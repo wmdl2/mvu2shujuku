@@ -3187,27 +3187,49 @@
         }
         const panel = hostDocument.getElementById(PANEL_ID);
         const context = getContextSafe();
-        if (typeof context.createCharacterData !== 'function') {
-            toast('当前 SillyTavern 版本不支持 createCharacterData，请改用下载', 'error');
-            return false;
-        }
         try {
-            const cardData = lastResult.card.data || lastResult.card;
+            // 统一成 chara_card_v3 包装（服务端按 json_data 整体导入，保留世界书等全部内容）
+            let cardData = lastResult.card;
+            if (cardData && !cardData.data && cardData.name) {
+                cardData = { spec: 'chara_card_v3', spec_version: '3.0', data: cardData };
+            }
+            const displayName = (cardData.data && cardData.data.name) || cardData.name || '角色';
             let avatarBlob = null;
             if (lastResult.meta && lastResult.meta.avatarBytes) {
                 avatarBlob = new Blob([lastResult.meta.avatarBytes], { type: lastResult.meta.avatarMime || 'application/json' });
             } else {
                 avatarBlob = await fetchAvatarBlob(selectedCharacter(panel));
             }
-            // 新角色卡：createCharacterData(character_id=undefined, avatar, character_data, is_edit=false)
-            await context.createCharacterData(undefined, avatarBlob || new Blob(), cardData, false);
+
+            // 优先用新版 API；老版本 createCharacterData 是表单状态对象时走直接接口
+            let saved = false;
+            if (typeof context.createCharacterData === 'function') {
+                await context.createCharacterData(undefined, avatarBlob || new Blob(), cardData, false);
+                saved = true;
+            } else {
+                const formData = new FormData();
+                formData.append('ch_name', displayName);
+                formData.append('json_data', JSON.stringify(cardData));
+                if (avatarBlob) formData.append('avatar', avatarBlob, 'avatar.png');
+                const headers = typeof context.getRequestHeaders === 'function'
+                    ? context.getRequestHeaders({ omitContentType: true })
+                    : {};
+                const res = await fetch('/api/characters/create', {
+                    method: 'POST',
+                    headers,
+                    body: formData,
+                });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                saved = true;
+            }
+            if (!saved) return false;
             if (typeof context.getCharacters === 'function') {
                 try {
                     await context.getCharacters();
                     if (panel) populateCharacterSelect(panel, context);
                 } catch (e) {}
             }
-            toast('已保存为新角色卡：' + (cardData.name || '未知'), 'success');
+            toast('已保存为新角色卡：' + displayName, 'success');
             return true;
         } catch (e) {
             toast('保存失败，已回退到下载：' + (e && e.message ? e.message : e), 'error');
