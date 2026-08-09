@@ -736,6 +736,17 @@ test('PNG 解析 → 转换 → 回写 → 再解析', () => {
     assert.strictEqual(again.card.data.name, String(parsed.card.data.name) + '_数据库');
 });
 
+test('JSON 输入 + asPng:true → 产出可解析的 PNG 卡（输出格式对 JSON 输入也生效）', () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both', asPng: true });
+    const png = r.files.find(f => f.kind === 'card' && f.name.endsWith('.png'));
+    assert.ok(png, 'JSON 输入选择总是 PNG 应产出 PNG 卡');
+    assert.ok(png.data.length > 1000, 'PNG 输出过小');
+    const again = core.parseCardPng(png.data);
+    assert.ok(again.card.data.name, 'PNG 应可再解析出角色卡');
+    assert.strictEqual(r.meta.asPng, true, 'meta.asPng 应为 true');
+});
+
 test('浏览器环境（无 Buffer）PNG 回写正常', () => {
     if (!fs.existsSync(PNG)) {
         console.log('    （跳过：缺少 PNG 参考卡）');

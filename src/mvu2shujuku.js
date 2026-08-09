@@ -413,6 +413,11 @@
         return out;
     }
 
+    function utf8ToString(bytes) {
+        if (typeof Buffer !== 'undefined' && Buffer.isBuffer(bytes)) return bytes.toString('utf8');
+        return new TextDecoder('utf-8').decode(bytes);
+    }
+
     // 读取 PNG 全部 chunk：返回 [{ type, data, crc, offset }]
     function readPngChunks(buffer) {
         if (!buffer || buffer.length < 8 || buffer[0] !== 0x89 || buffer[1] !== 0x50) {
@@ -435,6 +440,16 @@
         return chunks;
     }
 
+    // 最小 1x1 透明 PNG：JSON 输入选择“总是 PNG”时作为基底，写入角色卡数据
+    const MINI_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    function miniPngBuffer() {
+        if (typeof Buffer !== 'undefined') return Buffer.from(MINI_PNG_B64, 'base64');
+        const bin = atob(MINI_PNG_B64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes;
+    }
+
     // 从 PNG 字节解析角色卡
     function parseCardPng(buffer) {
         const chunks = readPngChunks(buffer);
@@ -449,12 +464,13 @@
             let text;
             if (chunk.type === 'iTXt') {
                 if (payload[0] !== 0) throw new Error('chara iTXt 使用了压缩，暂不支持');
-                let p = 3;
-                while (p < payload.length && payload[p] !== 0) p++;
-                p++; // 跳过 language
-                while (p < payload.length && payload[p] !== 0) p++;
+                // iTXt: compression_flag(1) compression_method(1) language\0 translated_keyword\0 text
+                let p = 2; // 跳过压缩标志与方法
+                while (p < payload.length && payload[p] !== 0) p++; // 跳过 language（空则立即停）
                 p++;
-                text = payload.slice(p).toString('utf8');
+                while (p < payload.length && payload[p] !== 0) p++; // 跳过 translated（空则立即停）
+                p++;
+                text = utf8ToString(payload.slice(p));
             } else {
                 text = latin1ToString(payload);
             }
@@ -499,6 +515,11 @@
         out.push(originalBuffer.slice(0, 8));
         let replaced = false;
         for (const chunk of chunks) {
+            // 无现有 chara 块时，把新块插在 IEND 之前（IEND 之后的块解析器读不到）
+            if (chunk.type === 'IEND' && !replaced) {
+                out.push(chunkData);
+                replaced = true;
+            }
             if (!replaced && (chunk.type === 'tEXt' || chunk.type === 'iTXt')) {
                 const nul = chunk.data.indexOf(0);
                 if (nul !== -1 && chunk.data.slice(0, nul).toString('latin1') === 'chara') {
@@ -509,6 +530,7 @@
             }
             out.push(originalBuffer.slice(chunk.offset, chunk.offset + 12 + chunk.data.length));
         }
+        // IEND 缺失时的兜底
         if (!replaced) out.push(chunkData);
         return concatBytes(...out);
     }
@@ -2969,9 +2991,11 @@
 
         const files = [];
         const cardName = ((card.data || card).name || 'converted').replace(/[\\/:*?"<>|]/g, '_');
-        const asPng = opts.asPng !== false && isPngInput;
-        if (asPng && input) {
-            const png = writeCardPng(input, card);
+        // 显式“总是 PNG”时，JSON 输入也用最小 PNG 基底生成 PNG 卡（不再只对 PNG 输入生效）
+        const asPng = opts.asPng === true || (opts.asPng !== false && isPngInput);
+        if (asPng) {
+            const base = isPngInput && input ? input : miniPngBuffer();
+            const png = writeCardPng(base, card);
             files.push({ name: `${cardName}-DB.png`, mime: 'image/png', data: png, kind: 'card' });
         } else {
             files.push({ name: `${cardName}-DB.json`, mime: 'application/json', data: JSON.stringify(card, null, 2), kind: 'card' });
@@ -3474,6 +3498,8 @@ ${DB_INIT_SNIPPET}
         for (const uid of sheets) {
             const s = tpl[uid];
             const dup = existing.has(String(s.name || '').trim());
+            const ec = (s.exportConfig || {});
+            const isSystem = ec.injectIntoWorldbook === false || /^(重要角色表|重要人物表|总结表|总体大纲|纪要表|选项表|全局数据表)$/.test(String(s.name || '').trim());
             const label = hostDocument.createElement('label');
             label.style.display = 'block';
             const cb = hostDocument.createElement('input');
@@ -3481,7 +3507,11 @@ ${DB_INIT_SNIPPET}
             cb.value = uid;
             cb.checked = false;
             label.appendChild(cb);
-            label.appendChild(hostDocument.createTextNode(' ' + (s.name || uid) + (dup ? '（已存在于转换结果，合并将跳过）' : '')));
+            label.appendChild(hostDocument.createTextNode(
+                ' ' + (s.name || uid) +
+                (dup ? '（已存在于转换结果，合并将跳过）' : '') +
+                (isSystem ? '（系统表）' : '')
+            ));
             if (dup) cb.disabled = true;
             box.appendChild(label);
         }
