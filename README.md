@@ -1,6 +1,6 @@
 # MVU转数据库（SillyTavern 扩展）
 
-把 **MVU 变量角色卡**（MagVarUpdate / `[InitVar]` + `stat_data`）转换为 **SP·数据库（AutoCardUpdater）** 角色卡的 SillyTavern 原生扩展。
+把 **MVU 变量角色卡**（MagVarUpdate / `[InitVar]` + `stat_data`）转换为 **SP·数据库** 角色卡的 SillyTavern 原生扩展。
 
 转换器是**通用**的：所有结构推导与规则转换都来自 MVU 框架本身，不依赖任何特定角色卡；转换产物包括：
 
@@ -10,7 +10,7 @@
 
 ## 安装
 
-1. 前提：已安装 **SP·数据库（AutoCardUpdater）** 插件。
+1. 前提：已安装 **SP·数据库** 插件。
 2. 在 SillyTavern 的 **Extensions 面板 → Install extension** 里粘贴本仓库链接：
 
    `https://github.com/wmdl2/mvu2shujuku`
