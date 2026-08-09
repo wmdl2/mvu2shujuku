@@ -412,5 +412,22 @@ test('非 MVU 卡（无 [InitVar]）应明确中止，不产出废卡', () => {
     assert.throws(() => core.convert(plain, { mode: 'both' }), /\[InitVar\]/);
 });
 
+test('世界书无 [InitVar] 但问候语含 <initvar> 块：按 MVU 规范兜底转换', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '问候语初始化卡',
+            description: '',
+            first_mes: '你好',
+            alternate_greetings: ['开场：<initvar>\n{\n  "人物": { "名字": ["阿星", "主角"], "等级": [1, "升级+1"] }\n}\n</initvar>'],
+            character_book: { entries: [{ comment: '普通条目', content: '你好' }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const byName = (n) => Object.keys(r.template).find(k => r.template[k].name === n);
+    assert.ok(byName('人物表'), '应从问候语 <initvar> 推导出 人物表');
+});
+
 console.log(`\n结果：${passed} 通过，${failed} 失败`);
 if (failed) process.exit(1);
