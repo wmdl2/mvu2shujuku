@@ -804,6 +804,146 @@ test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
     assert.ok(allData.display_data && allData.display_data.主角, '应有 display_data 镜像');
 });
 
+/* ---------------- Mvu 兼容层（通用 API 面，不依赖任何具体卡） ---------------- */
+console.log('Mvu 兼容层');
+
+function bridgeSandbox(r, opts = {}) {
+    const vm = require('vm');
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async () => ({ success: true }),
+        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const sheet = Object.values(tables).find(s => s && s.name === tableName);
+            if (!sheet) return false;
+            const ci = sheet.content[0].indexOf(col);
+            if (ci === -1) return false;
+            sheet.content[rowIndex][ci] = value;
+            return true;
+        },
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({
+            chatId: 'c1',
+            name: '测试角色',
+            chat: [],
+            eventSource: { on: () => {}, emit: () => {} },
+            event_types: { MESSAGE_RECEIVED: 'message_received' },
+        }),
+        ...(opts.extra || {}),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = fakeApi;
+    vm.createContext(win);
+    vm.runInContext(r.bridgeScript, win);
+    return { win, tables, fakeApi };
+}
+
+test('Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessage/事件名）', () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const { win, tables } = bridgeSandbox(r);
+    const Mvu = win.Mvu;
+    assert.ok(Mvu && typeof Mvu === 'object', '应挂载全局 Mvu');
+    // 事件面：MVU 官方 events 全部存在
+    const expectedEvents = ['VARIABLE_INITIALIZED', 'VARIABLE_UPDATE_STARTED', 'COMMAND_PARSED', 'VARIABLE_UPDATE_ENDED', 'BEFORE_MESSAGE_UPDATE', 'SINGLE_VARIABLE_UPDATED'];
+    for (const ev of expectedEvents) {
+        assert.ok(typeof Mvu.events[ev] === 'string' && Mvu.events[ev].length > 0, '缺少事件 ' + ev);
+    }
+    assert.strictEqual(Mvu.events.VARIABLE_UPDATE_ENDED, 'mag_variable_update_ended', '事件名应与 MVU 官方一致');
+    // getMvuData：stat_data/display_data/delta_data/initialized_lorebooks 齐全
+    const data = Mvu.getMvuData({ type: 'message', message_id: 'latest' });
+    assert.ok(data && typeof data.stat_data === 'object', 'getMvuData 应返回 stat_data 对象');
+    assert.ok(data.display_data && typeof data.display_data === 'object', 'getMvuData 应返回 display_data');
+    assert.ok('delta_data' in data && 'initialized_lorebooks' in data, 'getMvuData 字段齐全');
+    // setMvuVariable：mvu 缺 stat_data 也不应崩溃（旧 MVU 会因 $internal 崩溃），且写入成功
+    const empty = {};
+    return Promise.resolve(Mvu.setMvuVariable(empty, '系统.测试字段', 42, { reason: '测试' }))
+        .then((ok) => {
+            assert.strictEqual(ok, true, 'setMvuVariable 应返回 true');
+            assert.strictEqual(empty.stat_data.系统.测试字段, 42, 'setMvuVariable 应写入 stat_data');
+            // getMvuVariable / getRecordFromMvuData
+            assert.strictEqual(Mvu.getMvuVariable(empty, '系统.测试字段'), 42, 'getMvuVariable 应读到新值');
+            assert.strictEqual(Mvu.getMvuVariable(empty, '系统.不存在', { default_value: '缺省' }), '缺省', 'getMvuVariable 默认值');
+            const rec = Mvu.getRecordFromMvuData(empty, 'stat');
+            assert.strictEqual(rec.系统.测试字段, 42, 'getRecordFromMvuData 应返回 stat 记录');
+            // VWD（数组长度 2）取第一个元素
+            const vwd = { stat_data: { 系统: { 值: [7, '说明'] } } };
+            assert.strictEqual(Mvu.getMvuVariable(vwd, '系统.值'), 7, 'VWD 应取第一个元素');
+            // parseMessage：在副本上应用 _.set / _.add 命令
+            const base = { stat_data: { 主角: { 修为: 10 } } };
+            return Mvu.parseMessage("<UpdateVariable>\n_.set('主角.修为', 20);\n_.add('主角.灵气', 5);\n</UpdateVariable>", base).then((parsed) => ({ parsed, base }));
+        })
+        .then(({ parsed, base }) => {
+            assert.ok(parsed && parsed.stat_data.主角.修为 === 20, 'parseMessage 应应用 _.set');
+            assert.strictEqual(parsed.stat_data.主角.灵气, 5, 'parseMessage 应应用 _.add');
+            assert.strictEqual(base.stat_data.主角.修为, 10, 'parseMessage 不应改动传入对象');
+            // 无更新命令时返回 undefined（与 MVU 一致）
+            return Mvu.parseMessage('纯文本没有命令', base);
+        })
+        .then((none) => {
+            assert.strictEqual(none, undefined, '无更新命令时 parseMessage 应返回 undefined');
+            // deprecated 包装与工具方法
+            assert.strictEqual(typeof Mvu.getCurrentMvuData, 'function');
+            assert.strictEqual(typeof Mvu.replaceCurrentMvuData, 'function');
+            assert.strictEqual(typeof Mvu.reloadInitVar, 'function');
+            assert.strictEqual(typeof Mvu.isDuringExtraAnalysis, 'function');
+            assert.strictEqual(Mvu.isDuringExtraAnalysis(), false, '非额外分析轮次');
+            // replaceMvuData：差异写库并广播事件
+            const before = Mvu.getMvuData().stat_data.主角.姓名;
+            const next = JSON.parse(JSON.stringify(Mvu.getMvuData()));
+            next.stat_data.主角.姓名 = '测试新名';
+            return Mvu.replaceMvuData(next, { type: 'message', message_id: 'latest' }).then(() => {
+                const after = win.getAllVariables().stat_data.主角.姓名;
+                assert.strictEqual(after, '测试新名', 'replaceMvuData 应把 stat_data 差异写入数据库表格');
+                assert.ok(before !== after, '写库前后应不同');
+                // 表格内容同步更新
+                const tables2 = tables;
+                const heroSheet = Object.values(tables2).find(s => s && s.name === '主角表');
+                const nameIdx = heroSheet.content[0].indexOf('姓名');
+                assert.strictEqual(heroSheet.content[1][nameIdx], '测试新名', '表格单元格应被更新');
+            });
+        });
+});
+
+test('Mvu 兼容层：覆盖式接管已存在的真 MVU（保留自定义属性，双轨不再冲突）', () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    // 模拟“真 MVU 已挂载”：只有旧 API，setMvuVariable 缺失
+    const legacyMvu = {
+        getMvuData() { return { stat_data: 'OLD' }; },
+        replaceMvuData() { return 'OLD'; },
+        customFlag: 'keep-me',
+    };
+    const { win } = bridgeSandbox(r, { extra: { Mvu: legacyMvu } });
+    assert.strictEqual(typeof win.Mvu.getMvuData().stat_data, 'object', '接管后 getMvuData 应返回数据库重建的 stat_data 对象');
+    assert.notStrictEqual(win.Mvu.getMvuData().stat_data, 'OLD', '接管后不应再调用旧 getMvuData');
+    assert.strictEqual(win.Mvu.customFlag, 'keep-me', '旧对象上的自定义属性应保留');
+    assert.ok(typeof win.Mvu.setMvuVariable === 'function', '接管后应补全 setMvuVariable');
+    assert.ok(typeof win.Mvu.parseMessage === 'function', '接管后应补全 parseMessage');
+    assert.ok(win.Mvu.events && win.Mvu.events.VARIABLE_UPDATE_ENDED === 'mag_variable_update_ended', '接管后 events 应为 MVU 官方事件名');
+});
+
+test('扩展产物：index.js 应包含完整 Mvu 兼容层（事件名/接管/初始化广播）', () => {
+    const files = core.assembleExtension({
+        coreSource: require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8'),
+        pinyinInline: 'root.__MVU2SHUJUKU_PINYIN__ = {};',
+    });
+    const js = files['index.js'];
+    assert.ok(js.includes('mag_variable_initialized'), 'index.js 应含 VARIABLE_INITIALIZED 事件名');
+    assert.ok(js.includes('mag_variable_update_ended'), 'index.js 应含 VARIABLE_UPDATE_ENDED 事件名');
+    assert.ok(js.includes('global_Mvu_initialized'), 'index.js 应监听真 MVU 初始化事件并接管');
+    assert.ok(js.includes('setMvuVariable'), 'index.js 应实现 setMvuVariable');
+    assert.ok(js.includes('parseMessage'), 'index.js 应实现 parseMessage');
+});
+
 test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）', () => new Promise((resolve, reject) => {
     const vm = require('vm');
     const card = requireFixture();
