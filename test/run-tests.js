@@ -51,7 +51,8 @@ async function runTests() {
     }
     }
     console.log(`\n结果：${passed} 通过，${failed} 失败`);
-    if (failed) process.exit(1);
+    // VM 内桥使用真实定时器（合并写入/重试），测试结束后直接退出，避免未清理定时器拖住进程
+    process.exit(failed ? 1 : 0);
 }
 
 console.log('MVU→数据库 转换器测试\n');
@@ -819,7 +820,7 @@ test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
         deleteRow: async () => true,
     };
     const win = {
-        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
     };
     win.top = win;
@@ -872,7 +873,7 @@ function bridgeSandbox(r, opts = {}) {
         deleteRow: async () => true,
     };
     const win = {
-        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
         getContext: () => ({
@@ -889,6 +890,11 @@ function bridgeSandbox(r, opts = {}) {
     vm.createContext(win);
     vm.runInContext(r.bridgeScript, win);
     return { win, tables, fakeApi };
+}
+
+// 等待桥/扩展侧的合并写入定时器（150ms）完成落库
+async function waitBridgeFlush(ms = 300) {
+    await new Promise(resolve => setTimeout(resolve, ms));
 }
 
 test('Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessage/事件名）', () => {
@@ -946,14 +952,16 @@ test('Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessag
             const next = JSON.parse(JSON.stringify(Mvu.getMvuData()));
             next.stat_data.主角.姓名 = '测试新名';
             return Mvu.replaceMvuData(next, { type: 'message', message_id: 'latest' }).then(() => {
-                const after = win.getAllVariables().stat_data.主角.姓名;
-                assert.strictEqual(after, '测试新名', 'replaceMvuData 应把 stat_data 差异写入数据库表格');
-                assert.ok(before !== after, '写库前后应不同');
-                // 表格内容同步更新
-                const tables2 = tables;
-                const heroSheet = Object.values(tables2).find(s => s && s.name === '主角表');
-                const nameIdx = heroSheet.content[0].indexOf('姓名');
-                assert.strictEqual(heroSheet.content[1][nameIdx], '测试新名', '表格单元格应被更新');
+                return waitBridgeFlush().then(() => {
+                    const after = win.getAllVariables().stat_data.主角.姓名;
+                    assert.strictEqual(after, '测试新名', 'replaceMvuData 应把 stat_data 差异写入数据库表格');
+                    assert.ok(before !== after, '写库前后应不同');
+                    // 表格内容同步更新
+                    const tables2 = tables;
+                    const heroSheet = Object.values(tables2).find(s => s && s.name === '主角表');
+                    const nameIdx = heroSheet.content[0].indexOf('姓名');
+                    assert.strictEqual(heroSheet.content[1][nameIdx], '测试新名', '表格单元格应被更新');
+                });
             });
         });
 });
@@ -1042,7 +1050,7 @@ test('空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删
         deleteRow: async () => true,
     };
     const win = {
-        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
         getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
@@ -1128,7 +1136,7 @@ test('已声明单例/行表：未声明的动态字段写入 _扩展数据 并�
         deleteRow: async () => true,
     };
     const win = {
-        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
         getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
@@ -1198,7 +1206,7 @@ test('表结构校验：旧模板（同名表缺列）会被识别并重新导�
         deleteRow: async () => true,
     };
     const win = {
-        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
         getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
@@ -1249,7 +1257,7 @@ test('性能回归：桥的 重建/写入 按批次只导出一次全表快照�
         deleteRow: async () => true,
     };
     const win = {
-        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
         getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
@@ -1270,6 +1278,7 @@ test('性能回归：桥的 重建/写入 按批次只导出一次全表快照�
         // exportTableAsJson 只返回引用（开销可忽略），允许每操作刷新；关键是不得产生幻影重复行
         assert.ok(used <= 300, '一次批量读写（40 字段）导出次数应受控，实际 ' + used + ' 次');
         assert.strictEqual(win.Mvu.getMvuData().stat_data.道侣['角色5'].亲密, 5, '批量写入后应能读回');
+        await waitBridgeFlush();
         const daoSheet = Object.values(tables).find(s => s && s.name === '道侣表');
         const daoRows = daoSheet.content.slice(1).filter(r => r && r[1] === '角色5');
         assert.strictEqual(daoRows.length, 1, '同一键不应产生重复行（缓存幻影行 bug）');
@@ -1335,7 +1344,7 @@ test('单例/整组JSON表仅表头时自动补初始行（updateCell 不再 Row
         deleteRow: async () => true,
     };
     const win = {
-        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
         getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
@@ -1357,6 +1366,7 @@ test('单例/整组JSON表仅表头时自动补初始行（updateCell 不再 Row
         await win.Mvu.replaceMvuData(mvu);
         back = win.Mvu.getMvuData();
         assert.strictEqual(back.stat_data.系统.当前时间, '13:00', '仅表头的单例表写入应成功');
+        await waitBridgeFlush();
         // 表内容已补行（不止表头）
         assert.ok(tables[taskKey].content.length > 1, '任务表应补上数据行');
         assert.ok(tables[sysKey].content.length > 1, '系统表应补上数据行');
@@ -1422,7 +1432,7 @@ test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add�
         deleteRow: async () => true,
     };
     const win = {
-        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
         getContext: () => ({
