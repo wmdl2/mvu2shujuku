@@ -2987,6 +2987,8 @@
             `    try{targets[t].dispatchEvent(new EventCtor(name,{detail:payload}));}catch(e){}`,
             `    try{if(targets[t].eventSource&&typeof targets[t].eventSource.emit==='function')targets[t].eventSource.emit(name,payload);}catch(e){}`,
             `  }`,
+            `  // 与 MVU 原版一致：走 TH 的事件总线（前端 eventOn 监听的就是它）`,
+            `  try{if(typeof eventEmit==='function')eventEmit(name,payload);}catch(e){}`,
             `  // 缺少 ST 事件总线（如消息 iframe）时提供 eventOn/eventOff 兜底，绑定到同名 CustomEvent`,
             `  for(var t2=0;t2<targets.length;t2++){`,
             `    try{`,
@@ -3549,26 +3551,6 @@
      * 卡片转换（transformCard / convert）
      * ================================================================ */
 
-    function patchStatusBarMvuEvents(text) {
-        // 把“监听 Mvu 变量更新结束”改成“监听 shujuku 表格更新事件”
-        const re = /eventOn\s*\(\s*Mvu\s*\.\s*events\s*\.\s*VARIABLE_UPDATE_ENDED\s*,\s*\(\)\s*=>\s*\{/g;
-        let t = String(text || '');
-        let count = 0;
-        t = t.replace(re, () => {
-            count++;
-            return `(() => { if (window.addEventListener) window.addEventListener('shujuku-table-updated', () => {`;
-        });
-        // 处理缺少箭头参数的变体 eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, () => {
-        if (count === 0) {
-            const re2 = /eventOn\s*\(\s*Mvu\s*\.\s*events\s*\.\s*VARIABLE_UPDATE_ENDED\s*,\s*\(\s*\)\s*=>\s*\{/g;
-            t = t.replace(re2, () => {
-                count++;
-                return `(() => { if (window.addEventListener) window.addEventListener('shujuku-table-updated', () => {`;
-            });
-        }
-        return { text: t, count };
-    }
-
     const MVU_REGEX_REMOVE_PATTERNS = [
         /变量更新/i,
         /去除变量/i,
@@ -3584,7 +3566,26 @@
     }
 
     function isMvuScriptContent(content) {
-        return /Mvu\s*\.|MagVarUpdate|magvar|registerMvuSchema/i.test(String(content || ''));
+        const s = String(content || '');
+        if (/Mvu\s*\.|MagVarUpdate|magvar|registerMvuSchema/i.test(s)) return true;
+        // MVU 引擎也可能是纯 import 一行（官方包 / 离线镜像，如 MVU-offline / mvu_bundle），
+        // 只要 import 的 URL 指向 mvu/magvar 相关产物即视为 MVU 引擎脚本，避免真 MVU 与数据桥双轨运行
+        if (/^\s*(?:import\b|import\s*\(|await\s+import)/m.test(s)) {
+            return /(?:magvar|mvu[-_ ]?offline|mvu[-_ ]?bundle|MagVarUpdate|\/mvu(?:\/|\.|[-_]))/i.test(s);
+        }
+        return false;
+    }
+
+    // 整页注入模式：replaceString 用 $('body').load(...) 把整个前端页面塞进 body。
+    // 加“每页只加载一次”守卫，避免消息重渲染时反复重启前端应用；
+    // 应用常驻后靠 VARIABLE_UPDATE_ENDED 事件活体刷新（与 MVU 原版一致）。
+    function guardBodyLoadFrontend(text) {
+        const t = String(text || '');
+        const re = /((?:window\.)?(?:jQuery|\$)\s*\(\s*['"]body['"]\s*\)\s*\.\s*load\s*\(\s*)((?:"[^"]*"|'[^']*'))(\s*\))/g;
+        return {
+            text: t.replace(re, 'if(!window.__mvu2shujukuFrontendLoaded){window.__mvu2shujukuFrontendLoaded=true;$1$2$3;}'),
+            count: (t.match(re) || []).length,
+        };
     }
 
     /**
@@ -3768,17 +3769,18 @@
                 report.note(`已移除 MVU 专属正则「${name}」（解析 <UpdateVariable>/format_message_variable 等 MVU 语法）。`);
                 continue;
             }
-            if (/状态栏|placeholder/i.test(name)) {
-                const patched = patchStatusBarMvuEvents(r.replaceString || '');
-                if (patched.count) {
-                    report.auto(`正则「${name}」的状态栏刷新事件已由 Mvu.events.VARIABLE_UPDATE_ENDED 改为监听 shujuku-table-updated。`);
-                }
+            // 前端整页注入（$('body').load(...)）：加一次性守卫，避免消息重渲染反复重启前端
+            const guarded = guardBodyLoadFrontend(r.replaceString || '');
+            if (guarded.count) {
+                report.auto(`正则「${name}」为整页注入式前端，已加一次性加载守卫（前端常驻，靠 VARIABLE_UPDATE_ENDED 事件刷新）。`);
                 const copy = deepClone(r);
-                copy.replaceString = patched.text;
+                copy.replaceString = guarded.text;
                 if (!copy.replaceString && r.replaceString) copy.replaceString = r.replaceString;
                 keptRegexes.push(copy);
                 continue;
             }
+            // 状态栏刷新事件保持原样：数据桥每次写入都会广播 mag_variable_update_ended（与 MVU 原版一致），
+            // 前端原有 eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, ...) 监听即可活体刷新，无需改写
             if (isMvuScriptContent(r.replaceString || '')) {
                 report.manual(`正则「${name}」含 MVU API 调用；转换器保留它并依赖数据桥 MVU 兼容层，若逻辑异常请人工改为数据库 API。`);
             }
@@ -4535,6 +4537,9 @@ ${DB_INIT_SNIPPET}
             try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: payload })); } catch (e) {}
             try { if (t.eventSource && typeof t.eventSource.emit === 'function') t.eventSource.emit(name, payload); } catch (e) {}
         }
+        // 与 MVU 原版一致：尽量走 TH 的事件总线（前端 eventOn 监听的就是它）
+        try { if (typeof hostWindow.eventEmit === 'function') hostWindow.eventEmit(name, payload); } catch (e) {}
+        try { if (typeof window.eventEmit === 'function') window.eventEmit(name, payload); } catch (e) {}
         for (const t of targets) {
             try {
                 if (t && typeof t.eventOn !== 'function' && typeof t.addEventListener === 'function') {

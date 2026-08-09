@@ -2000,4 +2000,48 @@ test('世界书无 [InitVar] 但问候语含 <initvar> 块：按 MVU 规范兜�
     assert.ok(byName('人物表'), '应从问候语 <initvar> 推导出 人物表');
 });
 
+test('离线/镜像 MVU 引擎脚本按 import URL 识别并移除；整页注入前端加一次性守卫；状态栏事件监听原样保留', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '前端形态卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{ comment: '[InitVar]', content: JSON.stringify({ 系统: { 当前日期: '未知' } }) }],
+            },
+            extensions: {
+                regex_scripts: [
+                    {
+                        scriptName: '前端',
+                        findRegex: '<StatusPlaceHolderImpl/>',
+                        replaceString: "```\n<body>\n<script>\n$('body').load('https://example.test/frontend/index.html')\n</script>\n</body>\n```",
+                    },
+                    {
+                        scriptName: 'MVU状态栏',
+                        findRegex: '<StatusPlaceHolderImpl/>',
+                        replaceString: "<script>\nwindow.eventOn(window.Mvu.events.VARIABLE_UPDATE_ENDED, () => {\n  window.populate();\n});\n</script>",
+                    },
+                ],
+                tavern_helper: {
+                    scripts: [
+                        { name: 'MVU', enabled: true, content: "import 'https://testingcf.jsdelivr.net/gh/NLKASHEI/MVU-offline@v1.0.2/mvu_bundle_full.js'" },
+                        { name: '助手', enabled: true, content: 'console.log("非 MVU 脚本");' },
+                    ],
+                },
+            },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const d = r.card.data || r.card;
+    const thScripts = (d.extensions && d.extensions.tavern_helper && d.extensions.tavern_helper.scripts) || [];
+    assert.ok(!thScripts.some(s => String(s.content || '').includes('MVU-offline')), '应移除离线 MVU 引擎 import 脚本');
+    assert.ok(thScripts.some(s => String(s.content || '').includes('非 MVU 脚本')), '应保留非 MVU 脚本');
+    const front = (d.extensions && d.extensions.regex_scripts || []).find(rx => String(rx.scriptName || '') === '前端');
+    assert.ok(front && String(front.replaceString || '').includes('__mvu2shujukuFrontendLoaded'), '整页注入前端应加一次性加载守卫');
+    const sb = (d.extensions && d.extensions.regex_scripts || []).find(rx => String(rx.scriptName || '') === 'MVU状态栏');
+    assert.ok(sb && String(sb.replaceString || '').includes('window.eventOn(window.Mvu.events.VARIABLE_UPDATE_ENDED'), '状态栏事件监听应原样保留（靠数据桥广播 mag_variable_update_ended 驱动）');
+    assert.ok(!String(sb.replaceString || '').includes("(() => { if (window.addEventListener)"), '不应出现损坏状态栏脚本的事件改写');
+});
+
 runTests();
