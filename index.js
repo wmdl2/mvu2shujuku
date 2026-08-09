@@ -1119,7 +1119,10 @@
         const ruleNumeric = (shapeInfo && shapeInfo.numericFields) || new Set();
         const groupNameSet = new Set(Object.keys(initvar));
 
-        // 通用表种类推导：全叶子 → 单例；全条目字典 → 行表；空字典 → 行表（带提示）
+        // 通用表种类推导：
+        //  - 组自身有直接标量字段 → 单例（嵌套对象是子对象字段，如 主角.炼丹.阶级）
+        //  - 无直接标量字段且全部为对象 → 条目字典 → 行表（如 道侣.{林若悠:{亲密:88}}）
+        //  - 空字典 / 数组 → 行表 / 数组表
         function deriveKind(groupName, raw) {
             const values = Object.values(raw);
             if (values.length === 0) {
@@ -1127,11 +1130,9 @@
                 return 'rows';
             }
             const leaves = values.filter(v => isLeaf(v)).length;
-            const entryDicts = values.filter(v => isPlainObject(v) && !Object.values(v).every(x => isLeaf(x))).length;
-            const flatObjs = values.filter(v => isPlainObject(v) && Object.values(v).every(x => isLeaf(x))).length;
-            if (leaves === values.length) return 'singleton';
-            if (entryDicts === values.length) return 'rows';
-            return (leaves + flatObjs) >= entryDicts ? 'singleton' : 'rows';
+            if (leaves > 0) return 'singleton';
+            if (values.every(v => isPlainObject(v))) return 'rows';
+            return 'singleton';
         }
 
         function fieldRange(field) {
@@ -1195,13 +1196,18 @@
             const keyCol = '名称';
             const childTables = [];
             const prefixPath = [groupName];
-            const columns = collectColumns(raw, prefixPath, report, { childTables });
+            // 行表的列由下方 rows 分支从条目字段构造（嵌套对象统一转 JSON 列）；
+            // 不从顶层收集子表，避免“每角色一张字段相同的重复表”。
+            const columns = kind === 'rows'
+                ? []
+                : collectColumns(raw, prefixPath, report, { childTables });
 
             let rows = [];
             if (kind === 'rows') {
                 // 条目字典 → 每条目一行
                 const fieldOrder = [];
                 const entryRows = [];
+                const objFields = new Set();
                 let sawScalarEntries = false;
                 let scalarIsNumber = false;
                 for (const entryName of Object.keys(raw)) {
@@ -1232,6 +1238,7 @@
                             });
                         } else {
                             entryCols.push(jsonColumnFromObject(subKey, sv, spath, entryUsed));
+                            objFields.add(subKey);
                         }
                     }
                     for (const c of entryCols) {
@@ -1257,7 +1264,7 @@
                         type: fieldIsNumeric(f, rowFirstValue(entryRows, f)) ? 'INTEGER' : inferType(rowFirstValue(entryRows, f)),
                         range: fieldRange(f),
                         ident: toIdent(f, used, 'column'),
-                        isObject: !!(shapeObjects[groupName] && shapeObjects[groupName][f]),
+                        isObject: objFields.has(f) || !!(shapeObjects[groupName] && shapeObjects[groupName][f]),
                     });
                 }
                 if (sawScalarEntries) {
@@ -1652,16 +1659,31 @@
         }
         const keyIdent = group.columns[0] ? group.columns[0].ident : 'key';
         const sampleCols = group.columns.slice(1, 4).map(c => c.ident);
+        // 示例优先取卡内真实初始数据（与 MVU 提示词示例用具体值一致），无初始行时退回占位符
+        const sampleRow = group.rows && group.rows[0] ? group.rows[0] : null;
+        const sampleValue = (idx, fallback) => {
+            if (sampleRow && sampleRow[idx] !== undefined && sampleRow[idx] !== null && String(sampleRow[idx]) !== '') {
+                const col = group.columns[idx - 1];
+                const isNum = col && col.type === 'INTEGER' && typeof sampleRow[idx] === 'number';
+                return isNum ? String(sampleRow[idx]) : `'${sqlQuote(sampleRow[idx])}'`;
+            }
+            // 无初始数据：用“列中文名示例”占位，提示该列应填什么（不凭空造值）
+            const col = group.columns[idx - 1];
+            return col && col.zh ? `'${sqlQuote(col.zh)}示例'` : fallback;
+        };
+        const keyValue = (sampleRow && sampleRow[1] !== undefined && String(sampleRow[1]) !== '')
+            ? `'${sqlQuote(sampleRow[1])}'`
+            : "'条目名'";
         if (kind === 'update') {
-            return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${sampleCols[0] || '字段'} = '新值' WHERE ${keyIdent} = '条目名';`;
+            return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${sampleCols[0] || '字段'} = ${sampleValue(2, "'新值'")} WHERE ${keyIdent} = ${keyValue};`;
         }
         if (kind === 'insert') {
-            // 列数与 VALUES 一一对应，避免示例语句列值数量不匹配
             const cols = [keyIdent, ...sampleCols];
-            const vals = cols.map((c, i) => (i === 0 ? "'条目名'" : `'值${i}'`));
+            // 列数与 VALUES 一一对应，避免示例语句列值数量不匹配
+            const vals = cols.map((c, i) => (i === 0 ? keyValue : sampleValue(i + 1, `'值${i}'`)));
             return `正文中首次出现应记录的${group.keyCol}时，插入完整的新记录。\nSQL示例: INSERT INTO ${group.ident} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
         }
-        return `仅在条目彻底离场、失效或不再需要追踪时移除记录。\nSQL示例: DELETE FROM ${group.ident} WHERE ${keyIdent} = '条目名';`;
+        return `仅在条目彻底离场、失效或不再需要追踪时移除记录。\nSQL示例: DELETE FROM ${group.ident} WHERE ${keyIdent} = ${keyValue};`;
     }
 
     /**
@@ -2213,9 +2235,11 @@
             `  return '';`,
             `}`,
             `var initState={running:false,done:false,key:''};`,
+            `var initRetries=0;`,
             `async function ensureTemplateInit(){`,
             `  if(!TEMPLATE_B64)return;`,
             `  var key=currentChatKey();`,
+            `  if(initState.key!==key)initRetries=0;`,
             `  if(initState.done&&initState.key===key)return;`,
             `  if(initState.running)return;`,
             `  initState.running=true;`,
@@ -2225,13 +2249,17 @@
             `    if(out.status==='error'||out.status==='partial'){`,
             `      console.warn('['+BRIDGE_NAME+'] 开局建表未完全成功:',out.message);`,
             `      initState.done=false;`,
+            `      // 开场白切换/重渲染可能打断插件的运行时初始化；轮询重试直到建表成功`,
+            `      if(initRetries<15){initRetries++;setTimeout(ensureTemplateInit,4000);}`,
             `    }else{`,
             `      console.log('['+BRIDGE_NAME+'] '+out.message);`,
+            `      initRetries=0;`,
             `      initState.done=true;`,
             `    }`,
             `  }catch(e){`,
             `    console.warn('['+BRIDGE_NAME+'] 开局建表异常:',e);`,
             `    initState.done=false;`,
+            `    if(initRetries<15){initRetries++;setTimeout(ensureTemplateInit,4000);}`,
             `  }`,
             `  initState.running=false;`,
             `}`,
@@ -3144,7 +3172,7 @@
 ${DB_INIT_SNIPPET}
 
     const DB_TEMPLATE_KEY = '__ACU_TEMPLATE_DATA__';
-    const autoInitState = { running: false, done: '', inited: false };
+    const autoInitState = { running: false, done: '', inited: false, retries: 0 };
 
     function autoInitChatId() {
         try {
@@ -3179,13 +3207,19 @@ ${DB_INIT_SNIPPET}
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2db] 开局自动建表未完全成功：' + out.message);
                 autoInitState.done = '';
+                // 开场白切换/重渲染可能打断插件初始化；轮询重试直到建表成功（最多约 1 分钟）
+                autoInitState.retries += 1;
+                if (autoInitState.retries < 15) hostWindow.setTimeout(autoInitDatabase, 4000);
             } else {
                 console.log('[mvu2db] 开局自动建表：' + out.message);
+                autoInitState.retries = 0;
                 autoInitState.done = key;
             }
         } catch (e) {
             console.warn('[mvu2db] 开局自动建表异常：' + (e && e.message ? e.message : e));
             autoInitState.done = '';
+            autoInitState.retries += 1;
+            if (autoInitState.retries < 15) hostWindow.setTimeout(autoInitDatabase, 4000);
         } finally {
             autoInitState.running = false;
         }
@@ -3197,7 +3231,10 @@ ${DB_INIT_SNIPPET}
         if (!es || !et || typeof es.on !== 'function') return;
         try {
             if (!autoInitState.inited) {
-                es.on(et.CHAT_CHANGED, () => hostWindow.setTimeout(autoInitDatabase, 600));
+                es.on(et.CHAT_CHANGED, () => {
+                    autoInitState.retries = 0;
+                    hostWindow.setTimeout(autoInitDatabase, 600);
+                });
                 es.on(et.MESSAGE_RECEIVED, () => hostWindow.setTimeout(autoInitDatabase, 600));
                 autoInitState.inited = true;
             }
@@ -3904,7 +3941,7 @@ function mvu2dbMissingTableNames(api,names){var all={};try{all=api.exportTableAs
 async function mvu2dbEnsureInit(api,b64,presetName){var out={status:"skip",message:"",missing:[]};var tpl=null;try{tpl=JSON.parse(mvu2dbDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2dbExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2dbMissingTableNames(api,names);if(!out.missing.length){out.status="skip";out.message="已有全部表格，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await Promise.resolve(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}));steps.push(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成");}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"){try{var r2=await Promise.resolve(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}));if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else{steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2dbMissingTableNames(api,names);out.status=out.missing.length?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无");return out;}
 
     const DB_TEMPLATE_KEY = '__ACU_TEMPLATE_DATA__';
-    const autoInitState = { running: false, done: '', inited: false };
+    const autoInitState = { running: false, done: '', inited: false, retries: 0 };
 
     function autoInitChatId() {
         try {
@@ -3939,13 +3976,19 @@ async function mvu2dbEnsureInit(api,b64,presetName){var out={status:"skip",messa
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2db] 开局自动建表未完全成功：' + out.message);
                 autoInitState.done = '';
+                // 开场白切换/重渲染可能打断插件初始化；轮询重试直到建表成功（最多约 1 分钟）
+                autoInitState.retries += 1;
+                if (autoInitState.retries < 15) hostWindow.setTimeout(autoInitDatabase, 4000);
             } else {
                 console.log('[mvu2db] 开局自动建表：' + out.message);
+                autoInitState.retries = 0;
                 autoInitState.done = key;
             }
         } catch (e) {
             console.warn('[mvu2db] 开局自动建表异常：' + (e && e.message ? e.message : e));
             autoInitState.done = '';
+            autoInitState.retries += 1;
+            if (autoInitState.retries < 15) hostWindow.setTimeout(autoInitDatabase, 4000);
         } finally {
             autoInitState.running = false;
         }
@@ -3957,7 +4000,10 @@ async function mvu2dbEnsureInit(api,b64,presetName){var out={status:"skip",messa
         if (!es || !et || typeof es.on !== 'function') return;
         try {
             if (!autoInitState.inited) {
-                es.on(et.CHAT_CHANGED, () => hostWindow.setTimeout(autoInitDatabase, 600));
+                es.on(et.CHAT_CHANGED, () => {
+                    autoInitState.retries = 0;
+                    hostWindow.setTimeout(autoInitDatabase, 600);
+                });
                 es.on(et.MESSAGE_RECEIVED, () => hostWindow.setTimeout(autoInitDatabase, 600));
                 autoInitState.inited = true;
             }
