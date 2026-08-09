@@ -3428,6 +3428,15 @@
                 `    }`,
                 `  }catch(e){}`,
                 `}`,
+                `function bridgeSetChatMessages(){`,
+                `  try{var c=getContext();if(c&&typeof c.setChatMessages==='function')return c.setChatMessages.bind(c);}catch(e){}`,
+                `  try{if(typeof window.setChatMessages==='function')return window.setChatMessages;}catch(e){}`,
+                `  for(var i=0;i<roots.length;i++){`,
+                `    try{if(roots[i].TavernHelper&&typeof roots[i].TavernHelper.setChatMessages==='function')return roots[i].TavernHelper.setChatMessages.bind(roots[i].TavernHelper);}catch(e){}`,
+                `    try{if(typeof roots[i].setChatMessages==='function')return roots[i].setChatMessages;}catch(e){}`,
+                `  }`,
+                `  return null;`,
+                `}`,
                 `function ensureStatusPlaceholder(){`,
                 `  if(!statusPlaceholderNeeded)return;`,
                 `  try{`,
@@ -3444,13 +3453,14 @@
                 `    var now=Date.now();`,
                 `    if(msgKey===placeholderMsgKey&&now-placeholderAt<5000)return;`,
                 `    var next=text+'\\n\\n<StatusPlaceHolderImpl/>';`,
-                `    if(typeof ctx.setChatMessages==='function'){`,
-                `      ctx.setChatMessages([{message_id:msg.message_id!=null?msg.message_id:(ctx.chat.length-1),message:next,mes:next}],{refresh:'affected'});`,
+                `    var setter=bridgeSetChatMessages();`,
+                `    if(setter){`,
+                `      setter([{message_id:msg.message_id!=null?msg.message_id:(ctx.chat.length-1),message:next,mes:next}],{refresh:'affected'});`,
                 `      console.log('['+BRIDGE_NAME+'][占位符] 已追加到消息 id='+(msg.message_id!=null?msg.message_id:(ctx.chat.length-1)));`,
                 `    }else{`,
+                `      // 找不到 setChatMessages：只改内存，不调 saveChat（避免保存超时风暴）`,
                 `      msg.mes=next;if(msg.message!==undefined)msg.message=next;`,
-                `      if(typeof ctx.saveChat==='function')ctx.saveChat();`,
-                `      console.log('['+BRIDGE_NAME+'][占位符] 已直接写入消息（无 setChatMessages）');`,
+                `      if(!window.__mvu2shujukuPlaceholderFallbackWarned){window.__mvu2shujukuPlaceholderFallbackWarned=true;console.warn('['+BRIDGE_NAME+'][占位符] 未找到 setChatMessages，已直接写入内存消息');}`,
                 `    }`,
                 `    placeholderMsgKey=msgKey;placeholderAt=now;`,
                 `  }catch(e){console.warn('['+BRIDGE_NAME+'][占位符] 追加失败:',e);}`,
@@ -3483,13 +3493,6 @@
                 `console.log('['+BRIDGE_NAME+'][占位符] 维护已启用，needed='+statusPlaceholderNeeded);`,
                 `installMessageRuntime();`,
                 `setTimeout(function(){try{ensureStatusPlaceholder();}catch(e){}},3000);`,
-                `// 周期自愈：流式生成可能覆盖已追加的占位符，定期补一次`,
-                `(function placeholderPeriodic(){`,
-                `  setTimeout(function(){`,
-                `    try{ensureStatusPlaceholder();}catch(e){}`,
-                `    placeholderPeriodic();`,
-                `  },3000);`,
-                `})();`,
             ].join('\n') : ``),
             ``,
             `console.log('['+BRIDGE_NAME+'] 数据桥已就绪：getAllVariables/getSheetByName/getCellByHeader/findRowByColumn');`,
@@ -4175,6 +4178,15 @@ ${DB_INIT_SNIPPET}
     // 扩展本体复刻 MVU 的占位符维护：AI 回复后若缺少占位符则追加，前端注入正则才能命中每条消息
     let lastPlaceholderMsgKey = '';
     let lastPlaceholderAt = 0;
+    function findSetChatMessages() {
+        try { const context = getContextSafe(); if (context && typeof context.setChatMessages === 'function') return context.setChatMessages.bind(context); } catch (e) {}
+        try { if (typeof window.setChatMessages === 'function') return window.setChatMessages; } catch (e) {}
+        for (const r of [window, hostWindow]) {
+            try { if (r.TavernHelper && typeof r.TavernHelper.setChatMessages === 'function') return r.TavernHelper.setChatMessages.bind(r.TavernHelper); } catch (e) {}
+            try { if (typeof r.setChatMessages === 'function') return r.setChatMessages; } catch (e) {}
+        }
+        return null;
+    }
     function ensureWindowStatusPlaceholder() {
         if (!activePlaceholderNeeded) return;
         try {
@@ -4193,13 +4205,18 @@ ${DB_INIT_SNIPPET}
             const now = Date.now();
             if (msgKey === lastPlaceholderMsgKey && now - lastPlaceholderAt < 5000) return;
             const next = text + '\n\n<StatusPlaceHolderImpl/>';
-            if (typeof context.setChatMessages === 'function') {
-                context.setChatMessages([{ message_id: msg.message_id != null ? msg.message_id : (context.chat.length - 1), message: next, mes: next }], { refresh: 'affected' });
+            const setter = findSetChatMessages();
+            if (setter) {
+                setter([{ message_id: msg.message_id != null ? msg.message_id : (context.chat.length - 1), message: next, mes: next }], { refresh: 'affected' });
                 console.log('[mvu2shujuku][debug][占位符] 已追加到消息 id=' + (msg.message_id != null ? msg.message_id : (context.chat.length - 1)));
             } else {
+                // 找不到 setChatMessages：只改内存，不调 saveChat（避免每次保存超时形成风暴）；
+                // 落盘依赖酒馆自身保存，显示刷新依赖酒馆重渲染
                 msg.mes = next; if (msg.message !== undefined) msg.message = next;
-                if (typeof context.saveChat === 'function') context.saveChat();
-                console.log('[mvu2shujuku][debug][占位符] 已直接写入消息（无 setChatMessages）');
+                if (!window.__mvu2shujukuPlaceholderFallbackWarned) {
+                    window.__mvu2shujukuPlaceholderFallbackWarned = true;
+                    console.warn('[mvu2shujuku][debug][占位符] 未找到 setChatMessages，已直接写入内存消息（依赖酒馆下次保存落盘；若前端未刷新请升级酒馆）');
+                }
             }
             lastPlaceholderMsgKey = msgKey;
             lastPlaceholderAt = now;
@@ -5480,14 +5497,7 @@ ${DB_INIT_SNIPPET}
         );
         bindAutoInit(context);
         hostWindow.setTimeout(autoInitDatabase, 1500);
-        // 占位符周期自愈：流式生成/消息被覆盖时定期补一次（仅当前卡依赖占位符时生效）
         activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
-        (function placeholderPeriodic() {
-            hostWindow.setTimeout(() => {
-                try { ensureWindowStatusPlaceholder(); } catch (e) {}
-                placeholderPeriodic();
-            }, 3000);
-        })();
         console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') + '）');
     }
 
