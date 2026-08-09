@@ -1503,6 +1503,67 @@ test('桥复刻 MVU 占位符维护：AI 回复自动追加 <StatusPlaceHolderIm
     });
 });
 
+test('插件 initGameSession 挂起时不阻塞建表（超时后继续，不再永久卡住自动初始化）', () => {
+    const vm = require('vm');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '挂起卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: JSON.stringify({ 系统: { 当前时间: '12:00' } }),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    // 缩短桥内建表超时，便于测试（默认 15s/20s）
+    let bridge = r.bridgeScript.replace(/\+'模板'\);/, "+'模板',{importMs:80,initMs:80});");
+    let tables = {};
+    let initGameSessionCalled = 0;
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async (tpl) => {
+            tables = JSON.parse(JSON.stringify(tpl));
+            return { success: true };
+        },
+        initGameSession: () => {
+            initGameSessionCalled += 1;
+            return new Promise(() => {}); // 模拟插件 Promise 永不返回
+        },
+        registerTableUpdateCallback: () => {},
+        updateCell: async () => true,
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({ chatId: 'c1', name: '挂起卡', chat: [], eventSource: { on: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = fakeApi;
+    vm.createContext(win);
+    vm.runInContext(bridge, win);
+    return new Promise((resolve, reject) => {
+        setTimeout(() => {
+            try {
+                const keys = Object.keys(tables).filter(k => k.startsWith('sheet_'));
+                assert.ok(keys.length >= 1, 'initGameSession 挂起时，importTemplateFromData 也应完成建表');
+                assert.strictEqual(initGameSessionCalled, 1, '首次会调用 initGameSession（但超时不阻塞）');
+                resolve();
+            } catch (e) { reject(e); }
+        }, 500);
+    });
+});
+
 test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）', () => new Promise((resolve, reject) => {
     const vm = require('vm');
     const card = requireFixture();
