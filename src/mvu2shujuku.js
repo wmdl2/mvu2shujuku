@@ -2091,10 +2091,12 @@
                 else if (L.kind === 'json') { sd[L.group] = {}; }
                 continue;
             }
-            const header = s.content[0] || [];
+            // content 只有表头时，用插件的 seedRows 还原初始行（首楼被删/重置后常见）
+            const sRows = s.content.length > 1 ? s.content : ((Array.isArray(s.seedRows) && s.seedRows.length) ? [s.content[0]].concat(s.seedRows.slice()) : s.content);
+            const header = sRows[0] || [];
             const idxs = (L.cols || []).map(c => header.indexOf(c[0]));
             if (L.kind === 'singleton') {
-                const row = s.content[1] || [];
+                const row = sRows[1] || [];
                 sd[L.group] = {};
                 for (let j = 0; j < (L.cols || []).length; j++) {
                     const c = L.cols[j];
@@ -2110,14 +2112,14 @@
                 }
             } else if (L.kind === 'array') {
                 const arr = [];
-                for (let r = 1; r < s.content.length; r++) {
-                    const rw = s.content[r];
+                for (let r = 1; r < sRows.length; r++) {
+                    const rw = sRows[r];
                     if (rw && rw[idxs[0]] !== undefined) arr.push(text(rw[idxs[0]]));
                 }
                 sd[L.group] = arr;
                 for (const m of L.mirrors || []) setPath(sd, m.path, m.mode === 'first' ? (arr.length ? arr[0] : '') : arr);
             } else if (L.kind === 'json') {
-                const jrow = s.content[1] || [];
+                const jrow = sRows[1] || [];
                 const jidx = header.indexOf('内容');
                 const jv = jidx >= 0 ? jrow[jidx] : undefined;
                 const jparsed = parseObject(jv);
@@ -2126,8 +2128,8 @@
             } else {
                 const dict = {};
                 const keyIdx = header.indexOf(L.keyCol);
-                for (let r2 = 1; r2 < s.content.length; r2++) {
-                    const rw2 = s.content[r2];
+                for (let r2 = 1; r2 < sRows.length; r2++) {
+                    const rw2 = sRows[r2];
                     if (!rw2) continue;
                     const kv = keyIdx >= 0 ? rw2[keyIdx] : undefined;
                     if (kv === undefined || kv === null || kv === '') continue;
@@ -2685,13 +2687,17 @@
             `        }else if(L.kind==='array'){`,
             `          sd[L.group]=[];`,
             `          for(var mi=0;mi<(L.mirrors||[]).length;mi++)setPath(sd,L.mirrors[mi].path,'');`,
+            `        }else if(L.kind==='json'){`,
+            `          sd[L.group]={};`,
             `        }`,
             `        continue;`,
             `      }`,
-            `      var header=s.content[0]||[];`,
+            `      // content 只有表头时，用插件的 seedRows 还原初始行（首楼被删/重置后常见）`,
+            `      var sRows=s.content.length>1?s.content:((Array.isArray(s.seedRows)&&s.seedRows.length)?[s.content[0]].concat(s.seedRows.slice()):s.content);`,
+            `      var header=sRows[0]||[];`,
             `      var idxs=L.cols.map(function(c){return header.indexOf(c[0]);});`,
             `      if(L.kind==='singleton'){`,
-            `        var row=s.content[1]||[];`,
+            `        var row=sRows[1]||[];`,
             `        sd[L.group]={};`,
             `        for(var j=0;j<L.cols.length;j++){`,
             `          var cj=L.cols[j];`,
@@ -2708,8 +2714,8 @@
             `        }`,
             `      }else if(L.kind==='array'){`,
             `        var arr=[];`,
-            `        for(var r=1;r<s.content.length;r++){`,
-            `          var rw=s.content[r];`,
+            `        for(var r=1;r<sRows.length;r++){`,
+            `          var rw=sRows[r];`,
             `          if(rw&&rw[idxs[0]]!==undefined)arr.push(text(rw[idxs[0]]));`,
             `        }`,
             `        sd[L.group]=arr;`,
@@ -2732,8 +2738,8 @@
             `      }else{`,
             `        var dict={};`,
             `        var keyIdx=header.indexOf(L.keyCol);`,
-            `        for(var r2=1;r2<s.content.length;r2++){`,
-            `          var rw2=s.content[r2];`,
+            `        for(var r2=1;r2<sRows.length;r2++){`,
+            `          var rw2=sRows[r2];`,
             `          if(!rw2)continue;`,
             `          var kv=keyIdx>=0?rw2[keyIdx]:undefined;`,
             `          if(kv===undefined||kv===null||kv==='')continue;`,
