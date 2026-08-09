@@ -770,7 +770,15 @@ test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
         importTemplateFromData: async () => ({ success: true }),
         registerTableUpdateCallback: () => {},
         updateCell: async () => true,
-        insertRow: async () => 1,
+        insertRow: async (tableName, obj) => {
+            const sheet = Object.values(tables).find(s => s && s.name === tableName);
+            if (!sheet) return 1;
+            const row = sheet.content[0].map(() => '');
+            for (const k in obj) { const ci = sheet.content[0].indexOf(k); if (ci >= 0) row[ci] = String(obj[k]); }
+            row[0] = sheet.content.length || 1;
+            sheet.content.push(row);
+            return row[0];
+        },
         deleteRow: async () => true,
     };
     const win = {
@@ -1075,7 +1083,7 @@ test('已声明单例/行表：未声明的动态字段写入 _扩展数据 并�
             const sheet = Object.values(tables).find(s => s && s.name === tableName);
             if (!sheet) return 1;
             const row = sheet.content[0].map(() => '');
-            for (const k in obj) row[Number(k)] = String(obj[k]);
+            for (const k in obj) { const ci = sheet.content[0].indexOf(k); if (ci >= 0) row[ci] = String(obj[k]); }
             row[0] = sheet.content.length || 1;
             sheet.content.push(row);
             return row[0];
@@ -1171,6 +1179,64 @@ test('表结构校验：旧模板（同名表缺列）会被识别并重新导�
             } catch (e) { reject(e); }
         }, 100);
     });
+});
+
+test('性能回归：桥的 重建/写入 按批次只导出一次全表快照（不再每表/每操作导出）', () => {
+    const vm = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both', installMvuShim: true });
+    const tables = JSON.parse(JSON.stringify(r.template));
+    let exportCount = 0;
+    const fakeApi = {
+        exportTableAsJson: () => { exportCount += 1; return tables; },
+        importTemplateFromData: async () => ({ success: true }),
+        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const sheet = Object.values(tables).find(s => s && s.name === tableName);
+            if (!sheet) return false;
+            const ci = sheet.content[0].indexOf(col);
+            if (ci === -1) return false;
+            sheet.content[rowIndex][ci] = value;
+            return true;
+        },
+        insertRow: async (tableName, obj) => {
+            const sheet = Object.values(tables).find(s => s && s.name === tableName);
+            if (!sheet) return 1;
+            const row = sheet.content[0].map(() => '');
+            for (const k in obj) { const ci = sheet.content[0].indexOf(k); if (ci >= 0) row[ci] = String(obj[k]); }
+            row[0] = sheet.content.length || 1;
+            sheet.content.push(row);
+            return row[0];
+        },
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = fakeApi;
+    vm.createContext(win);
+    vm.runInContext(r.bridgeScript, win);
+    return (async () => {
+        const before = exportCount;
+        const mvu = win.Mvu.getMvuData();
+        for (let i = 1; i <= 20; i++) {
+            mvu.stat_data.主角['字段' + i] = i;
+            mvu.stat_data.道侣['角色' + i] = { 亲密: i };
+        }
+        await win.Mvu.replaceMvuData(mvu);
+        const used = exportCount - before;
+        // exportTableAsJson 只返回引用（开销可忽略），允许每操作刷新；关键是不得产生幻影重复行
+        assert.ok(used <= 300, '一次批量读写（40 字段）导出次数应受控，实际 ' + used + ' 次');
+        assert.strictEqual(win.Mvu.getMvuData().stat_data.道侣['角色5'].亲密, 5, '批量写入后应能读回');
+        const daoSheet = Object.values(tables).find(s => s && s.name === '道侣表');
+        const daoRows = daoSheet.content.slice(1).filter(r => r && r[1] === '角色5');
+        assert.strictEqual(daoRows.length, 1, '同一键不应产生重复行（缓存幻影行 bug）');
+    })().catch(e => { throw e; });
 });
 
 test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）', () => new Promise((resolve, reject) => {

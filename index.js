@@ -2160,6 +2160,7 @@
         const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
         const pathParts = (s) => String(s || '').split('.');
         const tableEntryByPath = (pathStr) => {
+            let best = null;
             for (const L of entries) {
                 if (L.kind === 'array') {
                     if (pathStr === L.group) return { layout: L, kind: 'array' };
@@ -2167,10 +2168,12 @@
                 }
                 const prefix = L.kind === 'singleton' ? [L.group] : ((L.writePaths || [])[0] || [L.group]);
                 const pre = prefix.join('.');
-                if (pathStr === pre) return { layout: L, kind: L.kind, prefix };
-                if (pathStr.indexOf(pre + '.') === 0) return { layout: L, kind: L.kind, prefix };
+                if (pathStr === pre || pathStr.indexOf(pre + '.') === 0) {
+                    // 最长前缀优先：避免单例组遮蔽其子表路径（如 主角.储物袋.* 应路由到子表）
+                    if (!best || prefix.length > best.prefix.length) best = { layout: L, kind: L.kind, prefix };
+                }
             }
-            return null;
+            return best;
         };
         let tables = {};
         try { tables = api.exportTableAsJson() || {}; } catch (e) {}
@@ -2276,8 +2279,8 @@
                             const cc = L.cols[nc];
                             const cIdx = header.indexOf(cc[0]);
                             if (cIdx === -1) continue;
-                            if (cc[0] === L.keyCol) { obj[String(nc)] = String(ovKey); continue; }
-                            if (cc[0] === '_扩展数据') { const o1 = {}; o1[op.mergeKey] = op.value; obj[String(nc)] = JSON.stringify(o1); }
+                            if (cc[0] === L.keyCol) { obj[cc[0]] = String(ovKey); continue; }
+                            if (cc[0] === '_扩展数据') { const o1 = {}; o1[op.mergeKey] = op.value; obj[cc[0]] = JSON.stringify(o1); }
                         }
                         ovNewRowObj = obj;
                     }
@@ -2329,8 +2332,8 @@
                         const cc = L.cols[nc];
                         const cIdx = header.indexOf(cc[0]);
                         if (cIdx === -1) continue;
-                        if (cc[0] === L.keyCol) { obj[String(nc)] = String(keyVal); continue; }
-                        if (cp.length === 1 && cp[0] === cc[0]) { arr[cIdx] = String(op.value); obj[String(nc)] = String(op.value); }
+                        if (cc[0] === L.keyCol) { obj[cc[0]] = String(keyVal); continue; }
+                        if (cp.length === 1 && cp[0] === cc[0]) { arr[cIdx] = String(op.value); obj[cc[0]] = String(op.value); }
                     }
                     newRowArr = arr;
                     newRowObj = obj;
@@ -2426,7 +2429,7 @@
                         try { await Promise.resolve(api.deleteRow(L.table, rr - 1)); } catch (e) {}
                     }
                     for (let ai = 0; ai < r.arr.length; ai++) {
-                        const o = {}; o[String(0)] = String(r.arr[ai]);
+                        const o = {}; o[r.header[1] || '名称'] = String(r.arr[ai]);
                         try { await Promise.resolve(api.insertRow(L.table, o)); } catch (e) {}
                     }
                     continue;
@@ -2589,9 +2592,13 @@
             `  var data={stat_data:{}};`,
             `  var sd=data.stat_data;`,
             `  try{`,
+            `    // 一次导出全表快照，避免每张表都调 exportTableAsJson 造成卡顿`,
+            `    var tablesSnap={};`,
+            `    try{tablesSnap=API.exportTableAsJson()||{};}catch(e){}`,
+            `    function sheetOfSnap(name){for(var k in tablesSnap){if(k.indexOf('sheet_')===0&&tablesSnap[k]&&tablesSnap[k].name===name)return tablesSnap[k];}return null;}`,
             `    for(var ei=0;ei<SD_LAYOUT.length;ei++){`,
             `      var L=SD_LAYOUT[ei];`,
-            `      var s=sheetOf(L.table);`,
+            `      var s=sheetOfSnap(L.table);`,
             `      if(!s||!Array.isArray(s.content)||!s.content.length){`,
             `        if(L.kind==='rows'){`,
             `          for(var wi=0;wi<(L.writePaths||[]).length;wi++)setPath(sd,L.writePaths[wi],{});`,
@@ -2694,6 +2701,7 @@
             `};`,
             '',
             `function tableEntryByPath(pathStr){`,
+            `  var best=null;`,
             `  for(var ei=0;ei<SD_LAYOUT.length;ei++){`,
             `    var L=SD_LAYOUT[ei];`,
             `    if(L.kind==='array'){`,
@@ -2704,10 +2712,13 @@
             `    if(L.kind==='singleton')prefix=[L.group];`,
             `    else if((L.writePaths||[]).length)prefix=L.writePaths[0];`,
             `    if(!prefix)continue;`,
-            `    if(pathStr===prefix.join('.'))return{layout:L,kind:L.kind,prefix:prefix};`,
-            `    if(pathStr.indexOf(prefix.join('.')+'.')===0)return{layout:L,kind:L.kind,prefix:prefix};`,
+            `    var pre=prefix.join('.');`,
+            `    if(pathStr===pre||pathStr.indexOf(pre+'.')===0){`,
+            `      // 最长前缀优先：避免单例组遮蔽其子表路径（如 主角.储物袋.* 应路由到子表）`,
+            `      if(!best||prefix.length>best.prefix.length)best={layout:L,kind:L.kind,prefix:prefix};`,
+            `    }`,
             `  }`,
-            `  return null;`,
+            `  return best;`,
             `}`,
             '',
             `function pathParts(pathStr){return String(pathStr).split('.');}`,
@@ -2754,12 +2765,19 @@
             `  }`,
             `  collect(prev,next,'');`,
             `  console.log('['+BRIDGE_NAME+'] writeDiffToDb: 差异操作 '+ops.length+' 条');`,
+            `  // 一次导出全表快照，避免每个操作重复 exportTableAsJson 造成卡顿`,
+            `  var tablesAll={};`,
+            `  try{tablesAll=API.exportTableAsJson()||{};}catch(e){}`,
+            `  function sheetOfLocal(name){for(var k in tablesAll){if(k.indexOf('sheet_')===0&&tablesAll[k]&&tablesAll[k].name===name)return tablesAll[k];}return null;}`,
+            `  function findRowLocal(sheet,colName,value){if(!sheet||!Array.isArray(sheet.content))return -1;var ci=sheet.content[0]?sheet.content[0].indexOf(colName):-1;if(ci===-1)return -1;for(var i=1;i<sheet.content.length;i++){if(sheet.content[i]&&String(sheet.content[i][ci])===String(value))return i;}return -1;}`,
             `  for(var oi=0;oi<ops.length;oi++){`,
             `    var op=ops[oi];`,
             `    var E=op.entry;`,
             `    if(!E)continue;`,
             `    var L=E.layout;`,
-            `    var sheet=sheetOf(L.table);`,
+            `    // 每操作前刷新快照：exportTableAsJson 仅返回引用，开销可忽略；写入后插件可能重建数据对象，需取最新`,
+            `    try{tablesAll=API.exportTableAsJson()||{};}catch(e){}`,
+            `    var sheet=sheetOfLocal(L.table);`,
             `    if(!sheet)continue;`,
             `    var header=sheet.content&&sheet.content[0]?sheet.content[0]:[];`,
             `    if(op.json&&E.kind==='json'){`,
@@ -2778,13 +2796,13 @@
             `      if(E.kind==='rows'){`,
             `        var ovKey=op.rowKey;`,
             `        if(ovKey===undefined)continue;`,
-            `        ovRow=window.findRowByColumn(L.table,L.keyCol,ovKey);`,
+            `        ovRow=findRowLocal(sheet,L.keyCol,ovKey);`,
             `        if(ovRow===-1){`,
             `          var ovNewRow={};`,
             `          for(var onc=0;onc<L.cols.length;onc++){`,
             `            var occ=L.cols[onc];`,
-            `            if(occ[0]===L.keyCol){ovNewRow[String(onc)]=String(ovKey);continue;}`,
-            `            if(occ[0]==='_扩展数据'){var o1={};o1[op.mergeKey]=op.value;ovNewRow[String(onc)]=JSON.stringify(o1);}`,
+            `            if(occ[0]===L.keyCol){ovNewRow[occ[0]]=String(ovKey);continue;}`,
+            `            if(occ[0]==='_扩展数据'){var o1={};o1[op.mergeKey]=op.value;ovNewRow[occ[0]]=JSON.stringify(o1);}`,
             `          }`,
             `          try{await Promise.resolve(API.insertRow(L.table,ovNewRow));}catch(e){console.warn('['+BRIDGE_NAME+'] 溢出行插入失败:',e);}`,
             `          continue;`,
@@ -2807,7 +2825,7 @@
             `      if(arrSame)continue;`,
             `      for(var rr=sheet.content.length-1;rr>=1;rr--){try{await Promise.resolve(API.deleteRow(L.table,rr-1));}catch(e){}}`,
             `      for(var ai=0;ai<arr.length;ai++){`,
-            `        var o={};o[String(0)]=String(arr[ai]);`,
+            `        var o={};o[header[1]||'名称']=String(arr[ai]);`,
             `        try{await Promise.resolve(API.insertRow(L.table,o));}catch(e){console.warn('['+BRIDGE_NAME+'] insertRow 失败:',e);}`,
             `      }`,
             `      continue;`,
@@ -2820,15 +2838,15 @@
             `    }else if(isRows){`,
             `      var keyVal=parts[E.prefix.length];`,
             `      if(keyVal===undefined){continue;}`,
-            `      rowIndex=window.findRowByColumn(L.table,L.keyCol,keyVal);`,
+            `      rowIndex=findRowLocal(sheet,L.keyCol,keyVal);`,
             `      if(rowIndex===-1){`,
             `        // 新条目：插入`,
             `        var newRow={};`,
             `        for(var nc=0;nc<L.cols.length;nc++){`,
             `          var cc=L.cols[nc];`,
-            `          if(cc[0]===L.keyCol){newRow[String(nc)]=String(keyVal);continue;}`,
+            `          if(cc[0]===L.keyCol){newRow[cc[0]]=String(keyVal);continue;}`,
             `          var cp=parts.slice(E.prefix.length+1);`,
-            `          if(cp.length===1&&cp[0]===cc[0])newRow[String(nc)]=String(op.value);`,
+            `          if(cp.length===1&&cp[0]===cc[0])newRow[cc[0]]=String(op.value);`,
             `        }`,
             `        try{await Promise.resolve(API.insertRow(L.table,newRow));}catch(e){console.warn('['+BRIDGE_NAME+'] insertRow 失败:',e);}`,
             `        continue;`,
@@ -3013,7 +3031,8 @@
             `    try{targets[t].dispatchEvent(new EventCtor('shujuku-table-updated'));}catch(e){}`,
             `  }`,
             `  // 同步广播 MVU 的 VARIABLE_UPDATE_ENDED（mag_variable_update_ended），供前端 eventOn 监听刷新`,
-            `  try{var curStat=currentStat();emitMvuEvent('mag_variable_update_ended',{stat_data:curStat,display_data:curStat});}catch(e){}`,
+            `  // 载荷从轻：监听方（前端）自行 getMvuData 重读，避免每次表格回调都全量重建 stat_data 造成卡顿`,
+            `  try{emitMvuEvent('mag_variable_update_ended',{stat_data:{},display_data:{}});}catch(e){}`,
             `}`,
             `rootWindow.__mvu2shujukuDataBridgeBroadcast=rootWindow.__mvu2shujukuDataBridgeBroadcast||broadcastBridgeEvent;`,
             '',
@@ -3936,9 +3955,12 @@ ${DB_INIT_SNIPPET}
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);
                 autoInitState.done = '';
-                // 开场白切换/重渲染可能打断插件初始化；轮询重试直到建表成功（最多约 1 分钟）
+                // 开场白切换/重渲染可能打断插件初始化；轮询重试直到建表成功（最多约 1 分钟）。
+                // 但“表结构不匹配（旧模板）”重导失败时不风暴重试，避免反复执行重型 initGameSession 卡住界面；
+                // 下次进入聊天/收到消息时会再尝试一次。
                 autoInitState.retries += 1;
-                if (autoInitState.retries < 15) hostWindow.setTimeout(autoInitDatabase, 4000);
+                const structureMismatch = String(out.message).indexOf('结构不匹配') !== -1;
+                if (!structureMismatch && autoInitState.retries < 15) hostWindow.setTimeout(autoInitDatabase, 4000);
             } else {
                 console.log('[mvu2shujuku] 开局自动建表：' + out.message);
                 autoInitState.retries = 0;
@@ -4182,10 +4204,8 @@ ${DB_INIT_SNIPPET}
         try {
             emitMvuEvent('shujuku-table-updated', null);
             // MVU 的 VARIABLE_UPDATE_ENDED（mag_variable_update_ended）：前端 eventOn 监听刷新
-            try {
-                const curStat = window.getAllVariables ? (window.getAllVariables().stat_data || {}) : {};
-                emitMvuEvent('mag_variable_update_ended', { stat_data: curStat, display_data: curStat });
-            } catch (e) {}
+            // 载荷从轻：监听方自行 getMvuData 重读，避免每次表格回调都全量重建 stat_data 造成卡顿
+            emitMvuEvent('mag_variable_update_ended', { stat_data: {}, display_data: {} });
         } catch (e) {}
     }
 
@@ -5432,9 +5452,12 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);
                 autoInitState.done = '';
-                // 开场白切换/重渲染可能打断插件初始化；轮询重试直到建表成功（最多约 1 分钟）
+                // 开场白切换/重渲染可能打断插件初始化；轮询重试直到建表成功（最多约 1 分钟）。
+                // 但“表结构不匹配（旧模板）”重导失败时不风暴重试，避免反复执行重型 initGameSession 卡住界面；
+                // 下次进入聊天/收到消息时会再尝试一次。
                 autoInitState.retries += 1;
-                if (autoInitState.retries < 15) hostWindow.setTimeout(autoInitDatabase, 4000);
+                const structureMismatch = String(out.message).indexOf('结构不匹配') !== -1;
+                if (!structureMismatch && autoInitState.retries < 15) hostWindow.setTimeout(autoInitDatabase, 4000);
             } else {
                 console.log('[mvu2shujuku] 开局自动建表：' + out.message);
                 autoInitState.retries = 0;
@@ -5678,10 +5701,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         try {
             emitMvuEvent('shujuku-table-updated', null);
             // MVU 的 VARIABLE_UPDATE_ENDED（mag_variable_update_ended）：前端 eventOn 监听刷新
-            try {
-                const curStat = window.getAllVariables ? (window.getAllVariables().stat_data || {}) : {};
-                emitMvuEvent('mag_variable_update_ended', { stat_data: curStat, display_data: curStat });
-            } catch (e) {}
+            // 载荷从轻：监听方自行 getMvuData 重读，避免每次表格回调都全量重建 stat_data 造成卡顿
+            emitMvuEvent('mag_variable_update_ended', { stat_data: {}, display_data: {} });
         } catch (e) {}
     }
 
