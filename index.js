@@ -2006,6 +2006,112 @@
     }
 
     /**
+     * 把 stat_data 的差异写回数据库表格（Mvu.replaceMvuData 等价物）。
+     * api: AutoCardUpdaterAPI；layoutEntries: buildLayoutJson 输出；prev/next: stat_data 前后快照。
+     * 与卡内数据桥 writeDiffToDb 同逻辑，供扩展在桥不运行时提供写库能力。
+     */
+    async function writeStatDiffToDb(api, layoutEntries, prevStat, nextStat) {
+        const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
+        const pathParts = (s) => String(s || '').split('.');
+        const tableEntryByPath = (pathStr) => {
+            for (const L of entries) {
+                if (L.kind === 'array') {
+                    if (pathStr === L.group) return { layout: L, kind: 'array' };
+                    continue;
+                }
+                const prefix = L.kind === 'singleton' ? [L.group] : ((L.writePaths || [])[0] || [L.group]);
+                const pre = prefix.join('.');
+                if (pathStr === pre) return { layout: L, kind: L.kind, prefix };
+                if (pathStr.indexOf(pre + '.') === 0) return { layout: L, kind: L.kind, prefix };
+            }
+            return null;
+        };
+        const sheetOf = (name) => {
+            let tables = {};
+            try { tables = api.exportTableAsJson() || {}; } catch (e) {}
+            for (const k in tables) {
+                if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return tables[k];
+            }
+            return null;
+        };
+        const findRowByColumn = (tableName, colName, value) => {
+            const s = sheetOf(tableName);
+            if (!s || !Array.isArray(s.content)) return -1;
+            const ci = s.content[0] ? s.content[0].indexOf(colName) : -1;
+            if (ci === -1) return -1;
+            for (let i = 1; i < s.content.length; i++) {
+                if (s.content[i] && String(s.content[i][ci]) === String(value)) return i;
+            }
+            return -1;
+        };
+        const ops = [];
+        const collect = (prevObj, nextObj, pathStr) => {
+            const keys = Object.keys(nextObj || {});
+            for (const k of keys) {
+                const np = pathStr ? pathStr + '.' + k : k;
+                const nv = nextObj[k];
+                const pv = prevObj ? prevObj[k] : undefined;
+                const entry = tableEntryByPath(np);
+                if (entry && entry.kind === 'array') {
+                    ops.push({ np, entry, value: nv, replace: true });
+                    continue;
+                }
+                if (nv && typeof nv === 'object' && !Array.isArray(nv)) {
+                    collect(pv && typeof pv === 'object' && !Array.isArray(pv) ? pv : {}, nv, np);
+                } else {
+                    ops.push({ np, entry, value: nv, prev: pv });
+                }
+            }
+        };
+        collect(prevStat || {}, nextStat || {}, '');
+        for (const op of ops) {
+            const E = op.entry;
+            if (!E) continue;
+            const L = E.layout;
+            const sheet = sheetOf(L.table);
+            if (!sheet) continue;
+            const header = sheet.content && sheet.content[0] ? sheet.content[0] : [];
+            if (op.replace && E.kind === 'array') {
+                for (let rr = sheet.content.length - 1; rr >= 1; rr--) {
+                    try { await Promise.resolve(api.deleteRow(L.table, rr - 1)); } catch (e) {}
+                }
+                const arr = Array.isArray(op.value) ? op.value : [];
+                for (let ai = 0; ai < arr.length; ai++) {
+                    const o = {}; o[String(0)] = String(arr[ai]);
+                    try { await Promise.resolve(api.insertRow(L.table, o)); } catch (e) {}
+                }
+                continue;
+            }
+            const parts = pathParts(op.np);
+            let rowIndex = -1;
+            if (E.kind === 'singleton') {
+                rowIndex = 1;
+            } else if (E.kind === 'rows') {
+                const keyVal = parts[E.prefix.length];
+                if (keyVal === undefined) continue;
+                rowIndex = findRowByColumn(L.table, L.keyCol, keyVal);
+                if (rowIndex === -1) {
+                    const newRow = {};
+                    for (let nc = 0; nc < L.cols.length; nc++) {
+                        const cc = L.cols[nc];
+                        if (cc[0] === L.keyCol) { newRow[String(nc)] = String(keyVal); continue; }
+                        const cp = parts.slice(E.prefix.length + 1);
+                        if (cp.length === 1 && cp[0] === cc[0]) newRow[String(nc)] = String(op.value);
+                    }
+                    try { await Promise.resolve(api.insertRow(L.table, newRow)); } catch (e) {}
+                    continue;
+                }
+            }
+            if (rowIndex < 0) continue;
+            const colZh = parts[parts.length - 1];
+            const colIdx = header.indexOf(colZh);
+            if (colIdx === -1) continue;
+            try { await Promise.resolve(api.updateCell(L.table, rowIndex, colZh, op.value)); } catch (e) {}
+        }
+        return ops.length;
+    }
+
+    /**
      * 生成数据桥脚本
      * opts: { mode, template, templateB64, installMvuShim, appendPlaceholder, bridgeScriptName }
      */
@@ -2029,9 +2135,6 @@
             `var VERSION=${JSON.stringify(ver)};`,
             `var BRIDGE_NAME=${JSON.stringify(name)};`,
             `console.log('['+BRIDGE_NAME+'] 桥启动 v'+VERSION);`,
-            `// 心跳：确认桥在运行（任何时段的控制台复制都能看到）`,
-            `function mvu2shujukuHeartbeat(){console.log('['+BRIDGE_NAME+'] 心跳（桥在运行）');setTimeout(mvu2shujukuHeartbeat,30000);}`,
-            `setTimeout(mvu2shujukuHeartbeat,30000);`,
             '',
             `function rootWin(){try{return window.top||window;}catch(e){return window;}}`,
             `var rootWindow=rootWin();`,
@@ -2055,46 +2158,6 @@
             `  }`,
             `  return null;`,
             `}`,
-            '',
-            // 把 getAllVariables 注册进 st-prompt-template 的 EJS 模板上下文（EjsTemplate.defines），
-            // 这样世界书 EJS 里的 mvu2shujukuGetAllVariables().stat_data.… 可在模板内直接调用：
-            // 数据仍只存于数据库表格，函数是惰性读取（每次调用实时从表格重建），无冗余存储。
-            `function installTemplateDefines(){`,
-            `  for(var i=0;i<roots.length;i++){`,
-            `    try{`,
-            `      var ejs=roots[i].EjsTemplate;`,
-            `      var hasDefines=!!(ejs&&ejs.defines&&typeof ejs.defines==='object');`,
-            `      console.log('['+BRIDGE_NAME+'] installTemplateDefines root#'+i,'EjsTemplate:',!!ejs,'defines:',hasDefines,'typeof getvar:',typeof (roots[i].EjsTemplate&&roots[i].EjsTemplate.defines&&roots[i].EjsTemplate.defines.getvar));`,
-            `      if(hasDefines){`,
-            `        var before=typeof ejs.defines.mvu2shujukuGetAllVariables;`,
-            `        if(typeof ejs.defines.mvu2shujukuGetAllVariables!=='function'){`,
-            `          ejs.defines.mvu2shujukuGetAllVariables=function(){`,
-            `            try{return window.getAllVariables?window.getAllVariables():{stat_data:{}};}catch(e){return {stat_data:{}};}`,
-            `          };`,
-            `        }`,
-            `        console.log('['+BRIDGE_NAME+'] 注册完成 before='+before+' after='+typeof ejs.defines.mvu2shujukuGetAllVariables);`,
-            `        return true;`,
-            `      }`,
-            `    }catch(e){console.warn('['+BRIDGE_NAME+'] installTemplateDefines root#'+i+' 异常:',e);}`,
-            `  }`,
-            `  return false;`,
-            `}`,
-            `function ensureTemplateDefines(){`,
-            `  var ok=installTemplateDefines();`,
-            `  if(ok){`,
-            `    console.log('['+BRIDGE_NAME+'] ensureTemplateDefines 成功');`,
-            `  }else{`,
-            `    console.warn('['+BRIDGE_NAME+'] ensureTemplateDefines 未找到 EjsTemplate，2 秒后重试');`,
-            `    setTimeout(ensureTemplateDefines,2000);`,
-            `  }`,
-            `}`,
-            `ensureTemplateDefines();`,
-            `// 调试：周期确认模板上下文注册未被重置`,
-            `setTimeout(function(){`,
-            `  var ejs=null;`,
-            `  for(var i=0;i<roots.length;i++){try{if(roots[i].EjsTemplate){ejs=roots[i].EjsTemplate;break;}}catch(e){}}`,
-            `  console.log('['+BRIDGE_NAME+'] 10 秒后检查: EjsTemplate='+!!ejs+' 注册函数='+(ejs&&ejs.defines?typeof ejs.defines.mvu2shujukuGetAllVariables:'(无 defines)'));`,
-            `},10000);`,
             '',
             `var API=getApi();`,
             `console.log('['+BRIDGE_NAME+'] 插件 API 就绪:', !!API);`,
@@ -2700,18 +2763,15 @@
     }
 
     /* ================================================================
-    /* ================================================================
      * EJS 数据源重写（rewriteEjsConditions）
      *
-     * 处理顺序（st-prompt-template + 数据库插件）：
-     *   提示词先经 st-prompt-template 渲染 EJS，再由数据库插件解析 <if>。
-     * 因此世界书条目里的 EJS 结构整体保留，只把 MVU 的数据读取位置改到数据桥：
+     * 世界书条目里的 EJS 结构整体保留，只把 MVU 的数据读取位置改为扩展注册的函数：
      *   getvar('stat_data.组.字段')        → mvu2shujukuGetAllVariables().stat_data.组.字段
      *   getvar("stat_data").组["字段"][0]  → mvu2shujukuGetAllVariables().stat_data.组["字段"][0]
      *   _.has(getvar("stat_data"), '路径') → _.has(mvu2shujukuGetAllVariables().stat_data, '路径')
-     * 数据桥的 getAllVariables() 从数据库表格重建 stat_data；
-     * st-prompt-template 在页面上下文求值 EJS，未在模板局部命中的标识符
-     * 会回落到页面全局，因此 getAllVariables 可直接调用（EJS 求值先于插件 <if>）。
+     * 扩展启动时把 mvu2shujukuGetAllVariables 注册进 st-prompt-template 模板上下文
+     * （EjsTemplate.defines），并用卡内布局 + 插件表格惰性重建 stat_data（window.getAllVariables），
+     * 不依赖卡内桥是否运行。
      * ================================================================ */
     function rewriteEjsConditions(text, layout, report) {
         const items = [];
@@ -2725,7 +2785,7 @@
         if (out !== before) {
             const count = (out.match(/mvu2shujukuGetAllVariables\(\)\.stat_data/g) || []).length;
             items.push({ original: 'getvar(\'stat_data…\')', rewritten: 'mvu2shujukuGetAllVariables().stat_data…', status: 'auto' });
-            report.auto(`已把 ${count} 处 MVU 数据读取 getvar('stat_data…') 改为 mvu2shujukuGetAllVariables().stat_data…（EJS 结构保留，函数由数据桥注册进模板上下文）。`);
+            report.auto(`已把 ${count} 处 MVU 数据读取 getvar('stat_data…') 改为 mvu2shujukuGetAllVariables().stat_data…（EJS 结构保留，函数由扩展注册进模板上下文并惰性读取表格）。`);
         }
         // 非 MVU 的 getwi 等引用：保留并提示
         const orphanRe = /<%[-=]\s*await\s+getwi[\s\S]*?-?%>/g;
@@ -2911,7 +2971,7 @@
             if (rw.items.length) {
                 for (const it of rw.items) {
                     if (it.status === 'auto') {
-                        report.auto(`条目「${comment}」MVU 数据读取已改写为数据桥 getAllVariables()：\`${it.rewritten}\``);
+                        report.auto(`条目「${comment}」MVU 数据读取已改写为扩展注册的 mvu2shujukuGetAllVariables()：\`${it.rewritten}\``);
                     }
                 }
             }
@@ -3291,6 +3351,9 @@ ${DB_INIT_SNIPPET}
                 console.log('[mvu2shujuku] 开局自动建表：' + out.message);
                 autoInitState.retries = 0;
                 autoInitState.done = key;
+                installWindowGetAllVariables();
+                installWindowMvuShim();
+                installTableUpdateHook();
             }
         } catch (e) {
             console.warn('[mvu2shujuku] 开局自动建表异常：' + (e && e.message ? e.message : e));
@@ -3511,6 +3574,57 @@ ${DB_INIT_SNIPPET}
         console.log('[mvu2shujuku][debug] 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
     }
 
+    // 表格更新广播：插件表格一变，状态栏（监听 shujuku-table-updated）立即刷新
+    function dispatchShujukuTableUpdated() {
+        try {
+            const ev = new CustomEvent('shujuku-table-updated');
+            window.dispatchEvent(ev);
+            if (window.parent && window.parent !== window) {
+                try { window.parent.dispatchEvent(new window.parent.CustomEvent('shujuku-table-updated')); } catch (e) {}
+            }
+        } catch (e) {}
+    }
+
+    function installTableUpdateHook() {
+        const api = getAcuApi();
+        if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
+        try {
+            api.registerTableUpdateCallback(() => dispatchShujukuTableUpdated());
+            return true;
+        } catch (e) { return false; }
+    }
+
+    // Mvu 兼容层（扩展侧）：桥不在主窗口运行时，前端脚本调 Mvu.getMvuData/replaceMvuData 也能读写数据库
+    function installWindowMvuShim() {
+        const core = window.MVU2SHUJUKU_CORE;
+        if (!core || typeof core.writeStatDiffToDb !== 'function') return;
+        window.Mvu = window.Mvu || {};
+        if (typeof window.Mvu.getMvuData !== 'function') {
+            window.Mvu.getMvuData = function () {
+                const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                return { stat_data: all.stat_data || {}, display_data: all.display_data || {}, delta_data: {}, initialized_lorebooks: {} };
+            };
+        }
+        if (typeof window.Mvu.replaceMvuData !== 'function') {
+            window.Mvu.replaceMvuData = async function (data) {
+                try {
+                    const api = getAcuApi();
+                    if (!api || !activeLayout) return false;
+                    const next = (data && data.stat_data) || {};
+                    const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                    const prev = all.stat_data || {};
+                    const n = await core.writeStatDiffToDb(api, activeLayout, prev, next);
+                    dispatchShujukuTableUpdated();
+                    return true;
+                } catch (e) {
+                    console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 异常:', e);
+                    return false;
+                }
+            };
+        }
+        console.log('[mvu2shujuku][debug] 扩展侧已安装 Mvu shim（getMvuData/replaceMvuData）');
+    }
+
     async function doConvert(inputBytes, sourceIsPng) {
         const settings = getSettings();
         const core = window.MVU2SHUJUKU_CORE;
@@ -3646,8 +3760,6 @@ ${DB_INIT_SNIPPET}
         for (const uid of sheets) {
             const s = tpl[uid];
             const dup = existing.has(String(s.name || '').trim());
-            const ec = (s.exportConfig || {});
-            const isSystem = ec.injectIntoWorldbook === false || /^(重要角色表|重要人物表|总结表|总体大纲|纪要表|选项表|全局数据表)$/.test(String(s.name || '').trim());
             const label = hostDocument.createElement('label');
             label.style.display = 'block';
             const cb = hostDocument.createElement('input');
@@ -3657,8 +3769,7 @@ ${DB_INIT_SNIPPET}
             label.appendChild(cb);
             label.appendChild(hostDocument.createTextNode(
                 ' ' + (s.name || uid) +
-                (dup ? '（已存在于转换结果，合并将跳过）' : '') +
-                (isSystem ? '（系统表）' : '')
+                (dup ? '（已存在于转换结果，合并将跳过）' : '')
             ));
             if (dup) cb.disabled = true;
             box.appendChild(label);
@@ -4169,6 +4280,13 @@ ${DB_INIT_SNIPPET}
         bindDebugHooks(context);
         ensureTemplateDefine();
         installWindowGetAllVariables();
+        installWindowMvuShim();
+        // 表格更新回调：插件就绪后自动重试注册
+        if (!installTableUpdateHook()) {
+            hostWindow.setTimeout(function retryHook() {
+                if (!installTableUpdateHook()) hostWindow.setTimeout(retryHook, 2000);
+            }, 2000);
+        }
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
         console.log(
             '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
@@ -4234,7 +4352,7 @@ ${DB_INIT_SNIPPET}
                 '## 说明',
                 '- 转换不自动安装数据库插件；不迁移旧聊天；只转换角色卡本身。',
                 '- 开局自动建表对应 MVU 的 init 时机：模板以 base64 写入卡内世界书条目（__ACU_TEMPLATE_DATA__），扩展与卡内数据桥在进入聊天/首条消息时按需调用 SP·数据库 的 initGameSession 建表，开场白保持原样。',
-                '- 状态栏继续通过 getAllVariables() 读取 stat_data；数据桥会把数据库表格重建为 stat_data 形状。',
+                '- 状态栏/世界书 EJS 通过 getAllVariables() 读取 stat_data；扩展与卡内数据桥都会把数据库表格重建为 stat_data 形状。',
                 '- 卡内 MVU 相关正则/脚本/更新规则会被移除；依赖 MVU API 的脚本通过 MVU 兼容层尽力适配。',
             ].join('\n'),
         };
@@ -4259,6 +4377,7 @@ ${DB_INIT_SNIPPET}
         mergeTemplates,
         generateBridgeScript,
         statDataFromTables,
+        writeStatDiffToDb,
         rewriteEjsConditions,
         toPinyinSlug,
         transformCard,
@@ -4361,6 +4480,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
                 console.log('[mvu2shujuku] 开局自动建表：' + out.message);
                 autoInitState.retries = 0;
                 autoInitState.done = key;
+                installWindowGetAllVariables();
+                installWindowMvuShim();
+                installTableUpdateHook();
             }
         } catch (e) {
             console.warn('[mvu2shujuku] 开局自动建表异常：' + (e && e.message ? e.message : e));
@@ -4581,6 +4703,57 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         console.log('[mvu2shujuku][debug] 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
     }
 
+    // 表格更新广播：插件表格一变，状态栏（监听 shujuku-table-updated）立即刷新
+    function dispatchShujukuTableUpdated() {
+        try {
+            const ev = new CustomEvent('shujuku-table-updated');
+            window.dispatchEvent(ev);
+            if (window.parent && window.parent !== window) {
+                try { window.parent.dispatchEvent(new window.parent.CustomEvent('shujuku-table-updated')); } catch (e) {}
+            }
+        } catch (e) {}
+    }
+
+    function installTableUpdateHook() {
+        const api = getAcuApi();
+        if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
+        try {
+            api.registerTableUpdateCallback(() => dispatchShujukuTableUpdated());
+            return true;
+        } catch (e) { return false; }
+    }
+
+    // Mvu 兼容层（扩展侧）：桥不在主窗口运行时，前端脚本调 Mvu.getMvuData/replaceMvuData 也能读写数据库
+    function installWindowMvuShim() {
+        const core = window.MVU2SHUJUKU_CORE;
+        if (!core || typeof core.writeStatDiffToDb !== 'function') return;
+        window.Mvu = window.Mvu || {};
+        if (typeof window.Mvu.getMvuData !== 'function') {
+            window.Mvu.getMvuData = function () {
+                const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                return { stat_data: all.stat_data || {}, display_data: all.display_data || {}, delta_data: {}, initialized_lorebooks: {} };
+            };
+        }
+        if (typeof window.Mvu.replaceMvuData !== 'function') {
+            window.Mvu.replaceMvuData = async function (data) {
+                try {
+                    const api = getAcuApi();
+                    if (!api || !activeLayout) return false;
+                    const next = (data && data.stat_data) || {};
+                    const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                    const prev = all.stat_data || {};
+                    const n = await core.writeStatDiffToDb(api, activeLayout, prev, next);
+                    dispatchShujukuTableUpdated();
+                    return true;
+                } catch (e) {
+                    console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 异常:', e);
+                    return false;
+                }
+            };
+        }
+        console.log('[mvu2shujuku][debug] 扩展侧已安装 Mvu shim（getMvuData/replaceMvuData）');
+    }
+
     async function doConvert(inputBytes, sourceIsPng) {
         const settings = getSettings();
         const core = window.MVU2SHUJUKU_CORE;
@@ -4716,8 +4889,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         for (const uid of sheets) {
             const s = tpl[uid];
             const dup = existing.has(String(s.name || '').trim());
-            const ec = (s.exportConfig || {});
-            const isSystem = ec.injectIntoWorldbook === false || /^(重要角色表|重要人物表|总结表|总体大纲|纪要表|选项表|全局数据表)$/.test(String(s.name || '').trim());
             const label = hostDocument.createElement('label');
             label.style.display = 'block';
             const cb = hostDocument.createElement('input');
@@ -4727,8 +4898,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
             label.appendChild(cb);
             label.appendChild(hostDocument.createTextNode(
                 ' ' + (s.name || uid) +
-                (dup ? '（已存在于转换结果，合并将跳过）' : '') +
-                (isSystem ? '（系统表）' : '')
+                (dup ? '（已存在于转换结果，合并将跳过）' : '')
             ));
             if (dup) cb.disabled = true;
             box.appendChild(label);
@@ -5239,6 +5409,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         bindDebugHooks(context);
         ensureTemplateDefine();
         installWindowGetAllVariables();
+        installWindowMvuShim();
+        // 表格更新回调：插件就绪后自动重试注册
+        if (!installTableUpdateHook()) {
+            hostWindow.setTimeout(function retryHook() {
+                if (!installTableUpdateHook()) hostWindow.setTimeout(retryHook, 2000);
+            }, 2000);
+        }
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
         console.log(
             '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
