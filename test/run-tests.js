@@ -7,6 +7,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const assert = require('assert');
 
 const core = require('../src/mvu2db.js');
@@ -134,14 +135,27 @@ test('道渊：14 张表，结构正确', () => {
         assert.strictEqual(header[0], 'row_id', `${k} 表头第一列应为 row_id`);
         const ddlComments = [];
         for (const line of sheet.sourceData.ddl.split('\n')) {
-            const m = line.match(/,\s*--\s*(.+)$/);
+            const m = line.match(/^  [A-Za-z_][A-Za-z0-9_]*\s+.*?--\s*(.+)$/);
             if (!m) continue;
             ddlComments.push(m[1].trim());
         }
         assert.strictEqual(ddlComments.length, header.length, `${k} DDL 列数应等于表头列数`);
         // row_id 固定（注释为“行号”），插件对其特殊处理；其余列注释必须与表头逐字一致
         ddlComments.slice(1).forEach((c, i) => assert.strictEqual(c, header[i + 1], `${k} 第 ${i + 1} 列 DDL 注释与表头不一致`));
+        // 末列不允许尾逗号（否则 sql.js 拒绝建表）
+        const ddlLines = sheet.sourceData.ddl.split('\n');
+        for (let li = ddlLines.length - 2; li >= 1; li--) {
+            if (/^  [A-Za-z_]/.test(ddlLines[li])) {
+                assert.ok(!/,\s*--\s*[^,]+$/.test(ddlLines[li]), `${k} 末列不应有尾逗号：${ddlLines[li]}`);
+                break;
+            }
+        }
     }
+    // 越界初始值原样保留（不钳制），CHECK 放行该值
+    const world = t[byName('世界表')];
+    const coolIdx = world.content[0].indexOf('遭遇冷却');
+    assert.strictEqual(world.content[1][coolIdx], 20, '遭遇冷却 初始值应原样保留为 20');
+    assert.ok(world.sourceData.ddl.includes('OR zaoyulengque IN (20)'), 'CHECK 应放行越界初始值 20');
 });
 
 test('模板结构满足插件最小要求', () => {
@@ -292,6 +306,10 @@ test('转换产物齐全', () => {
     if (c.extensions && typeof c.extensions.world === 'string' && c.extensions.world) {
         assert.ok(String(c.extensions.world).endsWith('_数据库'), '外部世界书引用应加 _数据库 后缀');
     }
+    const tplEntry = c.character_book.entries.find(e => Array.isArray(e.keys) && e.keys.includes('__ACU_TEMPLATE_DATA__'));
+    assert.ok(tplEntry, '应有 __ACU_TEMPLATE_DATA__ 世界书条目（开局自动建表用）');
+    assert.ok(typeof tplEntry.content === 'string' && tplEntry.content.length > 100, '模板条目内容应为 base64');
+    assert.ok(String(c.first_mes).includes('开局表格模板注入'), '开场白应含开局建表脚本');
 });
 
 test('native / sqlite 单模式', () => {
@@ -299,10 +317,12 @@ test('native / sqlite 单模式', () => {
     const rn = core.convert(card, { mode: 'native' });
     const rs = core.convert(card, { mode: 'sqlite' });
     const hero = Object.keys(rn.template).find(k => rn.template[k].name === '主角表');
-    assert.ok(rn.template[hero].sourceData.note.includes('原生 DSL'), 'native 应有 DSL 说明');
-    assert.ok(!rn.template[hero].sourceData.note.includes('SQLite SQL'), 'native 不应有 SQL 说明');
-    assert.ok(rs.template[hero].sourceData.note.includes('SQLite SQL'), 'sqlite 应有 SQL 说明');
-    assert.ok(!rs.template[hero].sourceData.note.includes('原生 DSL'), 'sqlite 不应有 DSL 说明');
+    // 模板 note 与模式无关（与默认模板一致），模式由插件填表提示词决定
+    assert.ok(!rn.template[hero].sourceData.note.includes('原生 DSL'), 'note 不应区分 native 模式');
+    assert.ok(!rn.template[hero].sourceData.note.includes('SQLite SQL'), 'note 不应区分 sqlite 模式');
+    assert.strictEqual(rn.template[hero].sourceData.note, rs.template[hero].sourceData.note, '两种模式应生成相同 note');
+    assert.ok(rn.template[hero].sourceData.note.includes('【列定义】'), 'note 应含默认模板风格的列定义');
+    assert.ok(rn.template[hero].sourceData.note.includes('【强制约束】'), 'note 应含强制约束');
 });
 
 /* ---------------- PNG 往返 ---------------- */
@@ -455,6 +475,57 @@ test('非 MVU 卡（无 [InitVar]）应明确中止，不产出废卡', () => {
         },
     };
     assert.throws(() => core.convert(plain, { mode: 'both' }), /\[InitVar\]/);
+});
+
+test('全部表格 DDL + 初始行 通过真实 SQLite 建表/插入校验（python3）', () => {
+    const cp = require('child_process');
+    let hasPython = true;
+    try { cp.execFileSync('python3', ['--version'], { stdio: 'ignore' }); } catch (e) { hasPython = false; }
+    if (!hasPython) {
+        console.log('    （跳过：无 python3）');
+        return;
+    }
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const script = `
+import json, sqlite3, sys
+tpl = json.load(open(sys.argv[1], encoding='utf-8'))
+issues = []
+for key, sheet in tpl.items():
+    if not key.startswith('sheet_'): continue
+    db = sqlite3.connect(':memory:')
+    try:
+        db.execute(sheet['sourceData']['ddl'])
+    except Exception as e:
+        issues.append(key + ': CREATE 失败: ' + str(e)); db.close(); continue
+    cols = [c[1] for c in db.execute('PRAGMA table_info(' + sheet['sourceData']['ddl'].split(' ')[2] + ')').fetchall()]
+    for row in sheet['content'][1:]:
+        try:
+            db.execute('INSERT INTO %s (%s) VALUES (%s)' % (sheet['sourceData']['ddl'].split(' ')[2], ','.join('"'+c+'"' for c in cols), ','.join('?' for _ in cols)), row)
+        except Exception as e:
+            issues.append(key + ': 初始行 INSERT 失败: ' + str(e))
+    db.close()
+if issues:
+    print('\\n'.join(issues)); sys.exit(1)
+print('OK')
+`;
+    let tmpDir = null;
+    for (const base of [os.tmpdir(), '/tmp', __dirname]) {
+        try { tmpDir = fs.mkdtempSync(path.join(base, 'mvu2db-')); break; } catch (e) {}
+    }
+    assert.ok(tmpDir, '无法创建临时目录');
+    const tmpFile = path.join(tmpDir, 'template.json');
+    fs.writeFileSync(tmpFile, JSON.stringify(r.template));
+    let out;
+    try {
+        out = cp.execFileSync('python3', ['-c', script, tmpFile], { encoding: 'utf8', timeout: 30000 });
+    } catch (e) {
+        console.log('    （跳过：本环境禁止从 Node 派生进程，无法运行 python3 校验）');
+        return;
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+    assert.strictEqual(out.trim(), 'OK');
 });
 
 test('世界书无 [InitVar] 但问候语含 <initvar> 块：按 MVU 规范兜底转换', () => {
