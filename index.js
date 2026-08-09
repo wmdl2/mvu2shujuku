@@ -1737,8 +1737,8 @@
         } else {
             L.push(`${group.tableName}。${describeGroup(group)}`);
         }
-        // 内部列（_扩展数据 / JSON 表的内容列）对 AI 隐藏：只在存储层存在，不进列定义与约束提示词
-        const aiCols = group.columns.filter(c => c.zh !== '_扩展数据' && !(group.kind === 'json' && c.zh === '内容'));
+        // JSON 表整组由脚本/前端管理：完全不展示列定义与约束；其余表隐藏内部列（_扩展数据）
+        const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据');
         if (aiCols.length) {
             L.push('【列定义】');
             // 对齐默认模板：列定义只列中文名 + 标识符；字段说明与约束放【强制约束】
