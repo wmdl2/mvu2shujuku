@@ -369,6 +369,43 @@ test('writeStatDiffToDb：多操作走 SQL 批量事务，只提交一次且 row
     assert.deepStrictEqual(tables.sheet_3.content.slice(1).map(r => r[1]), ['新1', '新2'], '数组应整体替换');
 });
 
+test('writeStatDiffToDb：同一新行的多字段合并为一条 INSERT（不撞 UNIQUE）', async () => {
+    const layout = [
+        { kind: 'rows', group: '气运', table: '气运表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['效果', 'text', '', '', '', ''], ['说明', 'text', '', '', '', '']], writePaths: [['气运']], mirrors: [] },
+    ];
+    const tables = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_1: { name: '气运表', content: [['row_id', '名称', '效果', '说明']] },
+    };
+    const inserts = [];
+    const api = {
+        exportTableAsJson: () => tables,
+        executeSqlBatch: async (sql) => {
+            applySqlToTables(tables, sql);
+            for (const line of sql.split(';')) {
+                if (line.includes('INSERT INTO')) inserts.push(line.trim());
+            }
+            return { success: true, appliedEdits: 1 };
+        },
+        updateCell: async () => { throw new Error('批量路径不应走逐格 updateCell'); },
+        insertRow: async () => { throw new Error('批量路径不应走逐行 insertRow'); },
+        deleteRow: async () => { throw new Error('批量路径不应走逐行 deleteRow'); },
+    };
+    const prev = { 气运: {} };
+    const next = {
+        气运: {
+            阿勒苏霍德之笔: { 效果: '写下的故事会成真', 说明: '传说中的笔' },
+            命运硬币: { 效果: '抛硬币决定命运', 说明: '一枚古币' },
+        },
+    };
+    const n = await core.writeStatDiffToDb(api, layout, prev, next);
+    assert.ok(n >= 2, '应写入两个新条目');
+    assert.strictEqual(inserts.length, 2, '两个新条目应各只有一条 INSERT，实际 ' + inserts.length + ' 条');
+    assert.ok(inserts.some(s => s.includes('阿勒苏霍德之笔') && s.includes('写下的故事会成真') && s.includes('传说中的笔')), '同一新行多个字段应合并进同一条 INSERT');
+    const names = tables.sheet_1.content.slice(1).map(r => r[1]);
+    assert.strictEqual(names.length, 2, '表内应有 2 行');
+});
+
 test('writeStatDiffToDb：值未变化时跳过写入，不产生持久化', async () => {
     const layout = [
         { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前MC点', 'number', '', '', '', '']], writePaths: [], mirrors: [] },
