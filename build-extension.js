@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * 构建 SillyTavern 原生扩展：读取 src/mvu2db.js，装配出仓库根目录可直接安装的扩展文件。
+ * 构建 SillyTavern 原生扩展：读取 src/mvu2shujuku.js，装配出仓库根目录可直接安装的扩展文件。
  * 用法：node build-extension.js [输出目录]（默认仓库根目录）
  */
 'use strict';
@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = __dirname;
-const CORE_SRC = path.join(__dirname, 'src', 'mvu2db.js');
+const CORE_SRC = path.join(__dirname, 'src', 'mvu2shujuku.js');
 const PINYIN_SRC = path.join(__dirname, 'src', 'pinyin-data.js');
 const OUT_DIR = process.argv[2]
     ? path.resolve(process.argv[2])
@@ -19,9 +19,9 @@ const coreSource = fs.readFileSync(CORE_SRC, 'utf8');
 const pinyinData = fs.readFileSync(PINYIN_SRC, 'utf8');
 const core = require(CORE_SRC);
 
-// 浏览器端没有 require：把拼音字典内联成 root.__MVU2DB_PINYIN__
+// 浏览器端没有 require：把拼音字典内联成 root.__MVU2SHUJUKU_PINYIN__
 const pinyinInline = pinyinData
-    .replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2DB_PINYIN__ = ')
+    .replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ')
     .replace(/;\s*$/, ';');
 
 const files = core.assembleExtension({ coreSource, pinyinInline });

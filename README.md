@@ -36,6 +36,12 @@
 
 > 如果卡片没有 `[InitVar]` 世界书条目（不是 MVU 变量卡，或 initvar 缺失），转换会**明确中止**并提示原因，不会产出残缺的转换结果。
 
+### 合并数据库现有表格模板
+转换完成后，可在扩展面板选择 SP·数据库 插件里的模板来源（当前聊天模板 / 全局模板 /
+全局预设），加载出表列表后勾选要并入的表，点「合并到转换结果」：
+选中表会并入转换生成的模板并重新转换（角色卡内嵌模板、数据桥、报告同步更新）；
+重名表自动跳过；合并后可用「保存角色卡和模板到sillytavern」保存。
+
 ## 转换逻辑
 
 ### 表格生成
@@ -87,8 +93,11 @@
 数据库插件解析 `<if>`。因此世界书里的 EJS（`<% if %>`、`<%_ if %>`、else-if 链、
 循环、函数调用、`<%- %>` 输出等）原样保留，只把 MVU 的数据读取
 `getvar('stat_data.路径')` / `getvar("stat_data").组.字段` / `_.has(getvar("stat_data"), …)`
-改写为数据桥的 `getAllVariables().stat_data.路径`（桥从数据库表格重建 stat_data，
-st-prompt-template 在页面上下文求值，可直接访问）。
+改写为数据桥的 `mvu2shujukuGetAllVariables().stat_data.路径`（桥从数据库表格重建 stat_data，
+数据桥会把 `mvu2shujukuGetAllVariables` 注册进 st-prompt-template 的模板上下文
+（`EjsTemplate.defines`），EJS 内直接调用；函数是**惰性读取**（每次调用实时从表格重建），
+数据只存一份，无冗余存储；唯一名字避免与其它扩展/卡在模板上下文撞名。
+状态栏用的页面全局 `window.getAllVariables` 保持不变。
 仅在 EJS 条件中出现、不在 `[InitVar]` 里的字段（如分段阈值）也会补进列定义。
 
 ## 目录
@@ -96,7 +105,7 @@ st-prompt-template 在页面上下文求值，可直接访问）。
 | 路径 | 说明 |
 | --- | --- |
 | `manifest.json` / `index.js` / `style.css` | 扩展本体（仓库根目录即扩展，可直接安装） |
-| `src/mvu2db.js` | 转换核心源码 |
+| `src/mvu2shujuku.js` | 转换核心源码 |
 | `src/pinyin-data.js` | 拼音字典（由 pinyin-pro 生成，MIT） |
 | `build-extension.js` | 重新构建扩展文件 |
 | `test/run-tests.js` | 自动化测试（无测试卡片时自动跳过卡片相关用例） |

@@ -1,9 +1,9 @@
 /*
- * mvu2db.js — MVU 角色卡 → SP·数据库（神·数据库）角色卡转换器
+ * mvu2shujuku.js — MVU 角色卡 → SP·数据库（神·数据库）角色卡转换器
  *
  * 运行环境：
  *  - 酒馆助手（JS-Slash-Runner）脚本：在 SillyTavern 内运行，提供按钮与下载/建卡流程
- *  - Node.js：`require('./mvu2db.js')` 可测试纯函数核心
+ *  - Node.js：`require('./mvu2shujuku.js')` 可测试纯函数核心
  *
  * 输出：
  *  1. 转换后的角色卡（JSON，或回包 PNG）
@@ -25,10 +25,10 @@
      * initGameSession / exportTableAsJson），不含任何特定角色卡内容。
      * ================================================================ */
     const DB_INIT_SNIPPET = [
-        'function mvu2dbDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}',
-        'function mvu2dbExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}',
-        'function mvu2dbMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}',
-        'async function mvu2dbEnsureInit(api,b64,presetName){var out={status:"skip",message:"",missing:[]};var tpl=null;try{tpl=JSON.parse(mvu2dbDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2dbExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2dbMissingTableNames(api,names);if(!out.missing.length){out.status="skip";out.message="已有全部表格，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await Promise.resolve(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}));steps.push(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成");}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"){try{var r2=await Promise.resolve(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}));if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else{steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2dbMissingTableNames(api,names);out.status=out.missing.length?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无");return out;}',
+        'function mvu2shujukuDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}',
+        'function mvu2shujukuExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}',
+        'function mvu2shujukuMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}',
+        'async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",message:"",missing:[]};var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);if(!out.missing.length){out.status="skip";out.message="已有全部表格，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await Promise.resolve(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}));steps.push(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成");}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"){try{var r2=await Promise.resolve(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}));if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else{steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2shujukuMissingTableNames(api,names);out.status=out.missing.length?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无");return out;}',
     ].join('\n');
 
     /* ================================================================
@@ -38,15 +38,15 @@
      * ================================================================ */
 
     function getPinyinMap() {
-        if (root.__MVU2DB_PINYIN__) return root.__MVU2DB_PINYIN__;
+        if (root.__MVU2SHUJUKU_PINYIN__) return root.__MVU2SHUJUKU_PINYIN__;
         try {
             if (typeof require === 'function') {
-                root.__MVU2DB_PINYIN__ = require('./pinyin-data.js');
-                return root.__MVU2DB_PINYIN__;
+                root.__MVU2SHUJUKU_PINYIN__ = require('./pinyin-data.js');
+                return root.__MVU2SHUJUKU_PINYIN__;
             }
         } catch (e) { /* 浏览器端由扩展构建时内联 */ }
-        root.__MVU2DB_PINYIN__ = root.__MVU2DB_PINYIN__ || {};
-        return root.__MVU2DB_PINYIN__;
+        root.__MVU2SHUJUKU_PINYIN__ = root.__MVU2SHUJUKU_PINYIN__ || {};
+        return root.__MVU2SHUJUKU_PINYIN__;
     }
 
     let pinyinReverse = null;
@@ -1898,9 +1898,9 @@
         const ver = opts.version || VERSION;
 
         const script = [
-            `window.__MVU2DB_TEMPLATE_BASE64="${b64}";`,
-            `try{if(window.top)window.top.__MVU2DB_TEMPLATE_BASE64="${b64}";}catch(e){}`,
-            `(function ${'mvu2dbBridge'}(){`,
+            `window.__MVU2SHUJUKU_TEMPLATE_BASE64="${b64}";`,
+            `try{if(window.top)window.top.__MVU2SHUJUKU_TEMPLATE_BASE64="${b64}";}catch(e){}`,
+            `(function ${'mvu2shujukuBridge'}(){`,
             `'use strict';`,
             `var VERSION=${JSON.stringify(ver)};`,
             `var BRIDGE_NAME=${JSON.stringify(name)};`,
@@ -1928,10 +1928,34 @@
             `  return null;`,
             `}`,
             '',
-            `var API=getApi();`,
-            `if(!API){setTimeout(mvu2dbBridge,2000);return;}`,
+            // 把 getAllVariables 注册进 st-prompt-template 的 EJS 模板上下文（EjsTemplate.defines），
+            // 这样世界书 EJS 里的 mvu2shujukuGetAllVariables().stat_data.… 可在模板内直接调用：
+            // 数据仍只存于数据库表格，函数是惰性读取（每次调用实时从表格重建），无冗余存储。
+            `function installTemplateDefines(){`,
+            `  for(var i=0;i<roots.length;i++){`,
+            `    try{`,
+            `      var ejs=roots[i].EjsTemplate;`,
+            `      if(ejs&&ejs.defines&&typeof ejs.defines==='object'){`,
+            `        if(typeof ejs.defines.mvu2shujukuGetAllVariables!=='function'){`,
+            `          ejs.defines.mvu2shujukuGetAllVariables=function(){`,
+            `            try{return window.getAllVariables?window.getAllVariables():{stat_data:{}};}catch(e){return {stat_data:{}};}`,
+            `          };`,
+            `        }`,
+            `        return true;`,
+            `      }`,
+            `    }catch(e){}`,
+            `  }`,
+            `  return false;`,
+            `}`,
+            `function ensureTemplateDefines(){`,
+            `  if(!installTemplateDefines())setTimeout(ensureTemplateDefines,2000);`,
+            `}`,
+            `ensureTemplateDefines();`,
             '',
-            `var TEMPLATE_B64=window.__MVU2DB_TEMPLATE_BASE64||'';`,
+            `var API=getApi();`,
+            `if(!API){setTimeout(mvu2shujukuBridge,2000);return;}`,
+            '',
+            `var TEMPLATE_B64=window.__MVU2SHUJUKU_TEMPLATE_BASE64||'';`,
             `function parseTemplate(){`,
             `  try{`,
             `    var bin=atob(TEMPLATE_B64);`,
@@ -2225,10 +2249,10 @@
             `    try{targets[t].dispatchEvent(new EventCtor('shujuku-table-updated'));}catch(e){}`,
             `  }`,
             `}`,
-            `rootWindow.__mvu2dbDataBridgeBroadcast=rootWindow.__mvu2dbDataBridgeBroadcast||broadcastBridgeEvent;`,
+            `rootWindow.__mvu2shujukuDataBridgeBroadcast=rootWindow.__mvu2shujukuDataBridgeBroadcast||broadcastBridgeEvent;`,
             '',
             `if(typeof API.registerTableUpdateCallback==='function'){`,
-            `  var cbKey='__mvu2dbTableUpdateCallback_'+VERSION;`,
+            `  var cbKey='__mvu2shujukuTableUpdateCallback_'+VERSION;`,
             `  if(!rootWindow[cbKey]){`,
             `    rootWindow[cbKey]=function(){`,
             `      try{broadcastBridgeEvent();}catch(e){}`,
@@ -2257,7 +2281,7 @@
             `  initState.running=true;`,
             `  initState.key=key;`,
             `  try{`,
-            `    var out=await mvu2dbEnsureInit(API,TEMPLATE_B64,currentCharName()+'模板');`,
+            `    var out=await mvu2shujukuEnsureInit(API,TEMPLATE_B64,currentCharName()+'模板');`,
             `    if(out.status==='error'||out.status==='partial'){`,
             `      console.warn('['+BRIDGE_NAME+'] 开局建表未完全成功:',out.message);`,
             `      initState.done=false;`,
@@ -2279,7 +2303,7 @@
             `  try{`,
             `    var tpl=parseTemplate();`,
             `    if(!tpl)return false;`,
-            `    return mvu2dbMissingTableNames(API,mvu2dbExpectedTableNames(tpl)).length===0;`,
+            `    return mvu2shujukuMissingTableNames(API,mvu2shujukuExpectedTableNames(tpl)).length===0;`,
             `  }catch(e){return false;}`,
             `}`,
             `Promise.resolve(ensureTemplateInit()).then(function(){try{applyPendingUpdateBlocks();}catch(e){}});`,
@@ -2530,9 +2554,9 @@
      * 处理顺序（st-prompt-template + 数据库插件）：
      *   提示词先经 st-prompt-template 渲染 EJS，再由数据库插件解析 <if>。
      * 因此世界书条目里的 EJS 结构整体保留，只把 MVU 的数据读取位置改到数据桥：
-     *   getvar('stat_data.组.字段')        → getAllVariables().stat_data.组.字段
-     *   getvar("stat_data").组["字段"][0]  → getAllVariables().stat_data.组["字段"][0]
-     *   _.has(getvar("stat_data"), '路径') → _.has(getAllVariables().stat_data, '路径')
+     *   getvar('stat_data.组.字段')        → mvu2shujukuGetAllVariables().stat_data.组.字段
+     *   getvar("stat_data").组["字段"][0]  → mvu2shujukuGetAllVariables().stat_data.组["字段"][0]
+     *   _.has(getvar("stat_data"), '路径') → _.has(mvu2shujukuGetAllVariables().stat_data, '路径')
      * 数据桥的 getAllVariables() 从数据库表格重建 stat_data；
      * st-prompt-template 在页面上下文求值 EJS，未在模板局部命中的标识符
      * 会回落到页面全局，因此 getAllVariables 可直接调用（EJS 求值先于插件 <if>）。
@@ -2541,15 +2565,15 @@
         const items = [];
         let out = String(text || '');
         const before = out;
-        // getvar('stat_data[.路径]') / getvar("stat_data").组.字段 → getAllVariables().stat_data…
+        // getvar('stat_data[.路径]') / getvar("stat_data").组.字段 → mvu2shujukuGetAllVariables().stat_data…
         out = out.replace(/getvar\s*\(\s*['"]stat_data(\.[^'"]*)?['"]\s*\)/gi, (m, path) => {
             const suffix = path ? String(path).replace(/^\./, '') : '';
-            return 'getAllVariables().stat_data' + (suffix ? '.' + suffix : '');
+            return 'mvu2shujukuGetAllVariables().stat_data' + (suffix ? '.' + suffix : '');
         });
         if (out !== before) {
-            const count = (out.match(/getAllVariables\(\)\.stat_data/g) || []).length;
-            items.push({ original: 'getvar(\'stat_data…\')', rewritten: 'getAllVariables().stat_data…', status: 'auto' });
-            report.auto(`已把 ${count} 处 MVU 数据读取 getvar('stat_data…') 改为数据桥 getAllVariables().stat_data…（EJS 结构保留）。`);
+            const count = (out.match(/mvu2shujukuGetAllVariables\(\)\.stat_data/g) || []).length;
+            items.push({ original: 'getvar(\'stat_data…\')', rewritten: 'mvu2shujukuGetAllVariables().stat_data…', status: 'auto' });
+            report.auto(`已把 ${count} 处 MVU 数据读取 getvar('stat_data…') 改为 mvu2shujukuGetAllVariables().stat_data…（EJS 结构保留，函数由数据桥注册进模板上下文）。`);
         }
         // 非 MVU 的 getwi 等引用：保留并提示
         const orphanRe = /<%[-=]\s*await\s+getwi[\s\S]*?-?%>/g;
@@ -2661,7 +2685,7 @@
                 `MVU 变量卡必须在世界书条目 comment 中含 [InitVar]（可禁用状态），或在问候语中用 <initvar> 声明初始结构。` +
                 (entries.length === 0 ? `若角色列表里的对象不包含世界书数据，请改用「选择文件」导入卡文件后转换。` : `若 [InitVar] 写在全局世界书/联动世界书中，请将其并入卡内后重试。`) +
                 `已中止转换，卡未被修改。`;
-            console.error('[mvu2db] ' + msg);
+            console.error('[mvu2shujuku] ' + msg);
             const e = new Error(msg);
             e.code = 'NOT_MVU_CARD';
             throw e;
@@ -2842,8 +2866,8 @@
                 report.note(`外部世界书引用已追加后缀：${worldName} → ${data.extensions.world}。`);
             }
         }
-        data.extensions.mvu2db = {
-            converter: 'mvu2db',
+        data.extensions.mvu2shujuku = {
+            converter: 'mvu2shujuku',
             version: VERSION,
             mode,
             convertedAt: new Date().toISOString(),
@@ -2853,6 +2877,47 @@
         };
 
         return { card, schema, layout, template, bridgeScript, report };
+    }
+
+    /**
+     * 把数据库插件里已有模板的选中表并入转换生成的模板。
+     * base: 转换器生成的模板对象（mate + sheet_*）
+     * source: 数据库插件模板对象（getTableTemplate 返回值）
+     * selectedUids: 要并入的 sheet_* 键数组
+     * 返回 { template, added, skipped }；重名表跳过（插件校验表名唯一），uid 冲突自动加后缀。
+     */
+    function mergeTemplates(base, source, selectedUids) {
+        const merged = JSON.parse(JSON.stringify(base && typeof base === 'object' ? base : {}));
+        if (!merged.mate) merged.mate = { type: 'chatSheets', version: 1 };
+        const src = source && typeof source === 'object' ? source : {};
+        const names = new Set();
+        for (const k of Object.keys(merged).filter(k => k.startsWith('sheet_'))) {
+            const s = merged[k];
+            if (s && typeof s === 'object' && typeof s.name === 'string') names.add(String(s.name).trim());
+        }
+        const added = [];
+        const skipped = [];
+        for (const uid of Array.isArray(selectedUids) ? selectedUids : []) {
+            const sheet = src[uid];
+            if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet)) continue;
+            const name = String(sheet.name || '').trim();
+            if (names.has(name)) { skipped.push(name); continue; }
+            let newUid = String(uid);
+            let n = 2;
+            while (merged[newUid]) newUid = `${uid}_${n++}`;
+            const copy = JSON.parse(JSON.stringify(sheet));
+            copy.uid = newUid;
+            merged[newUid] = copy;
+            names.add(name);
+            added.push(name);
+        }
+        // 重排 orderNo，保证插件按顺序显示
+        let order = 0;
+        for (const k of Object.keys(merged).filter(k => k.startsWith('sheet_'))) {
+            if (merged[k] && typeof merged[k] === 'object') merged[k].orderNo = order;
+            order++;
+        }
+        return { template: merged, added, skipped };
     }
 
     /**
@@ -2917,7 +2982,7 @@
             dependencies: [],
             js: 'index.js',
             css: 'style.css',
-            author: 'mvu2db',
+            author: 'mvu2shujuku',
             version: VERSION,
             homePage: 'https://github.com/wmdl2/mvu2shujuku',
             auto_update: false,
@@ -2927,22 +2992,22 @@
 
     function extensionStyle() {
         return [
-            '#mvu2db-settings .mvu2db-card {',
+            '#mvu2shujuku-settings .mvu2shujuku-card {',
             '  border: 1px solid var(--SmartThemeBorderColor, #555);',
             '  border-radius: 8px;',
             '  padding: 12px;',
             '  margin: 8px 0;',
             '  background: var(--SmartThemeBlurTintColor, rgba(0,0,0,0.2));',
             '}',
-            '#mvu2db-settings .mvu2db-row {',
+            '#mvu2shujuku-settings .mvu2shujuku-row {',
             '  margin: 8px 0;',
             '  display: flex;',
             '  flex-wrap: wrap;',
             '  gap: 8px;',
             '  align-items: center;',
             '}',
-            '#mvu2db-settings .mvu2db-row > * { flex: 0 0 auto; }',
-            '#mvu2db-settings .menu_button {',
+            '#mvu2shujuku-settings .mvu2shujuku-row > * { flex: 0 0 auto; }',
+            '#mvu2shujuku-settings .menu_button {',
             '  width: auto;',
             '  white-space: nowrap;',
             '  background: rgba(128,128,128,0.22);',
@@ -2952,29 +3017,29 @@
             '  cursor: pointer;',
             '  color: var(--SmartThemeBodyColor, inherit);',
             '}',
-            '#mvu2db-settings .menu_button:hover {',
+            '#mvu2shujuku-settings .menu_button:hover {',
             '  background: rgba(128,128,128,0.38);',
             '  border-color: rgba(220,220,220,0.85);',
             '}',
-            '#mvu2db-settings .menu_button[style*="display:none"] { display: none !important; }',
-            '#mvu2db-settings .mvu2db-label { display: block; margin-bottom: 4px; font-weight: 600; }',
-            '#mvu2db-settings .mvu2db-mode-group label { margin-right: 12px; }',
-            '#mvu2db-settings .mvu2db-help {',
+            '#mvu2shujuku-settings .menu_button[style*="display:none"] { display: none !important; }',
+            '#mvu2shujuku-settings .mvu2shujuku-label { display: block; margin-bottom: 4px; font-weight: 600; }',
+            '#mvu2shujuku-settings .mvu2shujuku-mode-group label { margin-right: 12px; }',
+            '#mvu2shujuku-settings .mvu2shujuku-help {',
             '  font-size: 12px; opacity: 0.8;',
             '  margin: 4px 0 10px; padding: 6px 8px;',
             '  border-left: 3px solid var(--SmartThemeBorderColor, #666);',
             '  background: rgba(0,0,0,0.15);',
             '}',
-            '#mvu2db-settings .mvu2db-help code { font-family: monospace; background: rgba(255,255,255,0.1); padding: 0 3px; border-radius: 3px; }',
-            '#mvu2db-settings textarea.mvu2db-report {',
+            '#mvu2shujuku-settings .mvu2shujuku-help code { font-family: monospace; background: rgba(255,255,255,0.1); padding: 0 3px; border-radius: 3px; }',
+            '#mvu2shujuku-settings textarea.mvu2shujuku-report {',
             '  width: 100%; min-height: 220px;',
             '  font-family: monospace; font-size: 12px;',
             '  white-space: pre-wrap; word-break: break-all;',
             '  background: var(--SmartThemeBlurTintColor, #111);',
             '  color: var(--SmartThemeBodyColor, #ddd);',
             '}',
-            '#mvu2db-settings .mvu2db-downloads button { margin: 4px 6px 4px 0; }',
-            '#mvu2db-settings .mvu2db-hint { font-size: 12px; opacity: 0.75; }',
+            '#mvu2shujuku-settings .mvu2shujuku-downloads button { margin: 4px 6px 4px 0; }',
+            '#mvu2shujuku-settings .mvu2shujuku-hint { font-size: 12px; opacity: 0.75; }',
         ].join('\n');
     }
 
@@ -2983,14 +3048,14 @@
         return String.raw`
 // ============================================================
 // MVU转数据库 · SillyTavern 原生扩展 UI
-// 依赖上方内联的核心源码（MVU2DB_CORE）
+// 依赖上方内联的核心源码（MVU2SHUJUKU_CORE）
 // ============================================================
 (function () {
     'use strict';
 
-    const PLUGIN_ID = 'mvu2db';
+    const PLUGIN_ID = 'mvu2shujuku';
     const PANEL_ID = PLUGIN_ID + '-settings';
-    const SETTINGS_KEY = 'mvu2db';
+    const SETTINGS_KEY = 'mvu2shujuku';
     const state = { timer: null };
 
     // 开局建表核心流程（与卡内数据桥同一份逻辑：缺表时调用 SP·数据库 的 initGameSession）
@@ -3028,20 +3093,20 @@ ${DB_INIT_SNIPPET}
         autoInitState.running = true;
         try {
             const presetName = String((character && character.name) || '') + '模板';
-            const out = await mvu2dbEnsureInit(api, entry.content, presetName);
+            const out = await mvu2shujukuEnsureInit(api, entry.content, presetName);
             if (out.status === 'error' || out.status === 'partial') {
-                console.warn('[mvu2db] 开局自动建表未完全成功：' + out.message);
+                console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);
                 autoInitState.done = '';
                 // 开场白切换/重渲染可能打断插件初始化；轮询重试直到建表成功（最多约 1 分钟）
                 autoInitState.retries += 1;
                 if (autoInitState.retries < 15) hostWindow.setTimeout(autoInitDatabase, 4000);
             } else {
-                console.log('[mvu2db] 开局自动建表：' + out.message);
+                console.log('[mvu2shujuku] 开局自动建表：' + out.message);
                 autoInitState.retries = 0;
                 autoInitState.done = key;
             }
         } catch (e) {
-            console.warn('[mvu2db] 开局自动建表异常：' + (e && e.message ? e.message : e));
+            console.warn('[mvu2shujuku] 开局自动建表异常：' + (e && e.message ? e.message : e));
             autoInitState.done = '';
             autoInitState.retries += 1;
             if (autoInitState.retries < 15) hostWindow.setTimeout(autoInitDatabase, 4000);
@@ -3127,7 +3192,7 @@ ${DB_INIT_SNIPPET}
                 return;
             }
         } catch (e) {}
-        console.log('[mvu2db][' + (type || 'info') + ']', message);
+        console.log('[mvu2shujuku][' + (type || 'info') + ']', message);
     }
 
     function download(name, mime, data) {
@@ -3157,14 +3222,14 @@ ${DB_INIT_SNIPPET}
     }
 
     function populateCharacterSelect(panel, context) {
-        const sel = panel.querySelector('#mvu2db-char-select');
+        const sel = panel.querySelector('#mvu2shujuku-char-select');
         if (!sel) return;
         const chars = Array.isArray(context.characters) ? context.characters : [];
         const currentIdx = context.characterId != null ? context.characterId : -1;
         const prevValue = sel.value;
-        panel.__mvu2dbChars = chars;
-        panel.__mvu2dbCurrentIdx = currentIdx;
-        const searchBox = panel.querySelector('#mvu2db-char-search');
+        panel.__mvu2shujukuChars = chars;
+        panel.__mvu2shujukuCurrentIdx = currentIdx;
+        const searchBox = panel.querySelector('#mvu2shujuku-char-search');
         const keyword = searchBox ? String(searchBox.value || '').trim().toLowerCase() : '';
         sel.innerHTML = '';
         const filtered = keyword
@@ -3189,7 +3254,7 @@ ${DB_INIT_SNIPPET}
     }
 
     function selectedCharacter(panel) {
-        const sel = panel && panel.querySelector('#mvu2db-char-select');
+        const sel = panel && panel.querySelector('#mvu2shujuku-char-select');
         if (sel && sel.value !== '' && sel.value !== '-1') {
             const idx = Number(sel.value);
             const context = getContextSafe();
@@ -3204,7 +3269,7 @@ ${DB_INIT_SNIPPET}
         if (!character) return null;
         const cb = character.character_book;
         if (cb && Array.isArray(cb.entries) && cb.entries.length) return character;
-        console.log('[mvu2db] 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
+        console.log('[mvu2shujuku] 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
         try {
             const context = getContextSafe();
             const headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
@@ -3213,11 +3278,11 @@ ${DB_INIT_SNIPPET}
                 headers,
                 body: JSON.stringify({ avatar_url: character.avatar }),
             });
-            console.log('[mvu2db] /api/characters/get 状态:', res.status);
+            console.log('[mvu2shujuku] /api/characters/get 状态:', res.status);
             if (res.ok) {
                 const full = await res.json();
                 const target = (full && full.data && full.data.character_book) ? full.data : full;
-                console.log('[mvu2db] 完整卡对象 keys:', Object.keys(full || {}).join(','), '| character_book.entries=', target && target.character_book ? target.character_book.entries.length : 'N/A');
+                console.log('[mvu2shujuku] 完整卡对象 keys:', Object.keys(full || {}).join(','), '| character_book.entries=', target && target.character_book ? target.character_book.entries.length : 'N/A');
                 if (target && target.character_book && Array.isArray(target.character_book.entries) && target.character_book.entries.length) return target;
             }
         } catch (e) {}
@@ -3234,12 +3299,14 @@ ${DB_INIT_SNIPPET}
     }
 
     let lastResult = null;
+    let lastInput = null;
+    const mergeState = { sourceTemplate: null };
 
     async function doConvert(inputBytes, sourceIsPng) {
         const settings = getSettings();
-        const core = window.MVU2DB_CORE;
+        const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.convert !== 'function') {
-            throw new Error('转换核心未加载（MVU2DB_CORE 不可用）');
+            throw new Error('转换核心未加载（MVU2SHUJUKU_CORE 不可用）');
         }
         const mode = settings.mode === 'native' ? 'native' : settings.mode === 'sqlite' ? 'sqlite' : 'both';
         const opts = {
@@ -3251,6 +3318,7 @@ ${DB_INIT_SNIPPET}
             opts.installMvuShim = settings.installMvuShim === 'yes';
         }
         const result = core.convert(inputBytes, opts);
+        lastInput = inputBytes;
         if (inputBytes instanceof Uint8Array || inputBytes instanceof ArrayBuffer) {
             result.meta.avatarBytes = inputBytes;
             result.meta.avatarMime = sourceIsPng ? 'image/png' : 'application/json';
@@ -3258,6 +3326,129 @@ ${DB_INIT_SNIPPET}
         lastResult = result;
         renderResult(result);
         return result;
+    }
+
+    // 合并数据库插件现有模板：选择来源 → 列出表 → 勾选 → 并入转换结果
+    async function populateMergeSource(panel) {
+        const sel = panel.querySelector('#mvu2shujuku-merge-source');
+        if (!sel) return;
+        const prev = sel.value;
+        sel.innerHTML = '';
+        const opt = (v, label) => {
+            const o = hostDocument.createElement('option');
+            o.value = v;
+            o.textContent = label;
+            sel.appendChild(o);
+        };
+        opt('', '（选择模板来源）');
+        opt('chat', '当前聊天模板');
+        opt('global', '全局模板（当前选中）');
+        const api = getAcuApi();
+        if (api && typeof api.getTemplatePresetNames === 'function') {
+            try {
+                const names = api.getTemplatePresetNames() || [];
+                for (const n of names) opt('preset:' + n, '预设：' + n);
+            } catch (e) {}
+        }
+        if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+    }
+
+    async function loadMergeTables(panel) {
+        const sel = panel.querySelector('#mvu2shujuku-merge-source');
+        const box = panel.querySelector('#mvu2shujuku-merge-tables');
+        const status = panel.querySelector('#mvu2shujuku-merge-status');
+        if (!sel || !box) return;
+        const v = sel.value;
+        if (!v) { toast('请先选择模板来源', 'error'); return; }
+        const api = getAcuApi();
+        if (!api || typeof api.getTableTemplate !== 'function') {
+            toast('未找到 SP·数据库 插件 API', 'error');
+            return;
+        }
+        let scope = 'global';
+        let presetName = '';
+        if (v === 'chat') scope = 'chat';
+        else if (v === 'global') scope = 'global';
+        else if (v.indexOf('preset:') === 0) { scope = 'global'; presetName = v.slice(7); }
+        let tpl = null;
+        try { tpl = api.getTableTemplate({ scope, presetName }) || null; } catch (e) { tpl = null; }
+        if (!tpl || typeof tpl !== 'object') {
+            toast('未读取到模板（该来源为空或插件未就绪）', 'error');
+            return;
+        }
+        mergeState.sourceTemplate = tpl;
+        const sheets = Object.keys(tpl).filter(k => k.startsWith('sheet_') && tpl[k] && typeof tpl[k] === 'object' && !Array.isArray(tpl[k]));
+        if (!sheets.length) {
+            box.innerHTML = '';
+            toast('该模板没有表格', 'error');
+            return;
+        }
+        const existing = new Set();
+        if (lastResult && lastResult.template) {
+            for (const k of Object.keys(lastResult.template).filter(k => k.startsWith('sheet_'))) {
+                const s = lastResult.template[k];
+                if (s && typeof s.name === 'string') existing.add(String(s.name).trim());
+            }
+        }
+        box.innerHTML = '';
+        for (const uid of sheets) {
+            const s = tpl[uid];
+            const dup = existing.has(String(s.name || '').trim());
+            const label = hostDocument.createElement('label');
+            label.style.display = 'block';
+            const cb = hostDocument.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = uid;
+            cb.checked = false;
+            label.appendChild(cb);
+            label.appendChild(hostDocument.createTextNode(' ' + (s.name || uid) + (dup ? '（已存在于转换结果，合并将跳过）' : '')));
+            if (dup) cb.disabled = true;
+            box.appendChild(label);
+        }
+        const applyBtn = panel.querySelector('#mvu2shujuku-merge-apply');
+        if (applyBtn) applyBtn.style.display = lastResult ? '' : 'none';
+        if (status) status.textContent = '';
+        toast('已列出 ' + sheets.length + ' 张表，勾选后点击「合并到转换结果」', 'info');
+    }
+
+    async function applyMergeTables(panel) {
+        if (!lastResult || !lastInput) { toast('请先转换角色卡', 'error'); return; }
+        if (!mergeState.sourceTemplate) { toast('请先加载模板来源', 'error'); return; }
+        const box = panel.querySelector('#mvu2shujuku-merge-tables');
+        const status = panel.querySelector('#mvu2shujuku-merge-status');
+        const checked = box ? [...box.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.value) : [];
+        if (!checked.length) { toast('请至少勾选一张要并入的表', 'error'); return; }
+        const core = window.MVU2SHUJUKU_CORE;
+        if (!core || typeof core.mergeTemplates !== 'function' || typeof core.convert !== 'function') {
+            toast('转换核心不可用', 'error');
+            return;
+        }
+        const merged = core.mergeTemplates(lastResult.template, mergeState.sourceTemplate, checked);
+        if (!merged.added.length) { toast('没有可并入的表（全部重名或无效）', 'error'); return; }
+        const settings = getSettings();
+        const mode = settings.mode === 'native' ? 'native' : settings.mode === 'sqlite' ? 'sqlite' : 'both';
+        const opts = {
+            mode,
+            template: merged.template,
+            asPng: settings.asPng === 'auto' ? (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) : settings.asPng === 'png',
+            appendPlaceholder: settings.appendPlaceholder !== false,
+        };
+        if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
+        toast('正在合并并重新转换…');
+        try {
+            const result = core.convert(lastInput, opts);
+            if (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) {
+                result.meta.avatarBytes = lastInput;
+                result.meta.avatarMime = lastInput instanceof Uint8Array && lastInput.length > 8 && lastInput[0] === 0x89 ? 'image/png' : 'application/json';
+            }
+            lastResult = result;
+            renderResult(result);
+            const msg = '合并完成：新增 ' + merged.added.length + ' 张表' + (merged.skipped.length ? '，跳过重名：' + merged.skipped.join('、') : '');
+            if (status) status.textContent = msg;
+            toast(msg, 'info');
+        } catch (e) {
+            toast('合并失败：' + (e && e.message ? e.message : e), 'error');
+        }
     }
 
     async function fetchAvatarBlob(character) {
@@ -3414,15 +3605,15 @@ ${DB_INIT_SNIPPET}
     function renderResult(result) {
         const panel = hostDocument.getElementById(PANEL_ID);
         if (!panel) return;
-        const box = panel.querySelector('.mvu2db-result');
+        const box = panel.querySelector('.mvu2shujuku-result');
         if (!box) return;
         box.innerHTML = '';
         const head = hostDocument.createElement('div');
-        head.className = 'mvu2db-row';
+        head.className = 'mvu2shujuku-row';
         head.innerHTML = '<b>转换完成</b>：' + result.meta.tableCount + ' 张表（' + result.meta.tableNames.join('、') + '）';
         box.appendChild(head);
         const downloads = hostDocument.createElement('div');
-        downloads.className = 'mvu2db-downloads mvu2db-row';
+        downloads.className = 'mvu2shujuku-downloads mvu2shujuku-row';
         for (const f of result.files) {
             const btn = hostDocument.createElement('button');
             btn.className = 'menu_button';
@@ -3432,13 +3623,15 @@ ${DB_INIT_SNIPPET}
         }
         box.appendChild(downloads);
         const report = hostDocument.createElement('textarea');
-        report.className = 'mvu2db-report';
+        report.className = 'mvu2shujuku-report';
         report.value = result.reportText;
         report.readOnly = true;
         box.appendChild(report);
         // 转换完成后才出现“保存到 sillytavern”按钮
-        const saveBtn = panel.querySelector('#mvu2db-save-card');
+        const saveBtn = panel.querySelector('#mvu2shujuku-save-card');
         if (saveBtn) saveBtn.style.display = '';
+        const mergeBtn = panel.querySelector('#mvu2shujuku-merge-apply');
+        if (mergeBtn) mergeBtn.style.display = '';
         toast('转换完成，共 ' + result.meta.tableCount + ' 张表');
     }
 
@@ -3465,58 +3658,68 @@ ${DB_INIT_SNIPPET}
             '    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>',
             '  </div>',
             '  <div class="inline-drawer-content">',
-            '    <div class="mvu2db-card">',
-            '      <div class="mvu2db-row">',
-            '        <label class="mvu2db-label" for="mvu2db-char-select">选择角色卡</label>',
-            '        <input id="mvu2db-char-search" type="text" placeholder="搜索角色…" title="输入角色名过滤下拉列表" />',
-            '        <select id="mvu2db-char-select" title="从酒馆角色列表选择要转换的角色卡"></select>',
-            '        <button id="mvu2db-pick-file" class="menu_button" title="从磁盘选择 .json / .png 角色卡文件">选择文件…</button>',
-            '        <input id="mvu2db-file" type="file" accept=".json,.png,application/json,image/png" hidden />',
-            '        <span id="mvu2db-file-name" class="mvu2db-hint"></span>',
+            '    <div class="mvu2shujuku-card">',
+            '      <div class="mvu2shujuku-row">',
+            '        <label class="mvu2shujuku-label" for="mvu2shujuku-char-select">选择角色卡</label>',
+            '        <input id="mvu2shujuku-char-search" type="text" placeholder="搜索角色…" title="输入角色名过滤下拉列表" />',
+            '        <select id="mvu2shujuku-char-select" title="从酒馆角色列表选择要转换的角色卡"></select>',
+            '        <button id="mvu2shujuku-pick-file" class="menu_button" title="从磁盘选择 .json / .png 角色卡文件">选择文件…</button>',
+            '        <input id="mvu2shujuku-file" type="file" accept=".json,.png,application/json,image/png" hidden />',
+            '        <span id="mvu2shujuku-file-name" class="mvu2shujuku-hint"></span>',
             '      </div>',
-            '      <div class="mvu2db-row mvu2db-mode-group">',
-            '        <span class="mvu2db-label" title="native：AI 输出 insertRow/updateRow/deleteRow DSL；sqlite：AI 输出 SQL；双模式跟随插件当前设置">填表模式</span>',
-            '        <label><input type="radio" name="mvu2db-mode" value="both" ' + (settings.mode === 'both' ? 'checked' : '') + ' /> 双模式（推荐）</label>',
-            '        <label><input type="radio" name="mvu2db-mode" value="native" ' + (settings.mode === 'native' ? 'checked' : '') + ' /> native（insertRow DSL）</label>',
-            '        <label><input type="radio" name="mvu2db-mode" value="sqlite" ' + (settings.mode === 'sqlite' ? 'checked' : '') + ' /> sqlite（SQL）</label>',
+            '      <div class="mvu2shujuku-row mvu2shujuku-mode-group">',
+            '        <span class="mvu2shujuku-label" title="native：AI 输出 insertRow/updateRow/deleteRow DSL；sqlite：AI 输出 SQL；双模式跟随插件当前设置">填表模式</span>',
+            '        <label><input type="radio" name="mvu2shujuku-mode" value="both" ' + (settings.mode === 'both' ? 'checked' : '') + ' /> 双模式（推荐）</label>',
+            '        <label><input type="radio" name="mvu2shujuku-mode" value="native" ' + (settings.mode === 'native' ? 'checked' : '') + ' /> native（insertRow DSL）</label>',
+            '        <label><input type="radio" name="mvu2shujuku-mode" value="sqlite" ' + (settings.mode === 'sqlite' ? 'checked' : '') + ' /> sqlite（SQL）</label>',
             '      </div>',
-            '      <div class="mvu2db-row">',
-            '        <label class="mvu2db-label" for="mvu2db-shim">MVU 兼容层</label>',
-            '        <select id="mvu2db-shim">',
+            '      <div class="mvu2shujuku-row">',
+            '        <label class="mvu2shujuku-label" for="mvu2shujuku-shim">MVU 兼容层</label>',
+            '        <select id="mvu2shujuku-shim">',
             '          <option value="auto" ' + (settings.installMvuShim === 'auto' ? 'selected' : '') + '>自动（检测到 MVU API 才装）</option>',
             '          <option value="yes" ' + (settings.installMvuShim === 'yes' ? 'selected' : '') + '>总是安装</option>',
             '          <option value="no" ' + (settings.installMvuShim === 'no' ? 'selected' : '') + '>不安装</option>',
             '        </select>',
             '      </div>',
-            '      <div class="mvu2db-help">',
+            '      <div class="mvu2shujuku-help">',
             '        MVU（MagVarUpdate）是旧角色卡用的变量框架：游戏状态存在 <code>stat_data</code>，脚本/状态栏通过 MVU API 读写变量',
             '        （入口是全局对象 <code>Mvu</code>，方法 <code>getMvuData</code> / <code>replaceMvuData</code>）。',
             '        转换后数据桥会提供同名兼容对象，把旧脚本的 MVU API 调用自动翻译成数据库操作，旧脚本才能继续工作。',
             '        若卡片脚本没用到 MVU API，选“不安装”即可。',
             '      </div>',
-            '      <div class="mvu2db-row">',
-            '        <label title="状态栏刷新由数据库表格更新回调驱动；此选项额外在 AI 回复结束时补一次刷新并处理消息里的 <UpdateVariable>/<json_patch> 更新块"><input type="checkbox" id="mvu2db-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 表格更新后自动刷新状态栏（含消息收尾兜底）</label>',
+            '      <div class="mvu2shujuku-row">',
+            '        <label title="状态栏刷新由数据库表格更新回调驱动；此选项额外在 AI 回复结束时补一次刷新并处理消息里的 <UpdateVariable>/<json_patch> 更新块"><input type="checkbox" id="mvu2shujuku-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 表格更新后自动刷新状态栏（含消息收尾兜底）</label>',
             '      </div>',
-            '      <div class="mvu2db-help">',
+            '      <div class="mvu2shujuku-help">',
             '        状态栏刷新以「表格更新回调」为主：数据库一有变动就广播 <code>shujuku-table-updated</code> 事件。',
             '        勾选上方选项后，还会在每次 AI 回复结束时补一次刷新，并顺带处理开场白/消息里的 <code>&lt;UpdateVariable&gt;</code> / <code>&lt;json_patch&gt;</code> 旧式更新块。',
             '      </div>',
-            '      <div class="mvu2db-row">',
-            '        <label class="mvu2db-label" for="mvu2db-png">输出格式</label>',
-            '        <select id="mvu2db-png">',
+            '      <div class="mvu2shujuku-row">',
+            '        <label class="mvu2shujuku-label" for="mvu2shujuku-png">输出格式</label>',
+            '        <select id="mvu2shujuku-png">',
             '          <option value="auto" ' + (settings.asPng === 'auto' ? 'selected' : '') + '>跟随输入（PNG 输入 → PNG 输出）</option>',
             '          <option value="json" ' + (settings.asPng === 'json' ? 'selected' : '') + '>总是 JSON</option>',
             '          <option value="png" ' + (settings.asPng === 'png' ? 'selected' : '') + '>总是 PNG</option>',
             '        </select>',
             '      </div>',
-            '      <div class="mvu2db-row">',
-            '        <button id="mvu2db-convert-current" class="menu_button">转换所选角色卡</button>',
-            '        <button id="mvu2db-convert-file" class="menu_button">转换所选文件</button>',
-            '        <button id="mvu2db-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
-            '        <button id="mvu2db-clear" class="menu_button">清空结果</button>',
+            '      <div class="mvu2shujuku-row">',
+            '        <button id="mvu2shujuku-convert-current" class="menu_button">转换所选角色卡</button>',
+            '        <button id="mvu2shujuku-convert-file" class="menu_button">转换所选文件</button>',
+            '        <button id="mvu2shujuku-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
+            '        <button id="mvu2shujuku-clear" class="menu_button">清空结果</button>',
             '      </div>',
-            '      <div class="mvu2db-result"></div>',
-            '      <div class="mvu2db-hint">',
+            '      <div class="mvu2shujuku-result"></div>',
+            '      <div class="mvu2shujuku-row">',
+            '        <label class="mvu2shujuku-label" for="mvu2shujuku-merge-source">合并数据库现有表格模板（转换完成后可用）</label>',
+            '        <select id="mvu2shujuku-merge-source" title="选择模板来源：当前聊天模板 / 全局模板 / 全局预设"></select>',
+            '        <button id="mvu2shujuku-merge-load" class="menu_button">加载表列表</button>',
+            '      </div>',
+            '      <div id="mvu2shujuku-merge-tables" class="mvu2shujuku-hint">选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。</div>',
+            '      <div class="mvu2shujuku-row">',
+            '        <button id="mvu2shujuku-merge-apply" class="menu_button" style="display:none">合并到转换结果</button>',
+            '        <span id="mvu2shujuku-merge-status" class="mvu2shujuku-hint"></span>',
+            '      </div>',
+            '      <div class="mvu2shujuku-hint">',
             '        前提：已安装 SP·数据库 插件（不自动安装，也不迁移旧聊天）。转换只产出 角色卡 + 表格模板 + 转换报告。',
             '      </div>',
             '    </div>',
@@ -3534,37 +3737,38 @@ ${DB_INIT_SNIPPET}
             }
         };
         populateCharacterSelect(panel, context);
-        const searchBox = panel.querySelector('#mvu2db-char-search');
+        populateMergeSource(panel);
+        const searchBox = panel.querySelector('#mvu2shujuku-char-search');
         if (searchBox && searchBox.dataset.bound !== 'true') {
             searchBox.dataset.bound = 'true';
             searchBox.addEventListener('input', () => populateCharacterSelect(panel, context));
         }
-        bind('#mvu2db-convert-current', async () => {
+        bind('#mvu2shujuku-convert-current', async () => {
             const ch = selectedCharacter(panel);
             if (!ch) { toast('请先在角色卡下拉栏中选择角色', 'error'); return; }
             toast('正在转换…');
             try {
                 const full = await fetchFullCharacter(ch);
-                console.log('[mvu2db] 待转换对象：name=', full && full.name, '| keys=', Object.keys(full || {}).join(','), '| character_book.entries=', full && full.character_book ? full.character_book.entries.length : 'N/A');
+                console.log('[mvu2shujuku] 待转换对象：name=', full && full.name, '| keys=', Object.keys(full || {}).join(','), '| character_book.entries=', full && full.character_book ? full.character_book.entries.length : 'N/A');
                 await doConvert(full, false);
             } catch (e) {
                 toast('转换失败：' + (e && e.message ? e.message : e), 'error');
             }
         });
-        bind('#mvu2db-pick-file', () => {
-            const input = panel.querySelector('#mvu2db-file');
+        bind('#mvu2shujuku-pick-file', () => {
+            const input = panel.querySelector('#mvu2shujuku-file');
             if (input) input.click();
         });
-        const fileInput = panel.querySelector('#mvu2db-file');
+        const fileInput = panel.querySelector('#mvu2shujuku-file');
         if (fileInput && fileInput.dataset.bound !== 'true') {
             fileInput.dataset.bound = 'true';
             fileInput.addEventListener('change', () => {
-                const nameEl = panel.querySelector('#mvu2db-file-name');
+                const nameEl = panel.querySelector('#mvu2shujuku-file-name');
                 if (nameEl) nameEl.textContent = fileInput.files && fileInput.files.length ? '已选择：' + fileInput.files[0].name : '';
             });
         }
-        bind('#mvu2db-convert-file', async () => {
-            const input = panel.querySelector('#mvu2db-file');
+        bind('#mvu2shujuku-convert-file', async () => {
+            const input = panel.querySelector('#mvu2shujuku-file');
             if (!input || !input.files || !input.files.length) { toast('请先选择文件', 'error'); return; }
             const file = input.files[0];
             toast('正在转换 ' + file.name + ' …');
@@ -3576,27 +3780,36 @@ ${DB_INIT_SNIPPET}
                 toast('转换失败：' + (e && e.message ? e.message : e), 'error');
             }
         });
-        bind('#mvu2db-clear', () => {
+        bind('#mvu2shujuku-clear', () => {
             lastResult = null;
-            const box = panel.querySelector('.mvu2db-result');
+            const box = panel.querySelector('.mvu2shujuku-result');
             if (box) box.innerHTML = '';
-            const saveBtn = panel.querySelector('#mvu2db-save-card');
+            const saveBtn = panel.querySelector('#mvu2shujuku-save-card');
             if (saveBtn) saveBtn.style.display = 'none';
+            mergeState.sourceTemplate = null;
+            const tablesBox = panel.querySelector('#mvu2shujuku-merge-tables');
+            if (tablesBox) tablesBox.innerHTML = '选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。';
+            const applyBtn = panel.querySelector('#mvu2shujuku-merge-apply');
+            if (applyBtn) applyBtn.style.display = 'none';
+            const statusEl = panel.querySelector('#mvu2shujuku-merge-status');
+            if (statusEl) statusEl.textContent = '';
         });
-        bind('#mvu2db-save-card', async () => {
+        bind('#mvu2shujuku-merge-load', () => loadMergeTables(panel));
+        bind('#mvu2shujuku-merge-apply', () => applyMergeTables(panel));
+        bind('#mvu2shujuku-save-card', async () => {
             await saveCardToSillyTavern();
         });
-        const modeInputs = panel.querySelectorAll('input[name="mvu2db-mode"]');
+        const modeInputs = panel.querySelectorAll('input[name="mvu2shujuku-mode"]');
         modeInputs.forEach((el) => {
             if (el.dataset.bound !== 'true') {
                 el.dataset.bound = 'true';
                 el.addEventListener('change', () => {
-                    getSettings().mode = panel.querySelector('input[name="mvu2db-mode"]:checked').value;
+                    getSettings().mode = panel.querySelector('input[name="mvu2shujuku-mode"]:checked').value;
                     saveSettings();
                 });
             }
         });
-        const shimSel = panel.querySelector('#mvu2db-shim');
+        const shimSel = panel.querySelector('#mvu2shujuku-shim');
         if (shimSel && shimSel.dataset.bound !== 'true') {
             shimSel.dataset.bound = 'true';
             shimSel.addEventListener('change', () => {
@@ -3604,7 +3817,7 @@ ${DB_INIT_SNIPPET}
                 saveSettings();
             });
         }
-        const ph = panel.querySelector('#mvu2db-placeholder');
+        const ph = panel.querySelector('#mvu2shujuku-placeholder');
         if (ph && ph.dataset.bound !== 'true') {
             ph.dataset.bound = 'true';
             ph.addEventListener('change', () => {
@@ -3612,7 +3825,7 @@ ${DB_INIT_SNIPPET}
                 saveSettings();
             });
         }
-        const pngSel = panel.querySelector('#mvu2db-png');
+        const pngSel = panel.querySelector('#mvu2shujuku-png');
         if (pngSel && pngSel.dataset.bound !== 'true') {
             pngSel.dataset.bound = 'true';
             pngSel.addEventListener('change', () => {
@@ -3645,13 +3858,13 @@ ${DB_INIT_SNIPPET}
         ensureSettingsPanel(context);
         bindAutoInit(context);
         hostWindow.setTimeout(autoInitDatabase, 1500);
-        console.log('[mvu2db] 扩展已加载（' + (window.MVU2DB_CORE ? window.MVU2DB_CORE.VERSION : '核心缺失') + '）');
+        console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') + '）');
     }
 
     try {
         main();
     } catch (error) {
-        console.error('[mvu2db] 初始化失败:', error);
+        console.error('[mvu2shujuku] 初始化失败:', error);
         try {
             if (hostWindow.toastr && typeof hostWindow.toastr.error === 'function') {
                 hostWindow.toastr.error(error && error.message ? error.message : String(error), 'MVU转数据库');
@@ -3664,14 +3877,14 @@ ${DB_INIT_SNIPPET}
 
     /**
      * 装配原生扩展文件。返回 { manifest, 'index.js', 'style.css', README }
-     * opts: { coreSource: mvu2db.js 源码字符串（用于内联） }
+     * opts: { coreSource: mvu2shujuku.js 源码字符串（用于内联） }
      */
     function assembleExtension(opts = {}) {
         const coreSource = opts.coreSource || '';
         const pinyinInline = opts.pinyinInline || '';
         const indexJs = [
             '// MVU转数据库 · SillyTavern 原生扩展',
-            '// 生成自 转换器/src/mvu2db.js（' + VERSION + '），核心源码内联如下',
+            '// 生成自 转换器/src/mvu2shujuku.js（' + VERSION + '），核心源码内联如下',
             '// @ts-nocheck',
             '(function (root) {',
             coreSource,
@@ -3709,7 +3922,7 @@ ${DB_INIT_SNIPPET}
     }
 
 
-    root.MVU2DB_CORE = {
+    root.MVU2SHUJUKU_CORE = {
         VERSION,
         parseCard,
         parseCardPng,
@@ -3724,6 +3937,7 @@ ${DB_INIT_SNIPPET}
         buildSchema,
         buildLayout,
         generateTemplate,
+        mergeTemplates,
         generateBridgeScript,
         rewriteEjsConditions,
         toPinyinSlug,
@@ -3738,6 +3952,6 @@ ${DB_INIT_SNIPPET}
     };
 
     if (typeof module !== 'undefined' && module.exports) {
-        module.exports = root.MVU2DB_CORE;
+        module.exports = root.MVU2SHUJUKU_CORE;
     }
 })(typeof globalThis !== 'undefined' ? globalThis : this);
