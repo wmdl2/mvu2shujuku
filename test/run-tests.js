@@ -271,6 +271,12 @@ test('转换产物齐全', () => {
     assert.ok(c.extensions.mvu2db, '应有转换标记');
     assert.ok(!c.character_book.entries.some(e => /\[initvar\]|\[mvu_update\]|变量列表/i.test(String(e.comment || ''))), 'MVU 世界书条目应被删除');
     assert.ok(String(c.name).endsWith('_数据库'), '卡名应带 _数据库 后缀');
+    if (c.character_book && c.character_book.name) {
+        assert.ok(String(c.character_book.name).endsWith('_数据库'), '内嵌世界书名称应加 _数据库 后缀');
+    }
+    if (c.extensions && typeof c.extensions.world === 'string' && c.extensions.world) {
+        assert.ok(String(c.extensions.world).endsWith('_数据库'), '外部世界书引用应加 _数据库 后缀');
+    }
 });
 
 test('native / sqlite 单模式', () => {

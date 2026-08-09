@@ -2851,6 +2851,22 @@
             data.name = String(data.name || '') + nameSuffix;
             report.note(`角色卡名已追加后缀：${origName} → ${data.name}。`);
         }
+        // 世界书独立：内嵌世界书与外部世界书引用都加后缀，
+        // 避免导入转换卡时以同名覆盖原卡的世界书。
+        if (data.character_book && typeof data.character_book.name === 'string' && nameSuffix) {
+            const bookName = data.character_book.name;
+            if (bookName && !bookName.endsWith(nameSuffix)) {
+                data.character_book.name = bookName + nameSuffix;
+                report.note(`内嵌世界书名称已追加后缀：${bookName} → ${data.character_book.name}（避免同名覆盖）。`);
+            }
+        }
+        if (data.extensions && typeof data.extensions.world === 'string' && nameSuffix) {
+            const worldName = data.extensions.world;
+            if (worldName && !worldName.endsWith(nameSuffix)) {
+                data.extensions.world = worldName + nameSuffix;
+                report.note(`外部世界书引用已追加后缀：${worldName} → ${data.extensions.world}。`);
+            }
+        }
         data.extensions.mvu2db = {
             converter: 'mvu2db',
             version: VERSION,
@@ -3207,9 +3223,38 @@
                 await context.createCharacterData(undefined, avatarBlob || new Blob(), cardData, false);
                 saved = true;
             } else {
+                // 直接走 /api/characters/create：必须把角色卡所有字段都放进表单，
+                // 服务端 charaFormatData 会用表单字段覆盖卡内同名字段，缺字段会被清空。
+                const d = cardData.data || cardData;
+                const ex = d.extensions || {};
+                const dp = ex.depth_prompt || {};
+                const appendStr = (key, value) => {
+                    if (value !== undefined && value !== null) formData.append(key, String(value));
+                };
                 const formData = new FormData();
                 formData.append('ch_name', displayName);
                 formData.append('json_data', JSON.stringify(cardData));
+                appendStr('description', d.description);
+                appendStr('personality', d.personality);
+                appendStr('scenario', d.scenario);
+                appendStr('first_mes', d.first_mes);
+                appendStr('mes_example', d.mes_example);
+                appendStr('creator_notes', d.creator_notes);
+                appendStr('system_prompt', d.system_prompt);
+                appendStr('post_history_instructions', d.post_history_instructions);
+                appendStr('creator', d.creator);
+                appendStr('character_version', d.character_version);
+                appendStr('talkativeness', d.talkativeness !== undefined ? d.talkativeness : ex.talkativeness);
+                appendStr('fav', ex.fav === true);
+                appendStr('world', ex.world);
+                appendStr('depth_prompt_prompt', dp.prompt);
+                appendStr('depth_prompt_depth', dp.depth);
+                appendStr('depth_prompt_role', dp.role);
+                const tags = Array.isArray(d.tags) ? d.tags.join(',') : d.tags;
+                appendStr('tags', tags);
+                const greetings = Array.isArray(d.alternate_greetings) ? d.alternate_greetings : (d.alternate_greetings ? [d.alternate_greetings] : []);
+                for (const g of greetings) formData.append('alternate_greetings', g);
+                formData.append('extensions', JSON.stringify(ex));
                 if (avatarBlob) formData.append('avatar', avatarBlob, 'avatar.png');
                 const headers = typeof context.getRequestHeaders === 'function'
                     ? context.getRequestHeaders({ omitContentType: true })
