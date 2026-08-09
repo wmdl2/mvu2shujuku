@@ -564,7 +564,7 @@ test('表种类推导矩阵：单例/行表/数组/混合均符合预期', () =>
         ['纯叶子', { 主角: { 姓名: '未知', 生命: 100 } }, '主角表', 'singleton', 1],
         ['叶子+平铺子对象', { 主角: { 姓名: 'x', 炼丹: { 阶级: '未入门' } } }, '主角表', 'singleton', 1],
         ['叶子+嵌套子对象', { 主角: { 姓名: 'x', 储物袋: { 铁剑: { 数量: 3 } } } }, '主角表', 'singleton', 1],
-        ['空字典', { 道侣: {} }, '道侣表', 'rows', 0],
+        ['空字典（无字段线索）', { 道侣: {} }, '道侣表', 'json', 1],
         ['条目全叶子', { 道侣: { 林若悠: { 亲密: 88 }, 苏媚: { 亲密: 77 } } }, '道侣表', 'rows', 2],
         ['条目含嵌套', { 道侣: { 林若悠: { 亲密: 88, 日程: { 周三: '空' } } } }, '道侣表', 'rows', 1],
         ['单条目字典', { 背包: { 铁剑: { 数量: 3 } } }, '背包表', 'rows', 1],
@@ -942,6 +942,174 @@ test('扩展产物：index.js 应包含完整 Mvu 兼容层（事件名/接管/�
     assert.ok(js.includes('global_Mvu_initialized'), 'index.js 应监听真 MVU 初始化事件并接管');
     assert.ok(js.includes('setMvuVariable'), 'index.js 应实现 setMvuVariable');
     assert.ok(js.includes('parseMessage'), 'index.js 应实现 parseMessage');
+});
+
+/* ---------------- 空字典组 / 未声明动态字段（通用 JSON 兜底） ---------------- */
+console.log('JSON 兜底（空字典组 / 未声明字段）');
+
+test('空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删除均可还原', () => {
+    const vm = require('vm');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'JSON兜底卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: JSON.stringify({
+                            系统: { 当前日期: '未知' },
+                            任务: {},
+                            本轮操作: {},
+                        }),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both', installMvuShim: true });
+    const layout = core.buildLayout(r.schema);
+    const taskEntry = layout.entries.find(e => e.group === '任务');
+    const opEntry = layout.entries.find(e => e.group === '本轮操作');
+    assert.strictEqual(taskEntry.kind, 'json', '空字典且无字段线索应生成整组 JSON 表');
+    assert.strictEqual(opEntry.kind, 'json', '空字典且无字段线索应生成整组 JSON 表');
+    const taskSheet = Object.values(r.template).find(s => s && s.name === '任务表');
+    assert.deepStrictEqual(taskSheet.content[0], ['row_id', '名称', '内容'], 'JSON 表头应为 row_id/名称/内容');
+
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async () => ({ success: true }),
+        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const sheet = Object.values(tables).find(s => s && s.name === tableName);
+            if (!sheet) return false;
+            const ci = sheet.content[0].indexOf(col);
+            if (ci === -1) return false;
+            sheet.content[rowIndex][ci] = value;
+            return true;
+        },
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = fakeApi;
+    vm.createContext(win);
+    vm.runInContext(r.bridgeScript, win);
+    return (async () => {
+        // 对象条目写入
+        let mvu = win.Mvu.getMvuData();
+        mvu.stat_data.任务['剿灭盗匪'] = { 完成条件: '击败首领', 已完成: false };
+        await win.Mvu.replaceMvuData(mvu);
+        let back = win.Mvu.getMvuData();
+        assert.strictEqual(JSON.stringify(back.stat_data.任务['剿灭盗匪']), JSON.stringify({ 完成条件: '击败首领', 已完成: false }), '任务条目应整组 JSON 还原');
+        // 标量整组写入
+        mvu = win.Mvu.getMvuData();
+        mvu.stat_data.本轮操作 = '无';
+        await win.Mvu.replaceMvuData(mvu);
+        back = win.Mvu.getMvuData();
+        assert.strictEqual(back.stat_data.本轮操作, '无', '整组标量应原样还原');
+        // 删除条目（unset 后整组覆盖）
+        mvu = win.Mvu.getMvuData();
+        delete mvu.stat_data.任务['剿灭盗匪'];
+        await win.Mvu.replaceMvuData(mvu);
+        back = win.Mvu.getMvuData();
+        assert.strictEqual(Object.keys(back.stat_data.任务).length, 0, '删除任务条目后应还原为空字典');
+    })().catch(e => { throw e; });
+});
+
+test('已声明单例/行表：未声明的动态字段写入 _扩展数据 并读回', () => {
+    const vm = require('vm');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '溢出卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: JSON.stringify({
+                            系统: { 当前日期: '未知' },
+                            角色: { 林若悠: { 好感度: 50 } },
+                        }),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both', installMvuShim: true });
+    const layout = core.buildLayout(r.schema);
+    const sys = layout.entries.find(e => e.group === '系统');
+    const role = layout.entries.find(e => e.group === '角色');
+    assert.ok(sys.cols.some(c => c.zh === '_扩展数据'), '单例表应有 _扩展数据 溢出列');
+    assert.ok(role.cols.some(c => c.zh === '_扩展数据'), '行表应有 _扩展数据 溢出列');
+
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async () => ({ success: true }),
+        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const sheet = Object.values(tables).find(s => s && s.name === tableName);
+            if (!sheet) return false;
+            const ci = sheet.content[0].indexOf(col);
+            if (ci === -1) return false;
+            sheet.content[rowIndex][ci] = value;
+            return true;
+        },
+        insertRow: async (tableName, obj) => {
+            const sheet = Object.values(tables).find(s => s && s.name === tableName);
+            if (!sheet) return 1;
+            const row = sheet.content[0].map(() => '');
+            for (const k in obj) row[Number(k)] = String(obj[k]);
+            row[0] = sheet.content.length || 1;
+            sheet.content.push(row);
+            return row[0];
+        },
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = fakeApi;
+    vm.createContext(win);
+    vm.runInContext(r.bridgeScript, win);
+    return (async () => {
+        // 单例组未声明字段（对应 系统._hypnoos 场景）
+        let mvu = win.Mvu.getMvuData();
+        mvu.stat_data.系统._hypnoos = { achievements: { a: true }, 特性: {} };
+        await win.Mvu.replaceMvuData(mvu);
+        let back = win.Mvu.getMvuData();
+        assert.strictEqual(JSON.stringify(back.stat_data.系统._hypnoos), JSON.stringify({ achievements: { a: true }, 特性: {} }), '单例组未声明字段应经 _扩展数据 读回');
+        assert.strictEqual(back.stat_data.系统.当前日期, '未知', '已声明字段不受影响');
+        assert.ok(!('_扩展数据' in back.stat_data.系统), '内部溢出列不应混入 stat_data');
+        // 行表未声明字段（角色.条目.新字段）
+        mvu = win.Mvu.getMvuData();
+        mvu.stat_data.角色['林若悠']['隐藏标记'] = 'x1';
+        await win.Mvu.replaceMvuData(mvu);
+        back = win.Mvu.getMvuData();
+        assert.strictEqual(back.stat_data.角色['林若悠']['隐藏标记'], 'x1', '行表未声明字段应经行级 _扩展数据 读回');
+        assert.strictEqual(back.stat_data.角色['林若悠'].好感度, 50, '行表已声明字段不受影响');
+        assert.ok(!('_扩展数据' in back.stat_data.角色['林若悠']), '行级内部溢出列不应混入 stat_data');
+    })().catch(e => { throw e; });
 });
 
 test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）', () => new Promise((resolve, reject) => {

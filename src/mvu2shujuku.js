@@ -1154,7 +1154,14 @@
         function deriveKind(groupName, raw) {
             const values = Object.values(raw);
             if (values.length === 0) {
-                report.note(`顶层组「${groupName}」初始为空字典，按行表处理；若它本应是单例表请人工调整。`);
+                // 状态栏/规则扫描到字段 → 仍可按字段建行表；完全无字段信息 → 整组 JSON（任意形状还原）
+                const knownFields = [...(usage[groupName] || []), ...(shapes[groupName] || [])]
+                    .filter(f => f !== '名称' && f !== '描述' && f !== '数值' && f !== '内容');
+                if (knownFields.length === 0) {
+                    report.note(`顶层组「${groupName}」初始为空字典且无字段线索，运行期结构未知，按整组 JSON 存储（任意形状均还原）。`);
+                    return 'json';
+                }
+                report.note(`顶层组「${groupName}」初始为空字典，已按状态栏/规则扫描到的字段建行表。`);
                 return 'rows';
             }
             const leaves = values.filter(v => isLeaf(v)).length;
@@ -1224,6 +1231,46 @@
             const keyCol = '名称';
             const childTables = [];
             const prefixPath = [groupName];
+            if (kind === 'json') {
+                // 空字典组：运行期可能是“字典→对象 / 字典→标量 / 组本身是标量”等任意形状，
+                // 统一存成单行 JSON（内容列），读取时原样还原；不猜列名。
+                const usedJson = new Set(['row_id']);
+                const columns = [
+                    {
+                        zh: keyCol,
+                        path: [groupName, keyCol],
+                        value: groupName,
+                        desc: '唯一标识',
+                        type: 'TEXT',
+                        ident: toIdent(keyCol, usedJson, 'column'),
+                    },
+                    {
+                        zh: '内容',
+                        path: [groupName, '内容'],
+                        value: '',
+                        desc: '整组数据（JSON 存储，读取时还原任意形状；内部数据，AI 不应直接修改）',
+                        type: 'TEXT',
+                        ident: toIdent('内容', usedJson, 'column'),
+                        isObject: true,
+                    },
+                ];
+                let initial;
+                try { initial = JSON.stringify(raw); } catch (e) { initial = '{}'; }
+                groups.push({
+                    name: groupName,
+                    tableName,
+                    ident: toIdent(tableName, usedTableIdents, 'table'),
+                    kind: 'json',
+                    keyCol,
+                    keyValue: groupName,
+                    columns,
+                    rows: [[1, groupName, initial]],
+                    childTables: [],
+                    source: 'initvar',
+                    reminders: ruleReminders[groupName] || [],
+                });
+                continue;
+            }
             // 行表的列由下方 rows 分支从条目字段构造（嵌套对象统一转 JSON 列）；
             // 不从顶层收集子表，避免“每角色一张字段相同的重复表”。
             const columns = kind === 'rows'
@@ -1316,6 +1363,19 @@
                     }
                     report.warn(`组「${groupName}」存在非对象条目（标量），已归入「${scalarZh}」列，请人工核对`, 'schema');
                 }
+                // 通用溢出列：运行期脚本/前端可能写入模板未声明的动态字段，统一存 JSON，读取时自动还原
+                if (!columns.some(c => c.zh === '_扩展数据')) {
+                    columns.push({
+                        zh: '_扩展数据',
+                        path: [groupName, '_扩展数据'],
+                        value: '',
+                        desc: '本表未在模板声明的动态字段（JSON 存储，读取时自动还原；内部数据，AI 不应直接修改）',
+                        type: 'TEXT',
+                        range: null,
+                        ident: toIdent('_扩展数据', used, 'column'),
+                        isObject: true,
+                    });
+                }
                 rows = entryRows.map(r => {
                     const rowArr = [r.__rowId || (columns.length + 1), r[keyCol]];
                     for (const c of columns.slice(1)) {
@@ -1368,6 +1428,19 @@
                         type: 'TEXT',
                         range: fieldRange(f),
                         ident: toIdent(f, used, 'column'),
+                    });
+                }
+                // 通用溢出列：运行期脚本/前端可能写入模板未声明的动态字段，统一存 JSON，读取时自动还原
+                if (!columns.some(c => c.zh === '_扩展数据')) {
+                    columns.push({
+                        zh: '_扩展数据',
+                        path: [groupName, '_扩展数据'],
+                        value: '',
+                        desc: '本表未在模板声明的动态字段（JSON 存储，读取时自动还原；内部数据，AI 不应直接修改）',
+                        type: 'TEXT',
+                        range: null,
+                        ident: toIdent('_扩展数据', used, 'column'),
+                        isObject: true,
                     });
                 }
                 const rowArr = [1];
@@ -1458,6 +1531,18 @@
                     }
                     report.warn(`子表「${ct.key}」存在非对象条目（标量），已归入「${scalarZh}」列，请人工核对`, 'schema');
                 }
+                if (!columns.some(c => c.zh === '_扩展数据')) {
+                    columns.push({
+                        zh: '_扩展数据',
+                        path: [...ct.path, '_扩展数据'],
+                        value: '',
+                        desc: '本表未在模板声明的动态字段（JSON 存储，读取时自动还原；内部数据，AI 不应直接修改）',
+                        type: 'TEXT',
+                        range: null,
+                        ident: toIdent('_扩展数据', used, 'column'),
+                        isObject: true,
+                    });
+                }
                 const rows = entryRows.map(r => {
                     const rowArr = [r.__rowId || (columns.length + 1), r[keyCol]];
                     for (const c of columns.slice(1)) {
@@ -1504,9 +1589,13 @@
         const ruleRanges = (shapeInfo && shapeInfo.ranges) || {};
         const ruleNumeric = (shapeInfo && shapeInfo.numericFields) || new Set();
         for (const g of groups) {
+            // 整组 JSON 表：内容不透明，不套用 [mvu_update] 按字段名的规则（避免误命中同名列）
+            if (g.kind === 'json') continue;
             const gFormats = ruleFormats[g.name] || {};
             const gChecks = ruleChecks[g.name] || {};
             for (const c of g.columns) {
+                // 内部溢出列：不接受按字段名的规则
+                if (c.zh === '_扩展数据') continue;
                 const last = c.path && c.path.length ? c.path[c.path.length - 1] : c.zh;
                 c.enum = ruleEnums[c.zh] || ruleEnums[last] || null;
                 c.format = gFormats[c.zh] || gFormats[last] || '';
@@ -1584,7 +1673,7 @@
         for (let i = 0; i < cols.length; i++) {
             const c = cols[i];
             const isKey = i === 0 && group.kind === 'rows';
-            const isSingletonKey = i === 0 && group.kind === 'singleton';
+            const isSingletonKey = i === 0 && (group.kind === 'singleton' || group.kind === 'json');
             let def = `  ${c.ident} ${c.type}`;
             const range = c.range || null;
             const extras = Array.isArray(group.extraAllowed && group.extraAllowed[c.ident]) ? group.extraAllowed[c.ident] : [];
@@ -1629,6 +1718,9 @@
         if (group.kind === 'singleton') {
             return `单例表，全表固定一条记录（${group.keyCol}='${group.keyValue}'），只做增量更新，不新增、不删除。`;
         }
+        if (group.kind === 'json') {
+            return `整组 JSON 存储表：本组数据以 JSON 整体保存、读取时还原任意形状（对象/字典/标量）；内部数据，AI 不应直接修改。`;
+        }
         if (group.kind === 'array') {
             return '数组表，每行一个元素，通常整体替换。';
         }
@@ -1637,7 +1729,7 @@
 
     function buildNote(group) {
         const L = [];
-        if (group.kind === 'singleton') {
+        if (group.kind === 'singleton' || group.kind === 'json') {
             // 单例表不重复描述（“全表固定一条记录”等），直接给出开局记录说明
             L.push(`本表唯一记录已由开局模板插入（row_id=1，${group.keyCol}='${group.keyValue}'）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`);
         } else {
@@ -1671,6 +1763,9 @@
     }
 
     function buildInitNode(group) {
+        if (group.kind === 'json') {
+            return `开局模板已初始化整组数据（row_id=1，${group.keyCol}='${group.keyValue}'）；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
+        }
         if (group.kind === 'singleton') {
             return `开局模板已包含唯一记录（row_id=1，${group.keyCol}='${group.keyValue}'）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`;
         }
@@ -1687,6 +1782,10 @@
     }
 
     function buildNodeProse(group, kind) {
+        if (group.kind === 'json') {
+            if (kind === 'update') return '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
+            return '禁止。';
+        }
         if (group.kind === 'singleton') {
             if (kind === 'update') {
                 // 用首个业务列给出具体示例（有初始值用真实值，否则“列名示例”）
@@ -1827,6 +1926,27 @@
 
         for (const g of schema) {
             tableByName[g.tableName] = g;
+            if (g.kind === 'json') {
+                const entry = {
+                    kind: 'json',
+                    group: g.name,
+                    table: g.tableName,
+                    keyCol: g.keyCol,
+                    keyValue: g.keyValue,
+                    cols: g.columns.map(c => ({
+                        zh: c.zh,
+                        type: columnLayoutType(c),
+                        fallback: c.value === undefined || c.value === null ? '' : c.value,
+                        path: c.path || [g.name, c.zh],
+                        isPair: !!c.isPair,
+                        desc: c.desc || '',
+                    })),
+                    writePaths: [[g.name]],
+                };
+                entries.push(entry);
+                pathIndex.set(g.name, { table: g.tableName, json: true });
+                continue;
+            }
             if (g.kind === 'array') {
                 const entry = {
                     kind: 'array',
@@ -1956,6 +2076,7 @@
             if (!s || !Array.isArray(s.content) || !s.content.length) {
                 if (L.kind === 'rows') { for (const wp of L.writePaths || []) setPath(sd, wp, {}); }
                 else if (L.kind === 'array') { sd[L.group] = []; for (const m of L.mirrors || []) setPath(sd, m.path, ''); }
+                else if (L.kind === 'json') { sd[L.group] = {}; }
                 continue;
             }
             const header = s.content[0] || [];
@@ -1965,9 +2086,15 @@
                 sd[L.group] = {};
                 for (let j = 0; j < (L.cols || []).length; j++) {
                     const c = L.cols[j];
+                    if (c[0] === '_扩展数据') continue;
                     const vj = idxs[j] >= 0 ? row[idxs[j]] : undefined;
                     const cp = c.length > 3 && c[3] && c[3].length ? c[3] : [L.group, c[0]];
                     setPath(sd, cp, convertCell(c[1], vj, c[2], c[5]));
+                }
+                const sovIdx = header.indexOf('_扩展数据');
+                if (sovIdx >= 0 && row[sovIdx]) {
+                    const sov = parseObject(row[sovIdx]);
+                    for (const sok in sov) { if (Object.prototype.hasOwnProperty.call(sov, sok)) sd[L.group][sok] = sov[sok]; }
                 }
             } else if (L.kind === 'array') {
                 const arr = [];
@@ -1977,6 +2104,13 @@
                 }
                 sd[L.group] = arr;
                 for (const m of L.mirrors || []) setPath(sd, m.path, m.mode === 'first' ? (arr.length ? arr[0] : '') : arr);
+            } else if (L.kind === 'json') {
+                const jrow = s.content[1] || [];
+                const jidx = header.indexOf('内容');
+                const jv = jidx >= 0 ? jrow[jidx] : undefined;
+                const jparsed = parseObject(jv);
+                sd[L.group] = (jparsed === null || jparsed === undefined) ? {} : jparsed;
+                for (const m of L.mirrors || []) setPath(sd, m.path, m.mode === 'first' ? (jparsed && typeof jparsed === 'object' && !Array.isArray(jparsed) ? jparsed : '') : jparsed);
             } else {
                 const dict = {};
                 const keyIdx = header.indexOf(L.keyCol);
@@ -1988,9 +2122,15 @@
                     const item = {};
                     for (let j2 = 0; j2 < (L.cols || []).length; j2++) {
                         const c2 = L.cols[j2];
+                        if (c2[0] === '_扩展数据') continue;
                         if (c2[0] === L.keyCol) { item[c2[0]] = text(kv); continue; }
                         const vj2 = idxs[j2] >= 0 ? rw2[idxs[j2]] : undefined;
                         item[c2[0]] = convertCell(c2[1], vj2, c2[2], c2[5]);
+                    }
+                    const ovIdx = header.indexOf('_扩展数据');
+                    if (ovIdx >= 0 && rw2[ovIdx]) {
+                        const ov = parseObject(rw2[ovIdx]);
+                        for (const ok in ov) { if (Object.prototype.hasOwnProperty.call(ov, ok)) item[ok] = ov[ok]; }
                     }
                     dict[text(kv)] = item;
                 }
@@ -2056,6 +2196,23 @@
                     ops.push({ np, entry, value: nv, replace: true });
                     continue;
                 }
+                if (entry && entry.kind === 'json') {
+                    ops.push({ np, entry, value: nv, json: true });
+                    continue;
+                }
+                if (entry && (entry.kind === 'singleton' || entry.kind === 'rows')) {
+                    const pre = entry.prefix.join('.');
+                    const rel = np === pre ? [] : np.slice(pre.length + 1).split('.');
+                    const fIdx = entry.kind === 'rows' ? 1 : 0;
+                    if (rel.length > fIdx) {
+                        const fld = rel[fIdx];
+                        const declared = entry.layout.cols.some(c => c[0] === fld);
+                        if (!declared) {
+                            ops.push({ np, entry, value: nv, overflow: true, mergeKey: entry.kind === 'rows' ? rel[1] : rel[0], rowKey: entry.kind === 'rows' ? rel[0] : undefined });
+                            continue;
+                        }
+                    }
+                }
                 if (nv && typeof nv === 'object' && !Array.isArray(nv)) {
                     collect(pv && typeof pv === 'object' && !Array.isArray(pv) ? pv : {}, nv, np);
                 } else {
@@ -2067,6 +2224,8 @@
 
         // 解析差异操作并跳过值未变化的写入
         const resolved = [];
+        const directOps = [];
+        const parseObj = (v) => { try { if (!v) return {}; if (typeof v === 'object') return v; return JSON.parse(String(v)); } catch (e) { return {}; } };
         for (const op of ops) {
             const E = op.entry;
             if (!E) continue;
@@ -2075,6 +2234,50 @@
             if (!found) continue;
             const sheet = found.sheet;
             const header = sheet.content && sheet.content[0] ? sheet.content[0] : [];
+            if (op.json && E.kind === 'json') {
+                const jcIdx = header.indexOf('内容');
+                if (jcIdx === -1) continue;
+                const jNew = op.value === undefined || op.value === null ? '{}' : JSON.stringify(op.value);
+                const jCur = sheet.content[1] ? sheet.content[1][jcIdx] : undefined;
+                if (sameValue(jCur, jNew)) continue;
+                directOps.push({ kind: 'json', key: found.key, sheet, header, layout: L, value: jNew });
+                continue;
+            }
+            if (op.overflow) {
+                const ovcIdx = header.indexOf('_扩展数据');
+                if (ovcIdx === -1) continue;
+                let ovRow = 1;
+                let ovNewRowObj = null;
+                if (E.kind === 'rows') {
+                    const ovKey = op.rowKey;
+                    if (ovKey === undefined) continue;
+                    ovRow = findRowByColumn(sheet, L.keyCol, ovKey);
+                    if (ovRow === -1) {
+                        const ci = header.indexOf(L.keyCol);
+                        if (ci === -1) continue;
+                        const obj = {};
+                        for (let nc = 0; nc < L.cols.length; nc++) {
+                            const cc = L.cols[nc];
+                            const cIdx = header.indexOf(cc[0]);
+                            if (cIdx === -1) continue;
+                            if (cc[0] === L.keyCol) { obj[String(nc)] = String(ovKey); continue; }
+                            if (cc[0] === '_扩展数据') { const o1 = {}; o1[op.mergeKey] = op.value; obj[String(nc)] = JSON.stringify(o1); }
+                        }
+                        ovNewRowObj = obj;
+                    }
+                }
+                if (ovNewRowObj) {
+                    directOps.push({ kind: 'overflow-insert', key: found.key, sheet, layout: L, rowObj: ovNewRowObj });
+                    continue;
+                }
+                const ovCur = parseObj(sheet.content[ovRow] ? sheet.content[ovRow][ovcIdx] : undefined);
+                const ovMerged = JSON.parse(JSON.stringify(ovCur || {}));
+                ovMerged[op.mergeKey] = op.value;
+                const ovStr = JSON.stringify(ovMerged);
+                if (sameValue(sheet.content[ovRow] ? sheet.content[ovRow][ovcIdx] : undefined, ovStr)) continue;
+                directOps.push({ kind: 'overflow', key: found.key, sheet, header, layout: L, rowIndex: ovRow, value: ovStr });
+                continue;
+            }
             if (op.replace && E.kind === 'array') {
                 const arr = Array.isArray(op.value) ? op.value : [];
                 const oldVals = sheet.content.slice(1).map(r => (r ? r[1] : undefined));
@@ -2127,7 +2330,7 @@
             }
             resolved.push({ kind: 'cell', key: found.key, sheet, header, layout: L, rowIndex, colIdx, colZh, value: op.value, newRowArr, newRowObj });
         }
-        if (resolved.length === 0) return 0;
+        if (resolved.length === 0 && directOps.length === 0) return 0;
 
         // 多操作批量写入：走插件 executeSqlBatch（增量事务，一次提交），
         // 避免逐格 updateCell 导致的几十次整表持久化卡顿。
@@ -2190,7 +2393,8 @@
                 if (statements.length) {
                     const out = await Promise.resolve(api.executeSqlBatch(statements.join('\n'), { skipChatSave: false }));
                     if (!out || out.success === false) throw new Error((out && out.error) || 'executeSqlBatch 返回失败');
-                    return resolved.length;
+                    await runDirectOps();
+                    return resolved.length + directOps.length;
                 }
             } catch (e) {
                 console.warn('[mvu2shujuku][debug] SQL 批量写入失败，回退逐条写入：' + (e && e.message ? e.message : e));
@@ -2218,7 +2422,20 @@
                 try { await Promise.resolve(api.updateCell(L.table, r.rowIndex, r.colZh, r.value)); } catch (e) {}
             } catch (e) {}
         }
-        return resolved.length;
+        await runDirectOps();
+        return resolved.length + directOps.length;
+
+        async function runDirectOps() {
+            for (const d of directOps) {
+                try {
+                    if (d.kind === 'json') await Promise.resolve(api.updateCell(d.layout.table, 1, '内容', d.value));
+                    else if (d.kind === 'overflow') await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', d.value));
+                    else if (d.kind === 'overflow-insert') await Promise.resolve(api.insertRow(d.layout.table, d.rowObj));
+                } catch (e) {
+                    console.warn('[mvu2shujuku][debug] 整组JSON/溢出列写入失败:', e);
+                }
+            }
+        }
     }
 
     /**
@@ -2375,9 +2592,16 @@
             `        sd[L.group]={};`,
             `        for(var j=0;j<L.cols.length;j++){`,
             `          var cj=L.cols[j];`,
+            `          if(cj[0]==='_扩展数据')continue;`,
             `          var vj=idxs[j]>=0?row[idxs[j]]:undefined;`,
             `          var cp=cj.length>3&&cj[3]&&cj[3].length?cj[3]:[L.group,cj[0]];`,
             `          setPath(sd,cp,convertCell(cj[1],vj,cj[2],cj[5]));`,
+            `        }`,
+            `        // 溢出列合并：模板未声明的动态字段（如 系统._hypnoos）`,
+            `        var sovIdx=header.indexOf('_扩展数据');`,
+            `        if(sovIdx>=0&&row[sovIdx]){`,
+            `          var sov=parseObject(row[sovIdx]);`,
+            `          for(var sok in sov){if(Object.prototype.hasOwnProperty.call(sov,sok))sd[L.group][sok]=sov[sok];}`,
             `        }`,
             `      }else if(L.kind==='array'){`,
             `        var arr=[];`,
@@ -2390,6 +2614,18 @@
             `          var mm=L.mirrors[mi2];`,
             `          setPath(sd,mm.path,mm.mode==='first'?(arr.length?arr[0]:''):arr);`,
             `        }`,
+            `      }else if(L.kind==='json'){`,
+            `        // 整组 JSON：单行“内容”列原样还原任意形状（对象/字典/标量）`,
+            `        var jrow=s.content[1]||[];`,
+            `        var jidx=header.indexOf('内容');`,
+            `        var jv=jidx>=0?jrow[jidx]:undefined;`,
+            `        var jparsed=parseObject(jv);`,
+            `        sd[L.group]=jparsed===null||jparsed===undefined?{}:jparsed;`,
+            `        // 镜像（若有）`,
+            `        for(var mi3=0;mi3<(L.mirrors||[]).length;mi3++){`,
+            `          var mm3=L.mirrors[mi3];`,
+            `          setPath(sd,mm3.path,mm3.mode==='first'?(jparsed&&typeof jparsed==='object'&&!Array.isArray(jparsed)?jparsed:''):jparsed);`,
+            `        }`,
             `      }else{`,
             `        var dict={};`,
             `        var keyIdx=header.indexOf(L.keyCol);`,
@@ -2401,9 +2637,16 @@
             `          var item={};`,
             `          for(var j2=0;j2<L.cols.length;j2++){`,
             `            var cj2=L.cols[j2];`,
+            `            if(cj2[0]==='_扩展数据')continue;`,
             `            if(cj2[0]===L.keyCol){item[cj2[0]]=text(kv);continue;}`,
             `            var vj2=idxs[j2]>=0?rw2[idxs[j2]]:undefined;`,
             `            item[cj2[0]]=convertCell(cj2[1],vj2,cj2[2],cj2[5]);`,
+            `          }`,
+            `          // 溢出列合并：模板未声明的动态字段`,
+            `          var ovIdx=header.indexOf('_扩展数据');`,
+            `          if(ovIdx>=0&&rw2[ovIdx]){`,
+            `            var ov=parseObject(rw2[ovIdx]);`,
+            `            for(var ok in ov){if(Object.prototype.hasOwnProperty.call(ov,ok))item[ok]=ov[ok];}`,
             `          }`,
             `          dict[text(kv)]=item;`,
             `        }`,
@@ -2467,6 +2710,25 @@
             `        ops.push({np:np,entry:entry,value:nv,replace:true});`,
             `        continue;`,
             `      }`,
+            `      if(entry&&entry.kind==='json'){`,
+            `        // 整组 JSON：以整组值替换（读取侧本来就整体还原，删除/新增都自然覆盖）`,
+            `        ops.push({np:np,entry:entry,value:nv,json:true});`,
+            `        continue;`,
+            `      }`,
+            `      if(entry&&(entry.kind==='singleton'||entry.kind==='rows')){`,
+            `        // 模板未声明的动态字段 → 溢出列 JSON 合并`,
+            `        var pre=entry.prefix.join('.');`,
+            `        var rel=np===pre?[]:np.slice(pre.length+1).split('.');`,
+            `        var fIdx=entry.kind==='rows'?1:0;`,
+            `        if(rel.length>fIdx){`,
+            `          var fld=rel[fIdx];`,
+            `          var declared=entry.layout.cols.some(function(c){return c[0]===fld;});`,
+            `          if(!declared){`,
+            `            ops.push({np:np,entry:entry,value:nv,overflow:true,mergeKey:entry.kind==='rows'?rel[1]:rel[0],rowKey:entry.kind==='rows'?rel[0]:undefined});`,
+            `            continue;`,
+            `          }`,
+            `        }`,
+            `      }`,
             `      if(nv&&typeof nv==='object'&&!Array.isArray(nv)){`,
             `        collect(pv&&typeof pv==='object'&&!Array.isArray(pv)?pv:{},nv,np);`,
             `      }else{`,
@@ -2484,6 +2746,42 @@
             `    var sheet=sheetOf(L.table);`,
             `    if(!sheet)continue;`,
             `    var header=sheet.content&&sheet.content[0]?sheet.content[0]:[];`,
+            `    if(op.json&&E.kind==='json'){`,
+            `      var jcIdx=header.indexOf('内容');`,
+            `      if(jcIdx===-1)continue;`,
+            `      var jNew=op.value===undefined||op.value===null?'{}':JSON.stringify(op.value);`,
+            `      var jCur=sheet.content[1]?sheet.content[1][jcIdx]:undefined;`,
+            `      if(String(jCur)===String(jNew))continue;`,
+            `      try{await Promise.resolve(API.updateCell(L.table,1,'内容',jNew));}catch(e){console.warn('['+BRIDGE_NAME+'] 整组JSON写入失败:',e);}`,
+            `      continue;`,
+            `    }`,
+            `    if(op.overflow){`,
+            `      var ovcIdx=header.indexOf('_扩展数据');`,
+            `      if(ovcIdx===-1)continue;`,
+            `      var ovRow=1;`,
+            `      if(E.kind==='rows'){`,
+            `        var ovKey=op.rowKey;`,
+            `        if(ovKey===undefined)continue;`,
+            `        ovRow=window.findRowByColumn(L.table,L.keyCol,ovKey);`,
+            `        if(ovRow===-1){`,
+            `          var ovNewRow={};`,
+            `          for(var onc=0;onc<L.cols.length;onc++){`,
+            `            var occ=L.cols[onc];`,
+            `            if(occ[0]===L.keyCol){ovNewRow[String(onc)]=String(ovKey);continue;}`,
+            `            if(occ[0]==='_扩展数据'){var o1={};o1[op.mergeKey]=op.value;ovNewRow[String(onc)]=JSON.stringify(o1);}`,
+            `          }`,
+            `          try{await Promise.resolve(API.insertRow(L.table,ovNewRow));}catch(e){console.warn('['+BRIDGE_NAME+'] 溢出行插入失败:',e);}`,
+            `          continue;`,
+            `        }`,
+            `      }`,
+            `      var ovCur=parseObject(sheet.content[ovRow]?sheet.content[ovRow][ovcIdx]:undefined);`,
+            `      var ovMerged=JSON.parse(JSON.stringify(ovCur||{}));`,
+            `      ovMerged[op.mergeKey]=op.value;`,
+            `      var ovStr=JSON.stringify(ovMerged);`,
+            `      if(String(sheet.content[ovRow]?sheet.content[ovRow][ovcIdx]:undefined)===String(ovStr))continue;`,
+            `      try{await Promise.resolve(API.updateCell(L.table,ovRow,'_扩展数据',ovStr));}catch(e){console.warn('['+BRIDGE_NAME+'] 溢出列写入失败:',e);}`,
+            `      continue;`,
+            `    }`,
             `    if(op.replace&&E.kind==='array'){`,
             `      // 数组整体替换：先清空旧行，再逐行插入`,
             `      var arr=Array.isArray(op.value)?op.value:[];`,
@@ -3535,6 +3833,7 @@ ${DB_INIT_SNIPPET}
 
     const DB_TEMPLATE_KEY = '__ACU_TEMPLATE_DATA__';
     const autoInitState = { running: false, done: '', inited: false, retries: 0 };
+    let autoInitNoEntryRetries = 0;
 
     function autoInitChatId() {
         try {
@@ -3546,20 +3845,52 @@ ${DB_INIT_SNIPPET}
     // 对应 MVU 的 init 时机：进入聊天/收到首条消息时，若卡内有模板且表格缺失则自动建表。
     // 只处理本转换器产出的卡（世界书含 __ACU_TEMPLATE_DATA__），其余卡一律不动。
     async function autoInitDatabase() {
-        if (autoInitState.running) return;
+        const key0 = autoInitChatId();
+        if (autoInitState.running) {
+            console.log('[mvu2shujuku][debug] 开局自动建表跳过：上一轮仍在运行（chat=' + key0 + '）');
+            return;
+        }
         const api = getAcuApi();
-        if (!api) return;
+        if (!api) {
+            console.log('[mvu2shujuku][debug] 开局自动建表跳过：未找到 SP·数据库 API（chat=' + key0 + '）');
+            return;
+        }
         let character = null;
         try { character = currentCharacter(); } catch (e) {}
-        if (!character) return;
+        if (!character) {
+            console.log('[mvu2shujuku][debug] 开局自动建表跳过：当前角色为空（chat=' + key0 + '）');
+            return;
+        }
+        let hadWorldbook = true;
         const cb = character.character_book;
         if (!(cb && Array.isArray(cb.entries) && cb.entries.length)) {
-            try { character = await fetchFullCharacter(character); } catch (e) {}
+            hadWorldbook = false;
+            console.log('[mvu2shujuku][debug] 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡（chat=' + key0 + '）');
+            try {
+                const full = await fetchFullCharacter(character);
+                if (full && full.character_book && Array.isArray(full.character_book.entries) && full.character_book.entries.length) {
+                    character = full;
+                    hadWorldbook = true;
+                } else {
+                    console.warn('[mvu2shujuku][debug] /api/characters/get 未能取回世界书（chat=' + key0 + '）');
+                }
+            } catch (e) {
+                console.warn('[mvu2shujuku][debug] /api/characters/get 异常：' + (e && e.message ? e.message : e) + '（chat=' + key0 + '）');
+            }
         }
         const fullCb = character && character.character_book;
         const entries = fullCb && Array.isArray(fullCb.entries) ? fullCb.entries : [];
         const entry = entries.find(e => Array.isArray(e.keys) && e.keys.indexOf(DB_TEMPLATE_KEY) !== -1);
-        if (!entry || !entry.content) return;
+        if (!entry || !entry.content) {
+            console.warn('[mvu2shujuku][debug] 未找到 __ACU_TEMPLATE_DATA__ 世界书条目（entries=' + entries.length + '；chat=' + key0 + '）');
+            if (!hadWorldbook && autoInitNoEntryRetries < 8) {
+                // 懒加载角色列表可能晚于首次触发；轮询重试（4s），最多约 40s
+                autoInitNoEntryRetries += 1;
+                hostWindow.setTimeout(autoInitDatabase, 4000);
+            }
+            return;
+        }
+        autoInitNoEntryRetries = 0;
         // 调试：确认当前卡的 tavern_helper 里到底有没有数据桥
         try {
             const th = character && character.extensions && character.extensions.tavern_helper;
@@ -3580,6 +3911,7 @@ ${DB_INIT_SNIPPET}
         }
         installWindowGetAllVariables();
         const key = autoInitChatId();
+        if (key !== key0) console.log('[mvu2shujuku][debug] 开局自动建表 chat 已切换：' + key0 + ' → ' + key);
         if (autoInitState.done === key) return;
         autoInitState.running = true;
         try {
