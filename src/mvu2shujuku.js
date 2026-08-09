@@ -2530,32 +2530,156 @@
             `  }`,
             `}`,
             '',
-            `var mvuShimInstalled=false;`,
-            `function installMvuShim(){`,
-            `  if(mvuShimInstalled)return;`,
-            `  var hostMvu=null;`,
-            `  for(var i=0;i<roots.length;i++){try{if(roots[i].Mvu){hostMvu=roots[i].Mvu;break;}}catch(e){}}`,
-            `  var fake={};`,
-            `  fake.getMvuData=function(opts){`,
-            `    var all=window.getAllVariables();`,
-            `    return {stat_data:all.stat_data||{},display_data:all.display_data||{},delta_data:{},initialized_lorebooks:{}};`,
-            `  };`,
-            `  fake.replaceMvuData=async function(data,opts){`,
-            `    var next=(data&&data.stat_data)||{};`,
-            `    var prev=currentStat();`,
-            `    await writeDiffToDb(prev,next);`,
-            `    broadcastBridgeEvent();`,
-            `    return true;`,
-            `  };`,
-            `  fake.events={VARIABLE_UPDATE_ENDED:'shujuku-table-updated',VARIABLE_UPDATE_STARTED:'shujuku-table-updating'};`,
-            `  for(var i2=0;i2<roots.length;i2++){`,
+            `// 完整的 Mvu 兼容层：按 MVU 官方全局 API（createMvu）实现数据库读写，`,
+            `// 覆盖式接管运行环境里可能残留的真 MVU 对象（避免双轨冲突）。`,
+            `var mvuShimTimer=null;`,
+            `function emitMvuEvent(name,payload){`,
+            `  var targets=[];`,
+            `  function add(t){try{if(t&&typeof t.dispatchEvent==='function'&&targets.indexOf(t)===-1)targets.push(t);}catch(e){}}`,
+            `  add(window);add(rootWindow);`,
+            `  for(var i=0;i<roots.length;i++){`,
             `    try{`,
-            `      if(!roots[i2].Mvu)roots[i2].Mvu=fake;`,
-            `      else if(!roots[i2].Mvu.getMvuData)roots[i2].Mvu.getMvuData=fake.getMvuData;`,
-            `      else if(!roots[i2].Mvu.replaceMvuData)roots[i2].Mvu.replaceMvuData=fake.replaceMvuData;`,
+            `      var frames=roots[i].document?roots[i].document.querySelectorAll('iframe'):[];`,
+            `      for(var f=0;f<frames.length;f++){try{add(frames[f].contentWindow);}catch(e){}}`,
             `    }catch(e){}`,
             `  }`,
-            `  mvuShimInstalled=true;`,
+            `  var EventCtor=null;`,
+            `  try{EventCtor=window.CustomEvent||rootWindow.CustomEvent||CustomEvent;}catch(e){EventCtor=CustomEvent;}`,
+            `  for(var t=0;t<targets.length;t++){`,
+            `    try{targets[t].dispatchEvent(new EventCtor(name,{detail:payload}));}catch(e){}`,
+            `    try{if(targets[t].eventSource&&typeof targets[t].eventSource.emit==='function')targets[t].eventSource.emit(name,payload);}catch(e){}`,
+            `  }`,
+            `  // 缺少 ST 事件总线（如消息 iframe）时提供 eventOn/eventOff 兜底，绑定到同名 CustomEvent`,
+            `  for(var t2=0;t2<targets.length;t2++){`,
+            `    try{`,
+            `      var w=targets[t2];`,
+            `      if(w&&typeof w.eventOn!=='function'&&typeof w.addEventListener==='function'){`,
+            `        w.eventOn=function(evName,handler){`,
+            `          var wrapped=function(e){try{handler(e&&e.detail);}catch(err){}};`,
+            `          w.addEventListener(evName,wrapped);`,
+            `          return {stop:function(){try{w.removeEventListener(evName,wrapped);}catch(e2){}}};`,
+            `        };`,
+            `        w.eventOff=function(evName,handler){try{w.removeEventListener(evName,handler);}catch(e2){}};`,
+            `      }`,
+            `    }catch(e){}`,
+            `  }`,
+            `}`,
+            `var mvuFake=null;`,
+            `function applyMvuShim(){`,
+            `  if(!mvuFake){`,
+            `    mvuFake={};`,
+            `    mvuFake.events={`,
+            `      VARIABLE_INITIALIZED:'mag_variable_initialized',`,
+            `      VARIABLE_UPDATE_STARTED:'mag_variable_update_started',`,
+            `      COMMAND_PARSED:'mag_command_parsed',`,
+            `      VARIABLE_UPDATE_ENDED:'mag_variable_update_ended',`,
+            `      BEFORE_MESSAGE_UPDATE:'mag_before_message_update',`,
+            `      SINGLE_VARIABLE_UPDATED:'mag_variable_updated'`,
+            `    };`,
+            `    mvuFake.getMvuData=function(opts){`,
+            `      var all=window.getAllVariables?window.getAllVariables():{stat_data:{}};`,
+            `      return {stat_data:all.stat_data||{},display_data:all.display_data||{},delta_data:{},initialized_lorebooks:{}};`,
+            `    };`,
+            `    mvuFake.getMvuVariable=function(mvu_data,path,opts){`,
+            `      try{`,
+            `        opts=opts||{};`,
+            `        var cat=opts.category||'stat';`,
+            `        var data=(cat==='display'?(mvu_data&&mvu_data.display_data):(cat==='delta'?(mvu_data&&mvu_data.delta_data):(mvu_data&&mvu_data.stat_data)));`,
+            `        var parts=String(path||'').split('.').filter(function(p){return p!=='';});`,
+            `        var cur=data;`,
+            `        for(var i=0;i<parts.length;i++){if(cur==null)break;cur=cur[parts[i]];}`,
+            `        var v=cur===undefined?opts.default_value:cur;`,
+            `        if(Array.isArray(v)&&v.length===2)return v[0];`,
+            `        return v;`,
+            `      }catch(e){return opts&&opts.default_value!==undefined?opts.default_value:undefined;}`,
+            `    };`,
+            `    mvuFake.getRecordFromMvuData=function(mvu_data,category){`,
+            `      if(!mvu_data)return undefined;`,
+            `      if(category==='display')return mvu_data.display_data;`,
+            `      if(category==='delta')return mvu_data.delta_data;`,
+            `      return mvu_data.stat_data;`,
+            `    };`,
+            `    mvuFake.setMvuVariable=async function(mvu_data,path,new_value,opts){`,
+            `      try{`,
+            `        opts=opts||{};`,
+            `        if(!mvu_data||typeof mvu_data!=='object')return false;`,
+            `        // 与 MVU 语义一致：保证 stat_data 存在（不因缺 $internal 崩溃），写入后由调用方 replaceMvuData 持久化`,
+            `        if(!mvu_data.stat_data||typeof mvu_data.stat_data!=='object')mvu_data.stat_data={};`,
+            `        var parts=String(path||'').split('.').filter(function(p){return p!=='';});`,
+            `        if(!parts.length)return false;`,
+            `        var oldVal;`,
+            `        var has=false;`,
+            `        var cur=mvu_data.stat_data;`,
+            `        for(var i=0;i<parts.length-1;i++){if(cur[parts[i]]==null||typeof cur[parts[i]]!=='object'||Array.isArray(cur[parts[i]]))cur[parts[i]]={};cur=cur[parts[i]];}`,
+            `        if(cur&&typeof cur==='object'&&Object.prototype.hasOwnProperty.call(cur,parts[parts.length-1])){oldVal=cur[parts[parts.length-1]];has=true;}`,
+            `        var reason=opts.reason||'';`,
+            `        var ds=has?(trimDisplay(oldVal)+'->'+trimDisplay(new_value)+(reason?(' ('+reason+')'):'')):('(新增)'+trimDisplay(new_value)+(reason?(' ('+reason+')'):''));`,
+            `        setPath(mvu_data.stat_data,parts,new_value);`,
+            `        if(!mvu_data.display_data||typeof mvu_data.display_data!=='object')mvu_data.display_data={};`,
+            `        try{setPath(mvu_data.display_data,parts,ds);}catch(e){}`,
+            `        if(mvu_data.delta_data&&typeof mvu_data.delta_data==='object'){try{setPath(mvu_data.delta_data,parts,ds);}catch(e){}}`,
+            `        console.log('['+BRIDGE_NAME+'] Mvu.setMvuVariable:',path,'=',trimDisplay(new_value)+(reason?(' ('+reason+')'):''));`,
+            `        return true;`,
+            `      }catch(e){`,
+            `        console.warn('['+BRIDGE_NAME+'] Mvu.setMvuVariable 异常:',e);`,
+            `        return false;`,
+            `      }`,
+            `    };`,
+            `    mvuFake.replaceMvuData=async function(data,opts){`,
+            `      var next=(data&&data.stat_data)||{};`,
+            `      var prev=currentStat();`,
+            `      try{await writeDiffToDb(prev,next);}catch(e){console.warn('['+BRIDGE_NAME+'] Mvu.replaceMvuData 写库异常:',e);}`,
+            `      broadcastBridgeEvent();`,
+            `      return true;`,
+            `    };`,
+            `    mvuFake.parseMessage=async function(message,old_data){`,
+            `      try{`,
+            `        var out=JSON.parse(JSON.stringify(old_data||{}));`,
+            `        if(!out.stat_data||typeof out.stat_data!=='object')out.stat_data={};`,
+            `        if(!out.display_data||typeof out.display_data!=='object')out.display_data={};`,
+            `        var cmds=parseUpdateCommands(String(message||''));`,
+            `        if(!cmds.length)return undefined;`,
+            `        applyCommandsToStat(out.stat_data,cmds,out.display_data);`,
+            `        return out;`,
+            `      }catch(e){console.warn('['+BRIDGE_NAME+'] Mvu.parseMessage 异常:',e);return undefined;}`,
+            `    };`,
+            `    mvuFake.reloadInitVar=async function(){return true;};`,
+            `    mvuFake.getCurrentMvuData=function(){return mvuFake.getMvuData({type:'message',message_id:'latest'});};`,
+            `    mvuFake.replaceCurrentMvuData=async function(mvu_data){return mvuFake.replaceMvuData(mvu_data,{type:'message',message_id:'latest'});};`,
+            `    mvuFake.isDuringExtraAnalysis=function(){return false;};`,
+            `  }`,
+            `  var targets=[];`,
+            `  function addTarget(t){try{if(t&&targets.indexOf(t)===-1)targets.push(t);}catch(e){}}`,
+            `  addTarget(window);addTarget(rootWindow);`,
+            `  for(var i=0;i<roots.length;i++){`,
+            `    addTarget(roots[i]);`,
+            `    try{`,
+            `      var frames2=roots[i].document?roots[i].document.querySelectorAll('iframe'):[];`,
+            `      for(var f2=0;f2<frames2.length;f2++){try{addTarget(frames2[f2].contentWindow);}catch(e){}}`,
+            `    }catch(e){}`,
+            `  }`,
+            `  for(var i2=0;i2<targets.length;i2++){`,
+            `    try{`,
+            `      var w=targets[i2];`,
+            `      var oldM=w.Mvu;`,
+            `      if(oldM&&typeof oldM==='object'&&oldM!==mvuFake){`,
+            `        // 保留旧对象上的自定义属性（非 MVU 官方 API），避免破坏其它代码引用`,
+            `        for(var pk in oldM){`,
+            `          if(!Object.prototype.hasOwnProperty.call(oldM,pk))continue;`,
+            `          if(pk==='getMvuData'||pk==='replaceMvuData'||pk==='setMvuVariable'||pk==='getMvuVariable'||pk==='getRecordFromMvuData'||pk==='parseMessage'||pk==='reloadInitVar'||pk==='getCurrentMvuData'||pk==='replaceCurrentMvuData'||pk==='isDuringExtraAnalysis'||pk==='events')continue;`,
+            `          if(mvuFake[pk]===undefined)mvuFake[pk]=oldM[pk];`,
+            `        }`,
+            `      }`,
+            `      w.Mvu=mvuFake;`,
+            `    }catch(e){}`,
+            `  }`,
+            `}`,
+            `function installMvuShim(){`,
+            `  if(mvuShimTimer)return;`,
+            `  applyMvuShim();`,
+            `  // 真 MVU 可能异步 import 后重新挂载 window.Mvu；周期复查接管（2s），并监听其初始化事件立即接管`,
+            `  if(typeof setInterval==='function')mvuShimTimer=setInterval(function(){try{applyMvuShim();}catch(e){}},2000);`,
+            `  try{if(typeof eventOn==='function'){eventOn('global_Mvu_initialized',function(){try{applyMvuShim();}catch(e){}});}}catch(e){}`,
             `}`,
             (installMvuShim ? `installMvuShim();` : ``),
             '',
@@ -2574,6 +2698,8 @@
             `  for(var t=0;t<targets.length;t++){`,
             `    try{targets[t].dispatchEvent(new EventCtor('shujuku-table-updated'));}catch(e){}`,
             `  }`,
+            `  // 同步广播 MVU 的 VARIABLE_UPDATE_ENDED（mag_variable_update_ended），供前端 eventOn 监听刷新`,
+            `  try{var curStat=currentStat();emitMvuEvent('mag_variable_update_ended',{stat_data:curStat,display_data:curStat});}catch(e){}`,
             `}`,
             `rootWindow.__mvu2shujukuDataBridgeBroadcast=rootWindow.__mvu2shujukuDataBridgeBroadcast||broadcastBridgeEvent;`,
             '',
@@ -2619,6 +2745,8 @@
             `      console.log('['+BRIDGE_NAME+'] '+out.message);`,
             `      initRetries=0;`,
             `      initState.done=true;`,
+            `      // 建表/初始化成功 ≈ MVU 的 VARIABLE_INITIALIZED 时机，广播给前端`,
+            `      try{var curStat2=currentStat();emitMvuEvent('mag_variable_initialized',{stat_data:curStat2,display_data:curStat2});}catch(e){}`,
             `    }`,
             `  }catch(e){`,
             `    console.warn('['+BRIDGE_NAME+'] 开局建表异常:',e);`,
@@ -3470,6 +3598,11 @@ ${DB_INIT_SNIPPET}
                 installWindowGetAllVariables();
                 installWindowMvuShim();
                 installTableUpdateHook();
+                // 建表/初始化成功 ≈ MVU 的 VARIABLE_INITIALIZED 时机，广播给前端
+                try {
+                    const curStat = window.getAllVariables ? (window.getAllVariables().stat_data || {}) : {};
+                    emitMvuEvent('mag_variable_initialized', { stat_data: curStat, display_data: curStat });
+                } catch (e) {}
             }
         } catch (e) {
             console.warn('[mvu2shujuku] 开局自动建表异常：' + (e && e.message ? e.message : e));
@@ -3699,12 +3832,46 @@ ${DB_INIT_SNIPPET}
     // 表格更新广播：插件表格一变，状态栏（监听 shujuku-table-updated）立即刷新
     function dispatchShujukuTableUpdated() {
         try {
-            const ev = new CustomEvent('shujuku-table-updated');
-            window.dispatchEvent(ev);
-            if (window.parent && window.parent !== window) {
-                try { window.parent.dispatchEvent(new window.parent.CustomEvent('shujuku-table-updated')); } catch (e) {}
-            }
+            emitMvuEvent('shujuku-table-updated', null);
+            // MVU 的 VARIABLE_UPDATE_ENDED（mag_variable_update_ended）：前端 eventOn 监听刷新
+            try {
+                const curStat = window.getAllVariables ? (window.getAllVariables().stat_data || {}) : {};
+                emitMvuEvent('mag_variable_update_ended', { stat_data: curStat, display_data: curStat });
+            } catch (e) {}
         } catch (e) {}
+    }
+
+    // 事件广播：同名 CustomEvent + ST eventSource（eventOn 监听者），覆盖 window/parent/top/同源 iframe；
+    // 缺少 ST 事件总线的窗口（如消息 iframe）补一个绑定到同名 CustomEvent 的 eventOn/eventOff 兜底。
+    function emitMvuEvent(name, payload) {
+        const targets = [];
+        const add = (t) => { try { if (t && typeof t.dispatchEvent === 'function' && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
+        add(window);
+        add(hostWindow);
+        try { add(window.parent); } catch (e) {}
+        try { add(window.top); } catch (e) {}
+        for (const r of [window, hostWindow]) {
+            try {
+                const frames = r.document ? r.document.querySelectorAll('iframe') : [];
+                for (const f of frames) { try { add(f.contentWindow); } catch (e) {} }
+            } catch (e) {}
+        }
+        for (const t of targets) {
+            try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: payload })); } catch (e) {}
+            try { if (t.eventSource && typeof t.eventSource.emit === 'function') t.eventSource.emit(name, payload); } catch (e) {}
+        }
+        for (const t of targets) {
+            try {
+                if (t && typeof t.eventOn !== 'function' && typeof t.addEventListener === 'function') {
+                    t.eventOn = (evName, handler) => {
+                        const wrapped = (e) => { try { handler(e && e.detail); } catch (err) {} };
+                        t.addEventListener(evName, wrapped);
+                        return { stop: () => { try { t.removeEventListener(evName, wrapped); } catch (e) {} } };
+                    };
+                    t.eventOff = (evName, handler) => { try { t.removeEventListener(evName, handler); } catch (e) {} };
+                }
+            } catch (e) {}
+        }
     }
 
     function installTableUpdateHook() {
@@ -3716,19 +3883,221 @@ ${DB_INIT_SNIPPET}
         } catch (e) { return false; }
     }
 
-    // Mvu 兼容层（扩展侧）：桥不在主窗口运行时，前端脚本调 Mvu.getMvuData/replaceMvuData 也能读写数据库
-    function installWindowMvuShim() {
+    // =================================================================
+    // 扩展侧 Mvu 兼容层：按 MVU 官方全局 API（createMvu）完整实现，
+    // 覆盖式接管运行环境里残留的真 MVU（避免双轨冲突），桥不在主窗口时也能读写数据库。
+    // =================================================================
+    function parseMvuCmdValue(raw) {
+        const t = String(raw == null ? '' : raw).trim();
+        if (t === 'true') return true;
+        if (t === 'false') return false;
+        if (t === 'null') return null;
+        if (t === 'undefined') return undefined;
+        try { return JSON.parse(t); } catch (e) {}
+        if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
+        return t.replace(/^['"]|['"]$/g, '');
+    }
+    function splitMvuCmdArgs(argsStr) {
+        const out = [];
+        let cur = '', depth = 0, inStr = null;
+        for (let i = 0; i < argsStr.length; i++) {
+            const ch = argsStr[i];
+            if (inStr) { cur += ch; if (ch === '\\') { cur += argsStr[i + 1] || ''; i++; continue; } if (ch === inStr) inStr = null; continue; }
+            if (ch === "'" || ch === '"') { inStr = ch; cur += ch; continue; }
+            if (ch === '(' || ch === '[' || ch === '{') depth++;
+            if (ch === ')' || ch === ']' || ch === '}') depth--;
+            if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+            cur += ch;
+        }
+        if (cur.trim()) out.push(cur.trim());
+        return out;
+    }
+    // 与卡内桥同一套通用命令规则：解析 <UpdateVariable>/<json_patch> 中的 _.set/_.add/_.remove 等指令
+    function parseMvuCommands(text) {
+        const cmds = [];
+        const blockRe = /<(updatevariable|json_?patch)>[\s\S]*?(?:\/\1>)/gi;
+        let m;
+        while ((m = blockRe.exec(String(text || '')))) {
+            const inner = m[0].replace(/<[^>]+>/g, '').replace(/\x60\x60\x60[^\x60]*\x60\x60\x60/g, '').trim();
+            if (m[1].toLowerCase().indexOf('json') === 0) {
+                try {
+                    const patch = JSON.parse(inner);
+                    if (Array.isArray(patch)) {
+                        for (const op of patch) {
+                            if (!op || (!op.path && !op.to)) continue;
+                            cmds.push({ type: op.op === 'delta' ? 'add' : op.op || 'set', path: String(op.path || op.to || '').replace(/^\//, '').replace(/\//g, '.'), value: op.value, from: op.from });
+                        }
+                    }
+                } catch (e) {}
+                continue;
+            }
+            const cmdRe = /\.(set|assign|insert|remove|unset|delete|add)\(/g;
+            let cm;
+            while ((cm = cmdRe.exec(inner))) {
+                const open = inner.indexOf('(', cm.index + cm[0].length - 1);
+                if (open === -1) continue;
+                let depth = 1, end = -1, inS = null;
+                for (let k = open + 1; k < inner.length; k++) {
+                    const c = inner[k];
+                    if (inS) { if (c === '\\') { k++; continue; } if (c === inS) inS = null; continue; }
+                    if (c === "'" || c === '"') { inS = c; continue; }
+                    if (c === '(') depth++;
+                    else if (c === ')') { depth--; if (depth === 0) { end = k; break; } }
+                }
+                if (end === -1) break;
+                const args = splitMvuCmdArgs(inner.slice(open + 1, end));
+                const after = inner.slice(end + 1).replace(/^\s*;\s*/, '');
+                let reason = '';
+                const rm = after.match(/^\/\/\s*([^\n]*)/);
+                if (rm) reason = rm[1].trim();
+                const type = cm[1];
+                const path = String(args[0] || '').replace(/^['"]|['"]$/g, '').replace(/^\//, '').replace(/\//g, '.');
+                if (type === 'remove' || type === 'unset' || type === 'delete') cmds.push({ type: 'delete', path, reason });
+                else if (type === 'insert') cmds.push({ type: 'insert', path, keyOrIndex: args[1] !== undefined ? parseMvuCmdValue(args[1]) : null, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : undefined, reason });
+                else if (type === 'assign') cmds.push({ type: 'assign', path, keyOrIndex: args[2] !== undefined ? parseMvuCmdValue(args[1]) : undefined, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : parseMvuCmdValue(args[1]), reason });
+                else if (type === 'add') cmds.push({ type: 'add', path, value: args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined, reason });
+                else cmds.push({ type: 'set', path, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : (args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined), reason });
+                cmdRe.lastIndex = end + 1;
+            }
+        }
+        return cmds;
+    }
+    function applyMvuCommands(stat, cmds, display) {
+        const setPathArr = (obj, parts, value) => {
+            let cur = obj;
+            for (let i = 0; i < parts.length - 1; i++) {
+                if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) cur[parts[i]] = {};
+                cur = cur[parts[i]];
+            }
+            cur[parts[parts.length - 1]] = value;
+        };
+        const note = (path, oldV, newV, reason) => {
+            if (!display) return;
+            const r = reason ? ' (' + reason + ')' : '';
+            display[path] = String(oldV) + '->' + String(newV) + r;
+        };
+        for (const cmd of cmds) {
+            if (!cmd.path) continue;
+            const parts = String(cmd.path).split('.').filter((p) => p !== '');
+            if (cmd.type === 'delete') {
+                let oldDel = null;
+                let cur = stat, ok = true;
+                for (let d = 0; d < parts.length - 1; d++) { cur = cur ? cur[parts[d]] : null; if (!cur) { ok = false; break; } }
+                if (ok && cur) { oldDel = cur[parts[parts.length - 1]]; try { delete cur[parts[parts.length - 1]]; } catch (e) {} }
+                if (Array.isArray(oldDel) && oldDel.length === 2) oldDel = oldDel[0];
+                note(cmd.path, oldDel, '(移除)', cmd.reason);
+                continue;
+            }
+            if (cmd.type === 'insert') {
+                let container = stat, ok2 = true;
+                for (let d2 = 0; d2 < parts.length - 1; d2++) { container = container ? container[parts[d2]] : null; if (!container) { ok2 = false; break; } }
+                if (!ok2) continue;
+                const key = cmd.keyOrIndex;
+                if (key === '-' || key === null) {
+                    if (Array.isArray(container)) container.push(cmd.value);
+                    else if (container && typeof container === 'object') container[String(Date.now())] = cmd.value;
+                } else if (Array.isArray(container) && /^\d+$/.test(String(key))) container.splice(Number(key), 0, cmd.value);
+                else if (container && typeof container === 'object') container[key] = cmd.value;
+                note(cmd.path, '(新增)', cmd.value, cmd.reason);
+                continue;
+            }
+            if (cmd.type === 'assign' && cmd.keyOrIndex !== undefined) {
+                let acont = stat, aok = true;
+                for (let d5 = 0; d5 < parts.length - 1; d5++) { acont = acont ? acont[parts[d5]] : null; if (!acont) { aok = false; break; } }
+                if (aok && acont && typeof acont === 'object') {
+                    const akey = cmd.keyOrIndex;
+                    if (akey === '-' && Array.isArray(acont)) acont.push(cmd.value);
+                    else if (Array.isArray(acont) && /^\d+$/.test(String(akey))) acont.splice(Number(akey), 0, cmd.value);
+                    else if (acont && typeof acont === 'object') acont[akey] = cmd.value;
+                    note(cmd.path, '(变更)', cmd.value, cmd.reason);
+                }
+                continue;
+            }
+            if (cmd.type === 'assign' && cmd.value && typeof cmd.value === 'object' && !Array.isArray(cmd.value)) {
+                let tgt = stat, ok3 = true;
+                for (let d3 = 0; d3 < parts.length - 1; d3++) { tgt = tgt ? tgt[parts[d3]] : null; if (!tgt) { ok3 = false; break; } }
+                if (ok3 && tgt && typeof tgt === 'object') { Object.keys(cmd.value).forEach((kk) => { tgt[kk] = cmd.value[kk]; }); note(cmd.path, '(变更)', cmd.value, cmd.reason); }
+                continue;
+            }
+            if (cmd.type === 'add' && Array.isArray(cmd.value)) {
+                let tgt2 = stat, ok4 = true;
+                for (let d4 = 0; d4 < parts.length - 1; d4++) { tgt2 = tgt2 ? tgt2[parts[d4]] : null; if (!tgt2) { ok4 = false; break; } }
+                if (ok4 && tgt2 && typeof tgt2 === 'object') {
+                    const curV = tgt2[parts[parts.length - 1]];
+                    const arr = Array.isArray(curV) ? curV.slice() : [];
+                    cmd.value.forEach((vv) => arr.push(vv));
+                    setPathArr(tgt2, parts, arr);
+                    note(cmd.path, curV, arr, cmd.reason);
+                }
+                continue;
+            }
+            const oldV = (() => { let c = stat; for (const p of parts) { c = c ? c[p] : undefined; } return c; })();
+            setPathArr(stat, parts, cmd.value);
+            note(cmd.path, oldV, cmd.value, cmd.reason);
+        }
+    }
+
+    let windowMvuShimTimer = null;
+    let windowMvuFake = null;
+    function applyWindowMvuShim() {
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.writeStatDiffToDb !== 'function') return;
-        window.Mvu = window.Mvu || {};
-        if (typeof window.Mvu.getMvuData !== 'function') {
-            window.Mvu.getMvuData = function () {
+        if (!windowMvuFake) {
+            windowMvuFake = {};
+            windowMvuFake.events = {
+                VARIABLE_INITIALIZED: 'mag_variable_initialized',
+                VARIABLE_UPDATE_STARTED: 'mag_variable_update_started',
+                COMMAND_PARSED: 'mag_command_parsed',
+                VARIABLE_UPDATE_ENDED: 'mag_variable_update_ended',
+                BEFORE_MESSAGE_UPDATE: 'mag_before_message_update',
+                SINGLE_VARIABLE_UPDATED: 'mag_variable_updated',
+            };
+            windowMvuFake.getMvuData = function () {
                 const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                 return { stat_data: all.stat_data || {}, display_data: all.display_data || {}, delta_data: {}, initialized_lorebooks: {} };
             };
-        }
-        if (typeof window.Mvu.replaceMvuData !== 'function') {
-            window.Mvu.replaceMvuData = async function (data) {
+            windowMvuFake.getMvuVariable = function (mvu_data, path, opts) {
+                try {
+                    opts = opts || {};
+                    const cat = opts.category || 'stat';
+                    const data = cat === 'display' ? (mvu_data && mvu_data.display_data) : cat === 'delta' ? (mvu_data && mvu_data.delta_data) : (mvu_data && mvu_data.stat_data);
+                    const parts = String(path || '').split('.').filter((p) => p !== '');
+                    let cur = data;
+                    for (const p of parts) { if (cur == null) break; cur = cur[p]; }
+                    const v = cur === undefined ? opts.default_value : cur;
+                    return (Array.isArray(v) && v.length === 2) ? v[0] : v;
+                } catch (e) { return opts && opts.default_value !== undefined ? opts.default_value : undefined; }
+            };
+            windowMvuFake.getRecordFromMvuData = function (mvu_data, category) {
+                if (!mvu_data) return undefined;
+                if (category === 'display') return mvu_data.display_data;
+                if (category === 'delta') return mvu_data.delta_data;
+                return mvu_data.stat_data;
+            };
+            windowMvuFake.setMvuVariable = async function (mvu_data, path, new_value, opts) {
+                try {
+                    opts = opts || {};
+                    if (!mvu_data || typeof mvu_data !== 'object') return false;
+                    if (!mvu_data.stat_data || typeof mvu_data.stat_data !== 'object') mvu_data.stat_data = {};
+                    const parts = String(path || '').split('.').filter((p) => p !== '');
+                    if (!parts.length) return false;
+                    let oldVal, has = false, cur = mvu_data.stat_data;
+                    for (let i = 0; i < parts.length - 1; i++) { if (cur[parts[i]] == null || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) cur[parts[i]] = {}; cur = cur[parts[i]]; }
+                    if (cur && typeof cur === 'object' && Object.prototype.hasOwnProperty.call(cur, parts[parts.length - 1])) { oldVal = cur[parts[parts.length - 1]]; has = true; }
+                    const reason = opts.reason || '';
+                    const ds = has ? (String(oldVal) + '->' + String(new_value) + (reason ? ' (' + reason + ')' : '')) : ('(新增)' + String(new_value) + (reason ? ' (' + reason + ')' : ''));
+                    cur[parts[parts.length - 1]] = new_value;
+                    if (!mvu_data.display_data || typeof mvu_data.display_data !== 'object') mvu_data.display_data = {};
+                    try { (() => { let dc = mvu_data.display_data; for (let i = 0; i < parts.length - 1; i++) { if (!dc[parts[i]] || typeof dc[parts[i]] !== 'object') dc[parts[i]] = {}; dc = dc[parts[i]]; } dc[parts[parts.length - 1]] = ds; })(); } catch (e) {}
+                    if (mvu_data.delta_data && typeof mvu_data.delta_data === 'object') { try { (() => { let dc2 = mvu_data.delta_data; for (let i = 0; i < parts.length - 1; i++) { if (!dc2[parts[i]] || typeof dc2[parts[i]] !== 'object') dc2[parts[i]] = {}; dc2 = dc2[parts[i]]; } dc2[parts[parts.length - 1]] = ds; })(); } catch (e) {} }
+                    console.log('[mvu2shujuku][debug] Mvu.setMvuVariable:', path, '=', String(new_value) + (reason ? ' (' + reason + ')' : ''));
+                    return true;
+                } catch (e) {
+                    console.warn('[mvu2shujuku][debug] Mvu.setMvuVariable 异常:', e);
+                    return false;
+                }
+            };
+            windowMvuFake.replaceMvuData = async function (data) {
                 try {
                     const api = getAcuApi();
                     if (!api || !activeLayout) return false;
@@ -3768,8 +4137,60 @@ ${DB_INIT_SNIPPET}
                     return false;
                 }
             };
+            windowMvuFake.parseMessage = async function (message, old_data) {
+                try {
+                    const out = JSON.parse(JSON.stringify(old_data || {}));
+                    if (!out.stat_data || typeof out.stat_data !== 'object') out.stat_data = {};
+                    if (!out.display_data || typeof out.display_data !== 'object') out.display_data = {};
+                    const cmds = parseMvuCommands(String(message || ''));
+                    if (!cmds.length) return undefined;
+                    applyMvuCommands(out.stat_data, cmds, out.display_data);
+                    return out;
+                } catch (e) {
+                    console.warn('[mvu2shujuku][debug] Mvu.parseMessage 异常:', e);
+                    return undefined;
+                }
+            };
+            windowMvuFake.reloadInitVar = async function () { return true; };
+            windowMvuFake.getCurrentMvuData = function () { return windowMvuFake.getMvuData({ type: 'message', message_id: 'latest' }); };
+            windowMvuFake.replaceCurrentMvuData = async function (mvu_data) { return windowMvuFake.replaceMvuData(mvu_data, { type: 'message', message_id: 'latest' }); };
+            windowMvuFake.isDuringExtraAnalysis = function () { return false; };
         }
-        console.log('[mvu2shujuku][debug] 扩展侧已安装 Mvu shim（getMvuData/replaceMvuData）');
+        const targets = [];
+        const addTarget = (t) => { try { if (t && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
+        addTarget(window);
+        addTarget(hostWindow);
+        try { addTarget(window.parent); } catch (e) {}
+        try { addTarget(window.top); } catch (e) {}
+        for (const r of [window, hostWindow]) {
+            try {
+                const frames = r.document ? r.document.querySelectorAll('iframe') : [];
+                for (const f of frames) { try { addTarget(f.contentWindow); } catch (e) {} }
+            } catch (e) {}
+        }
+        for (const w of targets) {
+            try {
+                const oldM = w.Mvu;
+                if (oldM && typeof oldM === 'object' && oldM !== windowMvuFake) {
+                    const SKIP = { getMvuData: 1, replaceMvuData: 1, setMvuVariable: 1, getMvuVariable: 1, getRecordFromMvuData: 1, parseMessage: 1, reloadInitVar: 1, getCurrentMvuData: 1, replaceCurrentMvuData: 1, isDuringExtraAnalysis: 1, events: 1 };
+                    for (const pk in oldM) {
+                        if (!Object.prototype.hasOwnProperty.call(oldM, pk)) continue;
+                        if (SKIP[pk]) continue;
+                        if (windowMvuFake[pk] === undefined) windowMvuFake[pk] = oldM[pk];
+                    }
+                }
+                w.Mvu = windowMvuFake;
+            } catch (e) {}
+        }
+    }
+    function installWindowMvuShim() {
+        applyWindowMvuShim();
+        if (!windowMvuShimTimer) {
+            // 真 MVU 可能异步 import 后重新挂载 window.Mvu；周期复查接管（2s），并监听其初始化事件立即接管
+            windowMvuShimTimer = hostWindow.setInterval(() => { try { applyWindowMvuShim(); } catch (e) {} }, 2000);
+            try { if (typeof hostWindow.eventOn === 'function') hostWindow.eventOn('global_Mvu_initialized', () => { try { applyWindowMvuShim(); } catch (e) {} }); } catch (e) {}
+        }
+        console.log('[mvu2shujuku][debug] 扩展侧已安装完整 Mvu shim（接管式）');
     }
 
     async function doConvert(inputBytes, sourceIsPng) {
