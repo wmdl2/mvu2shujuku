@@ -1637,9 +1637,11 @@
 
     function buildNote(group) {
         const L = [];
-        L.push(`${group.tableName}。${describeGroup(group)}`);
-        if (group.kind === 'singleton' && group.rows.length) {
+        if (group.kind === 'singleton') {
+            // 单例表不重复描述（“全表固定一条记录”等），直接给出开局记录说明
             L.push(`本表唯一记录已由开局模板插入（row_id=1，${group.keyCol}='${group.keyValue}'）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`);
+        } else {
+            L.push(`${group.tableName}。${describeGroup(group)}`);
         }
         if (group.columns.length) {
             L.push('【列定义】');
@@ -3199,6 +3201,8 @@
             '  color: var(--SmartThemeBodyColor, #ddd);',
             '}',
             '#mvu2shujuku-settings .mvu2shujuku-downloads button { margin: 4px 6px 4px 0; }',
+            '#mvu2shujuku-settings #mvu2shujuku-actions { flex-wrap: wrap; }',
+            '#mvu2shujuku-settings #mvu2shujuku-downloads { flex: 1 1 100%; flex-wrap: wrap; }',
             '#mvu2shujuku-settings .mvu2shujuku-hint { font-size: 12px; opacity: 0.75; }',
         ].join('\n');
     }

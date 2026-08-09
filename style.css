@@ -45,4 +45,6 @@
   color: var(--SmartThemeBodyColor, #ddd);
 }
 #mvu2shujuku-settings .mvu2shujuku-downloads button { margin: 4px 6px 4px 0; }
+#mvu2shujuku-settings #mvu2shujuku-actions { flex-wrap: wrap; }
+#mvu2shujuku-settings #mvu2shujuku-downloads { flex: 1 1 100%; flex-wrap: wrap; }
 #mvu2shujuku-settings .mvu2shujuku-hint { font-size: 12px; opacity: 0.75; }
