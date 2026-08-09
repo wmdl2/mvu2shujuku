@@ -10,7 +10,7 @@ const path = require('path');
 const os = require('os');
 const assert = require('assert');
 
-const core = require('../src/mvu2db.js');
+const core = require('../src/mvu2shujuku.js');
 
 const FIXTURE = path.join(__dirname, 'fixtures', '道渊-MVU.json');
 const PNG = path.join(__dirname, '..', '..', '参考资料', '参考角色卡', 'v5.2_1-MVU版.png');
@@ -181,6 +181,26 @@ test('模板结构满足插件最小要求', () => {
         // row_id 连续正整数
         s.content.slice(1).forEach((row, i) => assert.strictEqual(row[0], i + 1, `sheet ${k} row_id 应连续`));
     }
+});
+
+test('mergeTemplates：并入选中表、跳过重名、uid 冲突加后缀、orderNo 重排', () => {
+    const base = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_a: { uid: 'sheet_a', name: '转换表', content: [['row_id', '值']], sourceData: {}, orderNo: 0 },
+    };
+    const source = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_b: { uid: 'sheet_b', name: '玩家表', content: [['row_id', '值']], sourceData: {}, orderNo: 0 },
+        sheet_c: { uid: 'sheet_c', name: '转换表', content: [['row_id', '值']], sourceData: {}, orderNo: 1 },
+        sheet_a: { uid: 'sheet_a', name: '全局数据表', content: [['row_id', '值']], sourceData: {}, orderNo: 2 },
+    };
+    const out = core.mergeTemplates(base, source, ['sheet_b', 'sheet_c', 'sheet_a']);
+    assert.ok(out.template.sheet_b, '应并入 sheet_b');
+    assert.ok(!out.template.sheet_c, '重名表应跳过');
+    assert.ok(out.template.sheet_a_2, 'uid 冲突应加后缀');
+    assert.deepStrictEqual(out.skipped, ['转换表'], '应报告跳过的重名表');
+    const order = Object.keys(out.template).filter(k => k.startsWith('sheet_')).map(k => out.template[k].orderNo);
+    assert.deepStrictEqual(order, [0, 1, 2], 'orderNo 应连续重排');
 });
 
 test('条目字段全是叶子的字典应判为行表（修复误判为单例）', () => {
@@ -383,7 +403,7 @@ test('<%_ if %>（EJS 吞空白写法）也能重写为 <if cell>，且仅 EJS �
     const r = core.convert(card, { mode: 'both' });
     const entries = (r.card.data || r.card).character_book.entries;
     const plot = entries.find(e => e.comment.includes('人设'));
-    assert.ok(plot.content.includes('getAllVariables().stat_data.角色.苏苏.发情值 < 20'), '吞空白 EJS 应改数据源为 getAllVariables');
+    assert.ok(plot.content.includes('mvu2shujukuGetAllVariables().stat_data.角色.苏苏.发情值 < 20'), '吞空白 EJS 应改数据源为 mvu2shujukuGetAllVariables');
     assert.ok(plot.content.includes('<%_'), 'EJS 吞空白写法应保留');
     assert.ok(!plot.content.includes('<if cell='), '不应转换为 <if cell>（EJS 整体保留）');
     const t = Object.values(r.template).find(s => s && s.name === '角色表');
@@ -392,13 +412,13 @@ test('<%_ if %>（EJS 吞空白写法）也能重写为 <if cell>，且仅 EJS �
 
 /* ---------------- EJS 重写 ---------------- */
 console.log('rewriteEjsConditions');
-test('getvar 数值比较 → getAllVariables()（EJS 保留）', () => {
+test('getvar 数值比较 → mvu2shujukuGetAllVariables()（EJS 保留）', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const layout = core.buildLayout(r.schema);
     const text = '<% if (getvar(\'stat_data.主角.生命\') >= 50) { %>生命充沛<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(out.text.includes('getAllVariables().stat_data.主角.生命 >= 50'), out.text);
+    assert.ok(out.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.生命 >= 50'), out.text);
     assert.ok(out.text.includes('<% if'), 'EJS 结构应保留');
 });
 
@@ -408,7 +428,7 @@ test('嵌套路径（子表条目）→ getAllVariables()', () => {
     const layout = core.buildLayout(r.schema);
     const text = '<% if (getvar(\'stat_data.主角.储物袋.铁剑.数量\') > 0) { %>有铁剑<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(out.text.includes('getAllVariables().stat_data.主角.储物袋.铁剑.数量 > 0'), out.text);
+    assert.ok(out.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.储物袋.铁剑.数量 > 0'), out.text);
 });
 
 test('聚合计数（Object.keys）→ getAllVariables()', () => {
@@ -417,7 +437,7 @@ test('聚合计数（Object.keys）→ getAllVariables()', () => {
     const layout = core.buildLayout(r.schema);
     const text = '<% if (Object.keys(getvar(\'stat_data.道侣\')).length > 3) { %>道侣众多<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(out.text.includes('Object.keys(getAllVariables().stat_data.道侣).length > 3'), out.text);
+    assert.ok(out.text.includes('Object.keys(mvu2shujukuGetAllVariables().stat_data.道侣).length > 3'), out.text);
 });
 
 test('else 分支 EJS 保留', () => {
@@ -427,7 +447,7 @@ test('else 分支 EJS 保留', () => {
     const text = '<% if (getvar(\'stat_data.主角.修为\') < 100) { %>修炼中<% } else { %>可突破<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
     assert.ok(out.text.includes('<% } else { %>可突破<% } %>'), 'else 分支应保留为 EJS');
-    assert.ok(out.text.includes('getAllVariables().stat_data.主角.修为 < 100'), out.text);
+    assert.ok(out.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.修为 < 100'), out.text);
 });
 
 test('else-if 链 EJS 整体保留，仅改数据源', () => {
@@ -436,12 +456,12 @@ test('else-if 链 EJS 整体保留，仅改数据源', () => {
     const layout = core.buildLayout(r.schema);
     const text = '<% if (getvar(\'stat_data.主角.修为\') >= 100) { %>大乘<% } else if (getvar(\'stat_data.主角.修为\') >= 50) { %>中阶<% } else { %>初阶<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(out.text.includes('getAllVariables().stat_data.主角.修为 >= 100'), out.text);
-    assert.ok(out.text.includes('else if (getAllVariables().stat_data.主角.修为 >= 50)'), 'else-if 应保留为 EJS');
+    assert.ok(out.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.修为 >= 100'), out.text);
+    assert.ok(out.text.includes('else if (mvu2shujukuGetAllVariables().stat_data.主角.修为 >= 50)'), 'else-if 应保留为 EJS');
     assert.ok(out.text.includes('<% } else { %>初阶<% } %>'), 'else 分支应保留');
     const text2 = '<% if (getvar(\'stat_data.主角.生命\') > 0) { %>存活<% } else if (getvar(\'stat_data.主角.生命\') === 0) { %>濒死<% } %>';
     const out2 = core.rewriteEjsConditions(text2, layout, core.createReport());
-    assert.ok(out2.text.includes('getAllVariables().stat_data.主角.生命 === 0'), out2.text);
+    assert.ok(out2.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.生命 === 0'), out2.text);
 });
 
 test('官方教程规范写法：getvar("stat_data").组["字段"][0] 与 _.has', () => {
@@ -450,10 +470,10 @@ test('官方教程规范写法：getvar("stat_data").组["字段"][0] 与 _.has'
     const layout = core.buildLayout(r.schema);
     const text1 = '<% if (getvar("stat_data").主角["生命"][0] >= 50) { %>充沛<% } %>';
     const out1 = core.rewriteEjsConditions(text1, layout, core.createReport());
-    assert.ok(out1.text.includes('getAllVariables().stat_data.主角["生命"][0] >= 50'), out1.text);
+    assert.ok(out1.text.includes('mvu2shujukuGetAllVariables().stat_data.主角["生命"][0] >= 50'), out1.text);
     const text2 = '<% if (_.has(getvar("stat_data"), \'道侣.林若悠.亲密.[0]\')) { %>有数据<% } %>';
     const out2 = core.rewriteEjsConditions(text2, layout, core.createReport());
-    assert.ok(out2.text.includes('_.has(getAllVariables().stat_data, \'道侣.林若悠.亲密.[0]\')'), out2.text);
+    assert.ok(out2.text.includes('_.has(mvu2shujukuGetAllVariables().stat_data, \'道侣.林若悠.亲密.[0]\')'), out2.text);
 });
 
 /* ---------------- 数据桥脚本 ---------------- */
@@ -470,8 +490,9 @@ test('脚本语法与 SD_LAYOUT 结构', () => {
     assert.ok(layout.some(e => e.kind === 'array' && e.group === '$器灵台词'));
     assert.ok(r.bridgeScript.includes('importTemplateFromData'), '应使用 importTemplateFromData 自动建表');
     assert.ok(r.bridgeScript.includes('initGameSession'), '应使用 initGameSession 做开局初始化（对应 MVU init 时机）');
-    assert.ok(r.bridgeScript.includes('mvu2dbMissingTableNames'), '应按模板表名判断缺表，而非仅看是否有任意表');
+    assert.ok(r.bridgeScript.includes('mvu2shujukuMissingTableNames'), '应按模板表名判断缺表，而非仅看是否有任意表');
     assert.ok(r.bridgeScript.includes('shujuku-table-updated'), '应有表格更新事件');
+    assert.ok(r.bridgeScript.includes('ejs.defines.mvu2shujukuGetAllVariables'), '桥应把 mvu2shujukuGetAllVariables 注册进 st-prompt-template 模板上下文（惰性读取，无冗余存储）');
 });
 
 test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
@@ -609,7 +630,7 @@ test('转换产物齐全', () => {
     assert.ok((c.extensions.tavern_helper.scripts || []).some(s => /数据桥/.test(s.name)), '应有数据桥脚本');
     assert.ok((c.extensions.regex_scripts || []).every(rx => !/变量更新/.test(rx.scriptName)), '应移除 MVU 专属正则');
     assert.ok((c.extensions.regex_scripts || []).some(rx => rx.scriptName === 'XML状态栏'), '非 MVU 显示正则应保留');
-    assert.ok(c.extensions.mvu2db, '应有转换标记');
+    assert.ok(c.extensions.mvu2shujuku, '应有转换标记');
     assert.ok(!c.character_book.entries.some(e => /\[initvar\]|\[mvu_update\]|变量列表/i.test(String(e.comment || ''))), 'MVU 世界书条目应被删除');
     assert.ok(String(c.name).endsWith('_数据库'), '卡名应带 _数据库 后缀');
     if (c.character_book && c.character_book.name) {
@@ -721,7 +742,7 @@ test('浏览器环境（无 Buffer）PNG 回写正常', () => {
         return;
     }
     const vm = require('vm');
-    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2db.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
     const sandbox = {
         console, TextDecoder, TextEncoder, Uint8Array, Uint16Array, Uint32Array, DataView, ArrayBuffer,
         atob: (s) => Buffer.from(s, 'base64').toString('binary'),
@@ -731,7 +752,7 @@ test('浏览器环境（无 Buffer）PNG 回写正常', () => {
     sandbox.window = sandbox;
     vm.createContext(sandbox);
     vm.runInContext(src, sandbox);
-    const core = sandbox.MVU2DB_CORE;
+    const core = sandbox.MVU2SHUJUKU_CORE;
     const buf = fs.readFileSync(PNG);
     const parsed = core.parseCardPng(buf);
     const out = core.writeCardPng(buf, parsed.card);
@@ -742,7 +763,7 @@ test('浏览器环境（无 Buffer）PNG 回写正常', () => {
 /* ---------------- 扩展装配 ---------------- */
 console.log('assembleExtension');
 test('扩展文件齐全且 index.js 语法正确', () => {
-    const coreSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2db.js'), 'utf8');
+    const coreSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
     const files = core.assembleExtension({ coreSource });
     assert.ok(files['manifest.json']);
     assert.ok(files['index.js']);
@@ -815,7 +836,7 @@ test('合成卡：与参考卡无关的组名也能转换（含 [value,desc] 叶
     assert.ok(adv.sourceData.note.includes('主角名字'), '[值, 更新条件] 叶子的描述应写入 note');
     // EJS 规范写法应改数据源为数据桥 getAllVariables（EJS 结构保留）
     const cond = r.card.data.character_book.entries.find(e => e.comment === '显示条件');
-    assert.ok(cond.content.includes('getAllVariables().stat_data.冒险者["等级"][0] >= 10'), cond.content);
+    assert.ok(cond.content.includes('mvu2shujukuGetAllVariables().stat_data.冒险者["等级"][0] >= 10'), cond.content);
     assert.ok(cond.content.includes('<% if'), cond.content);
     // 非 MVU 内容保持不动
     const statusRegex = r.card.data.extensions.regex_scripts.find(x => x.scriptName === '状态栏');
@@ -885,7 +906,7 @@ print('OK')
 `;
     let tmpDir = null;
     for (const base of [os.tmpdir(), '/tmp', __dirname]) {
-        try { tmpDir = fs.mkdtempSync(path.join(base, 'mvu2db-')); break; } catch (e) {}
+        try { tmpDir = fs.mkdtempSync(path.join(base, 'mvu2shujuku-')); break; } catch (e) {}
     }
     assert.ok(tmpDir, '无法创建临时目录');
     const tmpFile = path.join(tmpDir, 'template.json');
