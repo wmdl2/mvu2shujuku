@@ -3106,6 +3106,28 @@
         return currentCharacter();
     }
 
+    // 酒馆开启 lazyLoadCharacters 时，角色列表对象只有元数据（无世界书）。
+    // 通过 /api/characters/get 按头像取完整卡数据。
+    async function fetchFullCharacter(character) {
+        if (!character) return null;
+        const cb = character.character_book;
+        if (cb && Array.isArray(cb.entries) && cb.entries.length) return character;
+        try {
+            const context = getContextSafe();
+            const headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
+            const res = await fetch('/api/characters/get', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ avatar_url: character.avatar }),
+            });
+            if (res.ok) {
+                const full = await res.json();
+                if (full && full.character_book && Array.isArray(full.character_book.entries)) return full;
+            }
+        } catch (e) {}
+        return character;
+    }
+
     function readFileAsBytes(file) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
@@ -3325,7 +3347,8 @@
             if (!ch) { toast('请先在角色卡下拉栏中选择角色', 'error'); return; }
             toast('正在转换…');
             try {
-                await doConvert(ch, false);
+                const full = await fetchFullCharacter(ch);
+                await doConvert(full, false);
             } catch (e) {
                 toast('转换失败：' + (e && e.message ? e.message : e), 'error');
             }
@@ -3650,6 +3673,28 @@ root.__MVU2DB_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢囹坽�
         return currentCharacter();
     }
 
+    // 酒馆开启 lazyLoadCharacters 时，角色列表对象只有元数据（无世界书）。
+    // 通过 /api/characters/get 按头像取完整卡数据。
+    async function fetchFullCharacter(character) {
+        if (!character) return null;
+        const cb = character.character_book;
+        if (cb && Array.isArray(cb.entries) && cb.entries.length) return character;
+        try {
+            const context = getContextSafe();
+            const headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
+            const res = await fetch('/api/characters/get', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ avatar_url: character.avatar }),
+            });
+            if (res.ok) {
+                const full = await res.json();
+                if (full && full.character_book && Array.isArray(full.character_book.entries)) return full;
+            }
+        } catch (e) {}
+        return character;
+    }
+
     function readFileAsBytes(file) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
@@ -3869,7 +3914,8 @@ root.__MVU2DB_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢囹坽�
             if (!ch) { toast('请先在角色卡下拉栏中选择角色', 'error'); return; }
             toast('正在转换…');
             try {
-                await doConvert(ch, false);
+                const full = await fetchFullCharacter(ch);
+                await doConvert(full, false);
             } catch (e) {
                 toast('转换失败：' + (e && e.message ? e.message : e), 'error');
             }
