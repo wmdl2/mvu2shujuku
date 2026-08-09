@@ -2967,7 +2967,17 @@
             report,
             reportText: report.toMarkdown(),
             files,
-            meta: { mode, isPngInput, asPng, tableCount: schema.length, tableNames: schema.map(g => g.tableName) },
+            // 以最终模板为准统计（合并模板后 schema 仍来自卡内 initvar，不能用于展示）
+            meta: {
+                mode,
+                isPngInput,
+                asPng,
+                tableCount: Object.keys(template).filter(k => k.startsWith('sheet_')).length,
+                tableNames: Object.keys(template)
+                    .filter(k => k.startsWith('sheet_'))
+                    .map(k => template[k] && template[k].name)
+                    .filter(Boolean),
+            },
         };
     }
 
@@ -3128,6 +3138,8 @@ ${DB_INIT_SNIPPET}
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
                     hostWindow.setTimeout(autoInitDatabase, 600);
+                    const p = hostDocument.getElementById(PANEL_ID);
+                    if (p) populateMergeSource(p);
                 });
                 es.on(et.MESSAGE_RECEIVED, () => hostWindow.setTimeout(autoInitDatabase, 600));
                 autoInitState.inited = true;
@@ -3333,6 +3345,7 @@ ${DB_INIT_SNIPPET}
     }
 
     // 合并数据库插件现有模板：选择来源 → 列出表 → 勾选 → 并入转换结果
+    let mergeSourceTimer = null;
     async function populateMergeSource(panel) {
         const sel = panel.querySelector('#mvu2shujuku-merge-source');
         if (!sel) return;
@@ -3347,12 +3360,21 @@ ${DB_INIT_SNIPPET}
         opt('', '（选择模板来源）');
         opt('chat', '当前聊天模板');
         opt('global', '全局模板（当前选中）');
+        opt('default', '默认模板（插件内置）');
         const api = getAcuApi();
         if (api && typeof api.getTemplatePresetNames === 'function') {
             try {
                 const names = api.getTemplatePresetNames() || [];
                 for (const n of names) opt('preset:' + n, '预设：' + n);
+                mergeSourceTimer = null;
             } catch (e) {}
+        } else if (!mergeSourceTimer) {
+            // 插件未就绪：稍后重试，让已保存的预设出现在列表里
+            mergeSourceTimer = hostWindow.setTimeout(() => {
+                mergeSourceTimer = null;
+                const p = hostDocument.getElementById(PANEL_ID);
+                if (p) populateMergeSource(p);
+            }, 2000);
         }
         if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
     }
@@ -3362,6 +3384,8 @@ ${DB_INIT_SNIPPET}
         const box = panel.querySelector('#mvu2shujuku-merge-tables');
         const status = panel.querySelector('#mvu2shujuku-merge-status');
         if (!sel || !box) return;
+        // 每次点击都重新拉取来源列表（预设可能刚导入）
+        await populateMergeSource(panel);
         const v = sel.value;
         if (!v) { toast('请先选择模板来源', 'error'); return; }
         const api = getAcuApi();
@@ -3373,9 +3397,21 @@ ${DB_INIT_SNIPPET}
         let presetName = '';
         if (v === 'chat') scope = 'chat';
         else if (v === 'global') scope = 'global';
+        else if (v === 'default') scope = 'default';
         else if (v.indexOf('preset:') === 0) { scope = 'global'; presetName = v.slice(7); }
         let tpl = null;
-        try { tpl = api.getTableTemplate({ scope, presetName }) || null; } catch (e) { tpl = null; }
+        if (scope === 'default') {
+            // 内置默认模板由插件服务器提供（插件自身也从该路径加载默认模板）
+            try {
+                const res = await fetch('/TavernDB_template_默认模板.json');
+                if (res.ok) tpl = await res.json();
+            } catch (e) { tpl = null; }
+            if (!tpl || typeof tpl !== 'object') {
+                try { tpl = api.getTableTemplate({ scope: 'global' }) || null; } catch (e2) { tpl = null; }
+            }
+        } else {
+            try { tpl = api.getTableTemplate({ scope, presetName }) || null; } catch (e) { tpl = null; }
+        }
         if (!tpl || typeof tpl !== 'object') {
             toast('未读取到模板（该来源为空或插件未就绪）', 'error');
             return;
@@ -3450,6 +3486,8 @@ ${DB_INIT_SNIPPET}
             const msg = '合并完成：新增 ' + merged.added.length + ' 张表' + (merged.skipped.length ? '，跳过重名：' + merged.skipped.join('、') : '');
             if (status) status.textContent = msg;
             toast(msg, 'info');
+            // 刷新勾选列表：已并入的表标记为“已存在”
+            try { await loadMergeTables(panel); } catch (e) {}
         } catch (e) {
             toast('合并失败：' + (e && e.message ? e.message : e), 'error');
         }
@@ -4046,6 +4084,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
                     hostWindow.setTimeout(autoInitDatabase, 600);
+                    const p = hostDocument.getElementById(PANEL_ID);
+                    if (p) populateMergeSource(p);
                 });
                 es.on(et.MESSAGE_RECEIVED, () => hostWindow.setTimeout(autoInitDatabase, 600));
                 autoInitState.inited = true;
@@ -4251,6 +4291,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
     }
 
     // 合并数据库插件现有模板：选择来源 → 列出表 → 勾选 → 并入转换结果
+    let mergeSourceTimer = null;
     async function populateMergeSource(panel) {
         const sel = panel.querySelector('#mvu2shujuku-merge-source');
         if (!sel) return;
@@ -4265,12 +4306,21 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         opt('', '（选择模板来源）');
         opt('chat', '当前聊天模板');
         opt('global', '全局模板（当前选中）');
+        opt('default', '默认模板（插件内置）');
         const api = getAcuApi();
         if (api && typeof api.getTemplatePresetNames === 'function') {
             try {
                 const names = api.getTemplatePresetNames() || [];
                 for (const n of names) opt('preset:' + n, '预设：' + n);
+                mergeSourceTimer = null;
             } catch (e) {}
+        } else if (!mergeSourceTimer) {
+            // 插件未就绪：稍后重试，让已保存的预设出现在列表里
+            mergeSourceTimer = hostWindow.setTimeout(() => {
+                mergeSourceTimer = null;
+                const p = hostDocument.getElementById(PANEL_ID);
+                if (p) populateMergeSource(p);
+            }, 2000);
         }
         if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
     }
@@ -4280,6 +4330,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         const box = panel.querySelector('#mvu2shujuku-merge-tables');
         const status = panel.querySelector('#mvu2shujuku-merge-status');
         if (!sel || !box) return;
+        // 每次点击都重新拉取来源列表（预设可能刚导入）
+        await populateMergeSource(panel);
         const v = sel.value;
         if (!v) { toast('请先选择模板来源', 'error'); return; }
         const api = getAcuApi();
@@ -4291,9 +4343,21 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         let presetName = '';
         if (v === 'chat') scope = 'chat';
         else if (v === 'global') scope = 'global';
+        else if (v === 'default') scope = 'default';
         else if (v.indexOf('preset:') === 0) { scope = 'global'; presetName = v.slice(7); }
         let tpl = null;
-        try { tpl = api.getTableTemplate({ scope, presetName }) || null; } catch (e) { tpl = null; }
+        if (scope === 'default') {
+            // 内置默认模板由插件服务器提供（插件自身也从该路径加载默认模板）
+            try {
+                const res = await fetch('/TavernDB_template_默认模板.json');
+                if (res.ok) tpl = await res.json();
+            } catch (e) { tpl = null; }
+            if (!tpl || typeof tpl !== 'object') {
+                try { tpl = api.getTableTemplate({ scope: 'global' }) || null; } catch (e2) { tpl = null; }
+            }
+        } else {
+            try { tpl = api.getTableTemplate({ scope, presetName }) || null; } catch (e) { tpl = null; }
+        }
         if (!tpl || typeof tpl !== 'object') {
             toast('未读取到模板（该来源为空或插件未就绪）', 'error');
             return;
@@ -4368,6 +4432,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
             const msg = '合并完成：新增 ' + merged.added.length + ' 张表' + (merged.skipped.length ? '，跳过重名：' + merged.skipped.join('、') : '');
             if (status) status.textContent = msg;
             toast(msg, 'info');
+            // 刷新勾选列表：已并入的表标记为“已存在”
+            try { await loadMergeTables(panel); } catch (e) {}
         } catch (e) {
             toast('合并失败：' + (e && e.message ? e.message : e), 'error');
         }
