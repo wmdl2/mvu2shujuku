@@ -1539,8 +1539,8 @@
             if (isSingletonKey && group.keyValue) {
                 def = def.replace(/DEFAULT '[^']*'/, `DEFAULT '${sqlQuote(group.keyValue)}'`);
             }
+            // 插件校验要求 DDL 列注释与 content 表头逐字一致，描述只写进 note，不拼进注释
             def += `, -- ${c.zh}`;
-            if (c.desc) def += `（${String(c.desc).replace(/\n/g, ' ')}）`;
             L.push(def);
         }
         L.push(');');
@@ -3219,13 +3219,14 @@
         }
         const panel = hostDocument.getElementById(PANEL_ID);
         const context = getContextSafe();
+        const log = [];
+        const displayName = ((lastResult.card && (lastResult.card.data || lastResult.card).name) || '角色');
         try {
             // 统一成 chara_card_v3 包装（服务端按 json_data 整体导入，保留世界书等全部内容）
             let cardData = lastResult.card;
             if (cardData && !cardData.data && cardData.name) {
                 cardData = { spec: 'chara_card_v3', spec_version: '3.0', data: cardData };
             }
-            const displayName = (cardData.data && cardData.data.name) || cardData.name || '角色';
             let avatarBlob = null;
             if (lastResult.meta && lastResult.meta.avatarBytes) {
                 avatarBlob = new Blob([lastResult.meta.avatarBytes], { type: lastResult.meta.avatarMime || 'application/json' });
@@ -3283,38 +3284,69 @@
                 if (!res.ok) throw new Error('HTTP ' + res.status);
                 saved = true;
             }
-            if (!saved) return false;
-            // 顺带把表格模板存为插件的“全局模板预设”，用户可在插件面板手动切换
-            const acu = getAcuApi();
-            if (acu && lastResult && lastResult.template) {
-                try {
-                    const presetName = displayName + '模板';
-                    const presetResult = await acu.importTemplateFromData(lastResult.template, { scope: 'global', presetName });
-                    if (presetResult && presetResult.success === false) {
-                        console.warn('[mvu2db] 模板全局预设保存失败:', presetResult.message);
-                    } else {
-                        toast('已把表格模板保存为插件预设：' + presetName, 'info');
-                    }
-                } catch (e) {
-                    console.warn('[mvu2db] 模板全局预设保存异常:', e);
-                }
-            }
+            if (!saved) throw new Error('角色卡保存失败（未知原因）');
+            log.push('✓ 角色卡已保存：' + displayName);
             if (typeof context.getCharacters === 'function') {
                 try {
                     await context.getCharacters();
                     if (panel) populateCharacterSelect(panel, context);
                 } catch (e) {}
             }
-            toast('已保存为新角色卡：' + displayName, 'success');
-            return true;
         } catch (e) {
-            toast('保存失败，已回退到下载：' + (e && e.message ? e.message : e), 'error');
-            // 回退：逐个下载
+            const msg = (e && e.message ? e.message : e);
+            toast('保存失败，已回退到下载：' + msg, 'error');
             for (const f of lastResult.files) {
                 if (f.kind === 'card') download(f.name, f.mime, f.data);
             }
+            showInfoPopup('保存失败', '角色卡保存失败，已回退到下载。\n\n' + msg + '\n\n如需排查请把此日志发给开发者。');
             return false;
         }
+
+        // 第二步：把表格模板存为插件的“全局模板预设”（失败不阻断角色卡保存）
+        let presetName = '';
+        const acu = getAcuApi();
+        if (acu && lastResult.template) {
+            presetName = displayName + '模板';
+            try {
+                const presetResult = await acu.importTemplateFromData(lastResult.template, { scope: 'global', presetName });
+                if (presetResult && presetResult.success === false) {
+                    log.push('✗ 表格模板导入插件失败：' + (presetResult.message || '未知原因'));
+                } else {
+                    log.push('✓ 表格模板已保存为插件预设：' + presetName);
+                }
+            } catch (e) {
+                log.push('✗ 表格模板导入插件异常：' + (e && e.message ? e.message : e));
+            }
+        } else {
+            log.push('⚠ 未找到 SP·数据库 插件 API，模板未导入（可下载“表格模板 JSON”手动导入插件）。');
+        }
+
+        // 第三步：弹窗汇总
+        const hasError = log.some(line => line.startsWith('✗'));
+        const body = log.join('\n') + (hasError
+            ? '\n\n有失败项，请把上方日志发给开发者排查。'
+            : (presetName
+                ? '\n\n请到 SP·数据库 插件面板的“模板”下拉里手动切换到：' + presetName + '（可应用到当前聊天或新聊天）。'
+                : ''));
+        showInfoPopup(hasError ? '保存完成（有失败项）' : '保存完成', body);
+        return !hasError;
+    }
+
+    // 弹窗：优先用酒馆通用弹窗，失败退回 toast
+    function showInfoPopup(title, body) {
+        const context = getContextSafe();
+        const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        try {
+            if (context.callGenericPopup && context.POPUP_TYPE) {
+                const html = '<h3>' + esc(title) + '</h3><pre style="white-space:pre-wrap;text-align:left;max-height:50vh;overflow:auto;">' + esc(body) + '</pre>';
+                context.callGenericPopup(html, context.POPUP_TYPE.TEXT, '', { okButton: '知道了' });
+                return;
+            }
+        } catch (e) {}
+        try {
+            if (hostWindow.alert) hostWindow.alert(title + '\n\n' + body);
+        } catch (e2) {}
+        toast(title + '：' + body, 'info');
     }
 
     function renderResult(result) {
@@ -3415,8 +3447,7 @@
             '      <div class="mvu2db-row">',
             '        <button id="mvu2db-convert-current" class="menu_button">转换所选角色卡</button>',
             '        <button id="mvu2db-convert-file" class="menu_button">转换所选文件</button>',
-            '        <button id="mvu2db-save-card" class="menu_button">保存角色卡至 SillyTavern</button>',
-            '        <button id="mvu2db-apply-template" class="menu_button" title="把最近一次转换的表格模板直接应用到当前聊天">应用模板到当前聊天</button>',
+            '        <button id="mvu2db-save-card" class="menu_button">保存角色卡和模板</button>',
             '        <button id="mvu2db-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2db-result"></div>',
@@ -3487,28 +3518,6 @@
         });
         bind('#mvu2db-save-card', async () => {
             await saveCardToSillyTavern();
-        });
-        bind('#mvu2db-apply-template', async () => {
-            if (!lastResult || !lastResult.template) {
-                toast('请先转换，再应用模板', 'error');
-                return;
-            }
-            const acu = getAcuApi();
-            if (!acu) {
-                toast('未找到 SP·数据库 插件 API（AutoCardUpdaterAPI）', 'error');
-                return;
-            }
-            try {
-                toast('正在应用模板到当前聊天…');
-                const result = await acu.importTemplateFromData(lastResult.template, { scope: 'chat' });
-                if (result && result.success === false) {
-                    toast('应用失败：' + (result.message || '未知原因'), 'error');
-                } else {
-                    toast('已把表格模板应用到当前聊天', 'success');
-                }
-            } catch (e) {
-                toast('应用模板失败：' + (e && e.message ? e.message : e), 'error');
-            }
         });
         const modeInputs = panel.querySelectorAll('input[name="mvu2db-mode"]');
         modeInputs.forEach((el) => {

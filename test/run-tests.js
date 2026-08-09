@@ -127,6 +127,21 @@ test('道渊：14 张表，结构正确', () => {
         const ident = k.replace(/^sheet_/, '');
         assert.ok(/^[a-z][a-z0-9_]*$/.test(ident), `表标识符应为合法 SQL 标识符：${ident}`);
     }
+    // 插件校验：DDL 列注释必须与 content 表头逐字一致（参考默认模板）
+    for (const k of Object.keys(t).filter(k => k.startsWith('sheet_'))) {
+        const sheet = t[k];
+        const header = sheet.content[0];
+        assert.strictEqual(header[0], 'row_id', `${k} 表头第一列应为 row_id`);
+        const ddlComments = [];
+        for (const line of sheet.sourceData.ddl.split('\n')) {
+            const m = line.match(/,\s*--\s*(.+)$/);
+            if (!m) continue;
+            ddlComments.push(m[1].trim());
+        }
+        assert.strictEqual(ddlComments.length, header.length, `${k} DDL 列数应等于表头列数`);
+        // row_id 固定（注释为“行号”），插件对其特殊处理；其余列注释必须与表头逐字一致
+        ddlComments.slice(1).forEach((c, i) => assert.strictEqual(c, header[i + 1], `${k} 第 ${i + 1} 列 DDL 注释与表头不一致`));
+    }
 });
 
 test('模板结构满足插件最小要求', () => {
