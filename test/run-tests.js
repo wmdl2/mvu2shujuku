@@ -183,6 +183,66 @@ test('模板结构满足插件最小要求', () => {
     }
 });
 
+test('条目字段全是叶子的字典应判为行表（修复误判为单例）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '平铺条目卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{
+                    comment: '[InitVar]',
+                    content: JSON.stringify({
+                        道侣: {
+                            林若悠: { 亲密: [88, ''], 种族: ['人族', ''] },
+                            苏媚: { 亲密: [77, ''], 种族: ['妖族', ''] },
+                        },
+                    }),
+                }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const t = Object.values(r.template).find(s => s && s.name === '道侣表');
+    assert.ok(t, '应有道侣表');
+    assert.strictEqual(t.content.length - 1, 2, '应为 2 行（每条目一行）');
+    assert.strictEqual(t.content[1][1], '林若悠', '第一行应为林若悠');
+    assert.strictEqual(t.content[2][1], '苏媚', '第二行应为苏媚');
+    assert.ok(t.content[0].includes('亲密'), '列应含条目字段');
+});
+
+test('行表条目内的空嵌套对象不再拆出每条目重复子表', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '角色集合卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{
+                    comment: '[InitVar]',
+                    content: JSON.stringify({
+                        角色: {
+                            A: { 好感度: [0, ''], 效果: {} },
+                            B: { 好感度: [0, ''], 效果: {} },
+                        },
+                    }),
+                }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const names = Object.values(r.template).filter(s => s && s.name).map(s => s.name);
+    assert.ok(names.includes('角色表'), '应有角色表');
+    assert.ok(!names.includes('A表') && !names.includes('B表'), '不应有每条目重复子表');
+    const t = Object.values(r.template).find(s => s && s.name === '角色表');
+    assert.strictEqual(t.content.length - 1, 2, '角色表应为 2 行');
+    assert.ok(t.content[0].includes('效果'), '空嵌套对象应转为 JSON 列');
+});
+
 /* ---------------- EJS 重写 ---------------- */
 console.log('rewriteEjsConditions');
 test('getvar 数值比较 → <if cell>', () => {
@@ -443,6 +503,50 @@ test('SQL 示例 VALUES 数量与列数一致', () => {
         checked++;
     }
     assert.ok(checked >= 3, `应至少检查 3 张表的 INSERT 示例（实际 ${checked}）`);
+});
+
+test('INSERT 示例优先用卡内真实初始值，空表退回列名占位', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '示例卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{
+                    comment: '[InitVar]',
+                    content: JSON.stringify({
+                        道侣: {
+                            林若悠: { 亲密: [88, ''], 日程: { 周三: ['空', ''] } },
+                        },
+                    }),
+                }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const ins = Object.values(r.template).find(s => s && s.name === '道侣表').sourceData.insertNode;
+    assert.ok(ins.includes("VALUES ('林若悠', 88"), ins);
+    // 空表（无初始条目）的示例应使用“列中文名示例”占位，而不是凭空的值
+    const card2 = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '空表示例卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{
+                    comment: '[InitVar]',
+                    content: JSON.stringify({ 仓库: {} }),
+                }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r2 = core.convert(card2, { mode: 'both' });
+    const ins2 = Object.values(r2.template).find(s => s && s.name === '仓库表').sourceData.insertNode;
+    assert.ok(ins2.includes("VALUES ('条目名')") || !ins2.includes('值1'), ins2);
 });
 
 /* ---------------- PNG 往返 ---------------- */
