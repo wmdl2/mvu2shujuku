@@ -262,6 +262,210 @@ test('writeStatDiffToDb：stat_data 差异写回数据库（单例更新/行表�
     assert.deepStrictEqual(tables.sheet_3.content.slice(1).map(r => r[1]), ['新1', '新2'], '数组应整体替换');
 });
 
+function parseSqlValue(v) {
+    if (/^'/.test(v)) return v.replace(/^'|'$/g, '').replace(/''/g, "'");
+    const n = Number(v);
+    return isNaN(n) ? v : n;
+}
+
+function splitSqlValues(str) {
+    const out = [];
+    let cur = '';
+    let inQ = false;
+    for (let i = 0; i < str.length; i++) {
+        const ch = str[i];
+        if (inQ) {
+            if (ch === "'") {
+                if (str[i + 1] === "'") { cur += "'"; i++; }
+                else inQ = false;
+            } else cur += ch;
+        } else if (ch === "'") {
+            inQ = true;
+        } else if (ch === ',') {
+            out.push(parseSqlValue(cur.trim()));
+            cur = '';
+            continue;
+        } else cur += ch;
+    }
+    if (cur.trim()) out.push(parseSqlValue(cur.trim()));
+    return out;
+}
+
+function applySqlToTables(tables, sql) {
+    for (const stmt of sql.split(';').map(s => s.trim()).filter(Boolean)) {
+        let m = stmt.match(/^UPDATE\s+(\S+)\s+SET\s+(\S+)\s*=\s*(.+?)\s+WHERE\s+row_id\s*=\s*(\d+)$/);
+        if (m) {
+            const tn = m[1], col = m[2], raw = m[3], rid = m[4];
+            const s = Object.values(tables).find(x => x.name === tn);
+            const ci = s.content[0].indexOf(col);
+            const row = s.content.find(r => String(r[0]) === rid);
+            row[ci] = parseSqlValue(raw);
+            continue;
+        }
+        m = stmt.match(/^INSERT INTO\s+(\S+)\s+\(([^)]+)\)\s+VALUES\s+\((.+)\)$/);
+        if (m) {
+            const tn = m[1];
+            const cols = m[2].split(',').map(s => s.trim());
+            const vals = splitSqlValues(m[3]);
+            const s = Object.values(tables).find(x => x.name === tn);
+            let maxId = 0;
+            for (let i = 1; i < s.content.length; i++) {
+                const rid = Number(s.content[i] && s.content[i][0]);
+                if (!isNaN(rid) && rid > maxId) maxId = rid;
+            }
+            const row = new Array(s.content[0].length).fill('');
+            row[0] = maxId + 1;
+            cols.forEach((c, i) => { row[s.content[0].indexOf(c)] = vals[i]; });
+            s.content.push(row);
+            continue;
+        }
+        m = stmt.match(/^DELETE FROM\s+(\S+)\s+WHERE\s+row_id\s*=\s*(\d+)$/);
+        if (m) {
+            const tn = m[1], rid = m[2];
+            const s = Object.values(tables).find(x => x.name === tn);
+            const idx = s.content.findIndex(r => String(r[0]) === rid);
+            if (idx >= 0) s.content.splice(idx, 1);
+            continue;
+        }
+        throw new Error('无法解析测试 SQL: ' + stmt);
+    }
+}
+
+test('writeStatDiffToDb：多操作走 SQL 批量事务，只提交一次且 row_id 不冲突', async () => {
+    const layout = [
+        { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前MC点', 'number', '', '', '', '']], writePaths: [], mirrors: [] },
+        { kind: 'rows', group: '角色', table: '角色表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['好感度', 'number', '', '', '', '']], writePaths: [['角色']], mirrors: [] },
+        { kind: 'array', group: '$器灵台词', table: '台词表', cols: [['内容', 'text', '', '', '', '']], writePaths: [], mirrors: [] },
+    ];
+    const tables = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_1: { name: '系统表', content: [['row_id', '名称', '当前MC点'], [1, '系统', 100]] },
+        sheet_2: { name: '角色表', content: [['row_id', '名称', '好感度'], [1, '西园寺爱丽莎', 0]] },
+        sheet_3: { name: '台词表', content: [['row_id', '内容'], [1, '旧']] },
+    };
+    let sqlBatchCalls = 0;
+    const api = {
+        exportTableAsJson: () => tables,
+        executeSqlBatch: async (sql) => {
+            sqlBatchCalls++;
+            applySqlToTables(tables, sql);
+            return { success: true, appliedEdits: 1 };
+        },
+        updateCell: async () => { throw new Error('批量路径不应走逐格 updateCell'); },
+        insertRow: async () => { throw new Error('批量路径不应走逐行 insertRow'); },
+        deleteRow: async () => { throw new Error('批量路径不应走逐行 deleteRow'); },
+    };
+    const prev = { 系统: { 当前MC点: 100 }, 角色: { 西园寺爱丽莎: { 好感度: 0 } }, '$器灵台词': ['旧'] };
+    const next = { 系统: { 当前MC点: 80 }, 角色: { 西园寺爱丽莎: { 好感度: 5 }, 月咏深雪: { 好感度: 3 }, 苏媚: { 好感度: 2 } }, '$器灵台词': ['新1', '新2'] };
+    const n = await core.writeStatDiffToDb(api, layout, prev, next);
+    assert.ok(n >= 5, '应产生 5 个以上差异操作');
+    assert.strictEqual(sqlBatchCalls, 1, '多操作应只提交一次 SQL 批量事务');
+    assert.strictEqual(tables.sheet_1.content[1][2], 80, '单例更新应生效');
+    assert.strictEqual(tables.sheet_2.content[1][2], 5, '行表更新应生效');
+    const names = tables.sheet_2.content.slice(1).map(r => r[1]);
+    assert.ok(names.includes('月咏深雪') && names.includes('苏媚'), '应插入两行新条目');
+    const ids = tables.sheet_2.content.slice(1).map(r => r[0]);
+    assert.strictEqual(new Set(ids).size, ids.length, 'row_id 不应冲突');
+    assert.deepStrictEqual(tables.sheet_3.content.slice(1).map(r => r[1]), ['新1', '新2'], '数组应整体替换');
+});
+
+test('writeStatDiffToDb：值未变化时跳过写入，不产生持久化', async () => {
+    const layout = [
+        { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前MC点', 'number', '', '', '', '']], writePaths: [], mirrors: [] },
+    ];
+    const tables = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_1: { name: '系统表', content: [['row_id', '名称', '当前MC点'], [1, '系统', 100]] },
+    };
+    let crudCalls = 0;
+    const api = {
+        exportTableAsJson: () => tables,
+        updateCell: async () => { crudCalls++; return true; },
+        insertRow: async () => { crudCalls++; return 1; },
+        deleteRow: async () => { crudCalls++; return true; },
+    };
+    const prev = { 系统: { 当前MC点: 100 } };
+    const next = { 系统: { 当前MC点: 100 } };
+    const n = await core.writeStatDiffToDb(api, layout, prev, next);
+    assert.strictEqual(n, 0, '无变化应返回 0');
+    assert.strictEqual(crudCalls, 0, '不应调用任何逐条写入');
+});
+
+test('writeStatDiffToDb：小批量（1~4 条）保持逐格增量写入，不触发批量', async () => {
+    const layout = [
+        { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前MC点', 'number', '', '', '', '']], writePaths: [], mirrors: [] },
+        { kind: 'rows', group: '角色', table: '角色表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['好感度', 'number', '', '', '', '']], writePaths: [['角色']], mirrors: [] },
+    ];
+    const tables = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_1: { name: '系统表', content: [['row_id', '名称', '当前MC点'], [1, '系统', 100]] },
+        sheet_2: { name: '角色表', content: [['row_id', '名称', '好感度'], [1, '西园寺爱丽莎', 0]] },
+    };
+    let crudCalls = 0;
+    const api = {
+        exportTableAsJson: () => tables,
+        updateCell: async (tn, ri, col, val) => {
+            crudCalls++;
+            const s = Object.values(tables).find(x => x.name === tn);
+            const ci = s.content[0].indexOf(col);
+            s.content[ri][ci] = val;
+            return true;
+        },
+        insertRow: async (tn, data) => {
+            crudCalls++;
+            const s = Object.values(tables).find(x => x.name === tn);
+            s.content.push([s.content.length, ...Object.values(data)]);
+            return s.content.length - 1;
+        },
+        deleteRow: async () => { crudCalls++; return true; },
+    };
+    const prev = { 系统: { 当前MC点: 100 }, 角色: { 西园寺爱丽莎: { 好感度: 0 } } };
+    const next = { 系统: { 当前MC点: 80 }, 角色: { 西园寺爱丽莎: { 好感度: 5 }, 月咏深雪: { 好感度: 3 } } };
+    const n = await core.writeStatDiffToDb(api, layout, prev, next);
+    assert.ok(n >= 3 && n < 5, '应为 3 个小批量操作');
+    assert.ok(crudCalls >= 3, '小批量应走逐格写入');
+    assert.strictEqual(tables.sheet_1.content[1][2], 80, '单例更新应生效');
+    assert.strictEqual(tables.sheet_2.content[1][2], 5, '行表更新应生效');
+    assert.strictEqual(tables.sheet_2.content.length, 3, '应插入新行');
+});
+
+test('writeStatDiffToDb：SQL 批量失败时自动回退逐条写入', async () => {
+    const layout = [
+        { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前MC点', 'number', '', '', '', '']], writePaths: [], mirrors: [] },
+        { kind: 'rows', group: '角色', table: '角色表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['好感度', 'number', '', '', '', '']], writePaths: [['角色']], mirrors: [] },
+    ];
+    const tables = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_1: { name: '系统表', content: [['row_id', '名称', '当前MC点'], [1, '系统', 100]] },
+        sheet_2: { name: '角色表', content: [['row_id', '名称', '好感度'], [1, '西园寺爱丽莎', 0]] },
+    };
+    let sqlBatchCalls = 0;
+    const api = {
+        exportTableAsJson: () => tables,
+        executeSqlBatch: async () => { sqlBatchCalls++; return { success: false, error: '模拟重绑失败' }; },
+        updateCell: async (tn, ri, col, val) => {
+            const s = Object.values(tables).find(x => x.name === tn);
+            const ci = s.content[0].indexOf(col);
+            s.content[ri][ci] = val;
+            return true;
+        },
+        insertRow: async (tn, data) => {
+            const s = Object.values(tables).find(x => x.name === tn);
+            s.content.push([s.content.length, ...Object.values(data)]);
+            return s.content.length - 1;
+        },
+        deleteRow: async () => true,
+    };
+    const prev = { 系统: { 当前MC点: 100 }, 角色: { 西园寺爱丽莎: { 好感度: 0 } } };
+    const next = { 系统: { 当前MC点: 80 }, 角色: { 西园寺爱丽莎: { 好感度: 5 }, 月咏深雪: { 好感度: 3 } } };
+    const n = await core.writeStatDiffToDb(api, layout, prev, next);
+    assert.ok(n >= 3, '回退后仍应返回差异操作数');
+    assert.strictEqual(sqlBatchCalls, 1, 'SQL 批量应只尝试一次');
+    assert.strictEqual(tables.sheet_1.content[1][2], 80, '回退后单例更新应生效');
+    assert.strictEqual(tables.sheet_2.content[1][2], 5, '回退后行表更新应生效');
+    assert.strictEqual(tables.sheet_2.content.length, 3, '回退后应插入新行');
+});
+
 test('条目字段全是叶子的字典应判为行表（修复误判为单例）', () => {
     const card = {
         spec: 'chara_card_v3',

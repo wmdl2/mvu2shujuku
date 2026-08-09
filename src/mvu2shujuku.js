@@ -2022,23 +2022,27 @@
             }
             return null;
         };
+        let tables = {};
+        try { tables = api.exportTableAsJson() || {}; } catch (e) {}
         const sheetOf = (name) => {
-            let tables = {};
-            try { tables = api.exportTableAsJson() || {}; } catch (e) {}
             for (const k in tables) {
-                if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return tables[k];
+                if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return { key: k, sheet: tables[k] };
             }
             return null;
         };
-        const findRowByColumn = (tableName, colName, value) => {
-            const s = sheetOf(tableName);
-            if (!s || !Array.isArray(s.content)) return -1;
-            const ci = s.content[0] ? s.content[0].indexOf(colName) : -1;
+        const findRowByColumn = (sheet, colName, value) => {
+            if (!sheet || !Array.isArray(sheet.content)) return -1;
+            const ci = sheet.content[0] ? sheet.content[0].indexOf(colName) : -1;
             if (ci === -1) return -1;
-            for (let i = 1; i < s.content.length; i++) {
-                if (s.content[i] && String(s.content[i][ci]) === String(value)) return i;
+            for (let i = 1; i < sheet.content.length; i++) {
+                if (sheet.content[i] && String(sheet.content[i][ci]) === String(value)) return i;
             }
             return -1;
+        };
+        const sameValue = (a, b) => {
+            const sa = a === undefined || a === null ? '' : String(a);
+            const sb = b === undefined || b === null ? '' : String(b);
+            return sa === sb;
         };
         const ops = [];
         const collect = (prevObj, nextObj, pathStr) => {
@@ -2060,51 +2064,161 @@
             }
         };
         collect(prevStat || {}, nextStat || {}, '');
+
+        // 解析差异操作并跳过值未变化的写入
+        const resolved = [];
         for (const op of ops) {
             const E = op.entry;
             if (!E) continue;
             const L = E.layout;
-            const sheet = sheetOf(L.table);
-            if (!sheet) continue;
+            const found = sheetOf(L.table);
+            if (!found) continue;
+            const sheet = found.sheet;
             const header = sheet.content && sheet.content[0] ? sheet.content[0] : [];
             if (op.replace && E.kind === 'array') {
-                for (let rr = sheet.content.length - 1; rr >= 1; rr--) {
-                    try { await Promise.resolve(api.deleteRow(L.table, rr - 1)); } catch (e) {}
-                }
                 const arr = Array.isArray(op.value) ? op.value : [];
-                for (let ai = 0; ai < arr.length; ai++) {
-                    const o = {}; o[String(0)] = String(arr[ai]);
-                    try { await Promise.resolve(api.insertRow(L.table, o)); } catch (e) {}
-                }
+                const oldVals = sheet.content.slice(1).map(r => (r ? r[1] : undefined));
+                const unchanged = oldVals.length === arr.length && oldVals.every((v, i) => sameValue(v, arr[i]));
+                if (unchanged) continue;
+                resolved.push({ kind: 'array', key: found.key, sheet, header, layout: L, arr });
                 continue;
             }
             const parts = pathParts(op.np);
             let rowIndex = -1;
+            let newRowArr = null;
+            let newRowObj = null;
             if (E.kind === 'singleton') {
                 rowIndex = 1;
             } else if (E.kind === 'rows') {
                 const keyVal = parts[E.prefix.length];
                 if (keyVal === undefined) continue;
-                rowIndex = findRowByColumn(L.table, L.keyCol, keyVal);
+                rowIndex = findRowByColumn(sheet, L.keyCol, keyVal);
                 if (rowIndex === -1) {
-                    const newRow = {};
+                    const ci = header.indexOf(L.keyCol);
+                    if (ci === -1) continue;
+                    let maxId = 0;
+                    for (let i = 1; i < sheet.content.length; i++) {
+                        const rid = Number(sheet.content[i] && sheet.content[i][0]);
+                        if (!isNaN(rid) && rid > maxId) maxId = rid;
+                    }
+                    const cp = parts.slice(E.prefix.length + 1);
+                    const arr = new Array(header.length).fill('');
+                    arr[0] = maxId + 1;
+                    arr[ci] = String(keyVal);
+                    const obj = {};
                     for (let nc = 0; nc < L.cols.length; nc++) {
                         const cc = L.cols[nc];
-                        if (cc[0] === L.keyCol) { newRow[String(nc)] = String(keyVal); continue; }
-                        const cp = parts.slice(E.prefix.length + 1);
-                        if (cp.length === 1 && cp[0] === cc[0]) newRow[String(nc)] = String(op.value);
+                        const cIdx = header.indexOf(cc[0]);
+                        if (cIdx === -1) continue;
+                        if (cc[0] === L.keyCol) { obj[String(nc)] = String(keyVal); continue; }
+                        if (cp.length === 1 && cp[0] === cc[0]) { arr[cIdx] = String(op.value); obj[String(nc)] = String(op.value); }
                     }
-                    try { await Promise.resolve(api.insertRow(L.table, newRow)); } catch (e) {}
-                    continue;
+                    newRowArr = arr;
+                    newRowObj = obj;
                 }
             }
-            if (rowIndex < 0) continue;
+            if (rowIndex < 0 && !newRowArr) continue;
             const colZh = parts[parts.length - 1];
             const colIdx = header.indexOf(colZh);
             if (colIdx === -1) continue;
-            try { await Promise.resolve(api.updateCell(L.table, rowIndex, colZh, op.value)); } catch (e) {}
+            if (!newRowArr) {
+                const cur = sheet.content[rowIndex] ? sheet.content[rowIndex][colIdx] : undefined;
+                if (sameValue(cur, op.value)) continue;
+            }
+            resolved.push({ kind: 'cell', key: found.key, sheet, header, layout: L, rowIndex, colIdx, colZh, value: op.value, newRowArr, newRowObj });
         }
-        return ops.length;
+        if (resolved.length === 0) return 0;
+
+        // 多操作批量写入：走插件 executeSqlBatch（增量事务，一次提交），
+        // 避免逐格 updateCell 导致的几十次整表持久化卡顿。
+        // 不用 importTableAsJson 整体导入：那是整表替换 + 完整检查点，
+        // 中途调用会过度重写、刷世界书并膨胀聊天，且存在导出-导回间的竞态窗口。
+        // SQL 中文表名/列名由插件自动重绑（与 AI 填表同一条链路）；失败时回退逐条写入。
+        if (resolved.length >= 2 && typeof api.executeSqlBatch === 'function') {
+            try {
+                const sqlLit = (v, numeric) => {
+                    if (v === undefined || v === null || v === '') return "''";
+                    if (numeric || typeof v === 'number') {
+                        const n = Number(v);
+                        if (isFinite(n)) return String(n);
+                    }
+                    return "'" + String(v).replace(/'/g, "''") + "'";
+                };
+                const colType = (L, zh) => {
+                    if (L && Array.isArray(L.cols)) {
+                        const c = L.cols.find(x => x && x[0] === zh);
+                        if (c) return String(c[1] || '').toLowerCase();
+                    }
+                    return '';
+                };
+                const isNum = (t) => /number|int|float|real|numeric|decimal/.test(t);
+                const statements = [];
+                for (const r of resolved) {
+                    const L = r.layout;
+                    const tname = L.table;
+                    if (r.kind === 'array') {
+                        for (let i = 1; i < r.sheet.content.length; i++) {
+                            const rid = r.sheet.content[i] ? r.sheet.content[i][0] : undefined;
+                            if (rid === undefined || rid === null || rid === '') continue;
+                            statements.push('DELETE FROM ' + tname + ' WHERE row_id = ' + Number(rid) + ';');
+                        }
+                        const vcol = r.header[1] || '内容';
+                        for (let ai = 0; ai < r.arr.length; ai++) {
+                            statements.push('INSERT INTO ' + tname + ' (' + vcol + ') VALUES (' + sqlLit(r.arr[ai], false) + ');');
+                        }
+                        continue;
+                    }
+                    if (r.newRowArr) {
+                        const cols = [];
+                        const vals = [];
+                        for (let nc = 0; nc < L.cols.length; nc++) {
+                            const cc = L.cols[nc];
+                            const cIdx = r.header.indexOf(cc[0]);
+                            const v = cIdx >= 0 ? r.newRowArr[cIdx] : '';
+                            if (cc[0] === L.keyCol || (v !== undefined && v !== null && v !== '')) {
+                                cols.push(cc[0]);
+                                vals.push(sqlLit(v, isNum(colType(L, cc[0]))));
+                            }
+                        }
+                        if (cols.length) statements.push('INSERT INTO ' + tname + ' (' + cols.join(', ') + ') VALUES (' + vals.join(', ') + ');');
+                        continue;
+                    }
+                    const rid = r.sheet.content[r.rowIndex] ? r.sheet.content[r.rowIndex][0] : undefined;
+                    if (rid === undefined || rid === null || rid === '') continue;
+                    statements.push('UPDATE ' + tname + ' SET ' + r.colZh + ' = ' + sqlLit(r.value, isNum(colType(L, r.colZh))) + ' WHERE row_id = ' + Number(rid) + ';');
+                }
+                if (statements.length) {
+                    const out = await Promise.resolve(api.executeSqlBatch(statements.join('\n'), { skipChatSave: false }));
+                    if (!out || out.success === false) throw new Error((out && out.error) || 'executeSqlBatch 返回失败');
+                    return resolved.length;
+                }
+            } catch (e) {
+                console.warn('[mvu2shujuku][debug] SQL 批量写入失败，回退逐条写入：' + (e && e.message ? e.message : e));
+            }
+        }
+
+        // 逐条写入（回退路径，保持原行为）
+        for (const r of resolved) {
+            const L = r.layout;
+            try {
+                if (r.kind === 'array') {
+                    for (let rr = r.sheet.content.length - 1; rr >= 1; rr--) {
+                        try { await Promise.resolve(api.deleteRow(L.table, rr - 1)); } catch (e) {}
+                    }
+                    for (let ai = 0; ai < r.arr.length; ai++) {
+                        const o = {}; o[String(0)] = String(r.arr[ai]);
+                        try { await Promise.resolve(api.insertRow(L.table, o)); } catch (e) {}
+                    }
+                    continue;
+                }
+                if (r.newRowObj) {
+                    try { await Promise.resolve(api.insertRow(L.table, r.newRowObj)); } catch (e) {}
+                    continue;
+                }
+                try { await Promise.resolve(api.updateCell(L.table, r.rowIndex, r.colZh, r.value)); } catch (e) {}
+            } catch (e) {}
+        }
+        return resolved.length;
     }
 
     /**
@@ -2372,8 +2486,12 @@
             `    var header=sheet.content&&sheet.content[0]?sheet.content[0]:[];`,
             `    if(op.replace&&E.kind==='array'){`,
             `      // 数组整体替换：先清空旧行，再逐行插入`,
-            `      for(var rr=sheet.content.length-1;rr>=1;rr--){try{await Promise.resolve(API.deleteRow(L.table,rr-1));}catch(e){}}`,
             `      var arr=Array.isArray(op.value)?op.value:[];`,
+            `      var oldVals=[];`,
+            `      for(var rv=1;rv<sheet.content.length;rv++)oldVals.push(sheet.content[rv]?sheet.content[rv][1]:undefined);`,
+            `      var arrSame=oldVals.length===arr.length&&oldVals.every(function(v,i){return String(v)===String(arr[i]);});`,
+            `      if(arrSame)continue;`,
+            `      for(var rr=sheet.content.length-1;rr>=1;rr--){try{await Promise.resolve(API.deleteRow(L.table,rr-1));}catch(e){}}`,
             `      for(var ai=0;ai<arr.length;ai++){`,
             `        var o={};o[String(0)]=String(arr[ai]);`,
             `        try{await Promise.resolve(API.insertRow(L.table,o));}catch(e){console.warn('['+BRIDGE_NAME+'] insertRow 失败:',e);}`,
@@ -2406,6 +2524,8 @@
             `    var colZh=parts[parts.length-1];`,
             `    var colIdx=header.indexOf(colZh);`,
             `    if(colIdx===-1)continue;`,
+            `    var curCell=sheet.content[rowIndex]?sheet.content[rowIndex][colIdx]:undefined;`,
+            `    if(String(curCell)===String(op.value))continue;`,
             `    try{await Promise.resolve(API.updateCell(L.table,rowIndex,colZh,op.value));}catch(e){console.warn('['+BRIDGE_NAME+'] updateCell 失败:',e);}`,
             `  }`,
             `}`,
@@ -3550,6 +3670,12 @@ ${DB_INIT_SNIPPET}
     let lastInput = null;
     const mergeState = { sourceTemplate: null };
     let activeLayout = null;
+    // Mvu.replaceMvuData 合并写入：MVU 卡开局初始化常连续多次调用（每次只改一个字段），
+    // 每次都触发插件整表持久化；合并为一次后只持久化一次。
+    let pendingStatWrite = null;
+    let statWriteTimer = null;
+    let statWriteFlushResolve = null;
+    let statWriteFlushPromise = null;
 
     // 扩展侧提供 window.getAllVariables：用卡内布局 + 插件表格实时重建 stat_data（惰性，零冗余）
     function installWindowGetAllVariables() {
@@ -3607,10 +3733,35 @@ ${DB_INIT_SNIPPET}
                     const api = getAcuApi();
                     if (!api || !activeLayout) return false;
                     const next = (data && data.stat_data) || {};
-                    const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                    const prev = all.stat_data || {};
-                    const n = await core.writeStatDiffToDb(api, activeLayout, prev, next);
-                    dispatchShujukuTableUpdated();
+                    pendingStatWrite = next;
+                    if (!statWriteFlushPromise) {
+                        statWriteFlushPromise = new Promise((res) => { statWriteFlushResolve = res; });
+                    }
+                    if (statWriteTimer) hostWindow.clearTimeout(statWriteTimer);
+                    statWriteTimer = hostWindow.setTimeout(() => {
+                        statWriteTimer = null;
+                        const target = pendingStatWrite;
+                        pendingStatWrite = null;
+                        const resolve = statWriteFlushResolve;
+                        statWriteFlushResolve = null;
+                        statWriteFlushPromise = null;
+                        (async () => {
+                            try {
+                                if (target) {
+                                    const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                                    const prev = all.stat_data || {};
+                                    const n = await core.writeStatDiffToDb(api, activeLayout, prev, target);
+                                    if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                                    dispatchShujukuTableUpdated();
+                                }
+                            } catch (e2) {
+                                console.warn('[mvu2shujuku][debug] Mvu 合并写入异常:', e2);
+                            } finally {
+                                if (resolve) resolve(true);
+                            }
+                        })();
+                    }, 30);
+                    await statWriteFlushPromise;
                     return true;
                 } catch (e) {
                     console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 异常:', e);
@@ -4253,10 +4404,14 @@ ${DB_INIT_SNIPPET}
         const es = context && (context.eventSource || context.event_source);
         if (!es || typeof es.on !== 'function') return;
         try {
+            // 只在首次 prepare 时打一行确认，避免每次生成都刷屏
+            let firstPreparedLogged = false;
             es.on('prompt_template_prepare', (prepared) => {
+                if (firstPreparedLogged) return;
+                firstPreparedLogged = true;
                 const pageEjs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
                 console.log(
-                    '[mvu2shujuku][debug] prompt_template_prepare 上下文: 键数=' + (prepared ? Object.keys(prepared).length : 0) +
+                    '[mvu2shujuku][debug] prompt_template_prepare 首次上下文: 键数=' + (prepared ? Object.keys(prepared).length : 0) +
                     ' | getvar=' + typeof (prepared && prepared.getvar) +
                     ' | mvu2shujukuGetAllVariables=' + typeof (prepared && prepared.mvu2shujukuGetAllVariables) +
                     ' | getAllVariables=' + typeof (prepared && prepared.getAllVariables) +
@@ -4264,7 +4419,7 @@ ${DB_INIT_SNIPPET}
                     ' | 页面defines注册函数=' + typeof (pageEjs && pageEjs.defines && pageEjs.defines.mvu2shujukuGetAllVariables)
                 );
             });
-            console.log('[mvu2shujuku][debug] 已监听 prompt_template_prepare 事件');
+            console.log('[mvu2shujuku][debug] 已监听 prompt_template_prepare 事件（仅首次打印上下文）');
         } catch (e) {
             console.warn('[mvu2shujuku][debug] 监听 prompt_template_prepare 失败:', e);
         }
