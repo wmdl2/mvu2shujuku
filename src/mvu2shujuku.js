@@ -4106,6 +4106,8 @@ ${DB_INIT_SNIPPET}
         } catch (e) {
             console.warn('[mvu2shujuku][debug] 解析卡布局失败:', e);
         }
+        activePlaceholderNeeded = detectPlaceholderFor(character);
+        console.log('[mvu2shujuku][debug][占位符] 当前卡依赖状态栏占位符=' + activePlaceholderNeeded);
         installWindowGetAllVariables();
         const key = autoInitChatId();
         if (key !== key0) console.log('[mvu2shujuku][debug] 开局自动建表 chat 已切换：' + key0 + ' → ' + key);
@@ -4154,6 +4156,42 @@ ${DB_INIT_SNIPPET}
         }
     }
 
+    // 判断角色卡正则是否依赖 <StatusPlaceHolderImpl/>（前端注入占位符）
+    function detectPlaceholderFor(character) {
+        try {
+            const rx = character && character.extensions && character.extensions.regex_scripts;
+            if (!Array.isArray(rx)) return false;
+            return rx.some(r => String(r.findRegex || '').indexOf('StatusPlaceHolderImpl') !== -1);
+        } catch (e) { return false; }
+    }
+
+    // 扩展本体复刻 MVU 的占位符维护：AI 回复后若缺少占位符则追加，前端注入正则才能命中每条消息
+    function ensureWindowStatusPlaceholder() {
+        if (!activePlaceholderNeeded) return;
+        try {
+            const context = getContextSafe();
+            if (!context || !Array.isArray(context.chat) || !context.chat.length) {
+                return;
+            }
+            const msg = context.chat[context.chat.length - 1];
+            if (!msg) return;
+            if (msg.is_user || String(msg.name || '') === 'System') return;
+            const text = String(msg.mes != null ? msg.mes : (msg.message || ''));
+            if (text.indexOf('<StatusPlaceHolderImpl/>') !== -1) return;
+            const next = text + '\n\n<StatusPlaceHolderImpl/>';
+            if (typeof context.setChatMessages === 'function') {
+                context.setChatMessages([{ message_id: msg.message_id != null ? msg.message_id : (context.chat.length - 1), message: next, mes: next }], { refresh: 'affected' });
+                console.log('[mvu2shujuku][debug][占位符] 已追加到消息 id=' + (msg.message_id != null ? msg.message_id : (context.chat.length - 1)));
+            } else {
+                msg.mes = next; if (msg.message !== undefined) msg.message = next;
+                if (typeof context.saveChat === 'function') context.saveChat();
+                console.log('[mvu2shujuku][debug][占位符] 已直接写入消息（无 setChatMessages）');
+            }
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug][占位符] 追加失败:', e);
+        }
+    }
+
     function bindAutoInit(context) {
         const es = context && (context.eventSource || context.event_source);
         const et = context && (context.event_types || context.eventTypes);
@@ -4163,10 +4201,22 @@ ${DB_INIT_SNIPPET}
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
                     hostWindow.setTimeout(autoInitDatabase, 600);
+                    activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
+                    hostWindow.setTimeout(ensureWindowStatusPlaceholder, 1200);
                     const p = hostDocument.getElementById(PANEL_ID);
                     if (p) populateMergeSource(p);
                 });
-                es.on(et.MESSAGE_RECEIVED, () => hostWindow.setTimeout(autoInitDatabase, 600));
+                es.on(et.MESSAGE_RECEIVED, () => {
+                    hostWindow.setTimeout(autoInitDatabase, 600);
+                    // 复刻 MVU：AI 回复后追加状态栏占位符，前端注入正则才能命中每条消息
+                    hostWindow.setTimeout(ensureWindowStatusPlaceholder, 500);
+                });
+                if (et.GENERATION_ENDED) {
+                    es.on(et.GENERATION_ENDED, () => hostWindow.setTimeout(ensureWindowStatusPlaceholder, 800));
+                }
+                if (et.MESSAGE_UPDATED) {
+                    es.on(et.MESSAGE_UPDATED, () => hostWindow.setTimeout(ensureWindowStatusPlaceholder, 300));
+                }
                 autoInitState.inited = true;
             }
         } catch (e) {}
@@ -4343,6 +4393,9 @@ ${DB_INIT_SNIPPET}
     let lastInput = null;
     const mergeState = { sourceTemplate: null };
     let activeLayout = null;
+    // 当前卡是否依赖 <StatusPlaceHolderImpl/>（前端注入正则）；由扩展本体维护占位符，
+    // 不依赖 tavern_helper 桥是否运行
+    let activePlaceholderNeeded = false;
     // Mvu.replaceMvuData 合并写入：MVU 卡开局初始化常连续多次调用（每次只改一个字段），
     // 每次都触发插件整表持久化；合并为一次后只持久化一次。
     let pendingStatWrite = null;
@@ -5414,6 +5467,14 @@ ${DB_INIT_SNIPPET}
         );
         bindAutoInit(context);
         hostWindow.setTimeout(autoInitDatabase, 1500);
+        // 占位符周期自愈：流式生成/消息被覆盖时定期补一次（仅当前卡依赖占位符时生效）
+        activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
+        (function placeholderPeriodic() {
+            hostWindow.setTimeout(() => {
+                try { ensureWindowStatusPlaceholder(); } catch (e) {}
+                placeholderPeriodic();
+            }, 3000);
+        })();
         console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') + '）');
     }
 
