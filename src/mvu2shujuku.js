@@ -1391,17 +1391,9 @@
                     return rowArr;
                 });
             } else {
-                // 单例表：keyCol 首列 + initvar 字段 + usage 补充字段
+                // 单例表：不加业务键列（整表固定一行，row_id=1 即身份；名称列已去掉，避免 stat_data 多出 系统.名称 这类冗余字段）
                 const keyValue = groupName;
                 const used = new Set(['row_id']);
-                columns.unshift({
-                    zh: keyCol,
-                    path: [groupName, keyCol],
-                    value: keyValue,
-                    desc: '唯一标识',
-                    type: 'TEXT',
-                    ident: toIdent(keyCol, used, 'column'),
-                });
                 for (const c of columns) {
                     if (c.ident) used.add(c.ident.toLowerCase());
                 }
@@ -1675,7 +1667,7 @@
         for (let i = 0; i < cols.length; i++) {
             const c = cols[i];
             const isKey = i === 0 && group.kind === 'rows';
-            const isSingletonKey = i === 0 && (group.kind === 'singleton' || group.kind === 'json');
+            const isSingletonKey = i === 0 && group.kind === 'json';
             let def = `  ${c.ident} ${c.type}`;
             const range = c.range || null;
             const extras = Array.isArray(group.extraAllowed && group.extraAllowed[c.ident]) ? group.extraAllowed[c.ident] : [];
@@ -1718,7 +1710,7 @@
 
     function describeGroup(group) {
         if (group.kind === 'singleton') {
-            return `单例表，全表固定一条记录（${group.keyCol}='${group.keyValue}'），只做增量更新，不新增、不删除。`;
+            return `单例表，全表固定一条记录（row_id=1），只做增量更新，不新增、不删除。`;
         }
         if (group.kind === 'json') {
             return `整组 JSON 存储表：本组数据以 JSON 整体保存、读取时还原任意形状（对象/字典/标量）；内部数据，AI 不应直接修改。`;
@@ -1732,19 +1724,21 @@
     function buildNote(group) {
         const L = [];
         if (group.kind === 'json') {
-            L.push(`整组 JSON 存储表（row_id=1，${group.keyCol}='${group.keyValue}'）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除记录。`);
+            L.push(`整组 JSON 存储表（row_id=1）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除记录。`);
         } else if (group.kind === 'singleton') {
             // 单例表不重复描述（“全表固定一条记录”等），直接给出开局记录说明
-            L.push(`本表唯一记录已由开局模板插入（row_id=1，${group.keyCol}='${group.keyValue}'）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`);
+            L.push(`本表唯一记录已由开局模板插入（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`);
         } else {
             L.push(`${group.tableName}。${describeGroup(group)}`);
         }
-        if (group.columns.length) {
+        // 内部列（_扩展数据 / JSON 表的内容列）对 AI 隐藏：只在存储层存在，不进列定义与约束提示词
+        const aiCols = group.columns.filter(c => c.zh !== '_扩展数据' && !(group.kind === 'json' && c.zh === '内容'));
+        if (aiCols.length) {
             L.push('【列定义】');
             // 对齐默认模板：列定义只列中文名 + 标识符；字段说明与约束放【强制约束】
-            group.columns.forEach((c, i) => L.push(`- 列${i + 1}: ${c.zh} ${c.ident}`));
+            aiCols.forEach((c, i) => L.push(`- 列${i + 1}: ${c.zh} ${c.ident}`));
             L.push('【强制约束】');
-            for (const c of group.columns) {
+            for (const c of aiCols) {
                 const parts = [];
                 if (c.range) parts.push(`数值范围 ${c.range[0]}~${c.range[1]}`);
                 if (c.enum) parts.push(`可选值：${c.enum.join(' / ')}`);
@@ -1757,7 +1751,7 @@
                 if (parts.length) L.push(`- ${c.zh}：${parts.join('；')}`);
                 for (const rule of c.check || []) L.push(`- ${c.zh}：${rule}`);
             }
-            for (const c of group.columns) {
+            for (const c of aiCols) {
                 if (c.check && c.check.length > 20) L.push(`- ${c.zh}：…（共 ${c.check.length} 条规则，其余略）`);
             }
             (group.reminders || []).forEach(r => L.push(`- 每次回复必须维护：${r}`));
@@ -1770,10 +1764,10 @@
 
     function buildInitNode(group) {
         if (group.kind === 'json') {
-            return `开局模板已初始化整组数据（row_id=1，${group.keyCol}='${group.keyValue}'）；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
+            return `开局模板已初始化整组数据（row_id=1）；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
         }
         if (group.kind === 'singleton') {
-            return `开局模板已包含唯一记录（row_id=1，${group.keyCol}='${group.keyValue}'）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`;
+            return `开局模板已包含唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`;
         }
         if (group.kind === 'array') {
             return group.rows.length
@@ -1795,14 +1789,14 @@
         if (group.kind === 'singleton') {
             if (kind === 'update') {
                 // 用首个业务列给出具体示例（有初始值用真实值，否则“列名示例”）
-                const col = group.columns[1];
+                const col = group.columns[0];
                 const ident = col ? col.ident : '字段';
                 const zh = col ? col.zh : '字段';
-                const raw = group.rows && group.rows[0] && group.rows[0][2] !== undefined && group.rows[0][2] !== null && String(group.rows[0][2]) !== ''
-                    ? group.rows[0][2]
+                const raw = group.rows && group.rows[0] && group.rows[0][1] !== undefined && group.rows[0][1] !== null && String(group.rows[0][1]) !== ''
+                    ? group.rows[0][1]
                     : `'${zh}示例'`;
                 const val = typeof raw === 'number' ? String(raw) : `'${sqlQuote(String(raw))}'`;
-                return `只允许 UPDATE ${group.ident} SET ${ident} = ${val} WHERE ${group.keyCol}='${sqlQuote(group.keyValue)}'; 依正文明确变化更新对应字段。`;
+                return `只允许 UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1; 依正文明确变化更新对应字段。`;
             }
             return '禁止。';
         }
@@ -2267,7 +2261,7 @@
                         }
                     }
                 }
-                if (!sObj) { sObj = {}; sObj[SE.keyCol] = SE.keyValue; if (SE.kind === 'json') sObj['内容'] = '{}'; }
+                if (!sObj) { sObj = {}; if (SE.kind === 'json') { sObj[SE.keyCol] = SE.keyValue; sObj['内容'] = '{}'; } }
                 try {
                     await Promise.resolve(api.insertRow(SE.table, sObj));
                     console.log('[mvu2shujuku][debug] 已为表「' + SE.table + '」补初始行（原表仅表头）。');
@@ -2876,7 +2870,7 @@
             `    var sSheet0=sheetOfLocal(SE0.table);`,
             `    if(!sSheet0||!Array.isArray(sSheet0.content)||sSheet0.content.length>1)continue;`,
             `    var sObj=templateSheetRow(SE0.table)||null;`,
-            `    if(!sObj){sObj={};sObj[SE0.keyCol]=SE0.keyValue;if(SE.kind==='json')sObj['内容']='{}';}`,
+            `    if(!sObj){sObj={};if(SE.kind==='json'){sObj[SE0.keyCol]=SE0.keyValue;sObj['内容']='{}';}}`,
             `    try{await Promise.resolve(API.insertRow(SE0.table,sObj));console.log('['+BRIDGE_NAME+'] 已为表「'+SE0.table+'」补初始行（原表仅表头）。');}catch(e){console.warn('['+BRIDGE_NAME+'] 补初始行失败:',e);}`,
             `  }`,
             `  for(var oi=0;oi<ops.length;oi++){`,
