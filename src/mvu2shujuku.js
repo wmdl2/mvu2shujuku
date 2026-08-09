@@ -2522,6 +2522,7 @@
             : btoaSafe(templateJson));
         const installMvuShim = opts.installMvuShim !== false;
         const appendPlaceholder = !!opts.appendPlaceholder;
+        const statusPlaceholderNeeded = !!opts.statusPlaceholderNeeded;
         const name = opts.bridgeScriptName || 'MVU转数据库-数据桥';
         const ver = opts.version || VERSION;
 
@@ -3414,7 +3415,7 @@
                 `var placeholderRuntime=null;`,
                 `// 复刻 MVU 的占位符维护：AI 回复后若卡内正则依赖 <StatusPlaceHolderImpl/>，就在消息末尾补上占位符，`,
                 `// 前端注入正则才能命中每条消息（原卡由 MVU 引擎完成，转换后桥接管）`,
-                `var statusPlaceholderNeeded=false;`,
+                `var statusPlaceholderNeeded=${statusPlaceholderNeeded ? 'true' : 'false'};`,
                 `function detectStatusPlaceholder(){`,
                 `  try{`,
                 `    var ctx0=getContext();`,
@@ -3471,6 +3472,13 @@
                 `detectStatusPlaceholder();`,
                 `installMessageRuntime();`,
                 `setTimeout(function(){try{ensureStatusPlaceholder();}catch(e){}},3000);`,
+                `// 周期自愈：流式生成可能覆盖已追加的占位符，定期补一次`,
+                `(function placeholderPeriodic(){`,
+                `  setTimeout(function(){`,
+                `    try{ensureStatusPlaceholder();}catch(e){}`,
+                `    placeholderPeriodic();`,
+                `  },3000);`,
+                `})();`,
             ].join('\n') : ``),
             ``,
             `console.log('['+BRIDGE_NAME+'] 数据桥已就绪：getAllVariables/getSheetByName/getCellByHeader/findRowByColumn');`,
@@ -3640,12 +3648,17 @@
         const blobs = cardTextBlobs(card);
         const usesMvu = blobs.some(b => /Mvu\s*\./i.test(b.text));
         const installMvuShim = opts.installMvuShim !== undefined ? !!opts.installMvuShim : usesMvu;
+        // 转换时即确定是否依赖 <StatusPlaceHolderImpl/>（前端注入正则），写死进桥，
+        // 避免运行时读取懒加载角色对象导致检测失败
+        const statusPlaceholderNeeded = ((data.extensions && data.extensions.regex_scripts) || [])
+            .some(r => String(r.findRegex || '').indexOf('StatusPlaceHolderImpl') !== -1);
 
         const bridgeScript = generateBridgeScript(schema, template, {
             mode,
             template,
             installMvuShim,
             appendPlaceholder: opts.appendPlaceholder !== false,
+            statusPlaceholderNeeded,
             bridgeScriptName: opts.bridgeScriptName || `${data.name || '角色'}·数据库数据桥`,
         });
 
