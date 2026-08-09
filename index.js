@@ -2179,6 +2179,7 @@
             `    }`,
             `  }`,
             `  collect(prev,next,'');`,
+            `  console.log('['+BRIDGE_NAME+'] writeDiffToDb: 差异操作 '+ops.length+' 条');`,
             `  for(var oi=0;oi<ops.length;oi++){`,
             `    var op=ops[oi];`,
             `    var E=op.entry;`,
@@ -2298,6 +2299,7 @@
             `async function ensureTemplateInit(){`,
             `  if(!TEMPLATE_B64)return;`,
             `  var key=currentChatKey();`,
+            `  console.log('['+BRIDGE_NAME+'] ensureTemplateInit: key='+key+' | done='+initState.done+' | running='+initState.running+' | retries='+initRetries);`,
             `  if(initState.key!==key)initRetries=0;`,
             `  if(initState.done&&initState.key===key)return;`,
             `  if(initState.running)return;`,
@@ -2305,6 +2307,7 @@
             `  initState.key=key;`,
             `  try{`,
             `    var out=await mvu2shujukuEnsureInit(API,TEMPLATE_B64,currentCharName()+'模板');`,
+            `    console.log('['+BRIDGE_NAME+'] ensureTemplateInit 结果:', out.status, out.message);`,
             `    if(out.status==='error'||out.status==='partial'){`,
             `      console.warn('['+BRIDGE_NAME+'] 开局建表未完全成功:',out.message);`,
             `      initState.done=false;`,
@@ -2511,6 +2514,7 @@
             `  var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];`,
             `  if(!chat.length)return;`,
             `  if(!tablesReady())return;`,
+            `  console.log('['+BRIDGE_NAME+'] applyPendingUpdateBlocks: 扫描 '+chat.length+' 条消息');`,
             `  if(!appliedBlocks)appliedBlocks={};`,
             `  var key=currentChatKey();`,
             `  for(var mi=0;mi<chat.length;mi++){`,
@@ -2522,6 +2526,7 @@
             `    if(appliedBlocks[msgKey])continue;`,
             `    appliedBlocks[msgKey]=true;`,
             `    var cmds=parseUpdateCommands(text);`,
+            `    console.log('['+BRIDGE_NAME+'] 消息 #'+mi+' 含更新块，解析出 '+cmds.length+' 条命令');`,
             `    if(!cmds.length)continue;`,
             `    Promise.resolve().then(function(){`,
             `      try{`,
@@ -2553,6 +2558,7 @@
                 `  }`,
                 `  function onMessage(){`,
                 `    setTimeout(function(){`,
+                `      console.log('['+BRIDGE_NAME+'] 消息收尾触发: 建表/更新块/状态栏刷新');`,
                 `      Promise.resolve(ensureTemplateInit()).then(function(){try{applyPendingUpdateBlocks();}catch(e){}});`,
                 `      try{broadcastBridgeEvent();}catch(e){}`,
                 `    },250);`,
@@ -3381,19 +3387,35 @@ ${DB_INIT_SNIPPET}
         opt('global', '全局模板（当前选中）');
         opt('default', '默认模板（插件内置）');
         const api = getAcuApi();
+        let presetCount = 0;
+        let presetOk = false;
         if (api && typeof api.getTemplatePresetNames === 'function') {
             try {
                 const names = api.getTemplatePresetNames() || [];
                 for (const n of names) opt('preset:' + n, '预设：' + n);
-                mergeSourceTimer = null;
-            } catch (e) {}
-        } else if (!mergeSourceTimer) {
-            // 插件未就绪：稍后重试，让已保存的预设出现在列表里
-            mergeSourceTimer = hostWindow.setTimeout(() => {
-                mergeSourceTimer = null;
-                const p = hostDocument.getElementById(PANEL_ID);
-                if (p) populateMergeSource(p);
-            }, 2000);
+                presetCount = names.length;
+                presetOk = true;
+            } catch (e) {
+                console.warn('[mvu2shujuku][debug] getTemplatePresetNames 异常:', e);
+            }
+        }
+        console.log(
+            '[mvu2shujuku][debug] populateMergeSource: api=' + !!api +
+            ' | 有 getTemplatePresetNames=' + !!(api && typeof api.getTemplatePresetNames === 'function') +
+            ' | 预设数=' + presetCount + ' | 可读=' + presetOk
+        );
+        // 插件未就绪或预设尚未读到：持续重试（每 2.5 秒），直到成功读到一次预设列表
+        if (!presetOk) {
+            if (!mergeSourceTimer) {
+                mergeSourceTimer = hostWindow.setTimeout(() => {
+                    mergeSourceTimer = null;
+                    const p = hostDocument.getElementById(PANEL_ID);
+                    if (p) populateMergeSource(p);
+                }, 2500);
+            }
+        } else if (mergeSourceTimer) {
+            hostWindow.clearTimeout(mergeSourceTimer);
+            mergeSourceTimer = null;
         }
         if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
     }
@@ -3408,6 +3430,7 @@ ${DB_INIT_SNIPPET}
         const v = sel.value;
         if (!v) { toast('请先选择模板来源', 'error'); return; }
         const api = getAcuApi();
+        console.log('[mvu2shujuku][debug] loadMergeTables: 来源=' + v + ' | api=' + !!api + ' | 有 getTableTemplate=' + !!(api && typeof api.getTableTemplate === 'function'));
         if (!api || typeof api.getTableTemplate !== 'function') {
             toast('未找到 SP·数据库 插件 API', 'error');
             return;
@@ -3431,12 +3454,14 @@ ${DB_INIT_SNIPPET}
         } else {
             try { tpl = api.getTableTemplate({ scope, presetName }) || null; } catch (e) { tpl = null; }
         }
+        console.log('[mvu2shujuku][debug] loadMergeTables: scope=' + scope + ' | presetName=' + presetName + ' | 读到的模板=' + !!tpl + ' | sheet 数=' + (tpl ? Object.keys(tpl).filter(k => k.indexOf('sheet_') === 0).length : 0));
         if (!tpl || typeof tpl !== 'object') {
             toast('未读取到模板（该来源为空或插件未就绪）', 'error');
             return;
         }
         mergeState.sourceTemplate = tpl;
         const sheets = Object.keys(tpl).filter(k => k.startsWith('sheet_') && tpl[k] && typeof tpl[k] === 'object' && !Array.isArray(tpl[k]));
+        console.log('[mvu2shujuku][debug] loadMergeTables: 有效表=' + sheets.length + ' | 表名=' + sheets.map(k => tpl[k].name).join('、'));
         if (!sheets.length) {
             box.innerHTML = '';
             toast('该模板没有表格', 'error');
@@ -3483,6 +3508,7 @@ ${DB_INIT_SNIPPET}
             return;
         }
         const merged = core.mergeTemplates(lastResult.template, mergeState.sourceTemplate, checked);
+        console.log('[mvu2shujuku][debug] applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
         if (!merged.added.length) { toast('没有可并入的表（全部重名或无效）', 'error'); return; }
         const settings = getSettings();
         const mode = settings.mode === 'native' ? 'native' : settings.mode === 'sqlite' ? 'sqlite' : 'both';
@@ -3502,6 +3528,7 @@ ${DB_INIT_SNIPPET}
             }
             lastResult = result;
             renderResult(result);
+            console.log('[mvu2shujuku][debug] applyMergeTables 重新转换完成: meta.tableCount=' + result.meta.tableCount + ' | tableNames=' + result.meta.tableNames.join('、'));
             const msg = '合并完成：新增 ' + merged.added.length + ' 张表' + (merged.skipped.length ? '，跳过重名：' + merged.skipped.join('、') : '');
             if (status) status.textContent = msg;
             toast(msg, 'info');
@@ -4353,19 +4380,35 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         opt('global', '全局模板（当前选中）');
         opt('default', '默认模板（插件内置）');
         const api = getAcuApi();
+        let presetCount = 0;
+        let presetOk = false;
         if (api && typeof api.getTemplatePresetNames === 'function') {
             try {
                 const names = api.getTemplatePresetNames() || [];
                 for (const n of names) opt('preset:' + n, '预设：' + n);
-                mergeSourceTimer = null;
-            } catch (e) {}
-        } else if (!mergeSourceTimer) {
-            // 插件未就绪：稍后重试，让已保存的预设出现在列表里
-            mergeSourceTimer = hostWindow.setTimeout(() => {
-                mergeSourceTimer = null;
-                const p = hostDocument.getElementById(PANEL_ID);
-                if (p) populateMergeSource(p);
-            }, 2000);
+                presetCount = names.length;
+                presetOk = true;
+            } catch (e) {
+                console.warn('[mvu2shujuku][debug] getTemplatePresetNames 异常:', e);
+            }
+        }
+        console.log(
+            '[mvu2shujuku][debug] populateMergeSource: api=' + !!api +
+            ' | 有 getTemplatePresetNames=' + !!(api && typeof api.getTemplatePresetNames === 'function') +
+            ' | 预设数=' + presetCount + ' | 可读=' + presetOk
+        );
+        // 插件未就绪或预设尚未读到：持续重试（每 2.5 秒），直到成功读到一次预设列表
+        if (!presetOk) {
+            if (!mergeSourceTimer) {
+                mergeSourceTimer = hostWindow.setTimeout(() => {
+                    mergeSourceTimer = null;
+                    const p = hostDocument.getElementById(PANEL_ID);
+                    if (p) populateMergeSource(p);
+                }, 2500);
+            }
+        } else if (mergeSourceTimer) {
+            hostWindow.clearTimeout(mergeSourceTimer);
+            mergeSourceTimer = null;
         }
         if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
     }
@@ -4380,6 +4423,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         const v = sel.value;
         if (!v) { toast('请先选择模板来源', 'error'); return; }
         const api = getAcuApi();
+        console.log('[mvu2shujuku][debug] loadMergeTables: 来源=' + v + ' | api=' + !!api + ' | 有 getTableTemplate=' + !!(api && typeof api.getTableTemplate === 'function'));
         if (!api || typeof api.getTableTemplate !== 'function') {
             toast('未找到 SP·数据库 插件 API', 'error');
             return;
@@ -4403,12 +4447,14 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         } else {
             try { tpl = api.getTableTemplate({ scope, presetName }) || null; } catch (e) { tpl = null; }
         }
+        console.log('[mvu2shujuku][debug] loadMergeTables: scope=' + scope + ' | presetName=' + presetName + ' | 读到的模板=' + !!tpl + ' | sheet 数=' + (tpl ? Object.keys(tpl).filter(k => k.indexOf('sheet_') === 0).length : 0));
         if (!tpl || typeof tpl !== 'object') {
             toast('未读取到模板（该来源为空或插件未就绪）', 'error');
             return;
         }
         mergeState.sourceTemplate = tpl;
         const sheets = Object.keys(tpl).filter(k => k.startsWith('sheet_') && tpl[k] && typeof tpl[k] === 'object' && !Array.isArray(tpl[k]));
+        console.log('[mvu2shujuku][debug] loadMergeTables: 有效表=' + sheets.length + ' | 表名=' + sheets.map(k => tpl[k].name).join('、'));
         if (!sheets.length) {
             box.innerHTML = '';
             toast('该模板没有表格', 'error');
@@ -4455,6 +4501,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
             return;
         }
         const merged = core.mergeTemplates(lastResult.template, mergeState.sourceTemplate, checked);
+        console.log('[mvu2shujuku][debug] applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
         if (!merged.added.length) { toast('没有可并入的表（全部重名或无效）', 'error'); return; }
         const settings = getSettings();
         const mode = settings.mode === 'native' ? 'native' : settings.mode === 'sqlite' ? 'sqlite' : 'both';
@@ -4474,6 +4521,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
             }
             lastResult = result;
             renderResult(result);
+            console.log('[mvu2shujuku][debug] applyMergeTables 重新转换完成: meta.tableCount=' + result.meta.tableCount + ' | tableNames=' + result.meta.tableNames.join('、'));
             const msg = '合并完成：新增 ' + merged.added.length + ' 张表' + (merged.skipped.length ? '，跳过重名：' + merged.skipped.join('、') : '');
             if (status) status.textContent = msg;
             toast(msg, 'info');
