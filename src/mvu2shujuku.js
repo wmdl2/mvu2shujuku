@@ -1826,7 +1826,9 @@
         const keyValue = (sampleRow && sampleRow[1] !== undefined && String(sampleRow[1]) !== '')
             ? `'${sqlQuote(sampleRow[1])}'`
             : "'条目名'";
-        const allIdents = group.columns.map(c => c.ident);
+        // 示例列排除内部溢出列（_扩展数据）：AI 不应直接修改该列
+        const exampleCols = group.columns.filter(c => c.zh !== '_扩展数据');
+        const allIdents = exampleCols.map(c => c.ident);
         const firstNonKey = allIdents[1] || '字段';
         if (kind === 'update') {
             return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${sampleValue(2, "'新值'")} WHERE ${keyIdent} = ${keyValue};`;
@@ -1835,7 +1837,11 @@
             // 完整列示例：全部列都列出，列数与 VALUES 一一对应
             const cols = allIdents;
             // 列数与 VALUES 一一对应，避免示例语句列值数量不匹配
-            const vals = cols.map((c, i) => (i === 0 ? keyValue : sampleValue(i + 1, `'值${i}'`)));
+            const vals = exampleCols.map((c, i) => {
+                if (i === 0) return keyValue;
+                const colIdx = group.columns.indexOf(c);
+                return sampleValue(colIdx + 1, `'值${i}'`);
+            });
             return `正文中首次出现应记录的${group.keyCol}时，插入完整的新记录。\nSQL示例: INSERT INTO ${group.ident} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
         }
         return `仅在条目彻底离场、失效或不再需要追踪时移除记录。\nSQL示例: DELETE FROM ${group.ident} WHERE ${keyIdent} = ${keyValue};`;
@@ -2230,6 +2236,45 @@
             }
         };
         collect(prevStat || {}, nextStat || {}, '');
+
+        // 单例/整组JSON表若缺初始行（插件可能只保留表头+seedRows，未物化到 content），先按模板补行，
+        // 避免 updateCell: Row index 1 out of bounds 导致写入落空
+        const seedNeeded = {};
+        for (const op of ops) {
+            if (op && op.entry && op.entry.layout && (op.entry.kind === 'singleton' || op.entry.kind === 'json')) {
+                seedNeeded[op.entry.layout.table] = op.entry;
+            }
+        }
+        if (Object.keys(seedNeeded).length) {
+            let tplSrc = null;
+            try { tplSrc = api.getTableTemplate({ scope: 'chat' }) || null; } catch (e) { tplSrc = null; }
+            for (const tableName in seedNeeded) {
+                const SE = seedNeeded[tableName];
+                const found2 = sheetOf(tableName);
+                if (!found2 || !Array.isArray(found2.sheet.content) || found2.sheet.content.length > 1) continue;
+                let sObj = null;
+                if (tplSrc && typeof tplSrc === 'object') {
+                    for (const k in tplSrc) {
+                        if (k.indexOf('sheet_') === 0 && tplSrc[k] && tplSrc[k].name === tableName) {
+                            const s = tplSrc[k];
+                            const hdr = Array.isArray(s.content) && Array.isArray(s.content[0]) ? s.content[0] : [];
+                            const row = Array.isArray(s.content) && s.content[1] ? s.content[1] : [];
+                            sObj = {};
+                            for (let i = 1; i < hdr.length; i++) sObj[hdr[i]] = (row[i] !== undefined && row[i] !== null) ? row[i] : '';
+                            break;
+                        }
+                    }
+                }
+                if (!sObj) { sObj = {}; sObj[SE.keyCol] = SE.keyValue; if (SE.kind === 'json') sObj['内容'] = '{}'; }
+                try {
+                    await Promise.resolve(api.insertRow(SE.table, sObj));
+                    console.log('[mvu2shujuku][debug] 已为表「' + SE.table + '」补初始行（原表仅表头）。');
+                } catch (e) {
+                    console.warn('[mvu2shujuku][debug] 补初始行失败:', e);
+                }
+            }
+            try { tables = api.exportTableAsJson() || {}; } catch (e) {}
+        }
 
         // 解析差异操作并跳过值未变化的写入
         const resolved = [];
@@ -2761,11 +2806,34 @@
             `  }`,
             `  collect(prev,next,'');`,
             `  console.log('['+BRIDGE_NAME+'] writeDiffToDb: 差异操作 '+ops.length+' 条');`,
-            `  // 一次导出全表快照，避免每个操作重复 exportTableAsJson 造成卡顿`,
+            `  // 一次导出全表快照（exportTableAsJson 仅返回引用，开销可忽略；写入后插件可能重建数据对象，循环内每操作前刷新）`,
             `  var tablesAll={};`,
             `  try{tablesAll=API.exportTableAsJson()||{};}catch(e){}`,
             `  function sheetOfLocal(name){for(var k in tablesAll){if(k.indexOf('sheet_')===0&&tablesAll[k]&&tablesAll[k].name===name)return tablesAll[k];}return null;}`,
             `  function findRowLocal(sheet,colName,value){if(!sheet||!Array.isArray(sheet.content))return -1;var ci=sheet.content[0]?sheet.content[0].indexOf(colName):-1;if(ci===-1)return -1;for(var i=1;i<sheet.content.length;i++){if(sheet.content[i]&&String(sheet.content[i][ci])===String(value))return i;}return -1;}`,
+            `  // 单例/整组JSON表若缺初始行（插件可能只保留表头+seedRows，未物化到 content），先按模板补行，`,
+            `  // 避免 updateCell: Row index 1 out of bounds 导致写入落空`,
+            `  var needSeed={};`,
+            `  for(var si=0;si<ops.length;si++){var se=ops[si];if(se&&se.entry&&se.entry.layout&&(se.entry.kind==='singleton'||se.entry.kind==='json'))needSeed[se.entry.layout.table]=se.entry;}`,
+            `  var tplCached=null;`,
+            `  function templateSheetRow(tableName){`,
+            `    try{if(!tplCached)tplCached=JSON.parse(mvu2shujukuDecodeB64(TEMPLATE_B64));}catch(e){tplCached={};}`,
+            `    for(var k in tplCached){if(k.indexOf('sheet_')===0&&tplCached[k]&&tplCached[k].name===tableName){`,
+            `      var s=tplCached[k];var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var row=Array.isArray(s.content)&&s.content[1]?s.content[1]:[];var o={};`,
+            `      for(var i=1;i<hdr.length;i++){o[hdr[i]]=row[i]!==undefined&&row[i]!==null?row[i]:'';}`,
+            `      return o;`,
+            `    }}`,
+            `    return null;`,
+            `  }`,
+            `  for(var st in needSeed){`,
+            `    var SE=needSeed[st];`,
+            `    var SE0=SE.layout||SE;`,
+            `    var sSheet0=sheetOfLocal(SE0.table);`,
+            `    if(!sSheet0||!Array.isArray(sSheet0.content)||sSheet0.content.length>1)continue;`,
+            `    var sObj=templateSheetRow(SE0.table)||null;`,
+            `    if(!sObj){sObj={};sObj[SE0.keyCol]=SE0.keyValue;if(SE.kind==='json')sObj['内容']='{}';}`,
+            `    try{await Promise.resolve(API.insertRow(SE0.table,sObj));console.log('['+BRIDGE_NAME+'] 已为表「'+SE0.table+'」补初始行（原表仅表头）。');}catch(e){console.warn('['+BRIDGE_NAME+'] 补初始行失败:',e);}`,
+            `  }`,
             `  for(var oi=0;oi<ops.length;oi++){`,
             `    var op=ops[oi];`,
             `    var E=op.entry;`,
