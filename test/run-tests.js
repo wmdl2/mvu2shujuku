@@ -1775,6 +1775,27 @@ test('JSON 输入 + asPng:true → 产出可解析的 PNG 卡（输出格式对 
     assert.strictEqual(r.meta.asPng, true, 'meta.asPng 应为 true');
 });
 
+test('内嵌世界书卡：移除外部世界引用，世界书以内嵌为准（避免酒馆按外部世界加载为空）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '世界书卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                name: '世界书卡',
+                entries: [{ comment: '[InitVar]', content: JSON.stringify({ 系统: { 当前时间: '12:00' } }) }],
+            },
+            extensions: { world: '世界书卡', regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const d = r.card.data || r.card;
+    assert.ok(d.character_book && Array.isArray(d.character_book.entries) && d.character_book.entries.length >= 1, '应保留内嵌世界书条目');
+    assert.ok(!d.extensions.world, '有内嵌世界书时应移除外部世界引用');
+    assert.ok(String(d.character_book.name).endsWith('_数据库'), '内嵌世界书名应加后缀避免同名覆盖');
+});
+
 test('浏览器环境（无 Buffer）PNG 回写正常', () => {
     if (!fs.existsSync(PNG)) {
         console.log('    （跳过：缺少 PNG 参考卡）');

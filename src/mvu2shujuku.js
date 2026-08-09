@@ -3797,8 +3797,7 @@
             data.name = String(data.name || '') + nameSuffix;
             report.note(`角色卡名已追加后缀：${origName} → ${data.name}。`);
         }
-        // 世界书独立：内嵌世界书与外部世界书引用都加后缀，
-        // 避免导入转换卡时以同名覆盖原卡的世界书。
+        // 世界书独立：内嵌世界书加后缀，避免同名覆盖原卡世界书。
         if (data.character_book && typeof data.character_book.name === 'string' && nameSuffix) {
             const bookName = data.character_book.name;
             if (bookName && !bookName.endsWith(nameSuffix)) {
@@ -3808,7 +3807,12 @@
         }
         if (data.extensions && typeof data.extensions.world === 'string' && nameSuffix) {
             const worldName = data.extensions.world;
-            if (worldName && !worldName.endsWith(nameSuffix)) {
+            // 转换后的世界书以内嵌 character_book 为准（含 __ACU_TEMPLATE_DATA__ 模板条目）；
+            // 移除外部世界引用，避免酒馆按旧名/新名去找外部世界文件导致世界书为空。
+            if (data.character_book && Array.isArray(data.character_book.entries) && data.character_book.entries.length) {
+                delete data.extensions.world;
+                report.note(`原外部世界引用「${worldName}」已移除：转换后的世界书以内嵌为准（${data.character_book.name}，含模板条目）。`);
+            } else if (worldName && !worldName.endsWith(nameSuffix)) {
                 data.extensions.world = worldName + nameSuffix;
                 report.note(`外部世界书引用已追加后缀：${worldName} → ${data.extensions.world}。`);
             }
