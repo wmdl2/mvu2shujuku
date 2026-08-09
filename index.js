@@ -20,6 +20,22 @@
     const VERSION = '0.1.0';
 
     /* ================================================================
+     * 开局建表核心流程（对应 MVU 的 init 时机 → SP·数据库 的初始化）
+     *
+     * MVU 在聊天开始（首条消息存在）时用 [InitVar] 初始化变量；
+     * 转换后由 SP·数据库 的 initGameSession 在同样时机建表并写入初始行。
+     * 本片段是纯 ES5 字符串，同时内嵌进 卡内数据桥脚本 与 扩展本体，
+     * 保证两处行为一致；规则只来自插件 API（importTemplateFromData /
+     * initGameSession / exportTableAsJson），不含任何特定角色卡内容。
+     * ================================================================ */
+    const DB_INIT_SNIPPET = [
+        'function mvu2dbDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}',
+        'function mvu2dbExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}',
+        'function mvu2dbMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}',
+        'async function mvu2dbEnsureInit(api,b64,presetName){var out={status:"skip",message:"",missing:[]};var tpl=null;try{tpl=JSON.parse(mvu2dbDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2dbExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2dbMissingTableNames(api,names);if(!out.missing.length){out.status="skip";out.message="已有全部表格，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await Promise.resolve(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}));steps.push(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成");}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"){try{var r2=await Promise.resolve(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}));if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else{steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2dbMissingTableNames(api,names);out.status=out.missing.length?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无");return out;}',
+    ].join('\n');
+
+    /* ================================================================
      * 拼音标识符（与 SP·数据库 插件内部的中文→拼音逻辑一致，基于 pinyin-pro 字典）
      * 角色卡的中文组名/字段名 → 拼音 slug，作为 SQLite 物理标识符。
      * 字典来自 转换器/src/pinyin-data.js（生成自 pinyin-pro，MIT）。
@@ -1640,8 +1656,10 @@
             return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${sampleCols[0] || '字段'} = '新值' WHERE ${keyIdent} = '条目名';`;
         }
         if (kind === 'insert') {
-            const cols = [keyIdent, ...sampleCols].join(', ');
-            return `正文中首次出现应记录的${group.keyCol}时，插入完整的新记录。\nSQL示例: INSERT INTO ${group.ident} (${cols}) VALUES ('条目名', '值1', '值2');`;
+            // 列数与 VALUES 一一对应，避免示例语句列值数量不匹配
+            const cols = [keyIdent, ...sampleCols];
+            const vals = cols.map((c, i) => (i === 0 ? "'条目名'" : `'值${i}'`));
+            return `正文中首次出现应记录的${group.keyCol}时，插入完整的新记录。\nSQL示例: INSERT INTO ${group.ident} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
         }
         return `仅在条目彻底离场、失效或不再需要追踪时移除记录。\nSQL示例: DELETE FROM ${group.ident} WHERE ${keyIdent} = '条目名';`;
     }
@@ -1893,6 +1911,9 @@
             `}`,
             `var TEMPLATE=parseTemplate();`,
             '',
+            // 开局建表核心流程（与扩展本体同一份逻辑：缺表时按插件 API 初始化）
+            ...DB_INIT_SNIPPET.split('\n'),
+            '',
             `var SD_LAYOUT=${layoutJson};`,
             '',
             `window.getSheetByName=function(tableName){`,
@@ -1952,6 +1973,8 @@
             `  }`,
             `  cur[path[path.length-1]]=value;`,
             `}`,
+            '',
+            `var runtimeDisplay={};`,
             '',
             `window.getAllVariables=function(){`,
             `  var data={stat_data:{}};`,
@@ -2015,9 +2038,20 @@
             `    console.error('['+BRIDGE_NAME+'] getAllVariables 出错:',e);`,
             `  }`,
             `  try{data.display_data=JSON.parse(JSON.stringify(sd));}catch(e){}`,
+            `  try{for(var rk in runtimeDisplay){if(runtimeDisplay.hasOwnProperty(rk))setPath(data.display_data,rk.split('.'),runtimeDisplay[rk]);}}catch(e){}`,
             `  return data;`,
             `};`,
             `try{rootWindow.getAllVariables=window.getAllVariables;}catch(e){}`,
+            `function installTavernHelperShim(){`,
+            `  for(var i=0;i<roots.length;i++){`,
+            `    try{`,
+            `      var th=roots[i].TavernHelper;`,
+            `      if(!th)continue;`,
+            `      if(typeof th.getVariables!=='function')th.getVariables=function(){return window.getAllVariables();};`,
+            `    }catch(e){}`,
+            `  }`,
+            `}`,
+            `installTavernHelperShim();`,
             '',
             `var currentStat=function(){`,
             `  try{return window.getAllVariables().stat_data||{};}catch(e){return {};}`,
@@ -2119,7 +2153,8 @@
             `  for(var i=0;i<roots.length;i++){try{if(roots[i].Mvu){hostMvu=roots[i].Mvu;break;}}catch(e){}}`,
             `  var fake={};`,
             `  fake.getMvuData=function(opts){`,
-            `    return {stat_data:currentStat()};`,
+            `    var all=window.getAllVariables();`,
+            `    return {stat_data:all.stat_data||{},display_data:all.display_data||{},delta_data:{},initialized_lorebooks:{}};`,
             `  };`,
             `  fake.replaceMvuData=async function(data,opts){`,
             `    var next=(data&&data.stat_data)||{};`,
@@ -2172,36 +2207,42 @@
             `  var ctx=getContext();`,
             `  return String(ctx&&(ctx.chatId||ctx.chat_id||ctx.chatFile||ctx.chatFileName)||'unknown');`,
             `}`,
-            `function hasAnyTables(){`,
-            `  try{`,
-            `    var all=API.exportTableAsJson()||{};`,
-            `    for(var k in all){if(k.indexOf('sheet_')===0)return true;}`,
-            `  }catch(e){}`,
-            `  return false;`,
+            `function currentCharName(){`,
+            `  var ctx=getContext();`,
+            `  try{var n=ctx&&(ctx.name||ctx.charName||ctx.characterName);if(n)return String(n);}catch(e){}`,
+            `  return '';`,
             `}`,
             `var initState={running:false,done:false,key:''};`,
             `async function ensureTemplateInit(){`,
-            `  if(!TEMPLATE)return;`,
+            `  if(!TEMPLATE_B64)return;`,
             `  var key=currentChatKey();`,
             `  if(initState.done&&initState.key===key)return;`,
             `  if(initState.running)return;`,
-            `  if(hasAnyTables()){initState.done=true;initState.key=key;return;}`,
             `  initState.running=true;`,
             `  initState.key=key;`,
             `  try{`,
-            `    var result=await Promise.resolve(API.importTemplateFromData(TEMPLATE,{scope:'chat'}));`,
-            `    if(result&&result.success===false){`,
-            `      console.warn('['+BRIDGE_NAME+'] 模板导入失败:',result.message||'未知原因');`,
+            `    var out=await mvu2dbEnsureInit(API,TEMPLATE_B64,currentCharName()+'模板');`,
+            `    if(out.status==='error'||out.status==='partial'){`,
+            `      console.warn('['+BRIDGE_NAME+'] 开局建表未完全成功:',out.message);`,
+            `      initState.done=false;`,
             `    }else{`,
-            `      console.log('['+BRIDGE_NAME+'] 已导入数据库模板到当前聊天');`,
+            `      console.log('['+BRIDGE_NAME+'] '+out.message);`,
+            `      initState.done=true;`,
             `    }`,
             `  }catch(e){`,
-            `    console.warn('['+BRIDGE_NAME+'] 模板导入异常:',e);`,
+            `    console.warn('['+BRIDGE_NAME+'] 开局建表异常:',e);`,
+            `    initState.done=false;`,
             `  }`,
             `  initState.running=false;`,
-            `  initState.done=true;`,
             `}`,
-            `ensureTemplateInit();`,
+            `function tablesReady(){`,
+            `  try{`,
+            `    var tpl=parseTemplate();`,
+            `    if(!tpl)return false;`,
+            `    return mvu2dbMissingTableNames(API,mvu2dbExpectedTableNames(tpl)).length===0;`,
+            `  }catch(e){return false;}`,
+            `}`,
+            `Promise.resolve(ensureTemplateInit()).then(function(){try{applyPendingUpdateBlocks();}catch(e){}});`,
             '',
             `// MVU 更新块兼容：解析 <UpdateVariable>/<json_patch> 中的 _.set/_.add/_.remove 等指令，`,
             `// 先应用到 stat_data 副本，再 diff 写回数据库（与 Mvu.replaceMvuData 同一套机制）。`,
@@ -2268,31 +2309,40 @@
             `      }`,
             `      if(end===-1)break;`,
             `      var args=splitCommandArgs(inner.slice(open+1,end));`,
+            `      var after=inner.slice(end+1).replace(/^\\s*;\\s*/,'');`,
+            `      var reason='';`,
+            `      var rmatch=after.match(/^\\/\\/\s*([^\\n]*)/);`,
+            `      if(rmatch)reason=rmatch[1].trim();`,
             `      var type=cm[1];`,
             `      var path=String(args[0]||'').replace(/^['\"]|['\"]$/g,'').replace(/^\\//,'').replace(/\\//g,'.');`,
-            `      if(type==='remove'||type==='unset'||type==='delete'){cmds.push({type:'delete',path:path});}`,
-            `      else if(type==='insert'){cmds.push({type:'insert',path:path,keyOrIndex:args[1]?parseCommandValue2(args[1]):null,value:args[2]?parseCommandValue2(args[2]):undefined});}`,
-            `      else if(type==='assign'){cmds.push({type:'assign',path:path,value:parseCommandValue2(args[1])});}`,
-            `      else if(type==='add'){cmds.push({type:'add',path:path,value:args[1]!==undefined?parseCommandValue2(args[1]):undefined});}`,
-            `      else {cmds.push({type:'set',path:path,value:args[1]!==undefined?parseCommandValue2(args[1]):undefined});}`,
+            `      if(type==='remove'||type==='unset'||type==='delete'){cmds.push({type:'delete',path:path,reason:reason});}`,
+            `      else if(type==='insert'){cmds.push({type:'insert',path:path,keyOrIndex:args[1]?parseCommandValue2(args[1]):null,value:args[2]?parseCommandValue2(args[2]):undefined,reason:reason});}`,
+            `      else if(type==='assign'){cmds.push({type:'assign',path:path,keyOrIndex:args[2]!==undefined?parseCommandValue2(args[1]):undefined,value:args[2]!==undefined?parseCommandValue2(args[2]):parseCommandValue2(args[1]),reason:reason});}`,
+            `      else if(type==='add'){cmds.push({type:'add',path:path,value:args[1]!==undefined?parseCommandValue2(args[1]):undefined,reason:reason});}`,
+            `      else {cmds.push({type:'set',path:path,value:args[2]!==undefined?parseCommandValue2(args[2]):(args[1]!==undefined?parseCommandValue2(args[1]):undefined),reason:reason});}`,
             `      cmdRe.lastIndex=end+1;`,
             `    }`,
             `  }`,
             `  return cmds;`,
             `}`,
-            `function applyCommandsToStat(stat,cmds){`,
+            `function trimDisplay(v){try{return String(JSON.stringify(v)).replace(/^"|"$/g,'').replace(/\\\\"/g,'"');}catch(e){return String(v);}}`,
+            `function noteDisplay(display,path,oldV,newV,reason){if(!display)return;var r=reason?(' ('+reason+')'):'';display[path]=trimDisplay(oldV)+'->'+trimDisplay(newV)+r;}`,
+            `function applyCommandsToStat(stat,cmds,display){`,
             `  for(var ci=0;ci<cmds.length;ci++){`,
             `    var cmd=cmds[ci];`,
             `    if(!cmd.path)continue;`,
             `    var parts=String(cmd.path).split('.').filter(function(p){return p!=='';});`,
             `    if(cmd.type==='delete'){`,
-            `      if(parts.length===1){try{delete stat[parts[0]];}catch(e){}}`,
+            `      var oldDel=null;`,
+            `      if(parts.length===1){oldDel=stat[parts[0]];try{delete stat[parts[0]];}catch(e){}}`,
             `      else{`,
             `        var cur=stat;`,
             `        var ok=true;`,
             `        for(var d=0;d<parts.length-1;d++){cur=cur?cur[parts[d]]:null;if(!cur){ok=false;break;}}`,
-            `        if(ok){try{delete cur[parts[parts.length-1]];}catch(e){}}`,
+            `        if(ok){oldDel=cur[parts[parts.length-1]];try{delete cur[parts[parts.length-1]];}catch(e){}}`,
             `      }`,
+            `      if(Array.isArray(oldDel)&&oldDel.length===2)oldDel=oldDel[0];`,
+            `      noteDisplay(display,cmd.path,oldDel,'(移除)',cmd.reason);`,
             `      continue;`,
             `    }`,
             `    if(cmd.type==='insert'){`,
@@ -2306,6 +2356,20 @@
             `        else if(container&&typeof container==='object')container[String(Date.now())]=cmd.value;`,
             `      }else if(Array.isArray(container)&&/^\\d+$/.test(String(key))){container.splice(Number(key),0,cmd.value);}`,
             `      else if(container&&typeof container==='object'){container[key]=cmd.value;}`,
+            `      noteDisplay(display,cmd.path,'(新增)',cmd.value,cmd.reason);`,
+            `      continue;`,
+            `    }`,
+            `    if(cmd.type==='assign'&&cmd.keyOrIndex!==undefined){`,
+            `      var acont=stat;`,
+            `      var aok=true;`,
+            `      for(var d5=0;d5<parts.length-1;d5++){acont=acont?acont[parts[d5]]:null;if(!acont){aok=false;break;}}`,
+            `      if(aok&&acont&&typeof acont==='object'){`,
+            `        var akey=cmd.keyOrIndex;`,
+            `        if(akey==='-'&&Array.isArray(acont))acont.push(cmd.value);`,
+            `        else if(Array.isArray(acont)&&/^\\d+$/.test(String(akey)))acont.splice(Number(akey),0,cmd.value);`,
+            `        else if(acont&&typeof acont==='object')acont[akey]=cmd.value;`,
+            `        noteDisplay(display,cmd.path,(Array.isArray(acont)&&acont.length&&acont[0]!==cmd.value?acont[0]:'(变更)'),cmd.value,cmd.reason);`,
+            `      }`,
             `      continue;`,
             `    }`,
             `    if(cmd.type==='assign'&&cmd.value&&typeof cmd.value==='object'&&!Array.isArray(cmd.value)){`,
@@ -2326,17 +2390,30 @@
             `    var existing=target[last];`,
             `    if(cmd.type==='add'){`,
             `      var base=Array.isArray(existing)&&existing.length?existing[0]:existing;`,
-            `      var num=parseFloat(base);`,
             `      var delta=parseFloat(cmd.value);`,
-            `      if(!isNaN(num)&&!isNaN(delta)){`,
-            `        target[last]=num+delta;`,
-            `      }else if(Array.isArray(existing)){`,
-            `        existing.push(cmd.value);`,
+            `      var dateVal=null;`,
+            `      if(typeof base==='string'){var dtest=new Date(base);if(!isNaN(dtest.getTime())&&isNaN(Number(base)))dateVal=dtest;}`,
+            `      if(dateVal&&!isNaN(delta)){`,
+            `        var nd=new Date(dateVal.getTime()+delta);`,
+            `        target[last]=nd.toISOString();`,
+            `        noteDisplay(display,cmd.path,base,target[last],cmd.reason);`,
             `      }else{`,
-            `        target[last]=cmd.value;`,
+            `        var num=parseFloat(base);`,
+            `        if(!isNaN(num)&&!isNaN(delta)){`,
+            `          target[last]=parseFloat((num+delta).toPrecision(12));`,
+            `          noteDisplay(display,cmd.path,base,target[last],cmd.reason);`,
+            `        }else if(Array.isArray(existing)){`,
+            `          existing.push(cmd.value);`,
+            `          noteDisplay(display,cmd.path,'(数组追加)',cmd.value,cmd.reason);`,
+            `        }else{`,
+            `          target[last]=cmd.value;`,
+            `          noteDisplay(display,cmd.path,base,target[last],cmd.reason);`,
+            `        }`,
             `      }`,
             `    }else{`,
+            `      var oldSet=Array.isArray(existing)&&existing.length===2?existing[0]:existing;`,
             `      target[last]=cmd.value;`,
+            `      noteDisplay(display,cmd.path,oldSet,target[last],cmd.reason);`,
             `    }`,
             `  }`,
             `  return stat;`,
@@ -2346,6 +2423,7 @@
             `  var ctx=getContext();`,
             `  var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];`,
             `  if(!chat.length)return;`,
+            `  if(!tablesReady())return;`,
             `  if(!appliedBlocks)appliedBlocks={};`,
             `  var key=currentChatKey();`,
             `  for(var mi=0;mi<chat.length;mi++){`,
@@ -2362,13 +2440,16 @@
             `      try{`,
             `        var prev=currentStat();`,
             `        var next=JSON.parse(JSON.stringify(prev));`,
-            `        applyCommandsToStat(next,cmds);`,
-            `        return writeDiffToDb(prev,next).then(function(){broadcastBridgeEvent();});`,
+            `        var disp={};`,
+            `        applyCommandsToStat(next,cmds,disp);`,
+            `        return writeDiffToDb(prev,next).then(function(){`,
+            `          for(var dk in disp){if(disp.hasOwnProperty(dk))runtimeDisplay[dk]=disp[dk];}`,
+            `          broadcastBridgeEvent();`,
+            `        });`,
             `      }catch(e){console.warn('['+BRIDGE_NAME+'] 应用 MVU 更新块失败:',e);}`,
             `    });`,
             `  }`,
             `}`,
-            `try{applyPendingUpdateBlocks();}catch(e){}`,
             (appendPlaceholder ? [
                 ``,
                 `var placeholderRuntime=null;`,
@@ -2385,8 +2466,7 @@
                 `  }`,
                 `  function onMessage(){`,
                 `    setTimeout(function(){`,
-                `      try{ensureTemplateInit();}catch(e){}`,
-                `      try{applyPendingUpdateBlocks();}catch(e){}`,
+                `      Promise.resolve(ensureTemplateInit()).then(function(){try{applyPendingUpdateBlocks();}catch(e){}});`,
                 `      try{broadcastBridgeEvent();}catch(e){}`,
                 `    },250);`,
                 `  }`,
@@ -2491,7 +2571,8 @@
         }
         pathStr = pathStr.replace(/^stat_data\./, '').replace(/^stat\./, '');
         const parts = pathStr.split('.');
-        const opMatch = s.replace(/^[^=!<>]*/, '').match(/^(>=|<=|==|===|!=|!==|>|<)\s*(.+)$/);
+        // 长操作符优先（===/!== 必须先于 ==/!= 匹配，否则会被拆成 == + 残留字符）
+        const opMatch = s.replace(/^[^=!<>]*/, '').match(/^(===|!==|==|!=|>=|<=|>|<)\s*(.+)$/);
         const cell = resolveCellForPath(layout, parts);
         if (!cell) return { unsupported: true, raw: atom, pathStr };
         let expr;
@@ -2542,69 +2623,80 @@
             const cond = condRaw.trim();
             const openEnd = match.length;
             const rest = full.slice(offset + openEnd);
-            // 找闭合（考虑嵌套 <% %> 数量）
+            // 解析 if / else-if / else 链：统计嵌套的 <% if ... { %> 与闭合标签，
+            // 记录每个分支的边界（bodyStart/bodyEnd 相对 rest）。
             let depth = 1;
             let closeIdx = -1;
-            let elseIdx = -1;
-            let unsupported = false;
-            const re = /<%[-=]?\s*}\s*(?:else\s*(?:if\s*\([\s\S]*?\))?\s*\{)?\s*%>/g;
-            re.lastIndex = 0;
-            let m;
-            while ((m = re.exec(rest))) {
-                const token = m[0];
-                if (token.includes('else')) {
-                    if (/else\s+if/.test(token)) { unsupported = true; break; } // else-if 链需人工
-                    if (elseIdx === -1) elseIdx = m.index; // } else { 不改变深度
+            const branches = [{ cond, bodyStart: 0 }];
+            const tokenRe = /<%[-=]?\s*if\s*\([\s\S]*?\)\s*\{[\s\S]*?%>|<%[-=]?\s*}\s*(?:else\s*(?:if\s*\([\s\S]*?\))?\s*\{)?\s*%>/g;
+            tokenRe.lastIndex = 0;
+            let tm;
+            while ((tm = tokenRe.exec(rest))) {
+                const token = tm[0];
+                if (/^\s*<%[-=]?\s*if\s*\(/i.test(token)) {
+                    depth++; // 嵌套 if 开标签
+                    continue;
+                }
+                if (/else\s*(?:if\s*\([\s\S]*?\))?\s*\{/i.test(token)) {
+                    const lastBranch = branches[branches.length - 1];
+                    lastBranch.bodyEnd = tm.index;
+                    const em = token.match(/else\s+if\s*\(([\s\S]*?)\)\s*\{/i);
+                    branches.push(em
+                        ? { cond: em[1].trim(), bodyStart: tm.index + token.length }
+                        : { cond: null, bodyStart: tm.index + token.length });
                     continue;
                 }
                 depth -= 1;
-                if (depth === 0) {
-                    closeIdx = m.index;
-                    break;
-                }
+                if (depth === 0) { closeIdx = tm.index; break; }
             }
-            if (closeIdx === -1 || unsupported) return null;
-            let elseBody = '';
-            let mainBody = rest.slice(0, elseIdx === -1 ? closeIdx : elseIdx);
-            if (elseIdx !== -1) {
-                const elseToken = rest.slice(elseIdx).match(/<%[-=]?\s*}\s*else\s*\{\s*%>/);
-                if (!elseToken) return null;
-                const elseTokenLen = elseToken[0].length;
-                elseBody = rest.slice(elseIdx + elseTokenLen, closeIdx);
-            }
-            // 处理嵌套 if？先只处理无嵌套的
-            if (/<%/g.test(mainBody) || /<%/g.test(elseBody)) {
-                // 内容里还有 EJS 块：递归处理
-                const r1 = rewriteEjsConditions(mainBody, layout, report);
-                const r2 = rewriteEjsConditions(elseBody, layout, report);
-                mainBody = r1.text;
-                elseBody = r2.text;
-                items.push(...r1.items);
-                items.push(...r2.items);
-            }
-            const atoms = cond.split(/\s+(&&|\|\|)\s+/);
-            const logical = cond.match(/\s+(&&|\|\|)\s+/g) || [];
-            let mapped = [];
+            if (closeIdx === -1) return null;
+            branches[branches.length - 1].bodyEnd = closeIdx;
+
+            // 逐分支：递归处理嵌套 EJS；映射条件（任一条件无法转换则整条链保留人工）
+            const mappedBranches = [];
             let ok = true;
             let aggregateUsed = false;
-            for (let i = 0; i < atoms.length; i++) {
-                const res = normalizeCondAtom(atoms[i], layout);
-                if (!res || res.unsupported) {
-                    ok = false;
-                    break;
+            for (const b of branches) {
+                let body = rest.slice(b.bodyStart, b.bodyEnd);
+                if (/<%/g.test(body)) {
+                    const rw = rewriteEjsConditions(body, layout, report);
+                    body = rw.text;
+                    items.push(...rw.items);
                 }
-                if (res.aggregate) aggregateUsed = true;
-                mapped.push(res.expr);
+                let ifStr = null;
+                if (b.cond !== null) {
+                    const atoms = b.cond.split(/\s+(&&|\|\|)\s+/);
+                    const logical = b.cond.match(/\s+(&&|\|\|)\s+/g) || [];
+                    const mapped = [];
+                    for (let i = 0; i < atoms.length; i++) {
+                        const res = normalizeCondAtom(atoms[i], layout);
+                        if (!res || res.unsupported) { ok = false; break; }
+                        if (res.aggregate) aggregateUsed = true;
+                        mapped.push(res.expr);
+                    }
+                    if (!ok) break;
+                    let condStr = mapped[0];
+                    for (let i = 0; i < logical.length; i++) {
+                        condStr += (logical[i] === '&&' ? ' & ' : ', ') + mapped[i + 1];
+                    }
+                    const ifType = mapCondToIfType(condStr);
+                    const attr = ifType.type === 'cell' ? 'cell' : ifType.type === 'db' ? 'db' : 'cond';
+                    ifStr = `<if ${attr}="${ifType.value}">`;
+                }
+                mappedBranches.push({ body, ifStr });
             }
             if (!ok) return null;
-            let condStr = mapped[0];
-            for (let i = 0; i < logical.length; i++) {
-                condStr += (logical[i] === '&&' ? ' & ' : ', ') + mapped[i + 1];
+
+            // 组装嵌套结构：<if C1>B1<else><if C2>B2<else>…B最后…</if></if>
+            // 插件解析器支持 <else> 内嵌套 <if>（parseSingleIfBlock 递归处理）。
+            function assembleChain(idx) {
+                const b = mappedBranches[idx];
+                if (idx === mappedBranches.length - 1) {
+                    return b.ifStr ? b.ifStr + b.body + '</if>' : b.body;
+                }
+                return b.ifStr + b.body + '<else>' + assembleChain(idx + 1) + '</if>';
             }
-            const ifType = mapCondToIfType(condStr);
-            const attr = ifType.type === 'cell' ? 'cell' : ifType.type === 'db' ? 'db' : 'cond';
-            const attrValue = ifType.value;
-            const rewritten = `<if ${attr}="${attrValue}">${mainBody}${elseIdx !== -1 ? `<else>${elseBody}` : ''}</if>`;
+            const rewritten = assembleChain(0);
             // 原块 = 开标签 + 主体（含 else 分支）+ 闭合标签
             const closeToken = rest.slice(closeIdx).match(/<%[-=]?\s*}\s*%>/);
             const origLen = closeToken ? closeIdx + closeToken[0].length : rest.length;
@@ -2670,29 +2762,6 @@
         /去除变量/i,
         /完整变量/i,
     ];
-
-    // 开局自动建表：往开场白注入脚本，读取内嵌模板，在表格为空时导入到当前聊天。
-    // 对应 MVU 的 init 时机（首次进入/首次回复前），避免用户手动切换模板。
-    function openingInitScript(templateB64) {
-        return '<script>(function(){' +
-            'var B64="' + templateB64 + '";' +
-            'function b64dec(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}' +
-            'function wait(fn,ms,max){return new Promise(function(res){var n=0;var iv=setInterval(function(){var ok=false;try{ok=fn();}catch(e){}if(ok||++n>max){clearInterval(iv);res();}},ms);});}' +
-            'function getApi(){var roots=[window];try{roots.push(window.parent);}catch(e){}try{roots.push(window.top);}catch(e){}for(var j=0;j<roots.length;j++){try{var a=roots[j].AutoCardUpdaterAPI;if(a&&typeof a.importTemplateFromData==="function")return a;}catch(e){}}return null;}' +
-            'async function init(){try{await wait(function(){return getApi()!=null;},300,120);var api=getApi();if(!api){console.warn("[mvu2db] 未找到 SP·数据库 插件 API，跳过开局建表");return;}var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var has=false;for(var k in all){if(k.indexOf("sheet_")===0){has=true;break;}}if(has){console.log("[mvu2db] 已有表格，跳过开局注入");return;}var tpl=JSON.parse(b64dec(B64));var r=await api.importTemplateFromData(tpl,{scope:"chat"});console.log("[mvu2db] 开局表格模板注入完成",r&&r.success!==false);}catch(e){console.error("[mvu2db] 开局表格模板注入失败",e);}}' +
-            'if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",init);}else{init();}' +
-            '})();</script>';
-    }
-
-    function injectOpeningScript(firstMes, templateB64) {
-        const script = openingInitScript(templateB64);
-        const text = String(firstMes || '');
-        const lastFence = text.lastIndexOf('```');
-        if (lastFence !== -1 && text.trimEnd().endsWith('```')) {
-            return text.slice(0, lastFence) + '\n' + script + '\n' + text.slice(lastFence);
-        }
-        return text + '\n' + script + '\n';
-    }
 
     // 仅当正则明确解析 MVU 专属语法时才移除；显示用正则（data_block/状态栏等）原样保留
     function isMvuRegex(r) {
@@ -2806,10 +2875,10 @@
             const comment = String(e.comment || '');
             const content = String(e.content || '');
             const isInit = /\[initvar\]/i.test(comment);
-            const isMvuUpdate = /^\[mvu[ _-]?update\]|^\[mvuupdate\]/i.test(comment) || (
-                /\[mvu[ _-]?update\]|\[mvuupdate\]|变量列表|变量输出格式/i.test(comment) &&
-                /stat_data|UpdateVariable|JSONPatch|format_message_variable|status_current_variables|JSON\s*Patch/i.test(content)
-            );
+            // MVU 变量输出/更新规则条目：comment 或 content 命中 MVU 专属标记即删除
+            // （教程示例“蓝灯 D1”comment 是任意名字，必须靠 content 里的专属宏识别）
+            const mvuMarker = /\[mvu[ _-]?update\]|\[mvuupdate\]|变量列表|变量输出格式|status_current_variables?|format_message_variable|get_message_variable|<UpdateVariable|<JSONPatch|<initvar>|\.set\s*\(\s*['"]/i;
+            const isMvuUpdate = mvuMarker.test(comment) || (mvuMarker.test(content) && /stat_data|UpdateVariable|JSONPatch|status_current_variable|get_message_variable|format_message_variable/i.test(content));
             if (isInit || isMvuUpdate) {
                 report.note(`已删除 MVU 世界书条目「${comment}」（${isInit ? '初始变量' : '更新规则'}已迁移为数据库模板/规则）。`);
                 continue;
@@ -2844,13 +2913,7 @@
             prevent_recursion: true,
             use_regex: false,
         });
-        report.note('已把表格模板写入世界书条目 __ACU_TEMPLATE_DATA__（base64），供插件/开场页在开局时自动建表。');
-
-        // 往开场白注入开局初始化脚本：表格为空时自动导入模板（对应 MVU 的 init 时机）
-        if (typeof data.first_mes === 'string') {
-            data.first_mes = injectOpeningScript(data.first_mes, tplB64);
-            report.note('已在开场白注入开局建表脚本：首次进入时若表格为空则自动导入模板，无需手动切换。');
-        }
+        report.note('已把表格模板写入世界书条目 __ACU_TEMPLATE_DATA__（base64），供扩展/卡内桥在开局时自动建表（对应 MVU 的 init 时机，调用 SP·数据库 的 initGameSession）。');
         cb.entries = newEntries;
 
         // 4. 正则处理
@@ -3026,7 +3089,21 @@
             '  align-items: center;',
             '}',
             '#mvu2db-settings .mvu2db-row > * { flex: 0 0 auto; }',
-            '#mvu2db-settings .menu_button { width: auto; white-space: nowrap; }',
+            '#mvu2db-settings .menu_button {',
+            '  width: auto;',
+            '  white-space: nowrap;',
+            '  background: var(--SmartThemeBlurTintColor, rgba(255,255,255,0.10));',
+            '  border: 1px solid var(--SmartThemeBorderColor, #888);',
+            '  border-radius: 6px;',
+            '  padding: 5px 12px;',
+            '  cursor: pointer;',
+            '  color: var(--SmartThemeBodyColor, inherit);',
+            '}',
+            '#mvu2db-settings .menu_button:hover {',
+            '  background: var(--SmartThemeBlurTintColor, rgba(255,255,255,0.20));',
+            '  border-color: var(--SmartThemeBorderColor, #ccc);',
+            '}',
+            '#mvu2db-settings .menu_button[style*="display:none"] { display: none !important; }',
             '#mvu2db-settings .mvu2db-label { display: block; margin-bottom: 4px; font-weight: 600; }',
             '#mvu2db-settings .mvu2db-mode-group label { margin-right: 12px; }',
             '#mvu2db-settings .mvu2db-help {',
@@ -3062,6 +3139,70 @@
     const PANEL_ID = PLUGIN_ID + '-settings';
     const SETTINGS_KEY = 'mvu2db';
     const state = { timer: null };
+
+    // 开局建表核心流程（与卡内数据桥同一份逻辑：缺表时调用 SP·数据库 的 initGameSession）
+${DB_INIT_SNIPPET}
+
+    const DB_TEMPLATE_KEY = '__ACU_TEMPLATE_DATA__';
+    const autoInitState = { running: false, done: '', inited: false };
+
+    function autoInitChatId() {
+        try {
+            const context = getContextSafe();
+            return String(context.chatId || context.chat_id || context.chatFile || context.chatFileName || 'unknown');
+        } catch (e) { return 'unknown'; }
+    }
+
+    // 对应 MVU 的 init 时机：进入聊天/收到首条消息时，若卡内有模板且表格缺失则自动建表。
+    // 只处理本转换器产出的卡（世界书含 __ACU_TEMPLATE_DATA__），其余卡一律不动。
+    async function autoInitDatabase() {
+        if (autoInitState.running) return;
+        const api = getAcuApi();
+        if (!api) return;
+        let character = null;
+        try { character = currentCharacter(); } catch (e) {}
+        if (!character) return;
+        const cb = character.character_book;
+        if (!(cb && Array.isArray(cb.entries) && cb.entries.length)) {
+            try { character = await fetchFullCharacter(character); } catch (e) {}
+        }
+        const fullCb = character && character.character_book;
+        const entries = fullCb && Array.isArray(fullCb.entries) ? fullCb.entries : [];
+        const entry = entries.find(e => Array.isArray(e.keys) && e.keys.indexOf(DB_TEMPLATE_KEY) !== -1);
+        if (!entry || !entry.content) return;
+        const key = autoInitChatId();
+        if (autoInitState.done === key) return;
+        autoInitState.running = true;
+        try {
+            const presetName = String((character && character.name) || '') + '模板';
+            const out = await mvu2dbEnsureInit(api, entry.content, presetName);
+            if (out.status === 'error' || out.status === 'partial') {
+                console.warn('[mvu2db] 开局自动建表未完全成功：' + out.message);
+                autoInitState.done = '';
+            } else {
+                console.log('[mvu2db] 开局自动建表：' + out.message);
+                autoInitState.done = key;
+            }
+        } catch (e) {
+            console.warn('[mvu2db] 开局自动建表异常：' + (e && e.message ? e.message : e));
+            autoInitState.done = '';
+        } finally {
+            autoInitState.running = false;
+        }
+    }
+
+    function bindAutoInit(context) {
+        const es = context && (context.eventSource || context.event_source);
+        const et = context && (context.event_types || context.eventTypes);
+        if (!es || !et || typeof es.on !== 'function') return;
+        try {
+            if (!autoInitState.inited) {
+                es.on(et.CHAT_CHANGED, () => hostWindow.setTimeout(autoInitDatabase, 600));
+                es.on(et.MESSAGE_RECEIVED, () => hostWindow.setTimeout(autoInitDatabase, 600));
+                autoInitState.inited = true;
+            }
+        } catch (e) {}
+    }
 
     function getHostWindow() {
         try {
@@ -3433,6 +3574,9 @@
         report.value = result.reportText;
         report.readOnly = true;
         box.appendChild(report);
+        // 转换完成后才出现“保存到 sillytavern”按钮
+        const saveBtn = panel.querySelector('#mvu2db-save-card');
+        if (saveBtn) saveBtn.style.display = '';
         toast('转换完成，共 ' + result.meta.tableCount + ' 张表');
     }
 
@@ -3506,7 +3650,7 @@
             '      <div class="mvu2db-row">',
             '        <button id="mvu2db-convert-current" class="menu_button">转换所选角色卡</button>',
             '        <button id="mvu2db-convert-file" class="menu_button">转换所选文件</button>',
-            '        <button id="mvu2db-save-card" class="menu_button">保存角色卡和模板</button>',
+            '        <button id="mvu2db-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
             '        <button id="mvu2db-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2db-result"></div>',
@@ -3574,6 +3718,8 @@
             lastResult = null;
             const box = panel.querySelector('.mvu2db-result');
             if (box) box.innerHTML = '';
+            const saveBtn = panel.querySelector('#mvu2db-save-card');
+            if (saveBtn) saveBtn.style.display = 'none';
         });
         bind('#mvu2db-save-card', async () => {
             await saveCardToSillyTavern();
@@ -3635,6 +3781,8 @@
     function main() {
         const context = getContextSafe();
         ensureSettingsPanel(context);
+        bindAutoInit(context);
+        hostWindow.setTimeout(autoInitDatabase, 1500);
         console.log('[mvu2db] 扩展已加载（' + (window.MVU2DB_CORE ? window.MVU2DB_CORE.VERSION : '核心缺失') + '）');
     }
 
@@ -3691,7 +3839,7 @@
                 '',
                 '## 说明',
                 '- 转换不自动安装数据库插件；不迁移旧聊天；只转换角色卡本身。',
-                '- 表格模板以 base64 写入卡内世界书条目（__ACU_TEMPLATE_DATA__），并在开场白注入开局脚本：进入新聊天且表格为空时自动建表，无需手动导入或切换。',
+                '- 开局自动建表对应 MVU 的 init 时机：模板以 base64 写入卡内世界书条目（__ACU_TEMPLATE_DATA__），扩展与卡内数据桥在进入聊天/首条消息时按需调用 SP·数据库 的 initGameSession 建表，开场白保持原样。',
                 '- 状态栏继续通过 getAllVariables() 读取 stat_data；数据桥会把数据库表格重建为 stat_data 形状。',
                 '- 卡内 MVU 相关正则/脚本/更新规则会被移除；依赖 MVU API 的脚本通过 MVU 兼容层尽力适配。',
             ].join('\n'),
@@ -3749,6 +3897,73 @@ root.__MVU2DB_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢囹坽�
     const SETTINGS_KEY = 'mvu2db';
     const state = { timer: null };
 
+    // 开局建表核心流程（与卡内数据桥同一份逻辑：缺表时调用 SP·数据库 的 initGameSession）
+function mvu2dbDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}
+function mvu2dbExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}
+function mvu2dbMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}
+async function mvu2dbEnsureInit(api,b64,presetName){var out={status:"skip",message:"",missing:[]};var tpl=null;try{tpl=JSON.parse(mvu2dbDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2dbExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2dbMissingTableNames(api,names);if(!out.missing.length){out.status="skip";out.message="已有全部表格，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await Promise.resolve(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}));steps.push(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成");}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"){try{var r2=await Promise.resolve(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}));if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else{steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2dbMissingTableNames(api,names);out.status=out.missing.length?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无");return out;}
+
+    const DB_TEMPLATE_KEY = '__ACU_TEMPLATE_DATA__';
+    const autoInitState = { running: false, done: '', inited: false };
+
+    function autoInitChatId() {
+        try {
+            const context = getContextSafe();
+            return String(context.chatId || context.chat_id || context.chatFile || context.chatFileName || 'unknown');
+        } catch (e) { return 'unknown'; }
+    }
+
+    // 对应 MVU 的 init 时机：进入聊天/收到首条消息时，若卡内有模板且表格缺失则自动建表。
+    // 只处理本转换器产出的卡（世界书含 __ACU_TEMPLATE_DATA__），其余卡一律不动。
+    async function autoInitDatabase() {
+        if (autoInitState.running) return;
+        const api = getAcuApi();
+        if (!api) return;
+        let character = null;
+        try { character = currentCharacter(); } catch (e) {}
+        if (!character) return;
+        const cb = character.character_book;
+        if (!(cb && Array.isArray(cb.entries) && cb.entries.length)) {
+            try { character = await fetchFullCharacter(character); } catch (e) {}
+        }
+        const fullCb = character && character.character_book;
+        const entries = fullCb && Array.isArray(fullCb.entries) ? fullCb.entries : [];
+        const entry = entries.find(e => Array.isArray(e.keys) && e.keys.indexOf(DB_TEMPLATE_KEY) !== -1);
+        if (!entry || !entry.content) return;
+        const key = autoInitChatId();
+        if (autoInitState.done === key) return;
+        autoInitState.running = true;
+        try {
+            const presetName = String((character && character.name) || '') + '模板';
+            const out = await mvu2dbEnsureInit(api, entry.content, presetName);
+            if (out.status === 'error' || out.status === 'partial') {
+                console.warn('[mvu2db] 开局自动建表未完全成功：' + out.message);
+                autoInitState.done = '';
+            } else {
+                console.log('[mvu2db] 开局自动建表：' + out.message);
+                autoInitState.done = key;
+            }
+        } catch (e) {
+            console.warn('[mvu2db] 开局自动建表异常：' + (e && e.message ? e.message : e));
+            autoInitState.done = '';
+        } finally {
+            autoInitState.running = false;
+        }
+    }
+
+    function bindAutoInit(context) {
+        const es = context && (context.eventSource || context.event_source);
+        const et = context && (context.event_types || context.eventTypes);
+        if (!es || !et || typeof es.on !== 'function') return;
+        try {
+            if (!autoInitState.inited) {
+                es.on(et.CHAT_CHANGED, () => hostWindow.setTimeout(autoInitDatabase, 600));
+                es.on(et.MESSAGE_RECEIVED, () => hostWindow.setTimeout(autoInitDatabase, 600));
+                autoInitState.inited = true;
+            }
+        } catch (e) {}
+    }
+
     function getHostWindow() {
         try {
             if (window.parent && window.parent !== window && window.parent.document) return window.parent;
@@ -4119,6 +4334,9 @@ root.__MVU2DB_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢囹坽�
         report.value = result.reportText;
         report.readOnly = true;
         box.appendChild(report);
+        // 转换完成后才出现“保存到 sillytavern”按钮
+        const saveBtn = panel.querySelector('#mvu2db-save-card');
+        if (saveBtn) saveBtn.style.display = '';
         toast('转换完成，共 ' + result.meta.tableCount + ' 张表');
     }
 
@@ -4192,7 +4410,7 @@ root.__MVU2DB_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢囹坽�
             '      <div class="mvu2db-row">',
             '        <button id="mvu2db-convert-current" class="menu_button">转换所选角色卡</button>',
             '        <button id="mvu2db-convert-file" class="menu_button">转换所选文件</button>',
-            '        <button id="mvu2db-save-card" class="menu_button">保存角色卡和模板</button>',
+            '        <button id="mvu2db-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
             '        <button id="mvu2db-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2db-result"></div>',
@@ -4260,6 +4478,8 @@ root.__MVU2DB_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢囹坽�
             lastResult = null;
             const box = panel.querySelector('.mvu2db-result');
             if (box) box.innerHTML = '';
+            const saveBtn = panel.querySelector('#mvu2db-save-card');
+            if (saveBtn) saveBtn.style.display = 'none';
         });
         bind('#mvu2db-save-card', async () => {
             await saveCardToSillyTavern();
@@ -4321,6 +4541,8 @@ root.__MVU2DB_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢囹坽�
     function main() {
         const context = getContextSafe();
         ensureSettingsPanel(context);
+        bindAutoInit(context);
+        hostWindow.setTimeout(autoInitDatabase, 1500);
         console.log('[mvu2db] 扩展已加载（' + (window.MVU2DB_CORE ? window.MVU2DB_CORE.VERSION : '核心缺失') + '）');
     }
 

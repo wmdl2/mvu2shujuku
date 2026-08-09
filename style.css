@@ -13,7 +13,21 @@
   align-items: center;
 }
 #mvu2db-settings .mvu2db-row > * { flex: 0 0 auto; }
-#mvu2db-settings .menu_button { width: auto; white-space: nowrap; }
+#mvu2db-settings .menu_button {
+  width: auto;
+  white-space: nowrap;
+  background: var(--SmartThemeBlurTintColor, rgba(255,255,255,0.10));
+  border: 1px solid var(--SmartThemeBorderColor, #888);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  color: var(--SmartThemeBodyColor, inherit);
+}
+#mvu2db-settings .menu_button:hover {
+  background: var(--SmartThemeBlurTintColor, rgba(255,255,255,0.20));
+  border-color: var(--SmartThemeBorderColor, #ccc);
+}
+#mvu2db-settings .menu_button[style*="display:none"] { display: none !important; }
 #mvu2db-settings .mvu2db-label { display: block; margin-bottom: 4px; font-weight: 600; }
 #mvu2db-settings .mvu2db-mode-group label { margin-right: 12px; }
 #mvu2db-settings .mvu2db-help {

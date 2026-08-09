@@ -28,7 +28,7 @@
    - **sqlite**：AI 输出 `INSERT/UPDATE/DELETE` SQL。
 2. 选择输入：当前角色卡，或文件选择器（支持 `.json` / `.png`）。
 3. 点击转换：
-   - **保存角色卡和模板**：把角色卡写入 SillyTavern 角色列表（自动带原头像），
+   - **保存角色卡和模板到sillytavern**（转换完成后才出现）：把角色卡写入 SillyTavern 角色列表（自动带原头像），
      并同时把表格模板存为 SP·数据库 插件的“全局模板预设”（预设名 = 卡名 + `模板`）；
      开局进入新聊天会自动建表，无需手动切换；预设仅作备用。失败会弹窗显示日志，
      角色卡部分失败时自动回退下载；
@@ -46,9 +46,10 @@
 - `[MvuUpdate]` 中的 `range` → `CHECK`、枚举 → `CHECK IN`、`format`/`check` → note、`_强制更新提醒` → “每次回复必须维护”。所有范围/枚举/格式均来自卡片自身规则。
 
 ### 数据桥（写入卡内 tavern_helper 脚本）
-- **开局自动建表（对应 MVU 的 init 时机）**：转换时把模板以 base64 写入世界书条目
-  `__ACU_TEMPLATE_DATA__`，并在开场白里注入初始化脚本——首次进入/首次回复前若表格为空，
-  自动 `importTemplateFromData({scope:'chat'})` 建表，无需手动切换模板；
+- **开局自动建表（对应 MVU 的 init 时机 → SP·数据库 的初始化）**：转换时把模板以 base64
+  写入世界书条目 `__ACU_TEMPLATE_DATA__`，不改动开场白（纯文字开场白也能用）。
+  扩展本体与卡内数据桥在进入聊天/首条消息时，若按模板表名检测到缺表，就调用
+  `initGameSession({ injectTemplate:true, loadPreset:false, templateData })` 建表并写入初始行；
   已有表格的聊天不会被重置。
 - 保存角色卡时仍会顺带把模板存为插件“全局模板预设”，可在插件模板面板手动切换备用。
 
@@ -59,16 +60,27 @@
 - `getAllVariables()` shim：数据库表格 → `stat_data` 嵌套形状（含 `[值,条件]` 还原、`display_data` 镜像）——**状态栏 HTML 不用改**。
 - `Mvu.getMvuData / Mvu.replaceMvuData` 兼容层：旧脚本 diff 写库。
 - 运行时解析 `<UpdateVariable>` / `<json_patch>` 块（`_.set/add/remove/assign`、JSON Patch）写库。
+- **问候语 `<UpdateVariable>` 覆盖初始值**：MVU 允许额外问候语里的更新语句覆盖 `[InitVar]`；
+  转换后桥脚本在开局建表完成后再应用开场白里的更新块，等效于 MVU 的覆盖行为。
+- **命令与显示兼容**：`_.set`（双参/三参 `old,new` 两种格式）、`_.assign`（对象合并/按键赋值）、
+  `_.remove/unset/delete`、`_.add`（数值加法带精度处理、日期字符串按毫秒推进转 ISO）；
+  `display_data` 在会话内保存 `旧->新(原因)` 镜像（与 MVU 的 display 字符串同格式）。
 - 广播 `shujuku-table-updated` 事件；状态栏原 `Mvu.events.VARIABLE_UPDATE_ENDED` 监听自动改写。
+- 数据桥同时提供 `TavernHelper.getVariables()` shim，兼容教程中「纯文本状态栏」的读取写法。
 
 ### 卡片清理
-- **删除** `[InitVar]` / `[MvuUpdate]` 系列世界书；仅移除解析 MVU 语法的正则与 MVU/ZOD 脚本。
+- **删除** `[InitVar]` / `[MvuUpdate]` 系列世界书，以及 content 含 MVU 专属宏
+  （`status_current_variable` / `get_message_variable` / `format_message_variable` 等）的变量输出条目；
+  仅移除解析 MVU 语法的正则与 MVU/ZOD 脚本。
 - **非 MVU 内容逐字节保留**（状态栏、data_block 显示、普通世界书等）；
-  开场白仅追加开局建表脚本，其余内容不动。
+  开场白保持原样（不注入任何脚本，纯文字开场白同样可用）。
 - **世界书独立**：内嵌世界书名称与外部世界书引用会追加 `_数据库` 后缀，避免导入转换卡时同名覆盖原卡世界书。
 
 ### EJS 条件重写
-`getvar('stat_data.组.字段')`、`getvar("stat_data").组["字段"][0]`、`_.has(...)` → `<if cell/cond/db>`；无法自动转换的保留原样并列入报告。
+`getvar('stat_data.组.字段')`、`getvar("stat_data").组["字段"][0]`、`_.has(...)`、
+`Object.keys(...).length` 聚合、`&&/||`/`!` 组合、单层 `else` 与 **else-if 链** →
+插件的 `<if cell/cond/db>` + `<else>`（链转成嵌套 `<if>`，插件解析器支持）；
+含函数调用等不可映射表达式的条件保留原样并列入报告。
 
 ## 目录
 
