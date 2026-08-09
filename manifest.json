@@ -8,7 +8,7 @@
   "css": "style.css",
   "author": "mvu2db",
   "version": "0.1.0",
-  "homePage": "",
+  "homePage": "https://github.com/wmdl2/mvu2shujuku",
   "auto_update": false,
   "minimum_client_version": "1.12.0"
 }
