@@ -3020,6 +3020,22 @@
         return window.SillyTavern.getContext();
     }
 
+    // 查找 SP·数据库 插件暴露的 window.AutoCardUpdaterAPI（兼容 iframe/顶层窗口）
+    function getAcuApi() {
+        const roots = [];
+        const add = (r) => { try { if (r && roots.indexOf(r) === -1) roots.push(r); } catch (e) {} };
+        add(window);
+        try { add(window.parent); } catch (e) {}
+        try { add(window.top); } catch (e) {}
+        for (const r of roots) {
+            try {
+                const a = r.AutoCardUpdaterAPI;
+                if (a && typeof a.importTemplateFromData === 'function') return a;
+            } catch (e) {}
+        }
+        return null;
+    }
+
     function getSettings() {
         const context = getContextSafe();
         if (!context.extensionSettings) context.extensionSettings = {};
@@ -3268,6 +3284,21 @@
                 saved = true;
             }
             if (!saved) return false;
+            // 顺带把表格模板存为插件的“全局模板预设”，用户可在插件面板手动切换
+            const acu = getAcuApi();
+            if (acu && lastResult && lastResult.template) {
+                try {
+                    const presetName = displayName + '模板';
+                    const presetResult = await acu.importTemplateFromData(lastResult.template, { scope: 'global', presetName });
+                    if (presetResult && presetResult.success === false) {
+                        console.warn('[mvu2db] 模板全局预设保存失败:', presetResult.message);
+                    } else {
+                        toast('已把表格模板保存为插件预设：' + presetName, 'info');
+                    }
+                } catch (e) {
+                    console.warn('[mvu2db] 模板全局预设保存异常:', e);
+                }
+            }
             if (typeof context.getCharacters === 'function') {
                 try {
                     await context.getCharacters();
@@ -3385,6 +3416,7 @@
             '        <button id="mvu2db-convert-current" class="menu_button">转换所选角色卡</button>',
             '        <button id="mvu2db-convert-file" class="menu_button">转换所选文件</button>',
             '        <button id="mvu2db-save-card" class="menu_button">保存角色卡至 SillyTavern</button>',
+            '        <button id="mvu2db-apply-template" class="menu_button" title="把最近一次转换的表格模板直接应用到当前聊天">应用模板到当前聊天</button>',
             '        <button id="mvu2db-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2db-result"></div>',
@@ -3455,6 +3487,28 @@
         });
         bind('#mvu2db-save-card', async () => {
             await saveCardToSillyTavern();
+        });
+        bind('#mvu2db-apply-template', async () => {
+            if (!lastResult || !lastResult.template) {
+                toast('请先转换，再应用模板', 'error');
+                return;
+            }
+            const acu = getAcuApi();
+            if (!acu) {
+                toast('未找到 SP·数据库 插件 API（AutoCardUpdaterAPI）', 'error');
+                return;
+            }
+            try {
+                toast('正在应用模板到当前聊天…');
+                const result = await acu.importTemplateFromData(lastResult.template, { scope: 'chat' });
+                if (result && result.success === false) {
+                    toast('应用失败：' + (result.message || '未知原因'), 'error');
+                } else {
+                    toast('已把表格模板应用到当前聊天', 'success');
+                }
+            } catch (e) {
+                toast('应用模板失败：' + (e && e.message ? e.message : e), 'error');
+            }
         });
         const modeInputs = panel.querySelectorAll('input[name="mvu2db-mode"]');
         modeInputs.forEach((el) => {
