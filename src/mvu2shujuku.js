@@ -3973,11 +3973,14 @@ ${DB_INIT_SNIPPET}
         if (!es || typeof es.on !== 'function') return;
         try {
             es.on('prompt_template_prepare', (prepared) => {
+                const pageEjs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
                 console.log(
                     '[mvu2shujuku][debug] prompt_template_prepare 上下文: 键数=' + (prepared ? Object.keys(prepared).length : 0) +
                     ' | getvar=' + typeof (prepared && prepared.getvar) +
                     ' | mvu2shujukuGetAllVariables=' + typeof (prepared && prepared.mvu2shujukuGetAllVariables) +
-                    ' | getAllVariables=' + typeof (prepared && prepared.getAllVariables)
+                    ' | getAllVariables=' + typeof (prepared && prepared.getAllVariables) +
+                    ' | 页面EjsTemplate=' + !!pageEjs +
+                    ' | 页面defines注册函数=' + typeof (pageEjs && pageEjs.defines && pageEjs.defines.mvu2shujukuGetAllVariables)
                 );
             });
             console.log('[mvu2shujuku][debug] 已监听 prompt_template_prepare 事件');
