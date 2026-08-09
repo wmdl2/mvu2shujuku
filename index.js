@@ -2905,14 +2905,29 @@
 
         // 3. 世界书处理
         const newEntries = [];
+        // MVU 剧情条目宏：{{get_message_variable::路径}} 改写为数据库表引用
+        // （剧情条目保留；变量值由插件注入表格数据提供，宏本身在数据库环境无解析器）
+        function rewritePlotMacros(text) {
+            return String(text || '').replace(/\{\{?\s*get_message_variable\s*::\s*([^}\s]+)\s*\}\}?/gi, (m, path) => {
+                const p = String(path).replace(/^stat_data\./, '').replace(/^stat\./, '').replace(/\[0\]/g, '');
+                const parts = p.split('.').filter(Boolean);
+                if (!parts.length) return m;
+                const table = parts[0] + '表';
+                const rest = parts.slice(1).join('/');
+                return rest ? `（数据库表「${table}」的「${rest}」）` : `（数据库表「${table}」）`;
+            });
+        }
         for (const e of entries) {
             const comment = String(e.comment || '');
             const content = String(e.content || '');
             const isInit = /\[initvar\]/i.test(comment);
+            // [mvu_plot] 是 MVU 的“剧情 AI 专用”标记：内容是剧情/人设/地点等提示，
+            // 不属于变量更新规则，一律保留（内部 MVU 宏单独改写）。
+            const isPlot = /\[mvu[ _-]?plot\]|\[mvuplot\]/i.test(comment);
             // MVU 变量输出/更新规则条目：comment 或 content 命中 MVU 专属标记即删除
             // （教程示例“蓝灯 D1”comment 是任意名字，必须靠 content 里的专属宏识别）
             const mvuMarker = /\[mvu[ _-]?update\]|\[mvuupdate\]|变量列表|变量输出格式|status_current_variables?|format_message_variable|get_message_variable|<UpdateVariable|<JSONPatch|<initvar>|\.set\s*\(\s*['"]/i;
-            const isMvuUpdate = mvuMarker.test(comment) || (mvuMarker.test(content) && /stat_data|UpdateVariable|JSONPatch|status_current_variable|get_message_variable|format_message_variable/i.test(content));
+            const isMvuUpdate = !isPlot && (mvuMarker.test(comment) || (mvuMarker.test(content) && /stat_data|UpdateVariable|JSONPatch|status_current_variable|get_message_variable|format_message_variable/i.test(content)));
             if (isInit || isMvuUpdate) {
                 report.note(`已删除 MVU 世界书条目「${comment}」（${isInit ? '初始变量' : '更新规则'}已迁移为数据库模板/规则）。`);
                 continue;
@@ -2927,7 +2942,11 @@
                 }
             }
             const copy = deepClone(e);
-            copy.content = rw.text;
+            const afterMacros = rewritePlotMacros(rw.text);
+            if (afterMacros !== rw.text) {
+                report.auto(`条目「${comment}」的 MVU 宏 {{get_message_variable::…}} 已改写为数据库表引用（剧情条目保留）。`);
+            }
+            copy.content = afterMacros;
             newEntries.push(copy);
         }
         // 把模板以 base64 写入世界书条目（keys: __ACU_TEMPLATE_DATA__），供插件/开场页按需导入
@@ -2938,7 +2957,9 @@
             keys: ['__ACU_TEMPLATE_DATA__'],
             comment: 'SP·数据库 表格模板（勿删勿改）',
             content: tplB64,
-            enabled: true,
+            // 默认禁用：仅作数据载体供扩展/桥读取（按 keys 识别，不看 enabled），
+            // 避免在世界书 UI 里显示为启用状态（绿灯）。
+            enabled: false,
             constant: false,
             selective: false,
             position: 'before_char',
@@ -3126,16 +3147,16 @@
             '#mvu2db-settings .menu_button {',
             '  width: auto;',
             '  white-space: nowrap;',
-            '  background: var(--SmartThemeBlurTintColor, rgba(255,255,255,0.10));',
-            '  border: 1px solid var(--SmartThemeBorderColor, #888);',
+            '  background: rgba(128,128,128,0.22);',
+            '  border: 1px solid rgba(160,160,160,0.65);',
             '  border-radius: 6px;',
             '  padding: 5px 12px;',
             '  cursor: pointer;',
             '  color: var(--SmartThemeBodyColor, inherit);',
             '}',
             '#mvu2db-settings .menu_button:hover {',
-            '  background: var(--SmartThemeBlurTintColor, rgba(255,255,255,0.20));',
-            '  border-color: var(--SmartThemeBorderColor, #ccc);',
+            '  background: rgba(128,128,128,0.38);',
+            '  border-color: rgba(220,220,220,0.85);',
             '}',
             '#mvu2db-settings .menu_button[style*="display:none"] { display: none !important; }',
             '#mvu2db-settings .mvu2db-label { display: block; margin-bottom: 4px; font-weight: 600; }',
