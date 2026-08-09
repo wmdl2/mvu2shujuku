@@ -2283,6 +2283,7 @@
         // 解析差异操作并跳过值未变化的写入
         const resolved = [];
         const directOps = [];
+        const newRows = new Map();
         const parseObj = (v) => { try { if (!v) return {}; if (typeof v === 'object') return v; return JSON.parse(String(v)); } catch (e) { return {}; } };
         for (const op of ops) {
             const E = op.entry;
@@ -2311,28 +2312,33 @@
                     continue;
                 }
                 let ovRow = 1;
-                let ovNewRowObj = null;
                 if (E.kind === 'rows') {
                     const ovKey = op.rowKey;
                     if (ovKey === undefined) continue;
                     ovRow = findRowByColumn(sheet, L.keyCol, ovKey);
                     if (ovRow === -1) {
-                        const ci = header.indexOf(L.keyCol);
-                        if (ci === -1) continue;
-                        const obj = {};
-                        for (let nc = 0; nc < L.cols.length; nc++) {
-                            const cc = L.cols[nc];
-                            const cIdx = header.indexOf(cc[0]);
-                            if (cIdx === -1) continue;
-                            if (cc[0] === L.keyCol) { obj[cc[0]] = String(ovKey); continue; }
-                            if (cc[0] === '_扩展数据') { const o1 = {}; o1[op.mergeKey] = op.value; obj[cc[0]] = JSON.stringify(o1); }
+                        // 行可能只存在于 seedRows：跳过，避免 INSERT 撞 UNIQUE
+                        const srH2 = header;
+                        const srF2 = Array.isArray(sheet.seedRows) && sheet.seedRows.length
+                            ? findRowByColumn({ content: [srH2, ...sheet.seedRows] }, L.keyCol, ovKey)
+                            : -1;
+                        if (srF2 !== -1) {
+                            console.log('[mvu2shujuku][debug] 表「' + L.table + '」键「' + ovKey + '」存在于 seedRows，溢出字段跳过（等待插件物化）。');
+                            continue;
                         }
-                        ovNewRowObj = obj;
+                        // 合并进同一新行（与已声明字段同一条 INSERT，避免重复 INSERT 撞 UNIQUE）
+                        const nk2 = L.table + '\u0000' + ovKey;
+                        let nr2 = newRows.get(nk2);
+                        if (!nr2) { nr2 = { table: L.table, header, layout: L, keyCol: L.keyCol, keyVal: ovKey, cells: {} }; newRows.set(nk2, nr2); }
+                        const ovCell = JSON.stringify({ [op.mergeKey]: op.value });
+                        const prevOv = nr2.cells['_扩展数据'];
+                        if (prevOv) {
+                            try { const m = JSON.parse(prevOv); m[op.mergeKey] = op.value; nr2.cells['_扩展数据'] = JSON.stringify(m); } catch (e) { nr2.cells['_扩展数据'] = ovCell; }
+                        } else {
+                            nr2.cells['_扩展数据'] = ovCell;
+                        }
+                        continue;
                     }
-                }
-                if (ovNewRowObj) {
-                    directOps.push({ kind: 'overflow-insert', key: found.key, sheet, layout: L, rowObj: ovNewRowObj });
-                    continue;
                 }
                 const ovCur = parseObj(sheet.content[ovRow] ? sheet.content[ovRow][ovcIdx] : undefined);
                 const ovMerged = JSON.parse(JSON.stringify(ovCur || {}));
@@ -2361,27 +2367,22 @@
                 if (keyVal === undefined) continue;
                 rowIndex = findRowByColumn(sheet, L.keyCol, keyVal);
                 if (rowIndex === -1) {
-                    const ci = header.indexOf(L.keyCol);
-                    if (ci === -1) continue;
-                    let maxId = 0;
-                    for (let i = 1; i < sheet.content.length; i++) {
-                        const rid = Number(sheet.content[i] && sheet.content[i][0]);
-                        if (!isNaN(rid) && rid > maxId) maxId = rid;
+                    // 行可能只存在于 seedRows（插件未物化到 content）：避免 INSERT 撞 UNIQUE，本次跳过
+                    const srHeader = header;
+                    const srFound = Array.isArray(sheet.seedRows) && sheet.seedRows.length
+                        ? findRowByColumn({ content: [srHeader, ...sheet.seedRows] }, L.keyCol, keyVal)
+                        : -1;
+                    if (srFound !== -1) {
+                        console.log('[mvu2shujuku][debug] 表「' + L.table + '」键「' + keyVal + '」存在于 seedRows，跳过 INSERT（等待插件物化）。');
+                        continue;
                     }
-                    const cp = parts.slice(E.prefix.length + 1);
-                    const arr = new Array(header.length).fill('');
-                    arr[0] = maxId + 1;
-                    arr[ci] = String(keyVal);
-                    const obj = {};
-                    for (let nc = 0; nc < L.cols.length; nc++) {
-                        const cc = L.cols[nc];
-                        const cIdx = header.indexOf(cc[0]);
-                        if (cIdx === -1) continue;
-                        if (cc[0] === L.keyCol) { obj[cc[0]] = String(keyVal); continue; }
-                        if (cp.length === 1 && cp[0] === cc[0]) { arr[cIdx] = String(op.value); obj[cc[0]] = String(op.value); }
-                    }
-                    newRowArr = arr;
-                    newRowObj = obj;
+                    // 同一新行的多个字段合并为一条 INSERT，避免重复 INSERT 撞 UNIQUE
+                    const colZh = parts[parts.length - 1];
+                    const nk = L.table + '\u0000' + keyVal;
+                    let nr = newRows.get(nk);
+                    if (!nr) { nr = { table: L.table, header, layout: L, keyCol: L.keyCol, keyVal, cells: {} }; newRows.set(nk, nr); }
+                    nr.cells[colZh] = op.value;
+                    continue;
                 }
             }
             if (rowIndex < 0 && !newRowArr) continue;
@@ -2393,6 +2394,18 @@
                 if (sameValue(cur, op.value)) continue;
             }
             resolved.push({ kind: 'cell', key: found.key, sheet, header, layout: L, rowIndex, colIdx, colZh, value: op.value, newRowArr, newRowObj });
+        }
+        // 把合并后的新行转换成单个 resolved 条目（批量 SQL 一条 INSERT / 回退路径一次 insertRow）
+        for (const nr of newRows.values()) {
+            const arr = new Array(nr.header.length).fill('');
+            const obj = {};
+            for (const colZh of Object.keys(nr.cells)) {
+                const cIdx = nr.header.indexOf(colZh);
+                if (cIdx >= 0) { arr[cIdx] = String(nr.cells[colZh]); obj[colZh] = nr.cells[colZh]; }
+            }
+            const ki = nr.header.indexOf(nr.keyCol);
+            if (ki >= 0) { arr[ki] = String(nr.keyVal); obj[nr.keyCol] = String(nr.keyVal); }
+            resolved.push({ kind: 'cell', key: nr.table, sheet: null, header: nr.header, layout: nr.layout, rowIndex: -1, colIdx: -1, colZh: '', value: undefined, newRowArr: arr, newRowObj: obj });
         }
         if (resolved.length === 0 && directOps.length === 0) return 0;
 
