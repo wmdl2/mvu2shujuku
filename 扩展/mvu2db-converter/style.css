@@ -1,0 +1,19 @@
+#mvu2db-settings .mvu2db-card {
+  border: 1px solid var(--SmartThemeBorderColor, #555);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 8px 0;
+  background: var(--SmartThemeBlurTintColor, rgba(0,0,0,0.2));
+}
+#mvu2db-settings .mvu2db-row { margin: 8px 0; }
+#mvu2db-settings .mvu2db-label { display: block; margin-bottom: 4px; font-weight: 600; }
+#mvu2db-settings .mvu2db-mode-group label { margin-right: 12px; }
+#mvu2db-settings textarea.mvu2db-report {
+  width: 100%; min-height: 220px;
+  font-family: monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-all;
+  background: var(--SmartThemeBlurTintColor, #111);
+  color: var(--SmartThemeBodyColor, #ddd);
+}
+#mvu2db-settings .mvu2db-downloads button { margin: 4px 6px 4px 0; }
+#mvu2db-settings .mvu2db-hint { font-size: 12px; opacity: 0.75; }
