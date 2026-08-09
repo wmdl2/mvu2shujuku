@@ -2722,14 +2722,15 @@
             }
         }
         if (!initEntries.length && Object.keys(initvar).length === 0) {
-            const e = new Error(
+            const msg =
                 `未找到 [InitVar] 世界书条目，无法识别为 MVU 变量卡。` +
                 `（当前角色卡：${data.name || '未知'}；世界书条目数=${entries.length}；` +
                 `first_mes/额外问候语中 <initvar> 块数=${greetingBlockCount}。）` +
                 `MVU 变量卡必须在世界书条目 comment 中含 [InitVar]（可禁用状态），或在问候语中用 <initvar> 声明初始结构。` +
                 (entries.length === 0 ? `若角色列表里的对象不包含世界书数据，请改用「选择文件」导入卡文件后转换。` : `若 [InitVar] 写在全局世界书/联动世界书中，请将其并入卡内后重试。`) +
-                `已中止转换，卡未被修改。`
-            );
+                `已中止转换，卡未被修改。`;
+            console.error('[mvu2db] ' + msg);
+            const e = new Error(msg);
             e.code = 'NOT_MVU_CARD';
             throw e;
         }
@@ -3108,6 +3109,7 @@
         if (!character) return null;
         const cb = character.character_book;
         if (cb && Array.isArray(cb.entries) && cb.entries.length) return character;
+        console.log('[mvu2db] 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
         try {
             const context = getContextSafe();
             const headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
@@ -3116,9 +3118,12 @@
                 headers,
                 body: JSON.stringify({ avatar_url: character.avatar }),
             });
+            console.log('[mvu2db] /api/characters/get 状态:', res.status);
             if (res.ok) {
                 const full = await res.json();
-                if (full && full.character_book && Array.isArray(full.character_book.entries)) return full;
+                const target = (full && full.data && full.data.character_book) ? full.data : full;
+                console.log('[mvu2db] 完整卡对象 keys:', Object.keys(full || {}).join(','), '| character_book.entries=', target && target.character_book ? target.character_book.entries.length : 'N/A');
+                if (target && target.character_book && Array.isArray(target.character_book.entries) && target.character_book.entries.length) return target;
             }
         } catch (e) {}
         return character;
@@ -3344,6 +3349,7 @@
             toast('正在转换…');
             try {
                 const full = await fetchFullCharacter(ch);
+                console.log('[mvu2db] 待转换对象：name=', full && full.name, '| keys=', Object.keys(full || {}).join(','), '| character_book.entries=', full && full.character_book ? full.character_book.entries.length : 'N/A');
                 await doConvert(full, false);
             } catch (e) {
                 toast('转换失败：' + (e && e.message ? e.message : e), 'error');
