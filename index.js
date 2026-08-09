@@ -2249,15 +2249,23 @@
         }
         if (Object.keys(seedNeeded).length) {
             let tplSrc = null;
-            try { tplSrc = api.getTableTemplate({ scope: 'chat' }) || null; } catch (e) { tplSrc = null; }
+            try { tplSrc = await Promise.resolve(api.getTableTemplate({ scope: 'chat' })) || null; } catch (e) { tplSrc = null; }
+            // 插件拿不到模板时，退回扩展启动时缓存的卡内模板（__ACU_TEMPLATE_DATA__）
+            if (!tplSrc) {
+                try {
+                    const holder = (typeof window !== 'undefined' ? window : globalThis);
+                    if (holder && holder.__mvu2shujukuTemplateCache) tplSrc = holder.__mvu2shujukuTemplateCache;
+                } catch (e) {}
+            }
             for (const tableName in seedNeeded) {
                 const SE = seedNeeded[tableName];
-                const found2 = sheetOf(tableName);
+                const SE0 = SE.layout || SE;
+                const found2 = sheetOf(SE0.table);
                 if (!found2 || !Array.isArray(found2.sheet.content) || found2.sheet.content.length > 1) continue;
                 let sObj = null;
                 if (tplSrc && typeof tplSrc === 'object') {
                     for (const k in tplSrc) {
-                        if (k.indexOf('sheet_') === 0 && tplSrc[k] && tplSrc[k].name === tableName) {
+                        if (k.indexOf('sheet_') === 0 && tplSrc[k] && tplSrc[k].name === SE0.table) {
                             const s = tplSrc[k];
                             const hdr = Array.isArray(s.content) && Array.isArray(s.content[0]) ? s.content[0] : [];
                             const row = Array.isArray(s.content) && s.content[1] ? s.content[1] : [];
@@ -2267,10 +2275,10 @@
                         }
                     }
                 }
-                if (!sObj) { sObj = {}; if (SE.kind === 'json') { sObj[SE.keyCol] = SE.keyValue; sObj['内容'] = '{}'; } }
+                if (!sObj) { sObj = {}; if (SE.kind === 'json') { sObj[SE0.keyCol] = SE0.keyValue; sObj['内容'] = '{}'; } }
                 try {
-                    await Promise.resolve(api.insertRow(SE.table, sObj));
-                    console.log('[mvu2shujuku][debug] 已为表「' + SE.table + '」补初始行（原表仅表头）。');
+                    await Promise.resolve(api.insertRow(SE0.table, sObj));
+                    console.log('[mvu2shujuku][debug] 已为表「' + SE0.table + '」补初始行（原表仅表头）。');
                 } catch (e) {
                     console.warn('[mvu2shujuku][debug] 补初始行失败:', e);
                 }
@@ -4134,6 +4142,11 @@ ${DB_INIT_SNIPPET}
         }, 30000);
         try {
             const presetName = String((character && character.name) || '') + '模板';
+            // 缓存卡内模板（供写路径在表缺初始行时按模板补行）
+            try {
+                const holder = (typeof window !== 'undefined' ? window : globalThis);
+                if (holder) holder.__mvu2shujukuTemplateCache = JSON.parse(mvu2shujukuDecodeB64(entry.content));
+            } catch (e) {}
             const out = await mvu2shujukuEnsureInit(api, entry.content, presetName);
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);
@@ -5739,6 +5752,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         }, 30000);
         try {
             const presetName = String((character && character.name) || '') + '模板';
+            // 缓存卡内模板（供写路径在表缺初始行时按模板补行）
+            try {
+                const holder = (typeof window !== 'undefined' ? window : globalThis);
+                if (holder) holder.__mvu2shujukuTemplateCache = JSON.parse(mvu2shujukuDecodeB64(entry.content));
+            } catch (e) {}
             const out = await mvu2shujukuEnsureInit(api, entry.content, presetName);
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);

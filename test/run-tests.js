@@ -2073,4 +2073,61 @@ test('VARIABLE_UPDATE_ENDED 载荷与 MVU 原版一致：携带更新前后的�
     assert.ok(ended.detail.after.stat_data.世界.当前时间, 'after 应为完整 MvuData（含其他组数据）');
 });
 
+test('扩展侧写路径：单例/JSON 表仅表头时按模板补初始行（防 updateCell out of bounds）', async () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    // 与真实运行一致：卡内布局是 buildLayoutJson 序列化后的数组列（[zh,type,fallback,path,isPair,desc]）
+    const layoutEntries = core.buildLayout(r.schema).entries.map(e => ({
+        kind: e.kind,
+        group: e.group,
+        table: e.table,
+        keyCol: e.keyCol || '',
+        keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => (e.kind === 'singleton'
+            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
+            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
+        writePaths: e.writePaths || [],
+        mirrors: e.mirrors || [],
+    }));
+    // 模拟“表格只有表头、初始行消失”：清掉所有物化行
+    const tables = JSON.parse(JSON.stringify(r.template));
+    for (const k of Object.keys(tables)) {
+        const s = tables[k];
+        if (s && Array.isArray(s.content) && s.content.length > 1) s.content = [s.content[0]];
+    }
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        getTableTemplate: async () => r.template,
+        insertRow: async (tableName, obj) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s) return 0;
+            const row = s.content[0].map(h => (obj[h] !== undefined && obj[h] !== null) ? String(obj[h]) : '');
+            row[0] = s.content.length || 1;
+            s.content.push(row);
+            return row[0];
+        },
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s || !s.content[rowIndex]) throw new Error('Row index ' + rowIndex + ' out of bounds in table "' + tableName + '".');
+            const ci = s.content[0].indexOf(col);
+            if (ci === -1) return false;
+            s.content[rowIndex][ci] = String(value);
+            return true;
+        },
+        executeSqlBatch: async () => ({ success: false, error: 'test' }),
+        deleteRow: async () => true,
+    };
+    const prevAll = core.statDataFromTables(layoutEntries, tables);
+    const prev = prevAll.stat_data || {};
+    const next = JSON.parse(JSON.stringify(prev));
+    if (!next.主角) next.主角 = {};
+    next.主角.姓名 = '测试主角';
+    const n = await core.writeStatDiffToDb(fakeApi, layoutEntries, prev, next);
+    assert.ok(n >= 1, '应有差异被写入');
+    const zj = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.ok(zj && zj.content.length > 1, '单例表缺行时应按模板补入初始行');
+    const hdr = zj.content[0];
+    assert.strictEqual(zj.content[1][hdr.indexOf('姓名')], '测试主角', '姓名应写入成功（不再 out of bounds）');
+});
+
 runTests();
