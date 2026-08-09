@@ -2031,7 +2031,7 @@
      *  - 表格为空时自动 importTemplateFromData({scope:'chat'})
      *  - getAllVariables() shim：DB 表格 → stat_data
      *  - Mvu.getMvuData / Mvu.replaceMvuData 兼容层（可选）
-     *  - registerTableUpdateCallback + 'shujuku-table-updated' 广播
+     *  - registerTableUpdateCallback → 广播 Mvu.events.VARIABLE_UPDATE_ENDED（与 MVU 原版一致）
      *  - 消息收尾时追加状态栏占位符（可选）并触发重渲染
      * ================================================================ */
 
@@ -2650,6 +2650,7 @@
             `var pendingStatOverlay=null;`,
             `var statOverlayTimer=null;`,
             `var statOverlayGen=0;`,
+            `function mvuWrap(stat){return {stat_data:stat,display_data:stat,delta_data:{},initialized_lorebooks:{}};}`,
             `function flushStatOverlay(){`,
             `  statOverlayTimer=null;`,
             `  var target=pendingStatOverlay;`,
@@ -2659,7 +2660,7 @@
             `    try{`,
             `      var prev=currentStat();`,
             `      await writeDiffToDb(prev,target);`,
-            `      broadcastBridgeEvent();`,
+            `      broadcastBridgeEvent(mvuWrap(target),mvuWrap(prev));`,
             `    }catch(e){console.warn('['+BRIDGE_NAME+'] 合并写库异常:',e);}`,
             `    finally{if(statOverlayGen===gen)pendingStatOverlay=null;}`,
             `  })();`,
@@ -2975,7 +2976,7 @@
             `// 完整的 Mvu 兼容层：按 MVU 官方全局 API（createMvu）实现数据库读写，`,
             `// 覆盖式接管运行环境里可能残留的真 MVU 对象（避免双轨冲突）。`,
             `var mvuShimTimer=null;`,
-            `function emitMvuEvent(name,payload){`,
+            `function emitMvuEvent(name,a,b){`,
             `  var targets=[];`,
             `  function add(t){try{if(t&&typeof t.dispatchEvent==='function'&&targets.indexOf(t)===-1)targets.push(t);}catch(e){}}`,
             `  add(window);add(rootWindow);`,
@@ -2988,11 +2989,11 @@
             `  var EventCtor=null;`,
             `  try{EventCtor=window.CustomEvent||rootWindow.CustomEvent||CustomEvent;}catch(e){EventCtor=CustomEvent;}`,
             `  for(var t=0;t<targets.length;t++){`,
-            `    try{targets[t].dispatchEvent(new EventCtor(name,{detail:payload}));}catch(e){}`,
-            `    try{if(targets[t].eventSource&&typeof targets[t].eventSource.emit==='function')targets[t].eventSource.emit(name,payload);}catch(e){}`,
+            `    try{targets[t].dispatchEvent(new EventCtor(name,{detail:{after:a,before:b}}));}catch(e){}`,
+            `    try{if(targets[t].eventSource&&typeof targets[t].eventSource.emit==='function')targets[t].eventSource.emit(name,a,b);}catch(e){}`,
             `  }`,
             `  // 与 MVU 原版一致：走 TH 的事件总线（前端 eventOn 监听的就是它）`,
-            `  try{if(typeof eventEmit==='function')eventEmit(name,payload);}catch(e){}`,
+            `  try{if(typeof eventEmit==='function')eventEmit(name,a,b);}catch(e){}`,
             `  // 缺少 ST 事件总线（如消息 iframe）时提供 eventOn/eventOff 兜底，绑定到同名 CustomEvent`,
             `  for(var t2=0;t2<targets.length;t2++){`,
             `    try{`,
@@ -3126,24 +3127,9 @@
             `}`,
             (installMvuShim ? `installMvuShim();` : ``),
             '',
-            `function broadcastBridgeEvent(){`,
-            `  var targets=[];`,
-            `  function add(t){try{if(t&&typeof t.dispatchEvent==='function'&&targets.indexOf(t)===-1)targets.push(t);}catch(e){}}`,
-            `  add(window);add(rootWindow);`,
-            `  for(var i=0;i<roots.length;i++){`,
-            `    try{`,
-            `      var frames=roots[i].document?roots[i].document.querySelectorAll('iframe'):[];`,
-            `      for(var f=0;f<frames.length;f++){try{add(frames[f].contentWindow);}catch(e){}}`,
-            `    }catch(e){}`,
-            `  }`,
-            `  var EventCtor=null;`,
-            `  try{EventCtor=window.CustomEvent||rootWindow.CustomEvent||CustomEvent;}catch(e){EventCtor=CustomEvent;}`,
-            `  for(var t=0;t<targets.length;t++){`,
-            `    try{targets[t].dispatchEvent(new EventCtor('shujuku-table-updated'));}catch(e){}`,
-            `  }`,
-            `  // 同步广播 MVU 的 VARIABLE_UPDATE_ENDED（mag_variable_update_ended），供前端 eventOn 监听刷新`,
-            `  // 载荷从轻：监听方（前端）自行 getMvuData 重读，避免每次表格回调都全量重建 stat_data 造成卡顿`,
-            `  try{emitMvuEvent('mag_variable_update_ended',{stat_data:{},display_data:{}});}catch(e){}`,
+            `function broadcastBridgeEvent(after,before){`,
+            `  // 与 MVU 原版一致：写库完成后广播 VARIABLE_UPDATE_ENDED，携带更新前后的完整 MvuData（after, before）`,
+            `  try{emitMvuEvent('mag_variable_update_ended',after,before);}catch(e){}`,
             `}`,
             `rootWindow.__mvu2shujukuDataBridgeBroadcast=rootWindow.__mvu2shujukuDataBridgeBroadcast||broadcastBridgeEvent;`,
             '',
@@ -3151,7 +3137,7 @@
             `  var cbKey='__mvu2shujukuTableUpdateCallback_'+VERSION;`,
             `  if(!rootWindow[cbKey]){`,
             `    rootWindow[cbKey]=function(){`,
-            `      try{broadcastBridgeEvent();}catch(e){}`,
+            `      try{broadcastBridgeEvent(mvuWrap(currentStat()),null);}catch(e){}`,
             `    };`,
             `    API.registerTableUpdateCallback(rootWindow[cbKey]);`,
             `  }`,
@@ -3190,7 +3176,7 @@
             `      initRetries=0;`,
             `      initState.done=true;`,
             `      // 建表/初始化成功 ≈ MVU 的 VARIABLE_INITIALIZED 时机，广播给前端`,
-            `      try{var curStat2=currentStat();emitMvuEvent('mag_variable_initialized',{stat_data:curStat2,display_data:curStat2});}catch(e){}`,
+            `      try{var curStat2=currentStat();emitMvuEvent('mag_variable_initialized',mvuWrap(curStat2));}catch(e){}`,
             `    }`,
             `  }catch(e){`,
             `    console.warn('['+BRIDGE_NAME+'] 开局建表异常:',e);`,
@@ -3410,7 +3396,7 @@
             `        applyCommandsToStat(next,cmds,disp);`,
             `        return writeDiffToDb(prev,next).then(function(){`,
             `          for(var dk in disp){if(disp.hasOwnProperty(dk))runtimeDisplay[dk]=disp[dk];}`,
-            `          broadcastBridgeEvent();`,
+            `          broadcastBridgeEvent(mvuWrap(next),mvuWrap(prev));`,
             `        });`,
             `      }catch(e){console.warn('['+BRIDGE_NAME+'] 应用 MVU 更新块失败:',e);}`,
             `    });`,
@@ -3497,7 +3483,7 @@
                 `      console.log('['+BRIDGE_NAME+'] 消息收尾触发: 建表/更新块/状态栏刷新');`,
                 `      try{var _ctx=getContext();var _m=_ctx&&_ctx.chat&&_ctx.chat[_ctx.chat.length-1];console.log('['+BRIDGE_NAME+'][占位符] MESSAGE_RECEIVED 最新消息 role='+(_m&&_m.is_user?'user':(_m&&_m.name||'?'))+' | 含占位符='+(String(_m&&(_m.mes!=null?_m.mes:(_m.message||''))).indexOf('<StatusPlaceHolderImpl/>')!==-1));}catch(e){}`,
                 `      Promise.resolve(ensureTemplateInit()).then(function(){try{applyPendingUpdateBlocks();}catch(e){}});`,
-                `      try{broadcastBridgeEvent();}catch(e){}`,
+                `      try{broadcastBridgeEvent(mvuWrap(currentStat()),null);}catch(e){}`,
                 `      try{ensureStatusPlaceholder();}catch(e){}`,
                 `    },250);`,
                 `  }`,
@@ -4168,7 +4154,7 @@ ${DB_INIT_SNIPPET}
                 // 建表/初始化成功 ≈ MVU 的 VARIABLE_INITIALIZED 时机，广播给前端
                 try {
                     const curStat = window.getAllVariables ? (window.getAllVariables().stat_data || {}) : {};
-                    emitMvuEvent('mag_variable_initialized', { stat_data: curStat, display_data: curStat });
+                    emitMvuEvent('mag_variable_initialized', { stat_data: curStat, display_data: curStat, delta_data: {}, initialized_lorebooks: {} });
                 } catch (e) {}
             }
         } catch (e) {
@@ -4481,7 +4467,7 @@ ${DB_INIT_SNIPPET}
                     const prev = all.stat_data || {};
                     const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
                     if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
-                    dispatchShujukuTableUpdated();
+                    dispatchVariableUpdateEnded({ stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} }, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
                 } else {
                     console.warn('[mvu2shujuku][debug] Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
                 }
@@ -4512,19 +4498,21 @@ ${DB_INIT_SNIPPET}
         console.log('[mvu2shujuku][debug] 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
     }
 
-    // 表格更新广播：插件表格一变，状态栏（监听 shujuku-table-updated）立即刷新
-    function dispatchShujukuTableUpdated() {
+    // 表格更新广播：与 MVU 原版一致，数据库一有变动就广播 VARIABLE_UPDATE_ENDED，
+    // 携带更新后的完整变量（before 在无基线时传空，前端结算逻辑会安全跳过）
+    function dispatchVariableUpdateEnded(after, before) {
         try {
-            emitMvuEvent('shujuku-table-updated', null);
-            // MVU 的 VARIABLE_UPDATE_ENDED（mag_variable_update_ended）：前端 eventOn 监听刷新
-            // 载荷从轻：监听方自行 getMvuData 重读，避免每次表格回调都全量重建 stat_data 造成卡顿
-            emitMvuEvent('mag_variable_update_ended', { stat_data: {}, display_data: {} });
+            if (after === undefined || after === null) {
+                try { if (typeof window.getAllVariables === 'function') after = window.getAllVariables(); } catch (e) {}
+            }
+            emitMvuEvent('mag_variable_update_ended', after || { stat_data: {}, display_data: {} }, before);
         } catch (e) {}
     }
 
-    // 事件广播：同名 CustomEvent + ST eventSource（eventOn 监听者），覆盖 window/parent/top/同源 iframe；
+    // 事件广播：与 MVU 原版一致，优先走 TH 事件总线（eventEmit，前端 eventOn 监听的就是它）；
+    // 另发同名 CustomEvent + ST eventSource，覆盖 window/parent/top/同源 iframe；
     // 缺少 ST 事件总线的窗口（如消息 iframe）补一个绑定到同名 CustomEvent 的 eventOn/eventOff 兜底。
-    function emitMvuEvent(name, payload) {
+    function emitMvuEvent(name, a, b) {
         const targets = [];
         const add = (t) => { try { if (t && typeof t.dispatchEvent === 'function' && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
         add(window);
@@ -4538,12 +4526,12 @@ ${DB_INIT_SNIPPET}
             } catch (e) {}
         }
         for (const t of targets) {
-            try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: payload })); } catch (e) {}
-            try { if (t.eventSource && typeof t.eventSource.emit === 'function') t.eventSource.emit(name, payload); } catch (e) {}
+            try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: { after: a, before: b } })); } catch (e) {}
+            try { if (t.eventSource && typeof t.eventSource.emit === 'function') t.eventSource.emit(name, a, b); } catch (e) {}
         }
         // 与 MVU 原版一致：尽量走 TH 的事件总线（前端 eventOn 监听的就是它）
-        try { if (typeof hostWindow.eventEmit === 'function') hostWindow.eventEmit(name, payload); } catch (e) {}
-        try { if (typeof window.eventEmit === 'function') window.eventEmit(name, payload); } catch (e) {}
+        try { if (typeof hostWindow.eventEmit === 'function') hostWindow.eventEmit(name, a, b); } catch (e) {}
+        try { if (typeof window.eventEmit === 'function') window.eventEmit(name, a, b); } catch (e) {}
         for (const t of targets) {
             try {
                 if (t && typeof t.eventOn !== 'function' && typeof t.addEventListener === 'function') {
@@ -4562,7 +4550,7 @@ ${DB_INIT_SNIPPET}
         const api = getAcuApi();
         if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
         try {
-            api.registerTableUpdateCallback(() => dispatchShujukuTableUpdated());
+            api.registerTableUpdateCallback(() => dispatchVariableUpdateEnded());
             return true;
         } catch (e) { return false; }
     }
@@ -5296,7 +5284,7 @@ ${DB_INIT_SNIPPET}
             '        <label title="状态栏刷新由数据库表格更新回调驱动；此选项额外在 AI 回复结束时补一次刷新并处理消息里的 <UpdateVariable>/<json_patch> 更新块"><input type="checkbox" id="mvu2shujuku-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 表格更新后自动刷新状态栏（含消息收尾兜底）</label>',
             '      </div>',
             '      <div class="mvu2shujuku-help">',
-            '        状态栏刷新以「表格更新回调」为主：数据库一有变动就广播 <code>shujuku-table-updated</code> 事件。',
+            '        状态栏刷新与 MVU 原版一致：数据库一有变动就广播 <code>mag_variable_update_ended</code>（VARIABLE_UPDATE_ENDED），前端原 eventOn 监听直接生效。',
             '        勾选上方选项后，还会在每次 AI 回复结束时补一次刷新，并顺带处理开场白/消息里的 <code>&lt;UpdateVariable&gt;</code> / <code>&lt;json_patch&gt;</code> 旧式更新块。',
             '      </div>',
             '      <div class="mvu2shujuku-row">',
@@ -5771,7 +5759,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 // 建表/初始化成功 ≈ MVU 的 VARIABLE_INITIALIZED 时机，广播给前端
                 try {
                     const curStat = window.getAllVariables ? (window.getAllVariables().stat_data || {}) : {};
-                    emitMvuEvent('mag_variable_initialized', { stat_data: curStat, display_data: curStat });
+                    emitMvuEvent('mag_variable_initialized', { stat_data: curStat, display_data: curStat, delta_data: {}, initialized_lorebooks: {} });
                 } catch (e) {}
             }
         } catch (e) {
@@ -6084,7 +6072,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     const prev = all.stat_data || {};
                     const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
                     if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
-                    dispatchShujukuTableUpdated();
+                    dispatchVariableUpdateEnded({ stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} }, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
                 } else {
                     console.warn('[mvu2shujuku][debug] Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
                 }
@@ -6115,19 +6103,21 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         console.log('[mvu2shujuku][debug] 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
     }
 
-    // 表格更新广播：插件表格一变，状态栏（监听 shujuku-table-updated）立即刷新
-    function dispatchShujukuTableUpdated() {
+    // 表格更新广播：与 MVU 原版一致，数据库一有变动就广播 VARIABLE_UPDATE_ENDED，
+    // 携带更新后的完整变量（before 在无基线时传空，前端结算逻辑会安全跳过）
+    function dispatchVariableUpdateEnded(after, before) {
         try {
-            emitMvuEvent('shujuku-table-updated', null);
-            // MVU 的 VARIABLE_UPDATE_ENDED（mag_variable_update_ended）：前端 eventOn 监听刷新
-            // 载荷从轻：监听方自行 getMvuData 重读，避免每次表格回调都全量重建 stat_data 造成卡顿
-            emitMvuEvent('mag_variable_update_ended', { stat_data: {}, display_data: {} });
+            if (after === undefined || after === null) {
+                try { if (typeof window.getAllVariables === 'function') after = window.getAllVariables(); } catch (e) {}
+            }
+            emitMvuEvent('mag_variable_update_ended', after || { stat_data: {}, display_data: {} }, before);
         } catch (e) {}
     }
 
-    // 事件广播：同名 CustomEvent + ST eventSource（eventOn 监听者），覆盖 window/parent/top/同源 iframe；
+    // 事件广播：与 MVU 原版一致，优先走 TH 事件总线（eventEmit，前端 eventOn 监听的就是它）；
+    // 另发同名 CustomEvent + ST eventSource，覆盖 window/parent/top/同源 iframe；
     // 缺少 ST 事件总线的窗口（如消息 iframe）补一个绑定到同名 CustomEvent 的 eventOn/eventOff 兜底。
-    function emitMvuEvent(name, payload) {
+    function emitMvuEvent(name, a, b) {
         const targets = [];
         const add = (t) => { try { if (t && typeof t.dispatchEvent === 'function' && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
         add(window);
@@ -6141,12 +6131,12 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             } catch (e) {}
         }
         for (const t of targets) {
-            try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: payload })); } catch (e) {}
-            try { if (t.eventSource && typeof t.eventSource.emit === 'function') t.eventSource.emit(name, payload); } catch (e) {}
+            try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: { after: a, before: b } })); } catch (e) {}
+            try { if (t.eventSource && typeof t.eventSource.emit === 'function') t.eventSource.emit(name, a, b); } catch (e) {}
         }
         // 与 MVU 原版一致：尽量走 TH 的事件总线（前端 eventOn 监听的就是它）
-        try { if (typeof hostWindow.eventEmit === 'function') hostWindow.eventEmit(name, payload); } catch (e) {}
-        try { if (typeof window.eventEmit === 'function') window.eventEmit(name, payload); } catch (e) {}
+        try { if (typeof hostWindow.eventEmit === 'function') hostWindow.eventEmit(name, a, b); } catch (e) {}
+        try { if (typeof window.eventEmit === 'function') window.eventEmit(name, a, b); } catch (e) {}
         for (const t of targets) {
             try {
                 if (t && typeof t.eventOn !== 'function' && typeof t.addEventListener === 'function') {
@@ -6165,7 +6155,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         const api = getAcuApi();
         if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
         try {
-            api.registerTableUpdateCallback(() => dispatchShujukuTableUpdated());
+            api.registerTableUpdateCallback(() => dispatchVariableUpdateEnded());
             return true;
         } catch (e) { return false; }
     }
@@ -6899,7 +6889,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             '        <label title="状态栏刷新由数据库表格更新回调驱动；此选项额外在 AI 回复结束时补一次刷新并处理消息里的 <UpdateVariable>/<json_patch> 更新块"><input type="checkbox" id="mvu2shujuku-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 表格更新后自动刷新状态栏（含消息收尾兜底）</label>',
             '      </div>',
             '      <div class="mvu2shujuku-help">',
-            '        状态栏刷新以「表格更新回调」为主：数据库一有变动就广播 <code>shujuku-table-updated</code> 事件。',
+            '        状态栏刷新与 MVU 原版一致：数据库一有变动就广播 <code>mag_variable_update_ended</code>（VARIABLE_UPDATE_ENDED），前端原 eventOn 监听直接生效。',
             '        勾选上方选项后，还会在每次 AI 回复结束时补一次刷新，并顺带处理开场白/消息里的 <code>&lt;UpdateVariable&gt;</code> / <code>&lt;json_patch&gt;</code> 旧式更新块。',
             '      </div>',
             '      <div class="mvu2shujuku-row">',

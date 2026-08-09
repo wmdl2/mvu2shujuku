@@ -792,7 +792,7 @@ test('脚本语法与 SD_LAYOUT 结构', () => {
     assert.ok(r.bridgeScript.includes('importTemplateFromData'), '应使用 importTemplateFromData 自动建表');
     assert.ok(r.bridgeScript.includes('initGameSession'), '应使用 initGameSession 做开局初始化（对应 MVU init 时机）');
     assert.ok(r.bridgeScript.includes('mvu2shujukuMissingTableNames'), '应按模板表名判断缺表，而非仅看是否有任意表');
-    assert.ok(r.bridgeScript.includes('shujuku-table-updated'), '应有表格更新事件');
+    assert.ok(r.bridgeScript.includes('mag_variable_update_ended'), '写库后应广播 MVU 原版的 VARIABLE_UPDATE_ENDED 事件');
     // EJS 数据函数由扩展注册（桥不在主窗口执行，注册无效）；桥不再包含注册代码
     assert.ok(!r.bridgeScript.includes('installTemplateDefines'), '桥不应再包含失效的模板注册代码');
 });
@@ -2042,6 +2042,35 @@ test('离线/镜像 MVU 引擎脚本按 import URL 识别并移除；整页注�
     const sb = (d.extensions && d.extensions.regex_scripts || []).find(rx => String(rx.scriptName || '') === 'MVU状态栏');
     assert.ok(sb && String(sb.replaceString || '').includes('window.eventOn(window.Mvu.events.VARIABLE_UPDATE_ENDED'), '状态栏事件监听应原样保留（靠数据桥广播 mag_variable_update_ended 驱动）');
     assert.ok(!String(sb.replaceString || '').includes("(() => { if (window.addEventListener)"), '不应出现损坏状态栏脚本的事件改写');
+});
+
+test('VARIABLE_UPDATE_ENDED 载荷与 MVU 原版一致：携带更新前后的完整 MvuData', async () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const captured = [];
+    class FakeCustomEvent {
+        constructor(type, init) {
+            this.type = type;
+            this.detail = init && init.detail;
+        }
+    }
+    const { win } = bridgeSandbox(r, {
+        extra: {
+            CustomEvent: FakeCustomEvent,
+            dispatchEvent(ev) { captured.push(ev); return true; },
+        },
+    });
+    const Mvu = win.Mvu;
+    const before = JSON.parse(JSON.stringify(Mvu.getMvuData().stat_data));
+    const mvu = Mvu.getMvuData();
+    mvu.stat_data.主角.生命 = 77;
+    await Mvu.replaceMvuData(mvu);
+    await waitBridgeFlush();
+    const ended = captured.find(e => e.type === 'mag_variable_update_ended');
+    assert.ok(ended, '写库后应广播 mag_variable_update_ended');
+    assert.strictEqual(ended.detail.after.stat_data.主角.生命, 77, 'after 应携带更新后的 stat_data');
+    assert.strictEqual(ended.detail.before.stat_data.主角.生命, before.主角.生命, 'before 应携带更新前的 stat_data');
+    assert.ok(ended.detail.after.stat_data.世界.当前时间, 'after 应为完整 MvuData（含其他组数据）');
 });
 
 runTests();

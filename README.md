@@ -74,7 +74,7 @@
 - **命令与显示兼容**：`_.set`（双参/三参 `old,new` 两种格式）、`_.assign`（对象合并/按键赋值）、
   `_.remove/unset/delete`、`_.add`（数值加法带精度处理、日期字符串按毫秒推进转 ISO）；
   `display_data` 在会话内保存 `旧->新(原因)` 镜像（与 MVU 的 display 字符串同格式）。
-- 广播 `shujuku-table-updated` 事件；状态栏原 `Mvu.events.VARIABLE_UPDATE_ENDED` 监听自动改写。
+- 与 MVU 原版一致，写库后广播 `Mvu.events.VARIABLE_UPDATE_ENDED`（`mag_variable_update_ended`，携带更新前后完整变量），前端原有 `eventOn` 监听直接生效。
 - 数据桥同时提供 `TavernHelper.getVariables()` shim，兼容教程中「纯文本状态栏」的读取写法。
 
 ### 卡片清理
