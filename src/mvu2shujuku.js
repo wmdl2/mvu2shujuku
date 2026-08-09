@@ -3737,22 +3737,24 @@ ${DB_INIT_SNIPPET}
         head.className = 'mvu2shujuku-row';
         head.innerHTML = '<b>转换完成</b>：' + result.meta.tableCount + ' 张表（' + result.meta.tableNames.join('、') + '）';
         box.appendChild(head);
-        const downloads = hostDocument.createElement('div');
-        downloads.className = 'mvu2shujuku-downloads mvu2shujuku-row';
-        for (const f of result.files) {
-            const btn = hostDocument.createElement('button');
-            btn.className = 'menu_button';
-            btn.textContent = '下载 ' + f.name;
-            btn.addEventListener('click', () => download(f.name, f.mime, f.data));
-            downloads.appendChild(btn);
-        }
-        box.appendChild(downloads);
+        // 第一步：先看报告
         const report = hostDocument.createElement('textarea');
         report.className = 'mvu2shujuku-report';
         report.value = result.reportText;
         report.readOnly = true;
         box.appendChild(report);
-        // 转换完成后才出现“保存到 sillytavern”按钮
+        // 最后一步：下载与保存到酒馆（放在合并模板区块之后）
+        const downloadsBox = panel.querySelector('#mvu2shujuku-downloads');
+        if (downloadsBox) {
+            downloadsBox.innerHTML = '';
+            for (const f of result.files) {
+                const btn = hostDocument.createElement('button');
+                btn.className = 'menu_button';
+                btn.textContent = '下载 ' + f.name;
+                btn.addEventListener('click', () => download(f.name, f.mime, f.data));
+                downloadsBox.appendChild(btn);
+            }
+        }
         const saveBtn = panel.querySelector('#mvu2shujuku-save-card');
         if (saveBtn) saveBtn.style.display = '';
         const mergeBtn = panel.querySelector('#mvu2shujuku-merge-apply');
@@ -3830,7 +3832,6 @@ ${DB_INIT_SNIPPET}
             '      <div class="mvu2shujuku-row">',
             '        <button id="mvu2shujuku-convert-current" class="menu_button">转换所选角色卡</button>',
             '        <button id="mvu2shujuku-convert-file" class="menu_button">转换所选文件</button>',
-            '        <button id="mvu2shujuku-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
             '        <button id="mvu2shujuku-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2shujuku-result"></div>',
@@ -3843,6 +3844,10 @@ ${DB_INIT_SNIPPET}
             '      <div class="mvu2shujuku-row">',
             '        <button id="mvu2shujuku-merge-apply" class="menu_button" style="display:none">合并到转换结果</button>',
             '        <span id="mvu2shujuku-merge-status" class="mvu2shujuku-hint"></span>',
+            '      </div>',
+            '      <div id="mvu2shujuku-actions" class="mvu2shujuku-row">',
+            '        <div id="mvu2shujuku-downloads" class="mvu2shujuku-downloads mvu2shujuku-row"></div>',
+            '        <button id="mvu2shujuku-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
             '      </div>',
             '      <div class="mvu2shujuku-hint">',
             '        前提：已安装 SP·数据库 插件（不自动安装，也不迁移旧聊天）。转换只产出 角色卡 + 表格模板 + 转换报告。',
@@ -3911,6 +3916,8 @@ ${DB_INIT_SNIPPET}
             if (box) box.innerHTML = '';
             const saveBtn = panel.querySelector('#mvu2shujuku-save-card');
             if (saveBtn) saveBtn.style.display = 'none';
+            const downloadsBox = panel.querySelector('#mvu2shujuku-downloads');
+            if (downloadsBox) downloadsBox.innerHTML = '';
             mergeState.sourceTemplate = null;
             const tablesBox = panel.querySelector('#mvu2shujuku-merge-tables');
             if (tablesBox) tablesBox.innerHTML = '选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。';
@@ -3979,6 +3986,25 @@ ${DB_INIT_SNIPPET}
     }
 
     // 调试钩子：确认 st-prompt-template 每次构建的 EJS 上下文是否包含我们的函数
+    let defineTimer = null;
+    function ensureTemplateDefine() {
+        try {
+            const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
+            if (ejs && ejs.defines && typeof ejs.defines === 'object') {
+                if (typeof ejs.defines.mvu2shujukuGetAllVariables !== 'function') {
+                    ejs.defines.mvu2shujukuGetAllVariables = function () {
+                        try { return window.getAllVariables ? window.getAllVariables() : { stat_data: {} }; } catch (e) { return { stat_data: {} }; }
+                    };
+                    console.log('[mvu2shujuku][debug] 扩展侧注册 mvu2shujukuGetAllVariables 完成');
+                }
+                defineTimer = null;
+            } else if (!defineTimer) {
+                defineTimer = hostWindow.setTimeout(() => { defineTimer = null; ensureTemplateDefine(); }, 2000);
+            }
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] 扩展侧注册异常:', e);
+        }
+    }
     function bindDebugHooks(context) {
         const es = context && (context.eventSource || context.event_source);
         if (!es || typeof es.on !== 'function') return;
@@ -4004,6 +4030,7 @@ ${DB_INIT_SNIPPET}
         const context = getContextSafe();
         ensureSettingsPanel(context);
         bindDebugHooks(context);
+        ensureTemplateDefine();
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
         console.log(
             '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
