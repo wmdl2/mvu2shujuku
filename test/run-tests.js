@@ -12,7 +12,7 @@ const assert = require('assert');
 const core = require('../src/mvu2db.js');
 
 const FIXTURE = path.join(__dirname, 'fixtures', '道渊-MVU.json');
-const PNG = path.join(__dirname, '..', '..', '参考资料', '参考角色卡', 'v5.2_1-MVU版.png');
+const PNG = path.join(__dirname, '..', '参考资料', '参考角色卡', 'v5.2_1-MVU版.png');
 const HAS_FIXTURE = fs.existsSync(FIXTURE);
 
 function requireFixture() {

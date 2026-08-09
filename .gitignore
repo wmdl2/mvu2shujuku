@@ -5,7 +5,7 @@
 输出示例/
 
 # 测试 fixture 是从参考卡提取的角色卡内容，不上传（缺失时相关测试自动跳过）
-转换器/test/fixtures/
+test/fixtures/
 
 # 常规忽略
 node_modules/
