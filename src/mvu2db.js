@@ -2705,7 +2705,14 @@
             }
             report.note(`已解析 ${initEntries.length} 个 [initvar] 条目（合并）：顶层组 ${Object.keys(initvar).join('、') || '（空）'}。`);
         } else {
-            report.manual('未找到 [initvar] 世界书条目，无法推导表格结构。转换仍会执行，但模板可能不完整。');
+            const e = new Error('未找到 [InitVar] 世界书条目，无法识别为 MVU 变量卡（MVU 变量卡必须以 [InitVar] 声明初始 stat_data 结构）。已中止转换，卡未被修改。');
+            e.code = 'NOT_MVU_CARD';
+            throw e;
+        }
+        if (Object.keys(initvar).length === 0) {
+            const e = new Error('已找到 [InitVar] 条目但解析后为空，无法推导表格结构。已中止转换，卡未被修改。');
+            e.code = 'EMPTY_INITVAR';
+            throw e;
         }
 
         const usage = scanStatusUsage(card, Object.keys(initvar));
@@ -3034,21 +3041,31 @@
         if (!sel) return;
         const chars = Array.isArray(context.characters) ? context.characters : [];
         const currentIdx = context.characterId != null ? context.characterId : -1;
+        const prevValue = sel.value;
+        panel.__mvu2dbChars = chars;
+        panel.__mvu2dbCurrentIdx = currentIdx;
+        const searchBox = panel.querySelector('#mvu2db-char-search');
+        const keyword = searchBox ? String(searchBox.value || '').trim().toLowerCase() : '';
         sel.innerHTML = '';
-        if (!chars.length) {
+        const filtered = keyword
+            ? chars.map((ch, i) => ({ ch, i })).filter(({ ch }) => String(ch && ch.name || '').toLowerCase().includes(keyword))
+            : chars.map((ch, i) => ({ ch, i }));
+        if (!filtered.length) {
             const opt = hostDocument.createElement('option');
             opt.value = '-1';
-            opt.textContent = '（角色列表为空）';
+            opt.textContent = keyword ? '（无匹配角色）' : '（角色列表为空）';
             sel.appendChild(opt);
             return;
         }
-        chars.forEach((ch, i) => {
+        filtered.forEach(({ ch, i }) => {
             const opt = hostDocument.createElement('option');
             opt.value = String(i);
             opt.textContent = (ch && ch.name) ? ch.name : ('角色 ' + i);
             sel.appendChild(opt);
         });
-        if (currentIdx >= 0 && currentIdx < chars.length) sel.value = String(currentIdx);
+        // 保留原选择；否则优先选当前角色
+        if (prevValue !== '' && filtered.some(f => String(f.i) === prevValue)) sel.value = prevValue;
+        else if (currentIdx >= 0 && filtered.some(f => f.i === currentIdx)) sel.value = String(currentIdx);
     }
 
     function selectedCharacter(panel) {
@@ -3204,8 +3221,11 @@
             '    <div class="mvu2db-card">',
             '      <div class="mvu2db-row">',
             '        <label class="mvu2db-label" for="mvu2db-char-select">选择角色卡</label>',
+            '        <input id="mvu2db-char-search" type="text" placeholder="搜索角色…" title="输入角色名过滤下拉列表" />',
             '        <select id="mvu2db-char-select" title="从酒馆角色列表选择要转换的角色卡"></select>',
-            '        <input id="mvu2db-file" type="file" accept=".json,.png,application/json,image/png" />',
+            '        <button id="mvu2db-pick-file" class="menu_button" title="从磁盘选择 .json / .png 角色卡文件">选择文件…</button>',
+            '        <input id="mvu2db-file" type="file" accept=".json,.png,application/json,image/png" hidden />',
+            '        <span id="mvu2db-file-name" class="mvu2db-hint"></span>',
             '      </div>',
             '      <div class="mvu2db-row mvu2db-mode-group">',
             '        <span class="mvu2db-label" title="native：AI 输出 insertRow/updateRow/deleteRow DSL；sqlite：AI 输出 SQL；双模式跟随插件当前设置">填表模式</span>',
@@ -3227,7 +3247,11 @@
             '        自动翻译成数据库操作，旧脚本才能继续工作。若卡片脚本没用到 <code>Mvu</code>，选“不安装”即可。',
             '      </div>',
             '      <div class="mvu2db-row">',
-            '        <label title="收到新回复后重新渲染状态栏，并处理开场白/消息里的 <UpdateVariable> 更新块"><input type="checkbox" id="mvu2db-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 消息收尾触发状态栏刷新</label>',
+            '        <label title="状态栏刷新由数据库表格更新回调驱动；此选项额外在 AI 回复结束时补一次刷新并处理消息里的 <UpdateVariable>/<json_patch> 更新块"><input type="checkbox" id="mvu2db-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 表格更新后自动刷新状态栏（含消息收尾兜底）</label>',
+            '      </div>',
+            '      <div class="mvu2db-help">',
+            '        状态栏刷新以「表格更新回调」为主：数据库一有变动就广播 <code>shujuku-table-updated</code> 事件。',
+            '        勾选上方选项后，还会在每次 AI 回复结束时补一次刷新，并顺带处理开场白/消息里的 <code>&lt;UpdateVariable&gt;</code> / <code>&lt;json_patch&gt;</code> 旧式更新块。',
             '      </div>',
             '      <div class="mvu2db-row">',
             '        <label class="mvu2db-label" for="mvu2db-png">输出格式</label>',
@@ -3240,7 +3264,7 @@
             '      <div class="mvu2db-row">',
             '        <button id="mvu2db-convert-current" class="menu_button">转换所选角色卡</button>',
             '        <button id="mvu2db-convert-file" class="menu_button">转换所选文件</button>',
-            '        <button id="mvu2db-save-card" class="menu_button">保存为角色卡（直接进酒馆）</button>',
+            '        <button id="mvu2db-save-card" class="menu_button">保存角色卡至 SillyTavern</button>',
             '        <button id="mvu2db-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2db-result"></div>',
@@ -3262,6 +3286,11 @@
             }
         };
         populateCharacterSelect(panel, context);
+        const searchBox = panel.querySelector('#mvu2db-char-search');
+        if (searchBox && searchBox.dataset.bound !== 'true') {
+            searchBox.dataset.bound = 'true';
+            searchBox.addEventListener('input', () => populateCharacterSelect(panel, context));
+        }
         bind('#mvu2db-convert-current', async () => {
             const ch = selectedCharacter(panel);
             if (!ch) { toast('请先在角色卡下拉栏中选择角色', 'error'); return; }
@@ -3272,6 +3301,18 @@
                 toast('转换失败：' + (e && e.message ? e.message : e), 'error');
             }
         });
+        bind('#mvu2db-pick-file', () => {
+            const input = panel.querySelector('#mvu2db-file');
+            if (input) input.click();
+        });
+        const fileInput = panel.querySelector('#mvu2db-file');
+        if (fileInput && fileInput.dataset.bound !== 'true') {
+            fileInput.dataset.bound = 'true';
+            fileInput.addEventListener('change', () => {
+                const nameEl = panel.querySelector('#mvu2db-file-name');
+                if (nameEl) nameEl.textContent = fileInput.files && fileInput.files.length ? '已选择：' + fileInput.files[0].name : '';
+            });
+        }
         bind('#mvu2db-convert-file', async () => {
             const input = panel.querySelector('#mvu2db-file');
             if (!input || !input.files || !input.files.length) { toast('请先选择文件', 'error'); return; }
