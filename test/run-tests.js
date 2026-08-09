@@ -1401,6 +1401,23 @@ test('SQL 示例不应包含内部溢出列 _扩展数据', () => {
     assert.ok(sheet.sourceData.insertNode.includes('INSERT INTO'), 'INSERT 示例仍应存在');
 });
 
+test('seedRows 兜底：content 仅表头时用 seedRows 还原初始行（首楼被删/重置场景）', () => {
+    const layout = [
+        { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前时间', 'text', '', '', '', '']], writePaths: [], mirrors: [] },
+        { kind: 'rows', group: '储物袋', table: '储物袋表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['数量', 'number', '', '', '', '']], writePaths: [['主角', '储物袋']], mirrors: [] },
+    ];
+    const tables = {
+        sheet_1: { name: '系统表', content: [['row_id', '名称', '当前时间']], seedRows: [[1, '系统', '12:00']] },
+        sheet_2: { name: '储物袋表', content: [['row_id', '名称', '数量']], seedRows: [[1, '铁剑', 1]] },
+    };
+    const out = core.statDataFromTables(layout, tables);
+    assert.strictEqual(out.stat_data.系统.当前时间, '12:00', '单例表 seedRows 应还原');
+    assert.strictEqual(out.stat_data.主角.储物袋['铁剑'].数量, 1, '行表 seedRows 应还原');
+    // 无 seedRows 时保持原行为（空）
+    const out2 = core.statDataFromTables(layout, { sheet_1: { name: '系统表', content: [['row_id', '名称', '当前时间']] }, sheet_2: { name: '储物袋表', content: [['row_id', '名称', '数量']] } });
+    assert.strictEqual(out2.stat_data.系统.当前时间, '', '无 seedRows 时单例为空值');
+});
+
 test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）', () => new Promise((resolve, reject) => {
     const vm = require('vm');
     const card = requireFixture();
