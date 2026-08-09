@@ -398,5 +398,19 @@ test('MVU 规则来源：范围/枚举/提醒均来自卡内 [MvuUpdate]（代�
     assert.deepStrictEqual(si.enums['危机程度'], ['无', '低', '中', '高', '致命'], '枚举应来自卡内规则');
 });
 
+test('非 MVU 卡（无 [InitVar]）应明确中止，不产出废卡', () => {
+    const plain = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '普通卡',
+            description: '',
+            first_mes: '你好',
+            character_book: { entries: [{ comment: '普通条目', content: '你好世界' }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    assert.throws(() => core.convert(plain, { mode: 'both' }), /\[InitVar\]/);
+});
+
 console.log(`\n结果：${passed} 通过，${failed} 失败`);
 if (failed) process.exit(1);
