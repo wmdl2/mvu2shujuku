@@ -3416,7 +3416,7 @@
                 `// 复刻 MVU 的占位符维护：AI 回复后若卡内正则依赖 <StatusPlaceHolderImpl/>，就在消息末尾补上占位符，`,
                 `// 前端注入正则才能命中每条消息（原卡由 MVU 引擎完成，转换后桥接管）`,
                 `var statusPlaceholderNeeded=${statusPlaceholderNeeded ? 'true' : 'false'};`,
-                `var placeholderMsgKey='';var placeholderAt=0;`,
+                `var placeholderMsgKey='';var placeholderAt=0;var placeholderRetryTimer=null;var placeholderRetryCount=0;`,
                 `function detectStatusPlaceholder(){`,
                 `  try{`,
                 `    var ctx0=getContext();`,
@@ -3429,6 +3429,8 @@
                 `  }catch(e){}`,
                 `}`,
                 `function bridgeSetChatMessages(){`,
+                `  // 优先使用 TH 脚本作用域注入的裸 setChatMessages（MVU 引擎同款调用方式）`,
+                `  try{if(typeof setChatMessages==='function')return setChatMessages;}catch(e){}`,
                 `  try{var c=getContext();if(c&&typeof c.setChatMessages==='function')return c.setChatMessages.bind(c);}catch(e){}`,
                 `  try{if(typeof window.setChatMessages==='function')return window.setChatMessages;}catch(e){}`,
                 `  for(var i=0;i<roots.length;i++){`,
@@ -3442,7 +3444,13 @@
                 `  try{`,
                 `    var ctx=getContext();`,
                 `    if(!ctx||!Array.isArray(ctx.chat)||!ctx.chat.length){console.log('['+BRIDGE_NAME+'][占位符] 跳过：无聊天上下文');return;}`,
-                `    if(ctx.generating===true||ctx.isStreaming===true)return;`,
+                `    if(ctx.generating===true||ctx.isStreaming===true){`,
+                `      if(!placeholderRetryTimer&&placeholderRetryCount<10){`,
+                `        placeholderRetryTimer=setTimeout(function(){placeholderRetryTimer=null;placeholderRetryCount+=1;ensureStatusPlaceholder();},1000);`,
+                `      }`,
+                `      return;`,
+                `    }`,
+                `    placeholderRetryCount=0;`,
                 `    var msg=ctx.chat[ctx.chat.length-1];`,
                 `    if(!msg){console.log('['+BRIDGE_NAME+'][占位符] 跳过：无最新消息');return;}`,
                 `    if(msg.is_user){console.log('['+BRIDGE_NAME+'][占位符] 跳过：最新消息是用户消息');return;}`,
@@ -3477,6 +3485,8 @@
                 `    return;`,
                 `  }`,
                 `  function onMessage(){`,
+                `    // 复刻 MVU：消息一到立即补占位符（不延迟），随后再处理建表/更新块`,
+                `    try{ensureStatusPlaceholder();}catch(e){}`,
                 `    setTimeout(function(){`,
                 `      console.log('['+BRIDGE_NAME+'] 消息收尾触发: 建表/更新块/状态栏刷新');`,
                 `      try{var _ctx=getContext();var _m=_ctx&&_ctx.chat&&_ctx.chat[_ctx.chat.length-1];console.log('['+BRIDGE_NAME+'][占位符] MESSAGE_RECEIVED 最新消息 role='+(_m&&_m.is_user?'user':(_m&&_m.name||'?'))+' | 含占位符='+(String(_m&&(_m.mes!=null?_m.mes:(_m.message||''))).indexOf('<StatusPlaceHolderImpl/>')!==-1));}catch(e){}`,
@@ -4178,6 +4188,8 @@ ${DB_INIT_SNIPPET}
     // 扩展本体复刻 MVU 的占位符维护：AI 回复后若缺少占位符则追加，前端注入正则才能命中每条消息
     let lastPlaceholderMsgKey = '';
     let lastPlaceholderAt = 0;
+    let placeholderRetryTimer = null;
+    let placeholderRetryCount = 0;
     function findSetChatMessages() {
         try { const context = getContextSafe(); if (context && typeof context.setChatMessages === 'function') return context.setChatMessages.bind(context); } catch (e) {}
         try { if (typeof window.setChatMessages === 'function') return window.setChatMessages; } catch (e) {}
@@ -4194,8 +4206,19 @@ ${DB_INIT_SNIPPET}
             if (!context || !Array.isArray(context.chat) || !context.chat.length) {
                 return;
             }
-            // 生成/流式过程中不追加，避免每次流更新都把占位符覆盖后再补（反复注入）
-            if (context.generating === true || context.isStreaming === true) return;
+            // 生成/流式过程中不追加，避免每次流更新都把占位符覆盖后再补（反复注入）；
+            // 若事件触发时 generating 仍为 true 导致错过，1 秒后补一次（最多 10 次），保证收尾必补（MVU 同款语义）
+            if (context.generating === true || context.isStreaming === true) {
+                if (!placeholderRetryTimer && placeholderRetryCount < 10) {
+                    placeholderRetryTimer = hostWindow.setTimeout(() => {
+                        placeholderRetryTimer = null;
+                        placeholderRetryCount += 1;
+                        ensureWindowStatusPlaceholder();
+                    }, 1000);
+                }
+                return;
+            }
+            placeholderRetryCount = 0;
             const msg = context.chat[context.chat.length - 1];
             if (!msg) return;
             if (msg.is_user || String(msg.name || '') === 'System') return;
@@ -4242,10 +4265,10 @@ ${DB_INIT_SNIPPET}
                 es.on(et.MESSAGE_RECEIVED, () => {
                     hostWindow.setTimeout(autoInitDatabase, 600);
                     // 复刻 MVU：AI 回复后追加状态栏占位符，前端注入正则才能命中每条消息
-                    hostWindow.setTimeout(ensureWindowStatusPlaceholder, 500);
+                    ensureWindowStatusPlaceholder();
                 });
                 if (et.GENERATION_ENDED) {
-                    es.on(et.GENERATION_ENDED, () => hostWindow.setTimeout(ensureWindowStatusPlaceholder, 800));
+                    es.on(et.GENERATION_ENDED, () => ensureWindowStatusPlaceholder());
                 }
                 autoInitState.inited = true;
             }
