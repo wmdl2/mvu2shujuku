@@ -2646,6 +2646,32 @@
             '',
             `var runtimeDisplay={};`,
             '',
+            `// 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），`,
+            `// 短窗口内合并为一次持久化，读路径直接返回待写快照保证写后立即读一致`,
+            `var pendingStatOverlay=null;`,
+            `var statOverlayTimer=null;`,
+            `var statOverlayGen=0;`,
+            `function flushStatOverlay(){`,
+            `  statOverlayTimer=null;`,
+            `  var target=pendingStatOverlay;`,
+            `  if(target===null)return;`,
+            `  var gen=statOverlayGen;`,
+            `  (async function(){`,
+            `    try{`,
+            `      var prev=currentStat();`,
+            `      await writeDiffToDb(prev,target);`,
+            `      broadcastBridgeEvent();`,
+            `    }catch(e){console.warn('['+BRIDGE_NAME+'] 合并写库异常:',e);}`,
+            `    finally{if(statOverlayGen===gen)pendingStatOverlay=null;}`,
+            `  })();`,
+            `}`,
+            `function scheduleStatOverlay(next){`,
+            `  statOverlayGen++;`,
+            `  pendingStatOverlay=next;`,
+            `  if(statOverlayTimer)clearTimeout(statOverlayTimer);`,
+            `  statOverlayTimer=setTimeout(flushStatOverlay,150);`,
+            `}`,
+            '',
             `window.getAllVariables=function(){`,
             `  var data={stat_data:{}};`,
             `  var sd=data.stat_data;`,
@@ -2990,6 +3016,8 @@
             `      SINGLE_VARIABLE_UPDATED:'mag_variable_updated'`,
             `    };`,
             `    mvuFake.getMvuData=function(opts){`,
+            `      // 有待写快照时直接返回，保证 写→读 一致（持久化由合并定时器落库）`,
+            `      if(pendingStatOverlay)return {stat_data:pendingStatOverlay,display_data:{},delta_data:{},initialized_lorebooks:{}};`,
             `      var all=window.getAllVariables?window.getAllVariables():{stat_data:{}};`,
             `      return {stat_data:all.stat_data||{},display_data:all.display_data||{},delta_data:{},initialized_lorebooks:{}};`,
             `    };`,
@@ -3039,10 +3067,7 @@
             `      }`,
             `    };`,
             `    mvuFake.replaceMvuData=async function(data,opts){`,
-            `      var next=(data&&data.stat_data)||{};`,
-            `      var prev=currentStat();`,
-            `      try{await writeDiffToDb(prev,next);}catch(e){console.warn('['+BRIDGE_NAME+'] Mvu.replaceMvuData 写库异常:',e);}`,
-            `      broadcastBridgeEvent();`,
+            `      scheduleStatOverlay((data&&data.stat_data)||{});`,
             `      return true;`,
             `    };`,
             `    mvuFake.parseMessage=async function(message,old_data){`,
@@ -4260,6 +4285,37 @@ ${DB_INIT_SNIPPET}
     let statWriteTimer = null;
     let statWriteFlushResolve = null;
     let statWriteFlushPromise = null;
+    let statWriteOverlayGen = 0;
+
+    // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
+    // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
+    function scheduleWindowStatOverlay(next) {
+        statWriteOverlayGen += 1;
+        pendingStatWrite = next;
+        if (statWriteTimer) hostWindow.clearTimeout(statWriteTimer);
+        statWriteTimer = hostWindow.setTimeout(async () => {
+            statWriteTimer = null;
+            const target = pendingStatWrite;
+            if (target === null || target === undefined) return;
+            const gen = statWriteOverlayGen;
+            try {
+                const api = getAcuApi();
+                if (api && activeLayout) {
+                    const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                    const prev = all.stat_data || {};
+                    const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
+                    if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                    dispatchShujukuTableUpdated();
+                } else {
+                    console.warn('[mvu2shujuku][debug] Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
+                }
+            } catch (e) {
+                console.warn('[mvu2shujuku][debug] Mvu 合并写入异常:', e);
+            } finally {
+                if (statWriteOverlayGen === gen) pendingStatWrite = null;
+            }
+        }, 150);
+    }
 
     // 扩展侧提供 window.getAllVariables：用卡内布局 + 插件表格实时重建 stat_data（惰性，零冗余）
     function installWindowGetAllVariables() {
@@ -4502,6 +4558,10 @@ ${DB_INIT_SNIPPET}
                 SINGLE_VARIABLE_UPDATED: 'mag_variable_updated',
             };
             windowMvuFake.getMvuData = function () {
+                // 有待写快照时直接返回，保证 写→读 一致（持久化由合并定时器落库）
+                if (pendingStatWrite) {
+                    return { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
+                }
                 const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                 return { stat_data: all.stat_data || {}, display_data: all.display_data || {}, delta_data: {}, initialized_lorebooks: {} };
             };
@@ -4553,36 +4613,7 @@ ${DB_INIT_SNIPPET}
                         console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空') + '（自动建表尚未缓存布局，或当前卡不是转换产物）');
                         return false;
                     }
-                    const next = (data && data.stat_data) || {};
-                    pendingStatWrite = next;
-                    if (!statWriteFlushPromise) {
-                        statWriteFlushPromise = new Promise((res) => { statWriteFlushResolve = res; });
-                    }
-                    if (statWriteTimer) hostWindow.clearTimeout(statWriteTimer);
-                    statWriteTimer = hostWindow.setTimeout(() => {
-                        statWriteTimer = null;
-                        const target = pendingStatWrite;
-                        pendingStatWrite = null;
-                        const resolve = statWriteFlushResolve;
-                        statWriteFlushResolve = null;
-                        statWriteFlushPromise = null;
-                        (async () => {
-                            try {
-                                if (target) {
-                                    const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                                    const prev = all.stat_data || {};
-                                    const n = await core.writeStatDiffToDb(api, activeLayout, prev, target);
-                                    if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
-                                    dispatchShujukuTableUpdated();
-                                }
-                            } catch (e2) {
-                                console.warn('[mvu2shujuku][debug] Mvu 合并写入异常:', e2);
-                            } finally {
-                                if (resolve) resolve(true);
-                            }
-                        })();
-                    }, 30);
-                    await statWriteFlushPromise;
+                    scheduleWindowStatOverlay((data && data.stat_data) || {});
                     return true;
                 } catch (e) {
                     console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 异常:', e);
@@ -5757,6 +5788,37 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
     let statWriteTimer = null;
     let statWriteFlushResolve = null;
     let statWriteFlushPromise = null;
+    let statWriteOverlayGen = 0;
+
+    // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
+    // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
+    function scheduleWindowStatOverlay(next) {
+        statWriteOverlayGen += 1;
+        pendingStatWrite = next;
+        if (statWriteTimer) hostWindow.clearTimeout(statWriteTimer);
+        statWriteTimer = hostWindow.setTimeout(async () => {
+            statWriteTimer = null;
+            const target = pendingStatWrite;
+            if (target === null || target === undefined) return;
+            const gen = statWriteOverlayGen;
+            try {
+                const api = getAcuApi();
+                if (api && activeLayout) {
+                    const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                    const prev = all.stat_data || {};
+                    const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
+                    if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                    dispatchShujukuTableUpdated();
+                } else {
+                    console.warn('[mvu2shujuku][debug] Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
+                }
+            } catch (e) {
+                console.warn('[mvu2shujuku][debug] Mvu 合并写入异常:', e);
+            } finally {
+                if (statWriteOverlayGen === gen) pendingStatWrite = null;
+            }
+        }, 150);
+    }
 
     // 扩展侧提供 window.getAllVariables：用卡内布局 + 插件表格实时重建 stat_data（惰性，零冗余）
     function installWindowGetAllVariables() {
@@ -5999,6 +6061,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
                 SINGLE_VARIABLE_UPDATED: 'mag_variable_updated',
             };
             windowMvuFake.getMvuData = function () {
+                // 有待写快照时直接返回，保证 写→读 一致（持久化由合并定时器落库）
+                if (pendingStatWrite) {
+                    return { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
+                }
                 const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                 return { stat_data: all.stat_data || {}, display_data: all.display_data || {}, delta_data: {}, initialized_lorebooks: {} };
             };
@@ -6050,36 +6116,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
                         console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空') + '（自动建表尚未缓存布局，或当前卡不是转换产物）');
                         return false;
                     }
-                    const next = (data && data.stat_data) || {};
-                    pendingStatWrite = next;
-                    if (!statWriteFlushPromise) {
-                        statWriteFlushPromise = new Promise((res) => { statWriteFlushResolve = res; });
-                    }
-                    if (statWriteTimer) hostWindow.clearTimeout(statWriteTimer);
-                    statWriteTimer = hostWindow.setTimeout(() => {
-                        statWriteTimer = null;
-                        const target = pendingStatWrite;
-                        pendingStatWrite = null;
-                        const resolve = statWriteFlushResolve;
-                        statWriteFlushResolve = null;
-                        statWriteFlushPromise = null;
-                        (async () => {
-                            try {
-                                if (target) {
-                                    const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                                    const prev = all.stat_data || {};
-                                    const n = await core.writeStatDiffToDb(api, activeLayout, prev, target);
-                                    if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
-                                    dispatchShujukuTableUpdated();
-                                }
-                            } catch (e2) {
-                                console.warn('[mvu2shujuku][debug] Mvu 合并写入异常:', e2);
-                            } finally {
-                                if (resolve) resolve(true);
-                            }
-                        })();
-                    }, 30);
-                    await statWriteFlushPromise;
+                    scheduleWindowStatOverlay((data && data.stat_data) || {});
                     return true;
                 } catch (e) {
                     console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 异常:', e);
