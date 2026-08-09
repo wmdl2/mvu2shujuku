@@ -468,6 +468,10 @@
         return btoa(bin);
     }
 
+    function toBase64(str) {
+        return typeof Buffer !== 'undefined' ? Buffer.from(String(str), 'utf8').toString('base64') : btoaSafe(str);
+    }
+
     // 把新角色卡写回 PNG（替换原 chara 块，无则插入 IEND 前）
     function writeCardPng(originalBuffer, card) {
         const chunks = readPngChunks(originalBuffer);
@@ -1526,25 +1530,38 @@
             const isSingletonKey = i === 0 && group.kind === 'singleton';
             let def = `  ${c.ident} ${c.type}`;
             const range = c.range || null;
+            const extras = Array.isArray(group.extraAllowed && group.extraAllowed[c.ident]) ? group.extraAllowed[c.ident] : [];
+            let dv = c.value;
+            // 默认值若越界也加入放行列表（不修改初始值）
+            if (range && typeof dv === 'number' && (dv < range[0] || dv > range[1]) && !extras.includes(dv)) extras.push(dv);
             if (c.type === 'INTEGER') {
-                const dv = c.value === undefined || c.value === null || c.value === '' ? 0 : Number(c.value);
-                def += ` NOT NULL DEFAULT ${Number.isFinite(dv) ? dv : 0}`;
+                const num = dv === undefined || dv === null || dv === '' ? 0 : Number(dv);
+                def += ` NOT NULL DEFAULT ${Number.isFinite(num) ? num : 0}`;
                 if (isKey) def += ' UNIQUE';
-                if (range) def += ` CHECK(${c.ident} BETWEEN ${range[0]} AND ${range[1]})`;
+                if (range) {
+                    def += ` CHECK(${c.ident} BETWEEN ${range[0]} AND ${range[1]}`;
+                    if (extras.length) def += ` OR ${c.ident} IN (${extras.join(', ')})`;
+                    def += ')';
+                }
             } else {
-                let dv = c.value === undefined || c.value === null ? '' : String(c.value);
-                if (c.isObject && dv === '') dv = '{}';
-                def += ` NOT NULL DEFAULT '${sqlQuote(dv)}'`;
+                let dvs = dv === undefined || dv === null ? '' : String(dv);
+                if (c.isObject && dvs === '') dvs = '{}';
+                def += ` NOT NULL DEFAULT '${sqlQuote(dvs)}'`;
                 if (isKey) def += ' UNIQUE';
+                // 枚举 CHECK：把默认值和越界初始值一并放行，避免初始行/默认值被拒绝
                 if (c.enum && c.enum.length <= 8 && c.enum.every(v => !/['"]/.test(v))) {
-                    def += ` CHECK(${c.ident} IN (${c.enum.map(v => `'${sqlQuote(v)}'`).join(', ')}))`;
+                    const allowed = [...c.enum];
+                    if (dvs !== '' && !allowed.includes(dvs)) allowed.push(dvs);
+                    for (const ex of extras) if (!allowed.includes(ex)) allowed.push(ex);
+                    def += ` CHECK(${c.ident} IN (${allowed.map(v => `'${sqlQuote(v)}'`).join(', ')}))`;
                 }
             }
             if (isSingletonKey && group.keyValue) {
                 def = def.replace(/DEFAULT '[^']*'/, `DEFAULT '${sqlQuote(group.keyValue)}'`);
             }
-            // 插件校验要求 DDL 列注释与 content 表头逐字一致，描述只写进 note，不拼进注释
-            def += `, -- ${c.zh}`;
+            // 插件校验要求 DDL 列注释与 content 表头逐字一致，描述只写进 note，不拼进注释；
+            // 末列不加逗号，否则 sql.js 拒绝建表（SQLite 运行时回退原生模式）。
+            def += (i < cols.length - 1 ? ',' : '') + ` -- ${c.zh}`;
             L.push(def);
         }
         L.push(');');
@@ -1561,84 +1578,40 @@
         return `条目表，以「${group.keyCol}」为唯一标识；同名记录只存在一行，更新用 UPDATE，新增用 INSERT。`;
     }
 
-    function buildNativeDslSection(group, tableIndex) {
-        const L = [];
-        L.push('【原生 DSL 填写（native 模式）】');
-        L.push('- 响应放在 <tableEdit> 标签内，标签内部只输出 DSL 指令，禁止附带解释或 Markdown。');
-        L.push(`- 本表 表格ID = ${tableIndex}（按模板顺序的数字索引）。`);
-        L.push('- 指令格式：');
-        L.push('  insertRow(表格ID, {"0":"值","1":"值",...})');
-        L.push('  updateRow(表格ID, 行号, {"0":"值","1":"值",...})');
-        L.push('  deleteRow(表格ID, 行号)');
-        L.push('- 列序号从 0 开始（不含 row_id）：');
-        group.columns.forEach((c, i) => L.push(`  ${i}=${c.zh}${c.desc ? `（${String(c.desc).replace(/\n/g, ' ')}）` : ''}`));
-        L.push('- 行号从 0 开始：第 1 条数据行为 0，第 2 条为 1，依此类推。');
-        L.push('- 对象里的键必须是带双引号的数字（"0":"值"），值内部的双引号要转义为 \\"。');
-        if (group.kind === 'singleton') {
-            L.push(`- 本表为单例表：禁止 insertRow / deleteRow，只允许 updateRow(${tableIndex}, 0, {...}) 更新已存在行。`);
-            const sample = {};
-            group.columns.slice(0, 3).forEach((c, i) => { sample[String(i)] = String(c.value || `示例${c.zh}`); });
-            L.push(`- 示例：updateRow(${tableIndex}, 0, ${JSON.stringify(sample)})`);
-        } else if (group.kind === 'rows') {
-            const sample = {};
-            group.columns.slice(0, Math.min(3, group.columns.length)).forEach((c, i) => { sample[String(i)] = String(c.value || `示例${c.zh}`); });
-            L.push(`- 示例：insertRow(${tableIndex}, ${JSON.stringify(sample)})`);
-        }
-        return L.join('\n');
-    }
-
-    function buildSqliteSection(group) {
-        const L = [];
-        L.push('【SQLite SQL 填写（sqlite 模式）】');
-        L.push('- 响应放在 <tableEdit> 标签内，标签内部只输出标准 INSERT/UPDATE/DELETE SQL。');
-        L.push(`- 物理表名 ${group.ident}，也可用中文表名「${group.tableName}」或中文列名（插件会自动映射）。`);
-        L.push('- UPDATE 与 DELETE 必须带 WHERE；优先使用 DDL 中的 UNIQUE 业务键定位。');
-        L.push(`- 业务键：${group.keyCol}（行号 row_id 也可用于精确定位）。`);
-        L.push('- SQL 字符串中的英文单引号必须写成两个单引号，禁止在语句后追加解释或 Markdown。');
-        if (group.kind === 'singleton') {
-            L.push(`- 本表为单例表：禁止 INSERT / DELETE，只允许 UPDATE ${group.ident} SET ... WHERE ${group.keyCol}='${sqlQuote(group.keyValue)}'。`);
-        } else if (group.kind === 'rows') {
-            const cols = group.columns.slice(0, Math.min(3, group.columns.length)).map(c => c.zh).join(', ');
-            L.push(`- 示例：INSERT INTO ${group.ident} (${cols}) VALUES ('示例1', '示例2');`);
-        }
-        return L.join('\n');
-    }
-
-    function buildNote(group, mode, tableIndex) {
+    function buildNote(group) {
         const L = [];
         L.push(`${group.tableName}。${describeGroup(group)}`);
-        if (group.reminders && group.reminders.length) {
-            L.push('【每次回复必须维护】');
-            group.reminders.forEach(r => L.push(`- ${r}`));
+        if (group.kind === 'singleton' && group.rows.length) {
+            L.push(`本表唯一记录已由开局模板插入（row_id=1，${group.keyCol}='${group.keyValue}'）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`);
         }
         if (group.columns.length) {
             L.push('【列定义】');
             group.columns.forEach((c, i) => {
                 let desc = c.desc ? String(c.desc).replace(/\n/g, ' ') : '';
-                if (c.range) desc += (desc ? '；' : '') + `数值范围 ${c.range[0]}~${c.range[1]}`;
-                if (c.enum) desc += (desc ? '；' : '') + `可选值：${c.enum.join(' / ')}`;
-                if (c.format) desc += (desc ? '；' : '') + `格式要求：${String(c.format).replace(/\n/g, ' ')}`;
-                if (c.isObject) desc += (desc ? '；' : '') + '对象以 JSON 存储，读取时还原';
-                L.push(`- 列${i}（${c.zh} / ${c.ident}）：${desc || '无特殊约束'}`);
+                L.push(`- 列${i + 1}: ${c.zh} ${c.ident}${desc ? `（${desc}）` : ''}`);
             });
-            // 字段级 check 规则（可能很长，放列定义之后）
+            L.push('【强制约束】');
             for (const c of group.columns) {
-                if (c.check && c.check.length) {
-                    L.push(`【${c.zh} 维护规则】`);
-                    c.check.slice(0, 20).forEach(r => L.push(`- ${r}`));
-                    if (c.check.length > 20) L.push(`- …（共 ${c.check.length} 条，其余略）`);
-                }
+                const parts = [];
+                if (c.range) parts.push(`数值范围 ${c.range[0]}~${c.range[1]}`);
+                if (c.enum) parts.push(`可选值：${c.enum.join(' / ')}`);
+                if (c.format) parts.push(`格式要求：${String(c.format).replace(/\n/g, ' ')}`);
+                if (c.isObject) parts.push('对象以 JSON 存储，读取时还原');
+                if (parts.length) L.push(`- ${c.zh}：${parts.join('；')}`);
+                for (const rule of c.check || []) L.push(`- ${c.zh}：${rule}`);
             }
+            for (const c of group.columns) {
+                if (c.check && c.check.length > 20) L.push(`- ${c.zh}：…（共 ${c.check.length} 条规则，其余略）`);
+            }
+            (group.reminders || []).forEach(r => L.push(`- 每次回复必须维护：${r}`));
         }
-        if (mode !== 'native') L.push(buildSqliteSection(group));
-        if (mode !== 'sqlite') L.push(buildNativeDslSection(group, tableIndex));
         L.push('只在正文明确造成状态变化时更新对应字段；不得为凑表而虚构数据。');
         return L.join('\n');
     }
 
     function buildInitNode(group) {
         if (group.kind === 'singleton') {
-            return `已由开局模板插入唯一记录（${group.keyCol}='${group.keyValue}'）；自动填表阶段禁止再次初始化。`;
+            return `开局模板已包含唯一记录（row_id=1，${group.keyCol}='${group.keyValue}'）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`;
         }
         if (group.kind === 'array') {
             return group.rows.length
@@ -1647,21 +1620,30 @@
         }
         if (group.rows.length) {
             const names = group.rows.slice(0, 5).map(r => r[1]).filter(Boolean).join('、');
-            return `已在模板中初始化 ${group.rows.length} 条记录${names ? `（${names}${group.rows.length > 5 ? '…' : ''}）` : ''}；开局阶段如有新条目再按 insertNode 规则新增。`;
+            return `开局模板已初始化 ${group.rows.length} 条记录${names ? `（${names}${group.rows.length > 5 ? '…' : ''}）` : ''}；开局阶段如有新条目再按 insertNode 规则新增。`;
         }
         return '无（开局时由剧情按需插入首条记录）。';
     }
 
     function buildNodeProse(group, kind) {
-        if (group.kind === 'singleton') return '禁止。';
+        if (group.kind === 'singleton') {
+            if (kind === 'update') return `只允许 UPDATE ${group.ident} SET ... WHERE ${group.keyCol}='${sqlQuote(group.keyValue)}'; 依正文明确变化更新对应字段。`;
+            return '禁止。';
+        }
         if (group.kind === 'array') {
             if (kind === 'update') return '每轮按最新剧情整体替换本表内容。';
-            if (kind === 'insert') return '禁止（数组表不支持追加，整体替换）。';
-            return '禁止（数组表不支持删除单行）。';
+            return '禁止（数组表不支持单行增删，整体替换）。';
         }
-        if (kind === 'update') return '正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。';
-        if (kind === 'insert') return `正文中首次出现应记录的${group.keyCol}时，插入完整的新记录。`;
-        return `仅在条目彻底离场、失效或不再需要追踪时移除记录。`;
+        const keyIdent = group.columns[0] ? group.columns[0].ident : 'key';
+        const sampleCols = group.columns.slice(1, 4).map(c => c.ident);
+        if (kind === 'update') {
+            return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${sampleCols[0] || '字段'} = '新值' WHERE ${keyIdent} = '条目名';`;
+        }
+        if (kind === 'insert') {
+            const cols = [keyIdent, ...sampleCols].join(', ');
+            return `正文中首次出现应记录的${group.keyCol}时，插入完整的新记录。\nSQL示例: INSERT INTO ${group.ident} (${cols}) VALUES ('条目名', '值1', '值2');`;
+        }
+        return `仅在条目彻底离场、失效或不再需要追踪时移除记录。\nSQL示例: DELETE FROM ${group.ident} WHERE ${keyIdent} = '条目名';`;
     }
 
     /**
@@ -1670,6 +1652,7 @@
      */
     function generateTemplate(schema, opts = {}) {
         const mode = opts.mode || 'both';
+        const report = opts.report || createReport();
         const template = {
             mate: {
                 type: 'chatSheets',
@@ -1680,17 +1663,42 @@
         };
         const order = {};
         schema.forEach((g, idx) => {
-            // 归一化行号 1..N
+            // 统计每列“超出规则但必须放行”的初始值（不改动初始值，只放宽 CHECK）
+            const extraAllowed = {};
+            for (const c of g.columns) extraAllowed[c.ident] = [];
+            for (const r of g.rows) {
+                for (let ci = 0; ci < g.columns.length; ci++) {
+                    const c = g.columns[ci];
+                    const v = r[ci + 1];
+                    if (c.range && typeof v === 'number' && (v < c.range[0] || v > c.range[1])) {
+                        if (!extraAllowed[c.ident].includes(v)) extraAllowed[c.ident].push(v);
+                    }
+                    if (c.enum && c.enum.length && typeof v === 'string' && !c.enum.includes(v)) {
+                        if (!extraAllowed[c.ident].includes(v)) extraAllowed[c.ident].push(v);
+                    }
+                }
+            }
+            g.extraAllowed = extraAllowed;
+            // 归一化行号 1..N（初始值原样保留）
             const content = [['row_id', ...g.columns.map(c => c.zh)]];
             g.rows.forEach((r, ri) => {
-                content.push([ri + 1, ...r.slice(1)]);
+                const row = [ri + 1];
+                for (let ci = 0; ci < g.columns.length; ci++) {
+                    row.push(r[ci + 1]);
+                }
+                content.push(row);
             });
+            for (const c of g.columns) {
+                if (extraAllowed[c.ident] && extraAllowed[c.ident].length) {
+                    report.note(`「${g.tableName}」列「${c.zh}」初始值 ${extraAllowed[c.ident].map(v => JSON.stringify(v)).join('、')} 超出规则范围，CHECK 约束已放行这些初始值（数值/枚举规则仍写入 note）。`);
+                }
+            }
             const uid = 'sheet_' + g.ident;
             template[uid] = {
                 uid,
                 name: g.tableName,
                 sourceData: {
-                    note: buildNote(g, mode, idx),
+                    note: buildNote(g),
                     initNode: buildInitNode(g),
                     deleteNode: buildNodeProse(g, 'delete'),
                     updateNode: buildNodeProse(g, 'update'),
@@ -2663,6 +2671,29 @@
         /完整变量/i,
     ];
 
+    // 开局自动建表：往开场白注入脚本，读取内嵌模板，在表格为空时导入到当前聊天。
+    // 对应 MVU 的 init 时机（首次进入/首次回复前），避免用户手动切换模板。
+    function openingInitScript(templateB64) {
+        return '<script>(function(){' +
+            'var B64="' + templateB64 + '";' +
+            'function b64dec(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}' +
+            'function wait(fn,ms,max){return new Promise(function(res){var n=0;var iv=setInterval(function(){var ok=false;try{ok=fn();}catch(e){}if(ok||++n>max){clearInterval(iv);res();}},ms);});}' +
+            'function getApi(){var roots=[window];try{roots.push(window.parent);}catch(e){}try{roots.push(window.top);}catch(e){}for(var j=0;j<roots.length;j++){try{var a=roots[j].AutoCardUpdaterAPI;if(a&&typeof a.importTemplateFromData==="function")return a;}catch(e){}}return null;}' +
+            'async function init(){try{await wait(function(){return getApi()!=null;},300,120);var api=getApi();if(!api){console.warn("[mvu2db] 未找到 SP·数据库 插件 API，跳过开局建表");return;}var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var has=false;for(var k in all){if(k.indexOf("sheet_")===0){has=true;break;}}if(has){console.log("[mvu2db] 已有表格，跳过开局注入");return;}var tpl=JSON.parse(b64dec(B64));var r=await api.importTemplateFromData(tpl,{scope:"chat"});console.log("[mvu2db] 开局表格模板注入完成",r&&r.success!==false);}catch(e){console.error("[mvu2db] 开局表格模板注入失败",e);}}' +
+            'if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",init);}else{init();}' +
+            '})();</script>';
+    }
+
+    function injectOpeningScript(firstMes, templateB64) {
+        const script = openingInitScript(templateB64);
+        const text = String(firstMes || '');
+        const lastFence = text.lastIndexOf('```');
+        if (lastFence !== -1 && text.trimEnd().endsWith('```')) {
+            return text.slice(0, lastFence) + '\n' + script + '\n' + text.slice(lastFence);
+        }
+        return text + '\n' + script + '\n';
+    }
+
     // 仅当正则明确解析 MVU 专属语法时才移除；显示用正则（data_block/状态栏等）原样保留
     function isMvuRegex(r) {
         const name = String(r.scriptName || '');
@@ -2754,7 +2785,7 @@
         }
         const schema = buildSchema(initvar, usage, report, shapeInfo);
         const layout = buildLayout(schema);
-        const template = opts.template || generateTemplate(schema, { mode });
+        const template = opts.template || generateTemplate(schema, { mode, report });
 
         // 2. 检测卡内是否依赖 MVU API
         const blobs = cardTextBlobs(card);
@@ -2795,6 +2826,30 @@
             const copy = deepClone(e);
             copy.content = rw.text;
             newEntries.push(copy);
+        }
+        // 把模板以 base64 写入世界书条目（keys: __ACU_TEMPLATE_DATA__），供插件/开场页按需导入
+        const tplB64 = toBase64(JSON.stringify(template));
+        const maxId = entries.reduce((m, e) => Math.max(m, Number(e.id) || 0), 0);
+        newEntries.push({
+            id: maxId + 1,
+            keys: ['__ACU_TEMPLATE_DATA__'],
+            comment: 'SP·数据库 表格模板（勿删勿改）',
+            content: tplB64,
+            enabled: true,
+            constant: false,
+            selective: false,
+            position: 'before_char',
+            insertion_order: 9990,
+            depth: 2,
+            prevent_recursion: true,
+            use_regex: false,
+        });
+        report.note('已把表格模板写入世界书条目 __ACU_TEMPLATE_DATA__（base64），供插件/开场页在开局时自动建表。');
+
+        // 往开场白注入开局初始化脚本：表格为空时自动导入模板（对应 MVU 的 init 时机）
+        if (typeof data.first_mes === 'string') {
+            data.first_mes = injectOpeningScript(data.first_mes, tplB64);
+            report.note('已在开场白注入开局建表脚本：首次进入时若表格为空则自动导入模板，无需手动切换。');
         }
         cb.entries = newEntries;
 
@@ -3330,7 +3385,7 @@
         const body = log.join('\n') + (hasError
             ? '\n\n有失败项，请把上方日志发给开发者排查。'
             : (presetName
-                ? '\n\n请到 SP·数据库 插件面板的“模板”下拉里手动切换到：' + presetName + '（可应用到当前聊天或新聊天）。'
+                ? '\n\n进入新聊天且表格为空时会自动建表，无需手动切换；模板已存为插件预设「' + presetName + '」备用，也可在插件模板面板手动切换。'
                 : ''));
         showInfoPopup(hasError ? '保存完成（有失败项）' : '保存完成', body);
         return !hasError;
@@ -3636,7 +3691,7 @@
                 '',
                 '## 说明',
                 '- 转换不自动安装数据库插件；不迁移旧聊天；只转换角色卡本身。',
-                '- 表格模板不会写入世界书条目，改为内嵌到卡内数据桥脚本，开局自动建表。',
+                '- 表格模板以 base64 写入卡内世界书条目（__ACU_TEMPLATE_DATA__），并在开场白注入开局脚本：进入新聊天且表格为空时自动建表，无需手动导入或切换。',
                 '- 状态栏继续通过 getAllVariables() 读取 stat_data；数据桥会把数据库表格重建为 stat_data 形状。',
                 '- 卡内 MVU 相关正则/脚本/更新规则会被移除；依赖 MVU API 的脚本通过 MVU 兼容层尽力适配。',
             ].join('\n'),
@@ -4016,7 +4071,7 @@ root.__MVU2DB_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢囹坽�
         const body = log.join('\n') + (hasError
             ? '\n\n有失败项，请把上方日志发给开发者排查。'
             : (presetName
-                ? '\n\n请到 SP·数据库 插件面板的“模板”下拉里手动切换到：' + presetName + '（可应用到当前聊天或新聊天）。'
+                ? '\n\n进入新聊天且表格为空时会自动建表，无需手动切换；模板已存为插件预设「' + presetName + '」备用，也可在插件模板面板手动切换。'
                 : ''));
         showInfoPopup(hasError ? '保存完成（有失败项）' : '保存完成', body);
         return !hasError;
