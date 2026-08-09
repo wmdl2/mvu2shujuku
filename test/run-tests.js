@@ -1239,6 +1239,121 @@ test('性能回归：桥的 重建/写入 按批次只导出一次全表快照�
     })().catch(e => { throw e; });
 });
 
+test('单例/整组JSON表仅表头时自动补初始行（updateCell 不再 Row index out of bounds）', () => {
+    const vm = require('vm');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '补行卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: JSON.stringify({
+                            系统: { 当前时间: '12:00' },
+                            任务: {},
+                        }),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both', installMvuShim: true });
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const byName = (n) => Object.keys(tables).find(k => tables[k].name === n);
+    // 模拟插件运行期"仅表头+seedRows"：把 系统表/任务表 的 content 裁成只有表头
+    const sysKey = byName('系统表');
+    const taskKey = byName('任务表');
+    tables[sysKey].seedRows = JSON.parse(JSON.stringify(tables[sysKey].content.slice(1)));
+    tables[taskKey].seedRows = JSON.parse(JSON.stringify(tables[taskKey].content.slice(1)));
+    tables[sysKey].content = [tables[sysKey].content[0]];
+    tables[taskKey].content = [tables[taskKey].content[0]];
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        getTableTemplate: () => r.template,
+        importTemplateFromData: async () => ({ success: true }),
+        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const sheet = Object.values(tables).find(s => s && s.name === tableName);
+            if (!sheet) return false;
+            const ci = sheet.content[0].indexOf(col);
+            if (ci === -1) return false;
+            sheet.content[rowIndex][ci] = value;
+            return true;
+        },
+        insertRow: async (tableName, obj) => {
+            const sheet = Object.values(tables).find(s => s && s.name === tableName);
+            if (!sheet) return 1;
+            const header = sheet.content[0];
+            const row = header.map(() => '');
+            for (const k in obj) { const ci = header.indexOf(k); if (ci >= 0) row[ci] = String(obj[k]); }
+            row[0] = sheet.content.length || 1;
+            sheet.content.push(row);
+            return row[0];
+        },
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = fakeApi;
+    vm.createContext(win);
+    vm.runInContext(r.bridgeScript, win);
+    return (async () => {
+        // 写任务（JSON 表，仅表头）→ 应先补初始行再写内容
+        let mvu = win.Mvu.getMvuData();
+        mvu.stat_data.任务['学习技能'] = { 完成条件: '读完一本书', 已完成: false };
+        await win.Mvu.replaceMvuData(mvu);
+        let back = win.Mvu.getMvuData();
+        assert.strictEqual(JSON.stringify(back.stat_data.任务['学习技能']), JSON.stringify({ 完成条件: '读完一本书', 已完成: false }), '仅表头的JSON表写入应成功');
+        // 写系统（单例表，仅表头）→ 应补初始行并保留初始值
+        mvu = win.Mvu.getMvuData();
+        mvu.stat_data.系统.当前时间 = '13:00';
+        await win.Mvu.replaceMvuData(mvu);
+        back = win.Mvu.getMvuData();
+        assert.strictEqual(back.stat_data.系统.当前时间, '13:00', '仅表头的单例表写入应成功');
+        // 表内容已补行（不止表头）
+        assert.ok(tables[taskKey].content.length > 1, '任务表应补上数据行');
+        assert.ok(tables[sysKey].content.length > 1, '系统表应补上数据行');
+    })().catch(e => { throw e; });
+});
+
+test('SQL 示例不应包含内部溢出列 _扩展数据', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '示例卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: JSON.stringify({
+                            持有物品: { 铁剑: { 数量: 1, 描述: '一把剑' } },
+                        }),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const sheet = Object.values(r.template).find(s => s && s.name === '持有物品表');
+    assert.ok(sheet.content[0].includes('_扩展数据'), '表头应有 _扩展数据 列');
+    assert.ok(!sheet.sourceData.insertNode.includes('_扩展数据'), 'INSERT 示例不应包含 _扩展数据');
+    assert.ok(!sheet.sourceData.updateNode.includes('_扩展数据'), 'UPDATE 示例不应包含 _扩展数据');
+    assert.ok(sheet.sourceData.insertNode.includes('INSERT INTO'), 'INSERT 示例仍应存在');
+});
+
 test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）', () => new Promise((resolve, reject) => {
     const vm = require('vm');
     const card = requireFixture();
