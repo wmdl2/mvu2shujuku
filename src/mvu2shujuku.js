@@ -1904,6 +1904,88 @@
     }
 
     /**
+     * 用布局（buildLayoutJson 输出的条目数组）+ 插件表格数据重建 stat_data/display_data。
+     * 与卡内数据桥 getAllVariables 同逻辑；扩展侧也用它提供 EJS 数据读取，零冗余（惰性读表格）。
+     */
+    function statDataFromTables(layoutEntries, tables) {
+        const data = { stat_data: {} };
+        const sd = data.stat_data;
+        const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
+        const tbl = tables && typeof tables === 'object' ? tables : {};
+        const sheetOf = (name) => {
+            for (const k in tbl) {
+                if (k.indexOf('sheet_') === 0 && tbl[k] && tbl[k].name === name) return tbl[k];
+            }
+            return null;
+        };
+        const text = (v, fb) => (v === undefined || v === null || v === '' ? (fb === undefined ? '' : fb) : String(v));
+        const number = (v, fb) => { const n = parseFloat(v); return isNaN(n) ? (fb === undefined ? 0 : fb) : n; };
+        const parseObject = (v) => { try { if (!v) return {}; if (typeof v === 'object') return v; return JSON.parse(String(v)); } catch (e) { return {}; } };
+        const convertCell = (type, v, fb, desc) => {
+            if (type === 'number') return number(v, fb);
+            if (type === 'object') return parseObject(v);
+            if (type === 'pair') return [text(v, fb), desc || ''];
+            return text(v, fb);
+        };
+        const setPath = (obj, path, value) => {
+            let cur = obj;
+            for (let i = 0; i < path.length - 1; i++) {
+                if (!cur[path[i]] || typeof cur[path[i]] !== 'object' || Array.isArray(cur[path[i]])) cur[path[i]] = {};
+                cur = cur[path[i]];
+            }
+            cur[path[path.length - 1]] = value;
+        };
+        for (const L of entries) {
+            const s = sheetOf(L.table);
+            if (!s || !Array.isArray(s.content) || !s.content.length) {
+                if (L.kind === 'rows') { for (const wp of L.writePaths || []) setPath(sd, wp, {}); }
+                else if (L.kind === 'array') { sd[L.group] = []; for (const m of L.mirrors || []) setPath(sd, m.path, ''); }
+                continue;
+            }
+            const header = s.content[0] || [];
+            const idxs = (L.cols || []).map(c => header.indexOf(c[0]));
+            if (L.kind === 'singleton') {
+                const row = s.content[1] || [];
+                sd[L.group] = {};
+                for (let j = 0; j < (L.cols || []).length; j++) {
+                    const c = L.cols[j];
+                    const vj = idxs[j] >= 0 ? row[idxs[j]] : undefined;
+                    const cp = c.length > 3 && c[3] && c[3].length ? c[3] : [L.group, c[0]];
+                    setPath(sd, cp, convertCell(c[1], vj, c[2], c[5]));
+                }
+            } else if (L.kind === 'array') {
+                const arr = [];
+                for (let r = 1; r < s.content.length; r++) {
+                    const rw = s.content[r];
+                    if (rw && rw[idxs[0]] !== undefined) arr.push(text(rw[idxs[0]]));
+                }
+                sd[L.group] = arr;
+                for (const m of L.mirrors || []) setPath(sd, m.path, m.mode === 'first' ? (arr.length ? arr[0] : '') : arr);
+            } else {
+                const dict = {};
+                const keyIdx = header.indexOf(L.keyCol);
+                for (let r2 = 1; r2 < s.content.length; r2++) {
+                    const rw2 = s.content[r2];
+                    if (!rw2) continue;
+                    const kv = keyIdx >= 0 ? rw2[keyIdx] : undefined;
+                    if (kv === undefined || kv === null || kv === '') continue;
+                    const item = {};
+                    for (let j2 = 0; j2 < (L.cols || []).length; j2++) {
+                        const c2 = L.cols[j2];
+                        if (c2[0] === L.keyCol) { item[c2[0]] = text(kv); continue; }
+                        const vj2 = idxs[j2] >= 0 ? rw2[idxs[j2]] : undefined;
+                        item[c2[0]] = convertCell(c2[1], vj2, c2[2], c2[5]);
+                    }
+                    dict[text(kv)] = item;
+                }
+                for (const wp2 of L.writePaths || []) setPath(sd, wp2, dict);
+            }
+        }
+        try { data.display_data = JSON.parse(JSON.stringify(sd)); } catch (e) {}
+        return data;
+    }
+
+    /**
      * 生成数据桥脚本
      * opts: { mode, template, templateB64, installMvuShim, appendPlaceholder, bridgeScriptName }
      */
@@ -2923,6 +3005,8 @@
             convertedAt: new Date().toISOString(),
             originalName: origName,
             templateUid: Object.keys(template).filter(k => k.startsWith('sheet_')).map(k => template[k].uid),
+            // 布局随卡保存：扩展用它从数据库表格实时重建 stat_data，供 EJS 读取（不依赖卡内桥）
+            layout: buildLayoutJson(layout),
             note: '由 MVU 变量角色卡转换而来；表格数据由 SP·数据库 插件维护，状态栏通过数据桥读取。',
         };
 
@@ -3158,6 +3242,17 @@ ${DB_INIT_SNIPPET}
         } catch (e) {
             console.warn('[mvu2shujuku][debug] 读取 tavern_helper 失败:', e);
         }
+        // 缓存当前卡布局，供 EJS 数据读取（window.getAllVariables）
+        try {
+            const mk = character && character.extensions && character.extensions.mvu2shujuku;
+            if (mk && typeof mk.layout === 'string') {
+                activeLayout = JSON.parse(mk.layout);
+                console.log('[mvu2shujuku][debug] 已缓存当前卡布局，条目数=' + (Array.isArray(activeLayout) ? activeLayout.length : 0));
+            }
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] 解析卡布局失败:', e);
+        }
+        installWindowGetAllVariables();
         const key = autoInitChatId();
         if (autoInitState.done === key) return;
         autoInitState.running = true;
@@ -3373,6 +3468,26 @@ ${DB_INIT_SNIPPET}
     let lastResult = null;
     let lastInput = null;
     const mergeState = { sourceTemplate: null };
+    let activeLayout = null;
+
+    // 扩展侧提供 window.getAllVariables：用卡内布局 + 插件表格实时重建 stat_data（惰性，零冗余）
+    function installWindowGetAllVariables() {
+        const core = window.MVU2SHUJUKU_CORE;
+        if (typeof window.getAllVariables === 'function') return;
+        if (!core || typeof core.statDataFromTables !== 'function') return;
+        window.getAllVariables = function () {
+            try {
+                const api = getAcuApi();
+                if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
+                    return { stat_data: {}, display_data: {} };
+                }
+                return core.statDataFromTables(activeLayout, api.exportTableAsJson());
+            } catch (e) {
+                return { stat_data: {}, display_data: {} };
+            }
+        };
+        console.log('[mvu2shujuku][debug] 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
+    }
 
     async function doConvert(inputBytes, sourceIsPng) {
         const settings = getSettings();
@@ -4031,6 +4146,7 @@ ${DB_INIT_SNIPPET}
         ensureSettingsPanel(context);
         bindDebugHooks(context);
         ensureTemplateDefine();
+        installWindowGetAllVariables();
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
         console.log(
             '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
@@ -4120,6 +4236,7 @@ ${DB_INIT_SNIPPET}
         generateTemplate,
         mergeTemplates,
         generateBridgeScript,
+        statDataFromTables,
         rewriteEjsConditions,
         toPinyinSlug,
         transformCard,

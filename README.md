@@ -93,11 +93,10 @@
 数据库插件解析 `<if>`。因此世界书里的 EJS（`<% if %>`、`<%_ if %>`、else-if 链、
 循环、函数调用、`<%- %>` 输出等）原样保留，只把 MVU 的数据读取
 `getvar('stat_data.路径')` / `getvar("stat_data").组.字段` / `_.has(getvar("stat_data"), …)`
-改写为数据桥的 `mvu2shujukuGetAllVariables().stat_data.路径`（桥从数据库表格重建 stat_data，
-数据桥会把 `mvu2shujukuGetAllVariables` 注册进 st-prompt-template 的模板上下文
-（`EjsTemplate.defines`），EJS 内直接调用；函数是**惰性读取**（每次调用实时从表格重建），
-数据只存一份，无冗余存储；唯一名字避免与其它扩展/卡在模板上下文撞名。
-状态栏用的页面全局 `window.getAllVariables` 保持不变。
+改写为 `mvu2shujukuGetAllVariables().stat_data.路径`。扩展启动时把该函数注册进
+st-prompt-template 的模板上下文（`EjsTemplate.defines`，实测可行），并用卡内布局 +
+插件表格**惰性重建** stat_data（每次调用实时读表，数据只存一份、无冗余同步、不依赖卡内桥）。
+唯一名字避免撞名；状态栏用的 `window.getAllVariables` 也由扩展提供。
 仅在 EJS 条件中出现、不在 `[InitVar]` 里的字段（如分段阈值）也会补进列定义。
 
 ## 目录
