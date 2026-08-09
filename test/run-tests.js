@@ -222,6 +222,46 @@ test('statDataFromTables：按布局从表格重建 stat_data（单例/行表/�
     assert.ok(data.display_data && data.display_data.系统, '应有 display_data 镜像');
 });
 
+test('writeStatDiffToDb：stat_data 差异写回数据库（单例更新/行表插入/数组替换）', async () => {
+    const layout = [
+        { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前MC点', 'number', '', '', '', '']], writePaths: [], mirrors: [] },
+        { kind: 'rows', group: '角色', table: '角色表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['好感度', 'number', '', '', '', '']], writePaths: [['角色']], mirrors: [] },
+        { kind: 'array', group: '$器灵台词', table: '台词表', cols: [['内容', 'text', '', '', '', '']], writePaths: [], mirrors: [] },
+    ];
+    const tables = {
+        sheet_1: { name: '系统表', content: [['row_id', '名称', '当前MC点'], [1, '系统', 100]] },
+        sheet_2: { name: '角色表', content: [['row_id', '名称', '好感度'], [1, '西园寺爱丽莎', 0]] },
+        sheet_3: { name: '台词表', content: [['row_id', '内容'], [1, '旧']] },
+    };
+    const api = {
+        exportTableAsJson: () => tables,
+        updateCell: async (tn, ri, col, val) => {
+            const s = Object.values(tables).find(x => x.name === tn);
+            const ci = s.content[0].indexOf(col);
+            s.content[ri][ci] = val;
+            return true;
+        },
+        insertRow: async (tn, data) => {
+            const s = Object.values(tables).find(x => x.name === tn);
+            s.content.push([s.content.length, ...Object.values(data)]);
+            return s.content.length - 1;
+        },
+        deleteRow: async (tn, ri) => {
+            const s = Object.values(tables).find(x => x.name === tn);
+            s.content.splice(ri + 1, 1);
+            return true;
+        },
+    };
+    const prev = { 系统: { 当前MC点: 100 }, 角色: { 西园寺爱丽莎: { 好感度: 0 } }, '$器灵台词': ['旧'] };
+    const next = { 系统: { 当前MC点: 80 }, 角色: { 西园寺爱丽莎: { 好感度: 5 }, 月咏深雪: { 好感度: 3 } }, '$器灵台词': ['新1', '新2'] };
+    const n = await core.writeStatDiffToDb(api, layout, prev, next);
+    assert.ok(n >= 4, '应产生差异操作');
+    assert.strictEqual(tables.sheet_1.content[1][2], 80, '单例更新应写库');
+    assert.strictEqual(tables.sheet_2.content[1][2], 5, '行表更新应写库');
+    assert.strictEqual(tables.sheet_2.content.length, 3, '新条目应插入');
+    assert.deepStrictEqual(tables.sheet_3.content.slice(1).map(r => r[1]), ['新1', '新2'], '数组应整体替换');
+});
+
 test('条目字段全是叶子的字典应判为行表（修复误判为单例）', () => {
     const card = {
         spec: 'chara_card_v3',
@@ -511,7 +551,8 @@ test('脚本语法与 SD_LAYOUT 结构', () => {
     assert.ok(r.bridgeScript.includes('initGameSession'), '应使用 initGameSession 做开局初始化（对应 MVU init 时机）');
     assert.ok(r.bridgeScript.includes('mvu2shujukuMissingTableNames'), '应按模板表名判断缺表，而非仅看是否有任意表');
     assert.ok(r.bridgeScript.includes('shujuku-table-updated'), '应有表格更新事件');
-    assert.ok(r.bridgeScript.includes('ejs.defines.mvu2shujukuGetAllVariables'), '桥应把 mvu2shujukuGetAllVariables 注册进 st-prompt-template 模板上下文（惰性读取，无冗余存储）');
+    // EJS 数据函数由扩展注册（桥不在主窗口执行，注册无效）；桥不再包含注册代码
+    assert.ok(!r.bridgeScript.includes('installTemplateDefines'), '桥不应再包含失效的模板注册代码');
 });
 
 test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
