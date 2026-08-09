@@ -1112,6 +1112,67 @@ test('已声明单例/行表：未声明的动态字段写入 _扩展数据 并�
     })().catch(e => { throw e; });
 });
 
+test('表结构校验：旧模板（同名表缺列）会被识别并重新导入，不再静默跳过', () => {
+    const vm = require('vm');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '结构校验卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: JSON.stringify({ 任务: {} }),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const tables = JSON.parse(JSON.stringify(r.template));
+    // 模拟旧模板：任务表存在但缺「内容」列
+    const taskKey = Object.keys(tables).find(k => tables[k].name === '任务表');
+    tables[taskKey].content = [['row_id', '名称'], [1, '任务']];
+    let importCalls = 0;
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async (tpl) => {
+            importCalls += 1;
+            // 导入后按模板恢复正确表头
+            const exp = Object.keys(tpl).find(k => tpl[k].name === '任务表');
+            if (exp) tables[taskKey].content = JSON.parse(JSON.stringify(tpl[exp].content));
+            return { success: true };
+        },
+        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async () => true,
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = fakeApi;
+    vm.createContext(win);
+    vm.runInContext(r.bridgeScript, win);
+    return new Promise((resolve, reject) => {
+        setTimeout(() => {
+            try {
+                assert.ok(importCalls >= 1, '旧模板缺列时应触发重新导入（importTemplateFromData 被调用）');
+                assert.deepStrictEqual(tables[taskKey].content[0], ['row_id', '名称', '内容'], '导入后任务表应恢复为名称+内容结构');
+                resolve();
+            } catch (e) { reject(e); }
+        }, 100);
+    });
+});
+
 test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）', () => new Promise((resolve, reject) => {
     const vm = require('vm');
     const card = requireFixture();

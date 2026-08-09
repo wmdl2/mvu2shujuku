@@ -28,7 +28,9 @@
         'function mvu2shujukuDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}',
         'function mvu2shujukuExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}',
         'function mvu2shujukuMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}',
-        'async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",message:"",missing:[]};var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);if(!out.missing.length){out.status="skip";out.message="已有全部表格，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await Promise.resolve(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}));steps.push(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成");}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"){try{var r2=await Promise.resolve(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}));if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else{steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2shujukuMissingTableNames(api,names);out.status=out.missing.length?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无");return out;}',
+        'function mvu2shujukuExpectedColumns(tpl){var map={};if(!tpl||typeof tpl!=="object")return map;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object"||typeof s.name!=="string")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var cols=[];for(var i=1;i<hdr.length;i++){if(cols.indexOf(hdr[i])===-1)cols.push(hdr[i]);}map[s.name]=cols;}return map;}',
+        'function mvu2shujukuMissingColumns(api,expected){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=all[k];}var mismatch=[];for(var name in expected){var sheet=have[name];if(!sheet)continue;var hdr=Array.isArray(sheet.content)&&Array.isArray(sheet.content[0])?sheet.content[0]:[];var exp=expected[name];for(var i=0;i<exp.length;i++){if(hdr.indexOf(exp[i])===-1){mismatch.push(name+"(缺列:"+exp[i]+")");break;}}}return mismatch;}',
+        'async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",message:"",missing:[]};var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await Promise.resolve(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}));steps.push(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成");}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"){try{var r2=await Promise.resolve(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}));if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else{steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}',
     ].join('\n');
 
     /* ================================================================
@@ -1729,7 +1731,9 @@
 
     function buildNote(group) {
         const L = [];
-        if (group.kind === 'singleton' || group.kind === 'json') {
+        if (group.kind === 'json') {
+            L.push(`整组 JSON 存储表（row_id=1，${group.keyCol}='${group.keyValue}'）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除记录。`);
+        } else if (group.kind === 'singleton') {
             // 单例表不重复描述（“全表固定一条记录”等），直接给出开局记录说明
             L.push(`本表唯一记录已由开局模板插入（row_id=1，${group.keyCol}='${group.keyValue}'）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`);
         } else {
@@ -1758,7 +1762,9 @@
             }
             (group.reminders || []).forEach(r => L.push(`- 每次回复必须维护：${r}`));
         }
-        L.push('只在正文明确造成状态变化时更新对应字段；不得为凑表而虚构数据。');
+        if (group.kind !== 'json') {
+            L.push('只在正文明确造成状态变化时更新对应字段；不得为凑表而虚构数据。');
+        }
         return L.join('\n');
     }
 
@@ -2236,7 +2242,10 @@
             const header = sheet.content && sheet.content[0] ? sheet.content[0] : [];
             if (op.json && E.kind === 'json') {
                 const jcIdx = header.indexOf('内容');
-                if (jcIdx === -1) continue;
+                if (jcIdx === -1) {
+                    console.warn('[mvu2shujuku][debug] 整组JSON表「' + L.table + '」缺少「内容」列（旧模板/旧聊天），写入已跳过；请重新转换角色卡并新开聊天。');
+                    continue;
+                }
                 const jNew = op.value === undefined || op.value === null ? '{}' : JSON.stringify(op.value);
                 const jCur = sheet.content[1] ? sheet.content[1][jcIdx] : undefined;
                 if (sameValue(jCur, jNew)) continue;
@@ -2245,7 +2254,10 @@
             }
             if (op.overflow) {
                 const ovcIdx = header.indexOf('_扩展数据');
-                if (ovcIdx === -1) continue;
+                if (ovcIdx === -1) {
+                    console.warn('[mvu2shujuku][debug] 表「' + L.table + '」缺少「_扩展数据」列（旧模板/旧聊天），动态字段写入已跳过；请重新转换角色卡并新开聊天。');
+                    continue;
+                }
                 let ovRow = 1;
                 let ovNewRowObj = null;
                 if (E.kind === 'rows') {
@@ -2748,7 +2760,7 @@
             `    var header=sheet.content&&sheet.content[0]?sheet.content[0]:[];`,
             `    if(op.json&&E.kind==='json'){`,
             `      var jcIdx=header.indexOf('内容');`,
-            `      if(jcIdx===-1)continue;`,
+            `      if(jcIdx===-1){console.warn('['+BRIDGE_NAME+'] 整组JSON表「'+L.table+'」缺少「内容」列（旧模板/旧聊天），写入已跳过；请重新转换角色卡并新开聊天。');continue;}`,
             `      var jNew=op.value===undefined||op.value===null?'{}':JSON.stringify(op.value);`,
             `      var jCur=sheet.content[1]?sheet.content[1][jcIdx]:undefined;`,
             `      if(String(jCur)===String(jNew))continue;`,
@@ -2757,7 +2769,7 @@
             `    }`,
             `    if(op.overflow){`,
             `      var ovcIdx=header.indexOf('_扩展数据');`,
-            `      if(ovcIdx===-1)continue;`,
+            `      if(ovcIdx===-1){console.warn('['+BRIDGE_NAME+'] 表「'+L.table+'」缺少「_扩展数据」列（旧模板/旧聊天），动态字段写入已跳过；请重新转换角色卡并新开聊天。');continue;}`,
             `      var ovRow=1;`,
             `      if(E.kind==='rows'){`,
             `        var ovKey=op.rowKey;`,
@@ -4432,7 +4444,10 @@ ${DB_INIT_SNIPPET}
             windowMvuFake.replaceMvuData = async function (data) {
                 try {
                     const api = getAcuApi();
-                    if (!api || !activeLayout) return false;
+                    if (!api || !activeLayout) {
+                        console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空') + '（自动建表尚未缓存布局，或当前卡不是转换产物）');
+                        return false;
+                    }
                     const next = (data && data.stat_data) || {};
                     pendingStatWrite = next;
                     if (!statWriteFlushPromise) {
