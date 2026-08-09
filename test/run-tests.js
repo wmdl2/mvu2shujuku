@@ -1418,6 +1418,91 @@ test('seedRows 兜底：content 仅表头时用 seedRows 还原初始行（首�
     assert.strictEqual(out2.stat_data.系统.当前时间, '', '无 seedRows 时单例为空值');
 });
 
+test('桥复刻 MVU 占位符维护：AI 回复自动追加 <StatusPlaceHolderImpl/>（前端每楼可注入）', () => {
+    const vm = require('vm');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '占位符卡',
+            description: '',
+            first_mes: '你好\n\n<StatusPlaceHolderImpl/>',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: JSON.stringify({ 系统: { 当前时间: '12:00' } }),
+                    },
+                ],
+            },
+            extensions: {
+                regex_scripts: [
+                    {
+                        scriptName: '前端',
+                        findRegex: '<StatusPlaceHolderImpl/>',
+                        replaceString: '```\n<body>\n<script>\n$(\'body\').load(\'https://example.com/app\')\n</script>\n</body>\n```',
+                    },
+                ],
+                tavern_helper: { scripts: [] },
+            },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const tables = JSON.parse(JSON.stringify(r.template));
+    let boundHandler = null;
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async () => ({ success: true }),
+        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async () => true,
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+    };
+    const contextObj = {
+        chatId: 'c1',
+        name: '占位符卡',
+        characterId: 0,
+        characters: [{ extensions: { regex_scripts: [{ findRegex: '<StatusPlaceHolderImpl/>' }] } }],
+        chat: [{ role: 'assistant', name: '占位符卡', mes: '这是AI回复', message: '这是AI回复' }],
+        eventSource: { on: (name, fn) => { boundHandler = fn; } },
+        event_types: { MESSAGE_RECEIVED: 'message_received' },
+        setChatMessages: async (arr) => {
+            for (const item of arr) {
+                if (contextObj.chat[0]) {
+                    contextObj.chat[0].mes = item.mes || item.message;
+                    contextObj.chat[0].message = item.message || item.mes;
+                }
+            }
+        },
+        saveChat: async () => {},
+    };
+    win.getContext = () => contextObj;
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = fakeApi;
+    vm.createContext(win);
+    vm.runInContext(r.bridgeScript, win);
+    return new Promise((resolve, reject) => {
+        setTimeout(() => {
+            try {
+                assert.strictEqual(typeof boundHandler, 'function', '桥应监听 MESSAGE_RECEIVED');
+                boundHandler({});
+                setTimeout(() => {
+                    try {
+                        const mes = contextObj.chat[0].mes;
+                        assert.ok(mes.includes('<StatusPlaceHolderImpl/>'), 'AI 回复末尾应追加状态栏占位符，实际：' + mes);
+                        resolve();
+                    } catch (e) { reject(e); }
+                }, 500);
+            } catch (e) { reject(e); }
+        }, 300);
+    });
+});
+
 test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）', () => new Promise((resolve, reject) => {
     const vm = require('vm');
     const card = requireFixture();
