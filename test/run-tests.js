@@ -336,57 +336,112 @@ test('[mvu_plot] 剧情条目全部保留，内部 MVU 宏改写为数据库引�
     assert.ok(!timeEntry.content.includes('get_message_variable'), '不应残留 MVU 宏');
 });
 
+test('误标 [mvu_update] 的剧情文本条目应保留，纯变量管道仍删除', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '误标卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[mvu_update]匿名版介绍', content: '<匿名版介绍>\nMChan匿名版是一群使用催眠APP的用户自行搭建的地下匿名版，只有使用者能进入。板块包括公告区、新手引导区、综合讨论区、成果展示区、求助区，语言风格为2chan/4chan式。' },
+                    { comment: '[mvu_update]变量更新格式', content: '格式: _.set(\'路径\', 旧值, 新值);//原因' },
+                    { comment: '[mvu_update]变量列表开始', content: '🔻' },
+                    { comment: '[InitVar]', content: '{"系统":{"当前时间":"09:00"}}' },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const entries = (r.card.data || r.card).character_book.entries;
+    assert.ok(entries.some(e => e.comment.includes('匿名版介绍')), '剧情文本（即使带 [mvu_update] 标记）应保留');
+    assert.ok(!entries.some(e => e.comment.includes('变量更新格式')), '纯变量管道应删除');
+    assert.ok(!entries.some(e => e.comment.includes('变量列表开始')), '短标记应删除');
+});
+
+test('<%_ if %>（EJS 吞空白写法）也能重写为 <if cell>，且仅 EJS 出现的字段补进列', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '吞空白EJS卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[mvu_plot]人设',
+                        content: '<%_ if (getvar(\'stat_data.角色.苏苏.发情值\') < 20) { _%>\n- 性欲不高\n<%_ } else if (getvar(\'stat_data.角色.苏苏.发情值\') < 60) { _%>\n- 性欲明显\n<%_ } else { _%>\n- 完全失控\n<%_ } _%>',
+                    },
+                    { comment: '[InitVar]', content: '{"角色":{"苏苏":{"好感度":[0,""]}}}' },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const entries = (r.card.data || r.card).character_book.entries;
+    const plot = entries.find(e => e.comment.includes('人设'));
+    assert.ok(plot.content.includes('getAllVariables().stat_data.角色.苏苏.发情值 < 20'), '吞空白 EJS 应改数据源为 getAllVariables');
+    assert.ok(plot.content.includes('<%_'), 'EJS 吞空白写法应保留');
+    assert.ok(!plot.content.includes('<if cell='), '不应转换为 <if cell>（EJS 整体保留）');
+    const t = Object.values(r.template).find(s => s && s.name === '角色表');
+    assert.ok(t.content[0].includes('发情值'), '仅在 EJS 中出现的字段应补进列定义');
+});
+
 /* ---------------- EJS 重写 ---------------- */
 console.log('rewriteEjsConditions');
-test('getvar 数值比较 → <if cell>', () => {
+test('getvar 数值比较 → getAllVariables()（EJS 保留）', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const layout = core.buildLayout(r.schema);
     const text = '<% if (getvar(\'stat_data.主角.生命\') >= 50) { %>生命充沛<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(/<if cell="主角表\/主角\/生命 >= 50">生命充沛<\/if>/.test(out.text), out.text);
+    assert.ok(out.text.includes('getAllVariables().stat_data.主角.生命 >= 50'), out.text);
+    assert.ok(out.text.includes('<% if'), 'EJS 结构应保留');
 });
 
-test('嵌套路径（子表条目）→ <if cell>', () => {
+test('嵌套路径（子表条目）→ getAllVariables()', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const layout = core.buildLayout(r.schema);
     const text = '<% if (getvar(\'stat_data.主角.储物袋.铁剑.数量\') > 0) { %>有铁剑<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(/<if cell="储物袋表\/铁剑\/数量 > 0">有铁剑<\/if>/.test(out.text), out.text);
+    assert.ok(out.text.includes('getAllVariables().stat_data.主角.储物袋.铁剑.数量 > 0'), out.text);
 });
 
-test('聚合计数 → <if db>（仅 SQLite）', () => {
+test('聚合计数（Object.keys）→ getAllVariables()', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const layout = core.buildLayout(r.schema);
     const text = '<% if (Object.keys(getvar(\'stat_data.道侣\')).length > 3) { %>道侣众多<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(out.text.includes('<if db="道侣表.count() > 3">道侣众多</if>'), out.text);
+    assert.ok(out.text.includes('Object.keys(getAllVariables().stat_data.道侣).length > 3'), out.text);
 });
 
-test('else 分支 → <else>', () => {
+test('else 分支 EJS 保留', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const layout = core.buildLayout(r.schema);
     const text = '<% if (getvar(\'stat_data.主角.修为\') < 100) { %>修炼中<% } else { %>可突破<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(out.text.includes('<else>可突破</if>'), out.text);
+    assert.ok(out.text.includes('<% } else { %>可突破<% } %>'), 'else 分支应保留为 EJS');
+    assert.ok(out.text.includes('getAllVariables().stat_data.主角.修为 < 100'), out.text);
 });
 
-test('else-if 链 → 嵌套 <if>/<else>', () => {
+test('else-if 链 EJS 整体保留，仅改数据源', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const layout = core.buildLayout(r.schema);
     const text = '<% if (getvar(\'stat_data.主角.修为\') >= 100) { %>大乘<% } else if (getvar(\'stat_data.主角.修为\') >= 50) { %>中阶<% } else { %>初阶<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(
-        out.text.includes('<if cell="主角表/主角/修为 >= 100">大乘<else><if cell="主角表/主角/修为 >= 50">中阶<else>初阶</if></if>'),
-        out.text
-    );
+    assert.ok(out.text.includes('getAllVariables().stat_data.主角.修为 >= 100'), out.text);
+    assert.ok(out.text.includes('else if (getAllVariables().stat_data.主角.修为 >= 50)'), 'else-if 应保留为 EJS');
+    assert.ok(out.text.includes('<% } else { %>初阶<% } %>'), 'else 分支应保留');
     const text2 = '<% if (getvar(\'stat_data.主角.生命\') > 0) { %>存活<% } else if (getvar(\'stat_data.主角.生命\') === 0) { %>濒死<% } %>';
     const out2 = core.rewriteEjsConditions(text2, layout, core.createReport());
-    assert.ok(out2.text.includes('>存活<else><if cell="主角表/主角/生命 === 0">濒死</if></if>'), out2.text);
+    assert.ok(out2.text.includes('getAllVariables().stat_data.主角.生命 === 0'), out2.text);
 });
 
 test('官方教程规范写法：getvar("stat_data").组["字段"][0] 与 _.has', () => {
@@ -395,10 +450,10 @@ test('官方教程规范写法：getvar("stat_data").组["字段"][0] 与 _.has'
     const layout = core.buildLayout(r.schema);
     const text1 = '<% if (getvar("stat_data").主角["生命"][0] >= 50) { %>充沛<% } %>';
     const out1 = core.rewriteEjsConditions(text1, layout, core.createReport());
-    assert.ok(/<if cell="主角表\/主角\/生命 >= 50">/.test(out1.text), out1.text);
+    assert.ok(out1.text.includes('getAllVariables().stat_data.主角["生命"][0] >= 50'), out1.text);
     const text2 = '<% if (_.has(getvar("stat_data"), \'道侣.林若悠.亲密.[0]\')) { %>有数据<% } %>';
     const out2 = core.rewriteEjsConditions(text2, layout, core.createReport());
-    assert.ok(/<if cell="道侣表\/林若悠\/亲密">有数据<\/if>/.test(out2.text), out2.text);
+    assert.ok(out2.text.includes('_.has(getAllVariables().stat_data, \'道侣.林若悠.亲密.[0]\')'), out2.text);
 });
 
 /* ---------------- 数据桥脚本 ---------------- */
@@ -758,9 +813,10 @@ test('合成卡：与参考卡无关的组名也能转换（含 [value,desc] 叶
     assert.ok(adv.content[0].includes('生命值'), '冒险者表应有 生命值 列');
     assert.ok(adv.sourceData.ddl.includes('CHECK('), '生命值应有 CHECK 约束（来自卡内规则）');
     assert.ok(adv.sourceData.note.includes('主角名字'), '[值, 更新条件] 叶子的描述应写入 note');
-    // EJS 规范写法应被重写
+    // EJS 规范写法应改数据源为数据桥 getAllVariables（EJS 结构保留）
     const cond = r.card.data.character_book.entries.find(e => e.comment === '显示条件');
-    assert.ok(/<if cell="冒险者表\/冒险者\/等级 >= 10">/.test(cond.content), cond.content);
+    assert.ok(cond.content.includes('getAllVariables().stat_data.冒险者["等级"][0] >= 10'), cond.content);
+    assert.ok(cond.content.includes('<% if'), cond.content);
     // 非 MVU 内容保持不动
     const statusRegex = r.card.data.extensions.regex_scripts.find(x => x.scriptName === '状态栏');
     assert.strictEqual(statusRegex.replaceString, '<div>${stat.冒险者.名字}</div>');

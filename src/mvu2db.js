@@ -864,6 +864,16 @@
 
         // 阶段1：直接 stat 映射（只跑一轮即可稳定）
         for (const { text } of blobs) {
+            // EJS 条件里的 getvar('stat_data.组.条目.字段') / getvar('stat_data.组.字段')
+            const reGetvar = /getvar\s*\(\s*['"]stat_data\.([\u4e00-\u9fff]+)(?:\.([\u4e00-\u9fff]+)(?:\.([\u4e00-\u9fff]+))?)?['"]/g;
+            let gm;
+            while ((gm = reGetvar.exec(text))) {
+                const group = gm[1];
+                if (!knownGroups.has(group)) continue;
+                // 三段式 组.条目.字段 → 条目行表的列；两段式 组.字段 → 单例列（若 initvar 已含则跳过重复）
+                const field = gm[3] || gm[2];
+                if (field) addField(group, field);
+            }
             // const X = ...stat_data.组[键].字段...  → 嵌套对象；只到组 → 组变量
             const re1 = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:all_variables|getAllVariables\(\))?[^;\n]*?\bstat_data\s*\.\s*([\u4e00-\u9fff]+)((?:\[[^\]]*\])*)((?:\s*\.\s*[\u4e00-\u9fff]+)*)/g;
             let m;
@@ -2514,247 +2524,34 @@
     }
 
     /* ================================================================
-     * EJS 条件重写（rewriteEjsConditions）
-     * MVU 卡里常见的条件写法：
-     *   <% if (getvar('stat_data.组.字段') >= 50) { %> ... <% } %>
-     *   <% if (getvar("stat_data").组["字段"][0] >= 50) { %> ... <% } %>
-     *   <% if (_.has(getvar("stat_data"), '组.条目.字段.[0]')) { %>
-     *   <% if (Object.keys(getvar('stat_data.组')).length > 3) { %>
-     * → 插件 <if cell="..."> / <if cond="..."> / <if db="...">
+    /* ================================================================
+     * EJS 数据源重写（rewriteEjsConditions）
+     *
+     * 处理顺序（st-prompt-template + 数据库插件）：
+     *   提示词先经 st-prompt-template 渲染 EJS，再由数据库插件解析 <if>。
+     * 因此世界书条目里的 EJS 结构整体保留，只把 MVU 的数据读取位置改到数据桥：
+     *   getvar('stat_data.组.字段')        → getAllVariables().stat_data.组.字段
+     *   getvar("stat_data").组["字段"][0]  → getAllVariables().stat_data.组["字段"][0]
+     *   _.has(getvar("stat_data"), '路径') → _.has(getAllVariables().stat_data, '路径')
+     * 数据桥的 getAllVariables() 从数据库表格重建 stat_data；
+     * st-prompt-template 在页面上下文求值 EJS，未在模板局部命中的标识符
+     * 会回落到页面全局，因此 getAllVariables 可直接调用（EJS 求值先于插件 <if>）。
      * ================================================================ */
-
-    function resolveCellForPath(layout, parts) {
-        for (const e of layout.entries) {
-            if (e.kind === 'singleton') {
-                if (parts.length === 2 && parts[0] === e.group) {
-                    const col = parts[1];
-                    if (e.cols.some(c => c.zh === col)) {
-                        return { table: e.table, rowKey: e.keyValue, col };
-                    }
-                }
-            } else if (e.kind === 'rows') {
-                const prefix = e.writePaths && e.writePaths[0] ? e.writePaths[0] : [e.group];
-                if (parts.length >= prefix.length && prefix.every((p, i) => parts[i] === p)) {
-                    if (parts.length === prefix.length) {
-                        // 组本身 → 行数聚合
-                        return { table: e.table, count: true };
-                    }
-                    if (parts.length === prefix.length + 1) {
-                        // 仅行标识 → 行存在性（用主键列判空）
-                        const rowKey = parts[prefix.length];
-                        return { table: e.table, rowKey, col: e.keyCol };
-                    }
-                    if (parts.length === prefix.length + 2) {
-                        const rowKey = parts[prefix.length];
-                        const col = parts[prefix.length + 1];
-                        if (e.cols.some(c => c.zh === col)) {
-                            return { table: e.table, rowKey, col };
-                        }
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
-    function normalizeCondAtom(atom, layout) {
-        // atom: 如 getvar('stat_data.组.字段') >= 50 或 !getvar(...) 或 Object.keys(...)
-        let s = atom.trim();
-        let negated = false;
-        while (s.startsWith('!')) {
-            negated = !negated;
-            s = s.slice(1).trim();
-        }
-        // 提取路径（支持官方教程规范写法）
-        let pathStr = null;
-        let aggregate = false;
-        // getvar("stat_data").组["字段"][0] 成员访问形式
-        const memberMatch = s.match(/getvar\(\s*["']stat_data["']\s*\)\.([\u4e00-\u9fffA-Za-z_$]+)((?:\[[^\]]*\]|\.[\u4e00-\u9fffA-Za-z_$]+)*)/);
-        const hasMatch = s.match(/_\s*\.\s*has\s*\(\s*getvar\(\s*["']stat_data["']\s*\)\s*,\s*['"]([^'"]+)['"]/);
-        const indexedMatch = s.match(/getvar\(\s*['"]([^'"]+)['"]\s*\)(\[[^\]]*\])+/);
-        if (memberMatch) {
-            const segs = [];
-            segs.push(memberMatch[1]);
-            const tail = memberMatch[2] || '';
-            const segRe = /(?:\.([\u4e00-\u9fffA-Za-z_$]+)|\[["']?([^"'\]]+)["']?\])/g;
-            let sm;
-            while ((sm = segRe.exec(tail))) segs.push(sm[1] || sm[2]);
-            pathStr = segs.filter(seg => !/^\d+$/.test(seg)).join('.');
-        } else if (hasMatch) {
-            pathStr = hasMatch[1].replace(/\.(\d+)$/, '').replace(/\.\[\d+\]$/, '');
-        } else if (indexedMatch) {
-            pathStr = indexedMatch[1];
-        } else {
-        const getvarMatch = s.match(/getvar\(\s*['"]([^'"]+)['"]\s*\)/);
-        const underscoreMatch = s.match(/_\s*\.\s*get\s*\(\s*[^,]+,\s*['"]([^'"]+)['"]/);
-        const keysMatch = s.match(/Object\s*\.\s*keys\s*\(\s*getvar\(\s*['"]([^'"]+)['"]\s*\)\s*\)\s*\.\s*length/);
-            if (keysMatch) {
-                pathStr = keysMatch[1];
-                aggregate = true;
-            } else if (getvarMatch) {
-                pathStr = getvarMatch[1];
-            } else if (underscoreMatch) {
-                pathStr = underscoreMatch[1];
-            } else {
-                return null;
-            }
-        }
-        pathStr = pathStr.replace(/^stat_data\./, '').replace(/^stat\./, '');
-        const parts = pathStr.split('.');
-        // 长操作符优先（===/!== 必须先于 ==/!= 匹配，否则会被拆成 == + 残留字符）
-        const opMatch = s.replace(/^[^=!<>]*/, '').match(/^(===|!==|==|!=|>=|<=|>|<)\s*(.+)$/);
-        const cell = resolveCellForPath(layout, parts);
-        if (!cell) return { unsupported: true, raw: atom, pathStr };
-        let expr;
-        if (cell.count) {
-            // 聚合：仅 SQLite 模式可用
-            if (!opMatch) return { unsupported: true, raw: atom, pathStr, aggregate: true };
-            expr = `db:${cell.table}.count() ${opMatch[1]} ${opMatch[2].trim()}`;
-            return { expr, negated, aggregate: true, pathStr, kind: 'db' };
-        }
-        if (opMatch) {
-            const value = opMatch[2].trim().replace(/^['"](.*)['"]$/, '$1');
-            if (/[\s/'"]/.test(value) && !/^-?\d+(\.\d+)?$/.test(value)) {
-                return { unsupported: true, raw: atom, pathStr };
-            }
-            expr = `cell:${cell.table}/${cell.rowKey}/${cell.col} ${opMatch[1]} ${value}`;
-        } else {
-            expr = `cell:${cell.table}/${cell.rowKey}/${cell.col}`;
-        }
-        if (negated) expr = `!${expr}`;
-        return { expr, negated, cell, pathStr, kind: 'cell' };
-    }
-
-    function mapCondToIfType(cond) {
-        // cond: 由若干 atom.expr 用 && / || / 括号组合
-        if (/^cell:/.test(cond) && !/[&,!]/.test(cond)) {
-            return { type: 'cell', value: cond.slice(5) };
-        }
-        if (/^db:/.test(cond) && !/[&,!]/.test(cond)) {
-            return { type: 'db', value: cond.slice(3) };
-        }
-        return { type: 'cond', value: cond };
-    }
-
-    /**
-     * 重写文本中的 EJS if 块。
-     * 返回 { text, items }；items 每项 { original, rewritten, status }
-     */
     function rewriteEjsConditions(text, layout, report) {
         const items = [];
         let out = String(text || '');
-        const blockRe = /<%[-=]?\s*if\s*\(([\s\S]*?)\)\s*\{[\s\S]*?%>/g;
-        const closeRe = /<%[-=]?\s*}\s*%>/g;
-        const elseRe = /<%[-=]?\s*}\s*else\s*\{\s*%>/g;
-        const elseIfRe = /<%[-=]?\s*}\s*else\s+if\s*\(([\s\S]*?)\)\s*\{\s*%>/g;
-
-        // 简化处理：只处理“if(cond){...}else{...}”或“if(cond){...}”的单层块
-        function processBlock(match, condRaw, offset, full) {
-            const cond = condRaw.trim();
-            const openEnd = match.length;
-            const rest = full.slice(offset + openEnd);
-            // 解析 if / else-if / else 链：统计嵌套的 <% if ... { %> 与闭合标签，
-            // 记录每个分支的边界（bodyStart/bodyEnd 相对 rest）。
-            let depth = 1;
-            let closeIdx = -1;
-            const branches = [{ cond, bodyStart: 0 }];
-            const tokenRe = /<%[-=]?\s*if\s*\([\s\S]*?\)\s*\{[\s\S]*?%>|<%[-=]?\s*}\s*(?:else\s*(?:if\s*\([\s\S]*?\))?\s*\{)?\s*%>/g;
-            tokenRe.lastIndex = 0;
-            let tm;
-            while ((tm = tokenRe.exec(rest))) {
-                const token = tm[0];
-                if (/^\s*<%[-=]?\s*if\s*\(/i.test(token)) {
-                    depth++; // 嵌套 if 开标签
-                    continue;
-                }
-                if (/else\s*(?:if\s*\([\s\S]*?\))?\s*\{/i.test(token)) {
-                    const lastBranch = branches[branches.length - 1];
-                    lastBranch.bodyEnd = tm.index;
-                    const em = token.match(/else\s+if\s*\(([\s\S]*?)\)\s*\{/i);
-                    branches.push(em
-                        ? { cond: em[1].trim(), bodyStart: tm.index + token.length }
-                        : { cond: null, bodyStart: tm.index + token.length });
-                    continue;
-                }
-                depth -= 1;
-                if (depth === 0) { closeIdx = tm.index; break; }
-            }
-            if (closeIdx === -1) return null;
-            branches[branches.length - 1].bodyEnd = closeIdx;
-
-            // 逐分支：递归处理嵌套 EJS；映射条件（任一条件无法转换则整条链保留人工）
-            const mappedBranches = [];
-            let ok = true;
-            let aggregateUsed = false;
-            for (const b of branches) {
-                let body = rest.slice(b.bodyStart, b.bodyEnd);
-                if (/<%/g.test(body)) {
-                    const rw = rewriteEjsConditions(body, layout, report);
-                    body = rw.text;
-                    items.push(...rw.items);
-                }
-                let ifStr = null;
-                if (b.cond !== null) {
-                    const atoms = b.cond.split(/\s+(&&|\|\|)\s+/);
-                    const logical = b.cond.match(/\s+(&&|\|\|)\s+/g) || [];
-                    const mapped = [];
-                    for (let i = 0; i < atoms.length; i++) {
-                        const res = normalizeCondAtom(atoms[i], layout);
-                        if (!res || res.unsupported) { ok = false; break; }
-                        if (res.aggregate) aggregateUsed = true;
-                        mapped.push(res.expr);
-                    }
-                    if (!ok) break;
-                    let condStr = mapped[0];
-                    for (let i = 0; i < logical.length; i++) {
-                        condStr += (logical[i] === '&&' ? ' & ' : ', ') + mapped[i + 1];
-                    }
-                    const ifType = mapCondToIfType(condStr);
-                    const attr = ifType.type === 'cell' ? 'cell' : ifType.type === 'db' ? 'db' : 'cond';
-                    ifStr = `<if ${attr}="${ifType.value}">`;
-                }
-                mappedBranches.push({ body, ifStr });
-            }
-            if (!ok) return null;
-
-            // 组装嵌套结构：<if C1>B1<else><if C2>B2<else>…B最后…</if></if>
-            // 插件解析器支持 <else> 内嵌套 <if>（parseSingleIfBlock 递归处理）。
-            function assembleChain(idx) {
-                const b = mappedBranches[idx];
-                if (idx === mappedBranches.length - 1) {
-                    return b.ifStr ? b.ifStr + b.body + '</if>' : b.body;
-                }
-                return b.ifStr + b.body + '<else>' + assembleChain(idx + 1) + '</if>';
-            }
-            const rewritten = assembleChain(0);
-            // 原块 = 开标签 + 主体（含 else 分支）+ 闭合标签
-            const closeToken = rest.slice(closeIdx).match(/<%[-=]?\s*}\s*%>/);
-            const origLen = closeToken ? closeIdx + closeToken[0].length : rest.length;
-            const orig = match + rest.slice(0, origLen);
-            return { rewritten, orig, aggregateUsed };
+        const before = out;
+        // getvar('stat_data[.路径]') / getvar("stat_data").组.字段 → getAllVariables().stat_data…
+        out = out.replace(/getvar\s*\(\s*['"]stat_data(\.[^'"]*)?['"]\s*\)/gi, (m, path) => {
+            const suffix = path ? String(path).replace(/^\./, '') : '';
+            return 'getAllVariables().stat_data' + (suffix ? '.' + suffix : '');
+        });
+        if (out !== before) {
+            const count = (out.match(/getAllVariables\(\)\.stat_data/g) || []).length;
+            items.push({ original: 'getvar(\'stat_data…\')', rewritten: 'getAllVariables().stat_data…', status: 'auto' });
+            report.auto(`已把 ${count} 处 MVU 数据读取 getvar('stat_data…') 改为数据桥 getAllVariables().stat_data…（EJS 结构保留）。`);
         }
-
-        let guard = 0;
-        while (guard++ < 20) {
-            const m = blockRe.exec(out);
-            if (!m) break;
-            const res = processBlock(m[0], m[1], m.index, out);
-            if (!res) {
-                // 无法自动转换：保留原样，标记人工
-                report.manual(`EJS 条件未自动转换（条目内）：\`${m[0].slice(0, 120)}...\``);
-                blockRe.lastIndex = m.index + m[0].length;
-                continue;
-            }
-            items.push({
-                original: res.orig.slice(0, 200),
-                rewritten: res.rewritten.slice(0, 200),
-                status: 'auto',
-                aggregate: !!res.aggregateUsed,
-            });
-            out = out.slice(0, m.index) + res.rewritten + out.slice(m.index + res.orig.length);
-            blockRe.lastIndex = m.index + res.rewritten.length;
-        }
-        // 处理孤立 <%- ... -%> 输出块（getwi 等）——保留并提示
+        // 非 MVU 的 getwi 等引用：保留并提示
         const orphanRe = /<%[-=]\s*await\s+getwi[\s\S]*?-?%>/g;
         const orphans = out.match(orphanRe);
         if (orphans) {
@@ -2920,10 +2717,15 @@
             // [mvu_plot] 是 MVU 的“剧情 AI 专用”标记：内容是剧情/人设/地点等提示，
             // 不属于变量更新规则，一律保留（内部 MVU 宏单独改写）。
             const isPlot = /\[mvu[ _-]?plot\]|\[mvuplot\]/i.test(comment);
-            // MVU 变量输出/更新规则条目：comment 或 content 命中 MVU 专属标记即删除
-            // （教程示例“蓝灯 D1”comment 是任意名字，必须靠 content 里的专属宏识别）
-            const mvuMarker = /\[mvu[ _-]?update\]|\[mvuupdate\]|变量列表|变量输出格式|status_current_variables?|format_message_variable|get_message_variable|<UpdateVariable|<JSONPatch|<initvar>|\.set\s*\(\s*['"]/i;
-            const isMvuUpdate = !isPlot && (mvuMarker.test(comment) || (mvuMarker.test(content) && /stat_data|UpdateVariable|JSONPatch|status_current_variable|get_message_variable|format_message_variable/i.test(content)));
+            // MVU 变量管道内容特征（更新规则/变量列表/宏注入），用于区分“该删的管道”与“误标成 [mvu_update] 的剧情文本”
+            const mvuPlumbing = /format_message_variable|status_current_variables?|get_message_variable|<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]|变量更新规则|变量更新格式|变量列表|输出格式|stat_data\s*[:\n{]/i;
+            const isMvuUpdate =
+                // 显式 [mvu_update] 标记：内容含管道语法或短标记 → 删；内容为剧情文本（如误标条目）→ 保留
+                (/\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment) && (mvuPlumbing.test(content) || String(content).trim().length < 60)) ||
+                // 变量输出类条目（comment 含“变量列表/变量输出格式”）→ 删
+                (/变量列表|变量输出格式/i.test(comment) && /stat_data|UpdateVariable|JSONPatch|status_current_variable|get_message_variable|format_message_variable/i.test(content)) ||
+                // 蓝灯 D1 类：comment 无标记但内容含 MVU 专属注入宏 → 删（剧情条目除外）
+                (!isPlot && /status_current_variables?|format_message_variable|<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]/i.test(content) && /stat_data|get_message_variable|UpdateVariable|JSONPatch/i.test(content));
             if (isInit || isMvuUpdate) {
                 report.note(`已删除 MVU 世界书条目「${comment}」（${isInit ? '初始变量' : '更新规则'}已迁移为数据库模板/规则）。`);
                 continue;
@@ -2933,7 +2735,7 @@
             if (rw.items.length) {
                 for (const it of rw.items) {
                     if (it.status === 'auto') {
-                        report.auto(`条目「${comment}」EJS 条件已重写为 <if ${it.aggregate ? 'db' : 'cell/cond'}>：\`${it.rewritten}\``);
+                        report.auto(`条目「${comment}」MVU 数据读取已改写为数据桥 getAllVariables()：\`${it.rewritten}\``);
                     }
                 }
             }

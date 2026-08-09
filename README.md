@@ -75,15 +75,21 @@
 - **删除** `[InitVar]` / `[MvuUpdate]` 系列世界书，以及 content 含 MVU 专属宏
   （`status_current_variable` / `get_message_variable` / `format_message_variable` 等）的变量输出条目；
   仅移除解析 MVU 语法的正则与 MVU/ZOD 脚本。
+- **误标保护**：带 `[mvu_update]` 标记但内容实为剧情/设定文本的条目（如部分“技能化”卡）
+  会保留——删除判定看内容是否为变量管道（更新规则/变量列表/MVU 宏），而非只看标记。
+- `[mvu_plot]` 剧情条目全部保留，内部 `{{get_message_variable::…}}` 宏改写为数据库表引用。
 - **非 MVU 内容逐字节保留**（状态栏、data_block 显示、普通世界书等）；
   开场白保持原样（不注入任何脚本，纯文字开场白同样可用）。
 - **世界书独立**：内嵌世界书名称与外部世界书引用会追加 `_数据库` 后缀，避免导入转换卡时同名覆盖原卡世界书。
 
 ### EJS 条件重写
-`getvar('stat_data.组.字段')`、`getvar("stat_data").组["字段"][0]`、`_.has(...)`、
-`Object.keys(...).length` 聚合、`&&/||`/`!` 组合、单层 `else` 与 **else-if 链** →
-插件的 `<if cell/cond/db>` + `<else>`（链转成嵌套 `<if>`，插件解析器支持）；
-含函数调用等不可映射表达式的条件保留原样并列入报告。
+**EJS 整体保留，只改数据读取位置**：提示词先经 st-prompt-template 渲染 EJS、再由
+数据库插件解析 `<if>`。因此世界书里的 EJS（`<% if %>`、`<%_ if %>`、else-if 链、
+循环、函数调用、`<%- %>` 输出等）原样保留，只把 MVU 的数据读取
+`getvar('stat_data.路径')` / `getvar("stat_data").组.字段` / `_.has(getvar("stat_data"), …)`
+改写为数据桥的 `getAllVariables().stat_data.路径`（桥从数据库表格重建 stat_data，
+st-prompt-template 在页面上下文求值，可直接访问）。
+仅在 EJS 条件中出现、不在 `[InitVar]` 里的字段（如分段阈值）也会补进列定义。
 
 ## 目录
 
