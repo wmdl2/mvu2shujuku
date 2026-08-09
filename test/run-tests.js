@@ -243,6 +243,69 @@ test('行表条目内的空嵌套对象不再拆出每条目重复子表', () =>
     assert.ok(t.content[0].includes('效果'), '空嵌套对象应转为 JSON 列');
 });
 
+test('行表 [值,说明] 文本列保留 pair 与 desc（状态栏读取一致）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'pair行表卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{
+                    comment: '[InitVar]',
+                    content: JSON.stringify({
+                        道侣: {
+                            林若悠: { 种族: ['人族', '林若悠的种族'], 亲密: [88, '与林若悠的亲密度'] },
+                        },
+                    }),
+                }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const layout = core.buildLayout(r.schema);
+    const e = layout.entries.find(x => x.table === '道侣表');
+    const zhongzu = e.cols.find(c => c.zh === '种族');
+    const qinmi = e.cols.find(c => c.zh === '亲密');
+    assert.strictEqual(zhongzu.type, 'pair', '文本 [值,说明] 应为 pair 类型');
+    assert.strictEqual(zhongzu.desc, '林若悠的种族', 'pair 应保留 desc');
+    // 数字 [值,说明] 按参考卡语义保持纯数字（状态栏 plain 读取兼容）
+    assert.strictEqual(qinmi.type, 'number', '数字 [值,说明] 保持 number');
+    const t = Object.values(r.template).find(s => s && s.name === '道侣表');
+    assert.ok(t.sourceData.note.includes('林若悠的种族'), 'note 列定义应含 desc');
+});
+
+test('表种类推导矩阵：单例/行表/数组/混合均符合预期', () => {
+    const cases = [
+        ['纯叶子', { 主角: { 姓名: '未知', 生命: 100 } }, '主角表', 'singleton', 1],
+        ['叶子+平铺子对象', { 主角: { 姓名: 'x', 炼丹: { 阶级: '未入门' } } }, '主角表', 'singleton', 1],
+        ['叶子+嵌套子对象', { 主角: { 姓名: 'x', 储物袋: { 铁剑: { 数量: 3 } } } }, '主角表', 'singleton', 1],
+        ['空字典', { 道侣: {} }, '道侣表', 'rows', 0],
+        ['条目全叶子', { 道侣: { 林若悠: { 亲密: 88 }, 苏媚: { 亲密: 77 } } }, '道侣表', 'rows', 2],
+        ['条目含嵌套', { 道侣: { 林若悠: { 亲密: 88, 日程: { 周三: '空' } } } }, '道侣表', 'rows', 1],
+        ['单条目字典', { 背包: { 铁剑: { 数量: 3 } } }, '背包表', 'rows', 1],
+        ['顶层数组', { 台词: ['a', 'b'] }, '台词表', 'array', 2],
+    ];
+    for (const [label, initvar, tableName, expectKind, expectRows] of cases) {
+        const card = {
+            spec: 'chara_card_v3',
+            data: {
+                name: '矩阵卡' + label,
+                description: '',
+                first_mes: '你好',
+                character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify(initvar) }] },
+                extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+            },
+        };
+        const r = core.convert(card, { mode: 'both' });
+        const g = (Array.isArray(r.schema) ? r.schema : []).find(x => x && x.name === tableName.replace(/表$/, ''));
+        assert.strictEqual(g && g.kind, expectKind, `${label}: 表种类应为 ${expectKind}`);
+        const t = Object.values(r.template).find(s => s && s.name === tableName);
+        assert.strictEqual(t.content.length - 1, expectRows, `${label}: 行数应为 ${expectRows}`);
+    }
+});
+
 /* ---------------- EJS 重写 ---------------- */
 console.log('rewriteEjsConditions');
 test('getvar 数值比较 → <if cell>', () => {

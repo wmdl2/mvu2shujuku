@@ -1204,6 +1204,8 @@
                 const fieldOrder = [];
                 const entryRows = [];
                 const objFields = new Set();
+                const pairFields = new Set();
+                const fieldDescs = {};
                 let sawScalarEntries = false;
                 let scalarIsNumber = false;
                 for (const entryName of Object.keys(raw)) {
@@ -1221,6 +1223,8 @@
                         const spath = [...prefixPath, entryName, subKey];
                         if (isLeaf(sv)) {
                             const li = leafInfo(sv);
+                            if (Array.isArray(sv)) pairFields.add(subKey);
+                            if (li.desc && !fieldDescs[subKey]) fieldDescs[subKey] = li.desc;
                             entryCols.push({
                                 zh: subKey,
                                 path: spath,
@@ -1235,6 +1239,7 @@
                         } else {
                             entryCols.push(jsonColumnFromObject(subKey, sv, spath, entryUsed));
                             objFields.add(subKey);
+                            if (!fieldDescs[subKey]) fieldDescs[subKey] = '对象（JSON 存储，读取时还原）';
                         }
                     }
                     for (const c of entryCols) {
@@ -1256,11 +1261,12 @@
                         zh: f,
                         path: [groupName, f],
                         value: '',
-                        desc: '',
+                        desc: fieldDescs[f] || '',
                         type: fieldIsNumeric(f, rowFirstValue(entryRows, f)) ? 'INTEGER' : inferType(rowFirstValue(entryRows, f)),
                         range: fieldRange(f),
                         ident: toIdent(f, used, 'column'),
                         isObject: objFields.has(f) || !!(shapeObjects[groupName] && shapeObjects[groupName][f]),
+                        isPair: pairFields.has(f),
                     });
                 }
                 if (sawScalarEntries) {
