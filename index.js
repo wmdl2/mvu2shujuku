@@ -31,12 +31,13 @@
     const DB_INIT_SNIPPET = [
         'function mvu2shujukuDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}',
         'function mvu2shujukuExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}',
+        'function mvu2shujukuSheetByName(tpl,name){if(!tpl||typeof tpl!=="object")return null;for(var k in tpl){if(k.indexOf("sheet_")===0&&tpl[k]&&tpl[k].name===name)return tpl[k];}return null;}',
         'function mvu2shujukuMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}',
         'function mvu2shujukuExpectedColumns(tpl){var map={};if(!tpl||typeof tpl!=="object")return map;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object"||typeof s.name!=="string")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var cols=[];for(var i=1;i<hdr.length;i++){if(cols.indexOf(hdr[i])===-1)cols.push(hdr[i]);}map[s.name]=cols;}return map;}',
         'function mvu2shujukuMissingColumns(api,expected){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=all[k];}var mismatch=[];for(var name in expected){var sheet=have[name];if(!sheet)continue;var hdr=Array.isArray(sheet.content)&&Array.isArray(sheet.content[0])?sheet.content[0]:[];var exp=expected[name];for(var i=0;i<exp.length;i++){if(hdr.indexOf(exp[i])===-1){mismatch.push(name+"(缺列:"+exp[i]+")");break;}}}return mismatch;}',
         'var mvu2shujukuInitSessionHung=false;',
         'function mvu2shujukuWithTimeout(promise,ms,label){var done=false;var tid=null;var timeoutPromise=new Promise(function(resolve){tid=setTimeout(function(){if(!done){done=true;resolve({timeout:true,message:label+" 超时("+(ms/1000)+"s)"});}},ms);});return Promise.race([Promise.resolve(promise).then(function(v){if(!done){done=true;if(tid)clearTimeout(tid);}return v;}),timeoutPromise]);}',
-        'async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试（表已由 importTemplateFromData 创建则无碍）");}else if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}',
+        'async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){var emptyS=[];try{var all2=api.exportTableAsJson()||{};for(var k2 in all2){if(k2.indexOf("sheet_")!==0)continue;var sh2=all2[k2];if(!sh2||typeof sh2!=="object"||typeof sh2.name!=="string")continue;if(Array.isArray(sh2.content)&&sh2.content.length>1)continue;if(Array.isArray(sh2.seedRows)&&sh2.seedRows.length)continue;var ts=mvu2shujukuSheetByName(tpl,sh2.name);if(!ts||!Array.isArray(ts.content)||ts.content.length!==2)continue;emptyS.push(sh2.name);}}catch(e){}if(emptyS.length){for(var ei=0;ei<emptyS.length;ei++){try{var ts2=mvu2shujukuSheetByName(tpl,emptyS[ei]);var hdr2=ts2.content[0];var row2=ts2.content[1];var obj2={};for(var ci=1;ci<hdr2.length;ci++){obj2[hdr2[ci]]=(row2[ci]!==undefined&&row2[ci]!==null)?row2[ci]:"";}await Promise.resolve(api.insertRow(emptyS[ei],obj2));}catch(e){}}out.status="skip";out.message="已为仅表头的单例/JSON表补初始行："+emptyS.join("、");return out;}out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试（表已由 importTemplateFromData 创建则无碍）");}else if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}',
     ].join('\n');
 
     /* ================================================================
@@ -3138,6 +3139,8 @@
             `function broadcastBridgeEvent(after,before){`,
             `  // 与 MVU 原版一致：写库完成后广播 VARIABLE_UPDATE_ENDED，携带更新前后的完整 MvuData（after, before）`,
             `  try{emitMvuEvent('mag_variable_update_ended',after,before);}catch(e){}`,
+            `  // shujuku 生态兼容别名：shujuku 原生状态栏/前端监听同名 CustomEvent（如道渊 v5.2.111-sqlite 版），一并派发`,
+            `  try{emitMvuEvent('shujuku-table-updated',null);}catch(e){}`,
             `}`,
             `rootWindow.__mvu2shujukuDataBridgeBroadcast=rootWindow.__mvu2shujukuDataBridgeBroadcast||broadcastBridgeEvent;`,
             '',
@@ -3162,11 +3165,54 @@
             `}`,
             `var initState={running:false,done:false,key:''};`,
             `var initRetries=0;`,
+            `var anchorChat='';var anchorTries=0;`,
+            `function hasFullCheckpoint(){`,
+            `  try{`,
+            `    var ctx=getContext();`,
+            `    var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];`,
+            `    for(var mi=0;mi<chat.length;mi++){`,
+            `      var msg=chat[mi];if(!msg||typeof msg!=='object')continue;`,
+            `      var keys=Object.keys(msg);`,
+            `      for(var ki=0;ki<keys.length;ki++){`,
+            `        var k=keys[ki];`,
+            `        if(k.indexOf('TavernDB_ACU_')!==0&&k.indexOf('_acu_')!==0)continue;`,
+            `        var v=msg[k];`,
+            `        if(typeof v==='string'){try{v=JSON.parse(v);}catch(e){continue;}}`,
+            `        if(!v||typeof v!=='object')continue;`,
+            `        if(v.storageFrame&&v.storageFrame.checkpoint)return true;`,
+            `        var ckeys=Object.keys(v);`,
+            `        for(var cki=0;cki<ckeys.length;cki++){`,
+            `          var child=v[ckeys[cki]];`,
+            `          if(typeof child==='string'){try{child=JSON.parse(child);}catch(e){continue;}}`,
+            `          if(child&&typeof child==='object'&&child.storageFrame&&child.storageFrame.checkpoint)return true;`,
+            `        }`,
+            `      }`,
+            `    }`,
+            `  }catch(e){}`,
+            `  return false;`,
+            `}`,
             `async function ensureTemplateInit(){`,
             `  if(!TEMPLATE_B64)return;`,
             `  var key=currentChatKey();`,
             `  console.log('['+BRIDGE_NAME+'] ensureTemplateInit: key='+key+' | done='+initState.done+' | running='+initState.running+' | retries='+initRetries);`,
             `  if(initState.key!==key)initRetries=0;`,
+            `  // 锚点检查：开场白切换会丢 full checkpoint，导致写库产生无锚点 artifacts，`,
+            `  // 触发插件 V2 boundary_after_data_mismatch；表已存在且缺锚点时重建一次（最多 3 次）`,
+            `  if(anchorChat!==key){anchorChat=key;anchorTries=0;}`,
+            `  if(!mvu2shujukuInitSessionHung&&anchorTries<3){`,
+            `    try{`,
+            `      var tpl=parseTemplate();`,
+            `      if(tpl&&!hasFullCheckpoint()){`,
+            `        var miss=mvu2shujukuMissingTableNames(API,mvu2shujukuExpectedTableNames(tpl));`,
+            `        if(miss.length===0&&typeof API.initGameSession==='function'){`,
+            `          anchorTries++;`,
+            `          console.log('['+BRIDGE_NAME+'] 聊天缺少 full checkpoint，重建数据库锚点…');`,
+            `          var r3=await mvu2shujukuWithTimeout(API.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:currentCharName()+'模板'}),20000,'initGameSession(锚点)');`,
+            `          console.log('['+BRIDGE_NAME+'] 数据库锚点重建：'+(r3&&r3.success===false?(r3.message||'失败'):(r3&&r3.timeout?'超时':'完成')));`,
+            `        }`,
+            `      }`,
+            `    }catch(e){anchorTries++;console.warn('['+BRIDGE_NAME+'] 数据库锚点重建异常:',e);}`,
+            `  }`,
             `  if(initState.done&&initState.key===key)return;`,
             `  if(initState.running)return;`,
             `  initState.running=true;`,
@@ -4049,8 +4095,35 @@
 ${DB_INIT_SNIPPET}
 
     const DB_TEMPLATE_KEY = '__ACU_TEMPLATE_DATA__';
-    const autoInitState = { running: false, done: '', inited: false, retries: 0 };
+    const autoInitState = { running: false, done: '', inited: false, retries: 0, anchorChat: '', anchorTries: 0 };
     let autoInitNoEntryRetries = 0;
+
+    // 聊天里是否存在 SP·数据库 的 full checkpoint（V2 锚点）：扫描消息上的 TavernDB_ACU_*/_acu_* 字段。
+    // 开场白切换/首楼重写会弄丢锚点，此时继续写库会产生无锚点 artifacts，触发插件的
+    // “V2 boundary_after_data_mismatch”拒绝建立 full checkpoint。
+    function hasFullShujukuCheckpoint() {
+        try {
+            const context = getContextSafe();
+            const chat = Array.isArray(context.chat) ? context.chat : [];
+            for (const msg of chat) {
+                if (!msg || typeof msg !== 'object') continue;
+                for (const k of Object.keys(msg)) {
+                    if (k.indexOf('TavernDB_ACU_') !== 0 && k.indexOf('_acu_') !== 0) continue;
+                    let v = msg[k];
+                    if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { continue; } }
+                    if (!v || typeof v !== 'object') continue;
+                    const hasCheckpoint = (o) => !!o && typeof o === 'object' && o.storageFrame && o.storageFrame.checkpoint;
+                    if (hasCheckpoint(v)) return true;
+                    for (const ck of Object.keys(v)) {
+                        let child = v[ck];
+                        if (typeof child === 'string') { try { child = JSON.parse(child); } catch (e) { continue; } }
+                        if (hasCheckpoint(child)) return true;
+                    }
+                }
+            }
+        } catch (e) {}
+        return false;
+    }
 
     function autoInitChatId() {
         try {
@@ -4131,6 +4204,42 @@ ${DB_INIT_SNIPPET}
         installWindowGetAllVariables();
         const key = autoInitChatId();
         if (key !== key0) console.log('[mvu2shujuku][debug] 开局自动建表 chat 已切换：' + key0 + ' → ' + key);
+        // 缓存卡内模板（供写路径补行与锚点重建使用）
+        try {
+            const holder = (typeof window !== 'undefined' ? window : globalThis);
+            if (holder) holder.__mvu2shujukuTemplateCache = JSON.parse(mvu2shujukuDecodeB64(entry.content));
+        } catch (e) {}
+        // 锚点检查：表可能已存在但聊天缺 full checkpoint（开场白切换/首楼
+        // 重写会丢锚点），此时继续写库会留下无锚点 artifacts，触发插件 V2 boundary_after_data_mismatch；
+        // 用卡内模板重建 initGameSession 把锚点补上（全新聊天由下方 ensureInit 建立，不重复）；
+        // 每次进入聊天都会复查，最多重试 3 次，避免 initGameSession 挂起时风暴。
+        if (autoInitState.anchorChat !== key) {
+            autoInitState.anchorChat = key;
+            autoInitState.anchorTries = 0;
+        }
+        if (!mvu2shujukuInitSessionHung && autoInitState.anchorTries < 3) {
+            try {
+                const holder = (typeof window !== 'undefined' ? window : globalThis);
+                const tplCached = holder && holder.__mvu2shujukuTemplateCache;
+                if (tplCached && !hasFullShujukuCheckpoint()) {
+                    const expected = mvu2shujukuExpectedTableNames(tplCached);
+                    const missing = mvu2shujukuMissingTableNames(api, expected);
+                    if (missing.length === 0) {
+                        autoInitState.anchorTries += 1;
+                        console.log('[mvu2shujuku][debug] 聊天缺少 full checkpoint，重建数据库锚点…');
+                        const r3 = await mvu2shujukuWithTimeout(
+                            api.initGameSession({}, { injectTemplate: true, loadPreset: false, templateData: tplCached, templatePresetName: String((character && character.name) || '') + '模板' }),
+                            20000,
+                            'initGameSession(锚点)'
+                        );
+                        console.log('[mvu2shujuku][debug] 数据库锚点重建：' + (r3 && r3.success === false ? (r3.message || '失败') : (r3 && r3.timeout ? '超时' : '完成')));
+                    }
+                }
+            } catch (e) {
+                autoInitState.anchorTries += 1;
+                console.warn('[mvu2shujuku][debug] 数据库锚点重建异常:', e);
+            }
+        }
         if (autoInitState.done === key) return;
         autoInitState.running = true;
         // 看门狗：即使插件 API 的 Promise 意外不返回，也强制复位 running，避免后续自动建表被永久跳过
@@ -4142,11 +4251,6 @@ ${DB_INIT_SNIPPET}
         }, 30000);
         try {
             const presetName = String((character && character.name) || '') + '模板';
-            // 缓存卡内模板（供写路径在表缺初始行时按模板补行）
-            try {
-                const holder = (typeof window !== 'undefined' ? window : globalThis);
-                if (holder) holder.__mvu2shujukuTemplateCache = JSON.parse(mvu2shujukuDecodeB64(entry.content));
-            } catch (e) {}
             const out = await mvu2shujukuEnsureInit(api, entry.content, presetName);
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);
@@ -5651,16 +5755,44 @@ root.__MVU2SHUJUKU_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢�
     // 开局建表核心流程（与卡内数据桥同一份逻辑：缺表时调用 SP·数据库 的 initGameSession）
 function mvu2shujukuDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}
 function mvu2shujukuExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}
+function mvu2shujukuSheetByName(tpl,name){if(!tpl||typeof tpl!=="object")return null;for(var k in tpl){if(k.indexOf("sheet_")===0&&tpl[k]&&tpl[k].name===name)return tpl[k];}return null;}
 function mvu2shujukuMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}
 function mvu2shujukuExpectedColumns(tpl){var map={};if(!tpl||typeof tpl!=="object")return map;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object"||typeof s.name!=="string")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var cols=[];for(var i=1;i<hdr.length;i++){if(cols.indexOf(hdr[i])===-1)cols.push(hdr[i]);}map[s.name]=cols;}return map;}
 function mvu2shujukuMissingColumns(api,expected){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=all[k];}var mismatch=[];for(var name in expected){var sheet=have[name];if(!sheet)continue;var hdr=Array.isArray(sheet.content)&&Array.isArray(sheet.content[0])?sheet.content[0]:[];var exp=expected[name];for(var i=0;i<exp.length;i++){if(hdr.indexOf(exp[i])===-1){mismatch.push(name+"(缺列:"+exp[i]+")");break;}}}return mismatch;}
 var mvu2shujukuInitSessionHung=false;
 function mvu2shujukuWithTimeout(promise,ms,label){var done=false;var tid=null;var timeoutPromise=new Promise(function(resolve){tid=setTimeout(function(){if(!done){done=true;resolve({timeout:true,message:label+" 超时("+(ms/1000)+"s)"});}},ms);});return Promise.race([Promise.resolve(promise).then(function(v){if(!done){done=true;if(tid)clearTimeout(tid);}return v;}),timeoutPromise]);}
-async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试（表已由 importTemplateFromData 创建则无碍）");}else if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}
+async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){var emptyS=[];try{var all2=api.exportTableAsJson()||{};for(var k2 in all2){if(k2.indexOf("sheet_")!==0)continue;var sh2=all2[k2];if(!sh2||typeof sh2!=="object"||typeof sh2.name!=="string")continue;if(Array.isArray(sh2.content)&&sh2.content.length>1)continue;if(Array.isArray(sh2.seedRows)&&sh2.seedRows.length)continue;var ts=mvu2shujukuSheetByName(tpl,sh2.name);if(!ts||!Array.isArray(ts.content)||ts.content.length!==2)continue;emptyS.push(sh2.name);}}catch(e){}if(emptyS.length){for(var ei=0;ei<emptyS.length;ei++){try{var ts2=mvu2shujukuSheetByName(tpl,emptyS[ei]);var hdr2=ts2.content[0];var row2=ts2.content[1];var obj2={};for(var ci=1;ci<hdr2.length;ci++){obj2[hdr2[ci]]=(row2[ci]!==undefined&&row2[ci]!==null)?row2[ci]:"";}await Promise.resolve(api.insertRow(emptyS[ei],obj2));}catch(e){}}out.status="skip";out.message="已为仅表头的单例/JSON表补初始行："+emptyS.join("、");return out;}out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}var steps=[];if(typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试（表已由 importTemplateFromData 创建则无碍）");}else if(r2&&r2.success===false)steps.push("initGameSession: "+(r2.message||"失败"));else steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用（仅 importTemplateFromData）");}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}
 
     const DB_TEMPLATE_KEY = '__ACU_TEMPLATE_DATA__';
-    const autoInitState = { running: false, done: '', inited: false, retries: 0 };
+    const autoInitState = { running: false, done: '', inited: false, retries: 0, anchorChat: '', anchorTries: 0 };
     let autoInitNoEntryRetries = 0;
+
+    // 聊天里是否存在 SP·数据库 的 full checkpoint（V2 锚点）：扫描消息上的 TavernDB_ACU_*/_acu_* 字段。
+    // 开场白切换/首楼重写会弄丢锚点，此时继续写库会产生无锚点 artifacts，触发插件的
+    // “V2 boundary_after_data_mismatch”拒绝建立 full checkpoint。
+    function hasFullShujukuCheckpoint() {
+        try {
+            const context = getContextSafe();
+            const chat = Array.isArray(context.chat) ? context.chat : [];
+            for (const msg of chat) {
+                if (!msg || typeof msg !== 'object') continue;
+                for (const k of Object.keys(msg)) {
+                    if (k.indexOf('TavernDB_ACU_') !== 0 && k.indexOf('_acu_') !== 0) continue;
+                    let v = msg[k];
+                    if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { continue; } }
+                    if (!v || typeof v !== 'object') continue;
+                    const hasCheckpoint = (o) => !!o && typeof o === 'object' && o.storageFrame && o.storageFrame.checkpoint;
+                    if (hasCheckpoint(v)) return true;
+                    for (const ck of Object.keys(v)) {
+                        let child = v[ck];
+                        if (typeof child === 'string') { try { child = JSON.parse(child); } catch (e) { continue; } }
+                        if (hasCheckpoint(child)) return true;
+                    }
+                }
+            }
+        } catch (e) {}
+        return false;
+    }
 
     function autoInitChatId() {
         try {
@@ -5741,6 +5873,42 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         installWindowGetAllVariables();
         const key = autoInitChatId();
         if (key !== key0) console.log('[mvu2shujuku][debug] 开局自动建表 chat 已切换：' + key0 + ' → ' + key);
+        // 缓存卡内模板（供写路径补行与锚点重建使用）
+        try {
+            const holder = (typeof window !== 'undefined' ? window : globalThis);
+            if (holder) holder.__mvu2shujukuTemplateCache = JSON.parse(mvu2shujukuDecodeB64(entry.content));
+        } catch (e) {}
+        // 锚点检查：表可能已存在但聊天缺 full checkpoint（开场白切换/首楼
+        // 重写会丢锚点），此时继续写库会留下无锚点 artifacts，触发插件 V2 boundary_after_data_mismatch；
+        // 用卡内模板重建 initGameSession 把锚点补上（全新聊天由下方 ensureInit 建立，不重复）；
+        // 每次进入聊天都会复查，最多重试 3 次，避免 initGameSession 挂起时风暴。
+        if (autoInitState.anchorChat !== key) {
+            autoInitState.anchorChat = key;
+            autoInitState.anchorTries = 0;
+        }
+        if (!mvu2shujukuInitSessionHung && autoInitState.anchorTries < 3) {
+            try {
+                const holder = (typeof window !== 'undefined' ? window : globalThis);
+                const tplCached = holder && holder.__mvu2shujukuTemplateCache;
+                if (tplCached && !hasFullShujukuCheckpoint()) {
+                    const expected = mvu2shujukuExpectedTableNames(tplCached);
+                    const missing = mvu2shujukuMissingTableNames(api, expected);
+                    if (missing.length === 0) {
+                        autoInitState.anchorTries += 1;
+                        console.log('[mvu2shujuku][debug] 聊天缺少 full checkpoint，重建数据库锚点…');
+                        const r3 = await mvu2shujukuWithTimeout(
+                            api.initGameSession({}, { injectTemplate: true, loadPreset: false, templateData: tplCached, templatePresetName: String((character && character.name) || '') + '模板' }),
+                            20000,
+                            'initGameSession(锚点)'
+                        );
+                        console.log('[mvu2shujuku][debug] 数据库锚点重建：' + (r3 && r3.success === false ? (r3.message || '失败') : (r3 && r3.timeout ? '超时' : '完成')));
+                    }
+                }
+            } catch (e) {
+                autoInitState.anchorTries += 1;
+                console.warn('[mvu2shujuku][debug] 数据库锚点重建异常:', e);
+            }
+        }
         if (autoInitState.done === key) return;
         autoInitState.running = true;
         // 看门狗：即使插件 API 的 Promise 意外不返回，也强制复位 running，避免后续自动建表被永久跳过
@@ -5752,11 +5920,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         }, 30000);
         try {
             const presetName = String((character && character.name) || '') + '模板';
-            // 缓存卡内模板（供写路径在表缺初始行时按模板补行）
-            try {
-                const holder = (typeof window !== 'undefined' ? window : globalThis);
-                if (holder) holder.__mvu2shujukuTemplateCache = JSON.parse(mvu2shujukuDecodeB64(entry.content));
-            } catch (e) {}
             const out = await mvu2shujukuEnsureInit(api, entry.content, presetName);
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);

@@ -2130,4 +2130,94 @@ test('扩展侧写路径：单例/JSON 表仅表头时按模板补初始行（�
     assert.strictEqual(zj.content[1][hdr.indexOf('姓名')], '测试主角', '姓名应写入成功（不再 out of bounds）');
 });
 
+test('开局自动建表：单例/JSON 表仅表头且无 seedRows 时自动补初始行（开场白切换重建场景）', async () => {
+    const vm = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const tables = JSON.parse(JSON.stringify(r.template));
+    // 模拟开场白切换后插件重建：所有表只剩表头，且 seedRows 也被清空
+    for (const k of Object.keys(tables)) {
+        const s = tables[k];
+        if (s && Array.isArray(s.content) && s.content.length > 1) s.content = [s.content[0]];
+    }
+    const win = {
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async () => ({ success: true }),
+        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async () => true,
+        insertRow: async (tableName, obj) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s) return 0;
+            const row = s.content[0].map(h => (obj[h] !== undefined && obj[h] !== null) ? String(obj[h]) : '');
+            row[0] = s.content.length || 1;
+            s.content.push(row);
+            return row[0];
+        },
+        deleteRow: async () => true,
+    };
+    vm.createContext(win);
+    vm.runInContext(r.bridgeScript, win);
+    await waitBridgeFlush(500);
+    const zj = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.ok(zj && zj.content.length > 1, '开局自动建表应为仅表头的单例表补初始行');
+    const sd = win.getAllVariables().stat_data;
+    assert.strictEqual(sd.主角.姓名, '未知', '补行后应能读到初始值');
+});
+
+test('聊天缺 full checkpoint 时自动重建数据库锚点；已有锚点则不重复', async () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+
+    const makeSandbox = (chat) => {
+        const vm2 = require('vm');
+        const tables = JSON.parse(JSON.stringify(r.template));
+        const win = {
+            top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
+            CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+            TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+            getContext: () => ({
+                chatId: 'c1',
+                name: '测试角色',
+                chat,
+                eventSource: { on: () => {}, emit: () => {} },
+                event_types: { MESSAGE_RECEIVED: 'message_received' },
+            }),
+        };
+        win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+        let initCalls = 0;
+        win.AutoCardUpdaterAPI = {
+            exportTableAsJson: () => tables,
+            importTemplateFromData: async () => ({ success: true }),
+            initGameSession: async () => { initCalls += 1; return { success: true, runtimeReady: true }; },
+            registerTableUpdateCallback: () => {},
+            updateCell: async () => true,
+            insertRow: async () => 1,
+            deleteRow: async () => true,
+        };
+        vm2.createContext(win);
+        vm2.runInContext(r.bridgeScript, win);
+        return { win, initCalls: () => initCalls };
+    };
+
+    // 无锚点：ensureTemplateInit 应调用 initGameSession 补锚
+    const s1 = makeSandbox([]);
+    await waitBridgeFlush(500);
+    assert.ok(s1.initCalls() >= 1, '无 full checkpoint 时应调用 initGameSession 重建锚点');
+
+    // 已有锚点：不应再次调用 initGameSession 补锚
+    const s2 = makeSandbox([
+        { message_id: 0, is_user: false, mes: '你好',
+          TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { ts: 1 } } } }) },
+    ]);
+    await waitBridgeFlush(500);
+    assert.strictEqual(s2.initCalls(), 0, '已存在 full checkpoint 时不应重复重建锚点');
+});
+
 runTests();
