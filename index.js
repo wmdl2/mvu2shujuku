@@ -2678,7 +2678,7 @@
      * 转换角色卡。
      * opts: {
      *   mode: 'both'|'native'|'sqlite',
-     *   installMvuShim: boolean（默认自动：卡内检测到 Mvu API 则装）
+     *   installMvuShim: boolean（默认自动：卡内检测到 MVU API 则装）
      *   appendPlaceholder: boolean（默认 true：消息收尾触发状态栏刷新）
      *   template: 预生成的模板（可选）
      *   report: 复用报告（可选）
@@ -2696,6 +2696,7 @@
         // 1. initvar（支持多个 [initvar] 条目，按出现顺序合并）
         const initEntries = entries.filter(e => /\[initvar\]/i.test(String(e.comment || '')));
         let initvar = {};
+        let greetingBlockCount = 0;
         if (initEntries.length) {
             for (const initEntry of initEntries) {
                 let content = String(initEntry.content || '');
@@ -2709,7 +2710,30 @@
             }
             report.note(`已解析 ${initEntries.length} 个 [initvar] 条目（合并）：顶层组 ${Object.keys(initvar).join('、') || '（空）'}。`);
         } else {
-            const e = new Error('未找到 [InitVar] 世界书条目，无法识别为 MVU 变量卡（MVU 变量卡必须以 [InitVar] 声明初始 stat_data 结构）。已中止转换，卡未被修改。');
+            // MVU 规范：额外问候语中的 <initvar> 块会覆盖世界书 [InitVar]，也作为结构来源
+            const greetingSources = [data.first_mes, ...(Array.isArray(data.alternate_greetings) ? data.alternate_greetings : [])];
+            const blockRe = /<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/gi;
+            for (const g of greetingSources) {
+                let m;
+                while ((m = blockRe.exec(String(g || '')))) {
+                    greetingBlockCount++;
+                    const parsed = parseInitVar(m[1]);
+                    initvar = deepMerge(initvar, parsed);
+                }
+            }
+            if (greetingBlockCount) {
+                report.note(`角色卡世界书未找到 [InitVar]，已改用额外问候语中的 ${greetingBlockCount} 个 <initvar> 块推导结构。`);
+            }
+        }
+        if (!initEntries.length && Object.keys(initvar).length === 0) {
+            const e = new Error(
+                `未找到 [InitVar] 世界书条目，无法识别为 MVU 变量卡。` +
+                `（当前角色卡：${data.name || '未知'}；世界书条目数=${entries.length}；` +
+                `first_mes/额外问候语中 <initvar> 块数=${greetingBlockCount}。）` +
+                `MVU 变量卡必须在世界书条目 comment 中含 [InitVar]（可禁用状态），或在问候语中用 <initvar> 声明初始结构。` +
+                (entries.length === 0 ? `若角色列表里的对象不包含世界书数据，请改用「选择文件」导入卡文件后转换。` : `若 [InitVar] 写在全局世界书/联动世界书中，请将其并入卡内后重试。`) +
+                `已中止转换，卡未被修改。`
+            );
             e.code = 'NOT_MVU_CARD';
             throw e;
         }
@@ -2730,7 +2754,7 @@
         const layout = buildLayout(schema);
         const template = opts.template || generateTemplate(schema, { mode });
 
-        // 2. 检测卡内是否依赖 Mvu API
+        // 2. 检测卡内是否依赖 MVU API
         const blobs = cardTextBlobs(card);
         const usesMvu = blobs.some(b => /Mvu\s*\./i.test(b.text));
         const installMvuShim = opts.installMvuShim !== undefined ? !!opts.installMvuShim : usesMvu;
@@ -2793,7 +2817,7 @@
                 continue;
             }
             if (isMvuScriptContent(r.replaceString || '')) {
-                report.manual(`正则「${name}」含 Mvu API 调用；转换器保留它并依赖数据桥 Mvu 兼容层，若逻辑异常请人工改为数据库 API。`);
+                report.manual(`正则「${name}」含 MVU API 调用；转换器保留它并依赖数据桥 MVU 兼容层，若逻辑异常请人工改为数据库 API。`);
             }
             keptRegexes.push(deepClone(r));
         }
@@ -3238,17 +3262,18 @@
             '        <label><input type="radio" name="mvu2db-mode" value="sqlite" ' + (settings.mode === 'sqlite' ? 'checked' : '') + ' /> sqlite（SQL）</label>',
             '      </div>',
             '      <div class="mvu2db-row">',
-            '        <label class="mvu2db-label" for="mvu2db-shim">Mvu 兼容层</label>',
+            '        <label class="mvu2db-label" for="mvu2db-shim">MVU 兼容层</label>',
             '        <select id="mvu2db-shim">',
-            '          <option value="auto" ' + (settings.installMvuShim === 'auto' ? 'selected' : '') + '>自动（检测到 Mvu API 才装）</option>',
+            '          <option value="auto" ' + (settings.installMvuShim === 'auto' ? 'selected' : '') + '>自动（检测到 MVU API 才装）</option>',
             '          <option value="yes" ' + (settings.installMvuShim === 'yes' ? 'selected' : '') + '>总是安装</option>',
             '          <option value="no" ' + (settings.installMvuShim === 'no' ? 'selected' : '') + '>不安装</option>',
             '        </select>',
             '      </div>',
             '      <div class="mvu2db-help">',
-            '        MVU（MagVarUpdate）是旧角色卡用的变量框架：游戏状态存在 <code>stat_data</code>，脚本/状态栏通过 <code>Mvu</code> 全局对象',
-            '        （<code>getMvuData</code> / <code>replaceMvuData</code>）读写变量。转换后数据桥会提供同名兼容对象，把旧脚本的变量读写',
-            '        自动翻译成数据库操作，旧脚本才能继续工作。若卡片脚本没用到 <code>Mvu</code>，选“不安装”即可。',
+            '        MVU（MagVarUpdate）是旧角色卡用的变量框架：游戏状态存在 <code>stat_data</code>，脚本/状态栏通过 MVU API 读写变量',
+            '        （入口是全局对象 <code>Mvu</code>，方法 <code>getMvuData</code> / <code>replaceMvuData</code>）。',
+            '        转换后数据桥会提供同名兼容对象，把旧脚本的 MVU API 调用自动翻译成数据库操作，旧脚本才能继续工作。',
+            '        若卡片脚本没用到 MVU API，选“不安装”即可。',
             '      </div>',
             '      <div class="mvu2db-row">',
             '        <label title="状态栏刷新由数据库表格更新回调驱动；此选项额外在 AI 回复结束时补一次刷新并处理消息里的 <UpdateVariable>/<json_patch> 更新块"><input type="checkbox" id="mvu2db-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 表格更新后自动刷新状态栏（含消息收尾兜底）</label>',
@@ -3453,7 +3478,7 @@
                 '- 转换不自动安装数据库插件；不迁移旧聊天；只转换角色卡本身。',
                 '- 表格模板不会写入世界书条目，改为内嵌到卡内数据桥脚本，开局自动建表。',
                 '- 状态栏继续通过 getAllVariables() 读取 stat_data；数据桥会把数据库表格重建为 stat_data 形状。',
-                '- 卡内 MVU 相关正则/脚本/更新规则会被移除；依赖 Mvu API 的脚本通过 Mvu 兼容层尽力适配。',
+                '- 卡内 MVU 相关正则/脚本/更新规则会被移除；依赖 MVU API 的脚本通过 MVU 兼容层尽力适配。',
             ].join('\n'),
         };
     }
@@ -3781,17 +3806,18 @@ root.__MVU2DB_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢囹坽�
             '        <label><input type="radio" name="mvu2db-mode" value="sqlite" ' + (settings.mode === 'sqlite' ? 'checked' : '') + ' /> sqlite（SQL）</label>',
             '      </div>',
             '      <div class="mvu2db-row">',
-            '        <label class="mvu2db-label" for="mvu2db-shim">Mvu 兼容层</label>',
+            '        <label class="mvu2db-label" for="mvu2db-shim">MVU 兼容层</label>',
             '        <select id="mvu2db-shim">',
-            '          <option value="auto" ' + (settings.installMvuShim === 'auto' ? 'selected' : '') + '>自动（检测到 Mvu API 才装）</option>',
+            '          <option value="auto" ' + (settings.installMvuShim === 'auto' ? 'selected' : '') + '>自动（检测到 MVU API 才装）</option>',
             '          <option value="yes" ' + (settings.installMvuShim === 'yes' ? 'selected' : '') + '>总是安装</option>',
             '          <option value="no" ' + (settings.installMvuShim === 'no' ? 'selected' : '') + '>不安装</option>',
             '        </select>',
             '      </div>',
             '      <div class="mvu2db-help">',
-            '        MVU（MagVarUpdate）是旧角色卡用的变量框架：游戏状态存在 <code>stat_data</code>，脚本/状态栏通过 <code>Mvu</code> 全局对象',
-            '        （<code>getMvuData</code> / <code>replaceMvuData</code>）读写变量。转换后数据桥会提供同名兼容对象，把旧脚本的变量读写',
-            '        自动翻译成数据库操作，旧脚本才能继续工作。若卡片脚本没用到 <code>Mvu</code>，选“不安装”即可。',
+            '        MVU（MagVarUpdate）是旧角色卡用的变量框架：游戏状态存在 <code>stat_data</code>，脚本/状态栏通过 MVU API 读写变量',
+            '        （入口是全局对象 <code>Mvu</code>，方法 <code>getMvuData</code> / <code>replaceMvuData</code>）。',
+            '        转换后数据桥会提供同名兼容对象，把旧脚本的 MVU API 调用自动翻译成数据库操作，旧脚本才能继续工作。',
+            '        若卡片脚本没用到 MVU API，选“不安装”即可。',
             '      </div>',
             '      <div class="mvu2db-row">',
             '        <label title="状态栏刷新由数据库表格更新回调驱动；此选项额外在 AI 回复结束时补一次刷新并处理消息里的 <UpdateVariable>/<json_patch> 更新块"><input type="checkbox" id="mvu2db-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 表格更新后自动刷新状态栏（含消息收尾兜底）</label>',
