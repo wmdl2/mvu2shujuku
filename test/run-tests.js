@@ -301,6 +301,30 @@ test('PNG 解析 → 转换 → 回写 → 再解析', () => {
     assert.strictEqual(again.card.data.name, String(parsed.card.data.name) + '_数据库');
 });
 
+test('浏览器环境（无 Buffer）PNG 回写正常', () => {
+    if (!fs.existsSync(PNG)) {
+        console.log('    （跳过：缺少 PNG 参考卡）');
+        return;
+    }
+    const vm = require('vm');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2db.js'), 'utf8');
+    const sandbox = {
+        console, TextDecoder, TextEncoder, Uint8Array, Uint16Array, Uint32Array, DataView, ArrayBuffer,
+        atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        btoa: (s) => Buffer.from(s, 'binary').toString('base64'),
+    };
+    sandbox.globalThis = sandbox;
+    sandbox.window = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(src, sandbox);
+    const core = sandbox.MVU2DB_CORE;
+    const buf = fs.readFileSync(PNG);
+    const parsed = core.parseCardPng(buf);
+    const out = core.writeCardPng(buf, parsed.card);
+    const again = core.parseCardPng(out);
+    assert.strictEqual(again.card.data.name, parsed.card.data.name);
+});
+
 /* ---------------- 扩展装配 ---------------- */
 console.log('assembleExtension');
 test('扩展文件齐全且 index.js 语法正确', () => {
