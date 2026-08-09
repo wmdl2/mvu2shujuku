@@ -473,9 +473,10 @@
         const chunks = readPngChunks(originalBuffer);
         const charaText = btoaSafe(JSON.stringify(card));
         const type = chunks.some(c => c.type === 'tEXt') ? 'tEXt' : 'iTXt';
-        const keyword = Buffer ? Buffer.from('chara', 'latin1') : new TextEncoder().encode('chara');
+        const hasBuffer = typeof Buffer !== 'undefined';
+        const keyword = hasBuffer ? Buffer.from('chara', 'latin1') : new TextEncoder().encode('chara');
         const payload = type === 'tEXt'
-            ? concatBytes(keyword, new Uint8Array([0]), Buffer ? Buffer.from(charaText, 'latin1') : new TextEncoder().encode(charaText))
+            ? concatBytes(keyword, new Uint8Array([0]), hasBuffer ? Buffer.from(charaText, 'latin1') : new TextEncoder().encode(charaText))
             : concatBytes(keyword, new Uint8Array([0, 0, 0, 0, 0]), new TextEncoder().encode(charaText));
         const chunkData = buildChunk(type, payload);
         const out = [];
@@ -3449,7 +3450,7 @@
     function main() {
         const context = getContextSafe();
         ensureSettingsPanel(context);
-        toast('MVU转数据库扩展已加载（' + (window.MVU2DB_CORE ? window.MVU2DB_CORE.VERSION : '核心缺失') + '）');
+        console.log('[mvu2db] 扩展已加载（' + (window.MVU2DB_CORE ? window.MVU2DB_CORE.VERSION : '核心缺失') + '）');
     }
 
     try {
@@ -4021,7 +4022,7 @@ root.__MVU2DB_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢囹坽�
     function main() {
         const context = getContextSafe();
         ensureSettingsPanel(context);
-        toast('MVU转数据库扩展已加载（' + (window.MVU2DB_CORE ? window.MVU2DB_CORE.VERSION : '核心缺失') + '）');
+        console.log('[mvu2db] 扩展已加载（' + (window.MVU2DB_CORE ? window.MVU2DB_CORE.VERSION : '核心缺失') + '）');
     }
 
     try {
