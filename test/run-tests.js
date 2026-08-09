@@ -203,6 +203,25 @@ test('mergeTemplates：并入选中表、跳过重名、uid 冲突加后缀、or
     assert.deepStrictEqual(order, [0, 1, 2], 'orderNo 应连续重排');
 });
 
+test('statDataFromTables：按布局从表格重建 stat_data（单例/行表/数组）', () => {
+    const layout = [
+        { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前时间', 'text', '', '', '', '']], writePaths: [], mirrors: [] },
+        { kind: 'rows', group: '角色', table: '角色表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['发情值', 'number', '', '', '', '']], writePaths: [['角色']], mirrors: [] },
+        { kind: 'array', group: '$器灵台词', table: '台词表', cols: [['内容', 'text', '', '', '', '']], writePaths: [], mirrors: [] },
+    ];
+    const tables = {
+        sheet_1: { name: '系统表', content: [['row_id', '名称', '当前时间'], [1, '系统', '09:00']] },
+        sheet_2: { name: '角色表', content: [['row_id', '名称', '发情值'], [1, '西园寺爱丽莎', 25], [2, '月咏深雪', 10]] },
+        sheet_3: { name: '台词表', content: [['row_id', '内容'], [1, '第一句'], [2, '第二句']] },
+    };
+    const data = core.statDataFromTables(layout, tables);
+    assert.strictEqual(data.stat_data.系统.当前时间, '09:00', '单例表应还原');
+    assert.strictEqual(data.stat_data.角色['西园寺爱丽莎'].发情值, 25, '行表数字列应还原为数字');
+    assert.strictEqual(data.stat_data.角色['月咏深雪'].发情值, 10, '行表多条应还原');
+    assert.deepStrictEqual(data.stat_data['$器灵台词'], ['第一句', '第二句'], '数组表应还原');
+    assert.ok(data.display_data && data.display_data.系统, '应有 display_data 镜像');
+});
+
 test('条目字段全是叶子的字典应判为行表（修复误判为单例）', () => {
     const card = {
         spec: 'chara_card_v3',
@@ -631,6 +650,7 @@ test('转换产物齐全', () => {
     assert.ok((c.extensions.regex_scripts || []).every(rx => !/变量更新/.test(rx.scriptName)), '应移除 MVU 专属正则');
     assert.ok((c.extensions.regex_scripts || []).some(rx => rx.scriptName === 'XML状态栏'), '非 MVU 显示正则应保留');
     assert.ok(c.extensions.mvu2shujuku, '应有转换标记');
+    assert.ok(typeof c.extensions.mvu2shujuku.layout === 'string' && Array.isArray(JSON.parse(c.extensions.mvu2shujuku.layout)), '转换标记应包含布局（供扩展重建 stat_data）');
     assert.ok(!c.character_book.entries.some(e => /\[initvar\]|\[mvu_update\]|变量列表/i.test(String(e.comment || ''))), 'MVU 世界书条目应被删除');
     assert.ok(String(c.name).endsWith('_数据库'), '卡名应带 _数据库 后缀');
     if (c.character_book && c.character_book.name) {
