@@ -3420,6 +3420,7 @@
                 `// 复刻 MVU 的占位符维护：AI 回复后若卡内正则依赖 <StatusPlaceHolderImpl/>，就在消息末尾补上占位符，`,
                 `// 前端注入正则才能命中每条消息（原卡由 MVU 引擎完成，转换后桥接管）`,
                 `var statusPlaceholderNeeded=${statusPlaceholderNeeded ? 'true' : 'false'};`,
+                `var placeholderMsgKey='';var placeholderAt=0;`,
                 `function detectStatusPlaceholder(){`,
                 `  try{`,
                 `    var ctx0=getContext();`,
@@ -3436,12 +3437,16 @@
                 `  try{`,
                 `    var ctx=getContext();`,
                 `    if(!ctx||!Array.isArray(ctx.chat)||!ctx.chat.length){console.log('['+BRIDGE_NAME+'][占位符] 跳过：无聊天上下文');return;}`,
+                `    if(ctx.generating===true||ctx.isStreaming===true)return;`,
                 `    var msg=ctx.chat[ctx.chat.length-1];`,
                 `    if(!msg){console.log('['+BRIDGE_NAME+'][占位符] 跳过：无最新消息');return;}`,
                 `    if(msg.is_user){console.log('['+BRIDGE_NAME+'][占位符] 跳过：最新消息是用户消息');return;}`,
                 `    if(String(msg.name||'')==='System'){console.log('['+BRIDGE_NAME+'][占位符] 跳过：最新消息是 System');return;}`,
                 `    var text=String(msg.mes!=null?msg.mes:(msg.message||''));`,
                 `    if(text.indexOf('<StatusPlaceHolderImpl/>')!==-1)return;`,
+                `    var msgKey=(msg.message_id!=null?msg.message_id:(ctx.chat.length-1))+':'+text.length;`,
+                `    var now=Date.now();`,
+                `    if(msgKey===placeholderMsgKey&&now-placeholderAt<5000)return;`,
                 `    var next=text+'\\n\\n<StatusPlaceHolderImpl/>';`,
                 `    if(typeof ctx.setChatMessages==='function'){`,
                 `      ctx.setChatMessages([{message_id:msg.message_id!=null?msg.message_id:(ctx.chat.length-1),message:next,mes:next}],{refresh:'affected'});`,
@@ -3451,6 +3456,7 @@
                 `      if(typeof ctx.saveChat==='function')ctx.saveChat();`,
                 `      console.log('['+BRIDGE_NAME+'][占位符] 已直接写入消息（无 setChatMessages）');`,
                 `    }`,
+                `    placeholderMsgKey=msgKey;placeholderAt=now;`,
                 `  }catch(e){console.warn('['+BRIDGE_NAME+'][占位符] 追加失败:',e);}`,
                 `}`,
                 `function installMessageRuntime(){`,
@@ -3811,11 +3817,12 @@
         }
         if (data.extensions && typeof data.extensions.world === 'string' && nameSuffix) {
             const worldName = data.extensions.world;
-            // 转换后的世界书以内嵌 character_book 为准（含 __ACU_TEMPLATE_DATA__ 模板条目）；
-            // 移除外部世界引用，避免酒馆按旧名/新名去找外部世界文件导致世界书为空。
+            // 转换后的世界书以内嵌 character_book 为准（含 __ACU_TEMPLATE_DATA__ 模板条目）。
+            // 酒馆导入内嵌世界书时会按 character_book.name 生成同名世界文件并绑定到角色，
+            // 因此把 extensions.world 指向转换后的世界书名，确保导入后自动挂载。
             if (data.character_book && Array.isArray(data.character_book.entries) && data.character_book.entries.length) {
-                delete data.extensions.world;
-                report.note(`原外部世界引用「${worldName}」已移除：转换后的世界书以内嵌为准（${data.character_book.name}，含模板条目）。`);
+                data.extensions.world = data.character_book.name || (worldName + nameSuffix);
+                report.note(`世界书绑定更新：${worldName} → ${data.extensions.world}（以内嵌世界书为准，导入时自动挂载，含模板条目）。`);
             } else if (worldName && !worldName.endsWith(nameSuffix)) {
                 data.extensions.world = worldName + nameSuffix;
                 report.note(`外部世界书引用已追加后缀：${worldName} → ${data.extensions.world}。`);
@@ -4170,6 +4177,8 @@ ${DB_INIT_SNIPPET}
     }
 
     // 扩展本体复刻 MVU 的占位符维护：AI 回复后若缺少占位符则追加，前端注入正则才能命中每条消息
+    let lastPlaceholderMsgKey = '';
+    let lastPlaceholderAt = 0;
     function ensureWindowStatusPlaceholder() {
         if (!activePlaceholderNeeded) return;
         try {
@@ -4177,11 +4186,16 @@ ${DB_INIT_SNIPPET}
             if (!context || !Array.isArray(context.chat) || !context.chat.length) {
                 return;
             }
+            // 生成/流式过程中不追加，避免每次流更新都把占位符覆盖后再补（反复注入）
+            if (context.generating === true || context.isStreaming === true) return;
             const msg = context.chat[context.chat.length - 1];
             if (!msg) return;
             if (msg.is_user || String(msg.name || '') === 'System') return;
             const text = String(msg.mes != null ? msg.mes : (msg.message || ''));
             if (text.indexOf('<StatusPlaceHolderImpl/>') !== -1) return;
+            const msgKey = (msg.message_id != null ? msg.message_id : (context.chat.length - 1)) + ':' + text.length;
+            const now = Date.now();
+            if (msgKey === lastPlaceholderMsgKey && now - lastPlaceholderAt < 5000) return;
             const next = text + '\n\n<StatusPlaceHolderImpl/>';
             if (typeof context.setChatMessages === 'function') {
                 context.setChatMessages([{ message_id: msg.message_id != null ? msg.message_id : (context.chat.length - 1), message: next, mes: next }], { refresh: 'affected' });
@@ -4191,6 +4205,8 @@ ${DB_INIT_SNIPPET}
                 if (typeof context.saveChat === 'function') context.saveChat();
                 console.log('[mvu2shujuku][debug][占位符] 已直接写入消息（无 setChatMessages）');
             }
+            lastPlaceholderMsgKey = msgKey;
+            lastPlaceholderAt = now;
         } catch (e) {
             console.warn('[mvu2shujuku][debug][占位符] 追加失败:', e);
         }
@@ -4217,9 +4233,6 @@ ${DB_INIT_SNIPPET}
                 });
                 if (et.GENERATION_ENDED) {
                     es.on(et.GENERATION_ENDED, () => hostWindow.setTimeout(ensureWindowStatusPlaceholder, 800));
-                }
-                if (et.MESSAGE_UPDATED) {
-                    es.on(et.MESSAGE_UPDATED, () => hostWindow.setTimeout(ensureWindowStatusPlaceholder, 300));
                 }
                 autoInitState.inited = true;
             }
@@ -5744,6 +5757,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     }
 
     // 扩展本体复刻 MVU 的占位符维护：AI 回复后若缺少占位符则追加，前端注入正则才能命中每条消息
+    let lastPlaceholderMsgKey = '';
+    let lastPlaceholderAt = 0;
     function ensureWindowStatusPlaceholder() {
         if (!activePlaceholderNeeded) return;
         try {
@@ -5751,11 +5766,16 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             if (!context || !Array.isArray(context.chat) || !context.chat.length) {
                 return;
             }
+            // 生成/流式过程中不追加，避免每次流更新都把占位符覆盖后再补（反复注入）
+            if (context.generating === true || context.isStreaming === true) return;
             const msg = context.chat[context.chat.length - 1];
             if (!msg) return;
             if (msg.is_user || String(msg.name || '') === 'System') return;
             const text = String(msg.mes != null ? msg.mes : (msg.message || ''));
             if (text.indexOf('<StatusPlaceHolderImpl/>') !== -1) return;
+            const msgKey = (msg.message_id != null ? msg.message_id : (context.chat.length - 1)) + ':' + text.length;
+            const now = Date.now();
+            if (msgKey === lastPlaceholderMsgKey && now - lastPlaceholderAt < 5000) return;
             const next = text + '\n\n<StatusPlaceHolderImpl/>';
             if (typeof context.setChatMessages === 'function') {
                 context.setChatMessages([{ message_id: msg.message_id != null ? msg.message_id : (context.chat.length - 1), message: next, mes: next }], { refresh: 'affected' });
@@ -5765,6 +5785,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (typeof context.saveChat === 'function') context.saveChat();
                 console.log('[mvu2shujuku][debug][占位符] 已直接写入消息（无 setChatMessages）');
             }
+            lastPlaceholderMsgKey = msgKey;
+            lastPlaceholderAt = now;
         } catch (e) {
             console.warn('[mvu2shujuku][debug][占位符] 追加失败:', e);
         }
@@ -5791,9 +5813,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 });
                 if (et.GENERATION_ENDED) {
                     es.on(et.GENERATION_ENDED, () => hostWindow.setTimeout(ensureWindowStatusPlaceholder, 800));
-                }
-                if (et.MESSAGE_UPDATED) {
-                    es.on(et.MESSAGE_UPDATED, () => hostWindow.setTimeout(ensureWindowStatusPlaceholder, 300));
                 }
                 autoInitState.inited = true;
             }
