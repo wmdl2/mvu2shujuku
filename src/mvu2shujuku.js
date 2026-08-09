@@ -1643,10 +1643,8 @@
         }
         if (group.columns.length) {
             L.push('【列定义】');
-            group.columns.forEach((c, i) => {
-                let desc = c.desc ? String(c.desc).replace(/\n/g, ' ') : '';
-                L.push(`- 列${i + 1}: ${c.zh} ${c.ident}${desc ? `（${desc}）` : ''}`);
-            });
+            // 对齐默认模板：列定义只列中文名 + 标识符；字段说明与约束放【强制约束】
+            group.columns.forEach((c, i) => L.push(`- 列${i + 1}: ${c.zh} ${c.ident}`));
             L.push('【强制约束】');
             for (const c of group.columns) {
                 const parts = [];
@@ -1654,6 +1652,10 @@
                 if (c.enum) parts.push(`可选值：${c.enum.join(' / ')}`);
                 if (c.format) parts.push(`格式要求：${String(c.format).replace(/\n/g, ' ')}`);
                 if (c.isObject) parts.push('对象以 JSON 存储，读取时还原');
+                // 真实字段说明（如 [值,说明] 的更新条件）；通用描述（唯一标识/条目名称/JSON 提示）不重复
+                const desc = c.desc ? String(c.desc).replace(/\n/g, ' ').trim() : '';
+                const generic = desc === '唯一标识' || desc === '条目名称' || desc === '对象（JSON 存储，读取时还原）';
+                if (desc && !generic) parts.push(desc);
                 if (parts.length) L.push(`- ${c.zh}：${parts.join('；')}`);
                 for (const rule of c.check || []) L.push(`- ${c.zh}：${rule}`);
             }
@@ -1684,7 +1686,17 @@
 
     function buildNodeProse(group, kind) {
         if (group.kind === 'singleton') {
-            if (kind === 'update') return `只允许 UPDATE ${group.ident} SET ... WHERE ${group.keyCol}='${sqlQuote(group.keyValue)}'; 依正文明确变化更新对应字段。`;
+            if (kind === 'update') {
+                // 用首个业务列给出具体示例（有初始值用真实值，否则“列名示例”）
+                const col = group.columns[1];
+                const ident = col ? col.ident : '字段';
+                const zh = col ? col.zh : '字段';
+                const raw = group.rows && group.rows[0] && group.rows[0][2] !== undefined && group.rows[0][2] !== null && String(group.rows[0][2]) !== ''
+                    ? group.rows[0][2]
+                    : `'${zh}示例'`;
+                const val = typeof raw === 'number' ? String(raw) : `'${sqlQuote(String(raw))}'`;
+                return `只允许 UPDATE ${group.ident} SET ${ident} = ${val} WHERE ${group.keyCol}='${sqlQuote(group.keyValue)}'; 依正文明确变化更新对应字段。`;
+            }
             return '禁止。';
         }
         if (group.kind === 'array') {
@@ -1692,7 +1704,6 @@
             return '禁止（数组表不支持单行增删，整体替换）。';
         }
         const keyIdent = group.columns[0] ? group.columns[0].ident : 'key';
-        const sampleCols = group.columns.slice(1, 4).map(c => c.ident);
         // 示例优先取卡内真实初始数据（与 MVU 提示词示例用具体值一致），无初始行时退回占位符
         const sampleRow = group.rows && group.rows[0] ? group.rows[0] : null;
         const sampleValue = (idx, fallback) => {
@@ -1708,11 +1719,14 @@
         const keyValue = (sampleRow && sampleRow[1] !== undefined && String(sampleRow[1]) !== '')
             ? `'${sqlQuote(sampleRow[1])}'`
             : "'条目名'";
+        const allIdents = group.columns.map(c => c.ident);
+        const firstNonKey = allIdents[1] || '字段';
         if (kind === 'update') {
-            return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${sampleCols[0] || '字段'} = ${sampleValue(2, "'新值'")} WHERE ${keyIdent} = ${keyValue};`;
+            return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${sampleValue(2, "'新值'")} WHERE ${keyIdent} = ${keyValue};`;
         }
         if (kind === 'insert') {
-            const cols = [keyIdent, ...sampleCols];
+            // 完整列示例：全部列都列出，列数与 VALUES 一一对应
+            const cols = allIdents;
             // 列数与 VALUES 一一对应，避免示例语句列值数量不匹配
             const vals = cols.map((c, i) => (i === 0 ? keyValue : sampleValue(i + 1, `'值${i}'`)));
             return `正文中首次出现应记录的${group.keyCol}时，插入完整的新记录。\nSQL示例: INSERT INTO ${group.ident} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
