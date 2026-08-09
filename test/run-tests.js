@@ -27,21 +27,31 @@ function requireFixture() {
 
 let passed = 0;
 let failed = 0;
+const pendingTests = [];
 
 function test(name, fn) {
+    pendingTests.push({ name, fn });
+}
+
+async function runTests() {
+    for (const t of pendingTests) {
+        const { name, fn } = t;
     try {
-        fn();
-        passed++;
-        console.log('  ✓', name);
+            await fn();
+            passed++;
+            console.log('  ✓', name);
     } catch (e) {
         if (e && e.code === 'SKIP_NO_FIXTURE') {
             console.log('  - 跳过（无参考卡 fixture，仅保留通用性测试）', name);
-            return;
+                continue;
         }
         failed++;
         console.error('  ✗', name);
-        console.error('    ', e.message);
+            console.error('    ', e && e.message ? e.message : e);
     }
+    }
+    console.log(`\n结果：${passed} 通过，${failed} 失败`);
+    if (failed) process.exit(1);
 }
 
 console.log('MVU→数据库 转换器测试\n');
@@ -211,6 +221,21 @@ test('else 分支 → <else>', () => {
     assert.ok(out.text.includes('<else>可突破</if>'), out.text);
 });
 
+test('else-if 链 → 嵌套 <if>/<else>', () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const layout = core.buildLayout(r.schema);
+    const text = '<% if (getvar(\'stat_data.主角.修为\') >= 100) { %>大乘<% } else if (getvar(\'stat_data.主角.修为\') >= 50) { %>中阶<% } else { %>初阶<% } %>';
+    const out = core.rewriteEjsConditions(text, layout, core.createReport());
+    assert.ok(
+        out.text.includes('<if cell="主角表/主角/修为 >= 100">大乘<else><if cell="主角表/主角/修为 >= 50">中阶<else>初阶</if></if>'),
+        out.text
+    );
+    const text2 = '<% if (getvar(\'stat_data.主角.生命\') > 0) { %>存活<% } else if (getvar(\'stat_data.主角.生命\') === 0) { %>濒死<% } %>';
+    const out2 = core.rewriteEjsConditions(text2, layout, core.createReport());
+    assert.ok(out2.text.includes('>存活<else><if cell="主角表/主角/生命 === 0">濒死</if></if>'), out2.text);
+});
+
 test('官方教程规范写法：getvar("stat_data").组["字段"][0] 与 _.has', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -236,6 +261,8 @@ test('脚本语法与 SD_LAYOUT 结构', () => {
     assert.ok(layout.some(e => e.kind === 'rows' && e.group === '储物袋' && e.writePaths[0][0] === '主角'));
     assert.ok(layout.some(e => e.kind === 'array' && e.group === '$器灵台词'));
     assert.ok(r.bridgeScript.includes('importTemplateFromData'), '应使用 importTemplateFromData 自动建表');
+    assert.ok(r.bridgeScript.includes('initGameSession'), '应使用 initGameSession 做开局初始化（对应 MVU init 时机）');
+    assert.ok(r.bridgeScript.includes('mvu2dbMissingTableNames'), '应按模板表名判断缺表，而非仅看是否有任意表');
     assert.ok(r.bridgeScript.includes('shujuku-table-updated'), '应有表格更新事件');
 });
 
@@ -284,6 +311,83 @@ test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
     assert.ok(allData.display_data && allData.display_data.主角, '应有 display_data 镜像');
 });
 
+test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）', () => new Promise((resolve, reject) => {
+    const vm = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const byName = (name) => Object.keys(tables).find(k => tables[k].name === name);
+    const hero = tables[byName('主角表')];
+    const world = tables[byName('世界表')];
+    // 固定已知值，避免时区干扰
+    const timeCol = world.content[0].indexOf('当前时间');
+    world.content[1][timeCol] = '2026-08-09T01:00:00.000Z';
+    const nameCol = hero.content[0].indexOf('姓名');
+    hero.content[1][nameCol] = '未知';
+
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async () => ({ success: true }),
+        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const sheet = Object.values(tables).find(s => s && s.name === tableName);
+            if (!sheet) return false;
+            const ci = sheet.content[0].indexOf(col);
+            if (ci === -1) return false;
+            sheet.content[rowIndex][ci] = value;
+            return true;
+        },
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null, setTimeout: () => 0, clearTimeout: () => {}, console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({
+            chatId: 'c1',
+            name: '测试角色',
+            chat: [{
+                is_user: false,
+                mes: '开场白文字\n\n<UpdateVariable>\n_.set(\'主角.姓名\', \'未知\', \'新名字\');//开局设定\n_.add(\'世界.当前时间\', 3600000);\n</UpdateVariable>',
+            }],
+            eventSource: { on: () => {} },
+            event_types: { MESSAGE_RECEIVED: 'message_received' },
+        }),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = fakeApi;
+    vm.createContext(win);
+    vm.runInContext(r.bridgeScript, win);
+    setTimeout(() => {
+        try {
+            const all = win.getAllVariables();
+            assert.strictEqual(all.stat_data.主角.姓名, '新名字', '问候语 <UpdateVariable> 应覆盖初始值');
+            assert.strictEqual(all.stat_data.世界.当前时间, '2026-08-09T02:00:00.000Z', '日期型 _.add 应增加毫秒并转 ISO');
+            assert.ok(String(all.display_data.主角.姓名).includes('未知->新名字'), 'display_data 应有 旧->新(原因) 镜像');
+            assert.ok(String(all.display_data.主角.姓名).includes('开局设定'), 'display_data 应带原因');
+            resolve();
+        } catch (e) {
+            reject(e);
+        }
+    }, 500);
+}));
+
+test('status_current_variable 单数条目也应识别为 MVU 并删除', () => {
+    const card = requireFixture();
+    // 模拟教程“蓝灯 D1”：comment 为任意名字，content 用单数 status_current_variable + get_message_variable
+    const data = JSON.parse(JSON.stringify(card.data || card));
+    data.character_book.entries.push({
+        comment: '蓝灯 D1',
+        content: '<status_current_variable>//do not output following content\n{{get_message_variable::stat_data}}\n</status_current_variable>',
+        enabled: true,
+    });
+    const r = core.convert({ spec: 'chara_card_v3', data }, { mode: 'both' });
+    const out = r.card.data || r.card;
+    assert.ok(!out.character_book.entries.some(e => e.comment === '蓝灯 D1'), 'MVU 变量输出条目（任意 comment + status_current_variable）应被删除');
+});
+
 /* ---------------- convert 输出 ---------------- */
 console.log('convert');
 test('转换产物齐全', () => {
@@ -309,7 +413,7 @@ test('转换产物齐全', () => {
     const tplEntry = c.character_book.entries.find(e => Array.isArray(e.keys) && e.keys.includes('__ACU_TEMPLATE_DATA__'));
     assert.ok(tplEntry, '应有 __ACU_TEMPLATE_DATA__ 世界书条目（开局自动建表用）');
     assert.ok(typeof tplEntry.content === 'string' && tplEntry.content.length > 100, '模板条目内容应为 base64');
-    assert.ok(String(c.first_mes).includes('开局表格模板注入'), '开场白应含开局建表脚本');
+    assert.strictEqual(String(c.first_mes || ''), String((card.data || card).first_mes || ''), '开场白应保持原样（不注入脚本，纯文字开场白可用）');
 });
 
 test('native / sqlite 单模式', () => {
@@ -323,6 +427,22 @@ test('native / sqlite 单模式', () => {
     assert.strictEqual(rn.template[hero].sourceData.note, rs.template[hero].sourceData.note, '两种模式应生成相同 note');
     assert.ok(rn.template[hero].sourceData.note.includes('【列定义】'), 'note 应含默认模板风格的列定义');
     assert.ok(rn.template[hero].sourceData.note.includes('【强制约束】'), 'note 应含强制约束');
+});
+
+test('SQL 示例 VALUES 数量与列数一致', () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    let checked = 0;
+    for (const k of Object.keys(r.template).filter(k => k.startsWith('sheet_'))) {
+        const ins = r.template[k].sourceData.insertNode || '';
+        const m = ins.match(/INSERT INTO \S+ \(([^)]+)\) VALUES \(([^)]+)\)/);
+        if (!m) continue;
+        const colCount = m[1].split(',').length;
+        const valCount = m[2].split(',').length;
+        assert.strictEqual(colCount, valCount, `${r.template[k].name} INSERT 示例列值数量不一致: ${ins}`);
+        checked++;
+    }
+    assert.ok(checked >= 3, `应至少检查 3 张表的 INSERT 示例（实际 ${checked}）`);
 });
 
 /* ---------------- PNG 往返 ---------------- */
@@ -545,5 +665,4 @@ test('世界书无 [InitVar] 但问候语含 <initvar> 块：按 MVU 规范兜�
     assert.ok(byName('人物表'), '应从问候语 <initvar> 推导出 人物表');
 });
 
-console.log(`\n结果：${passed} 通过，${failed} 失败`);
-if (failed) process.exit(1);
+runTests();
