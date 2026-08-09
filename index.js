@@ -1931,6 +1931,9 @@
             `var VERSION=${JSON.stringify(ver)};`,
             `var BRIDGE_NAME=${JSON.stringify(name)};`,
             `console.log('['+BRIDGE_NAME+'] 桥启动 v'+VERSION);`,
+            `// 心跳：确认桥在运行（任何时段的控制台复制都能看到）`,
+            `function mvu2shujukuHeartbeat(){console.log('['+BRIDGE_NAME+'] 心跳（桥在运行）');setTimeout(mvu2shujukuHeartbeat,30000);}`,
+            `setTimeout(mvu2shujukuHeartbeat,30000);`,
             '',
             `function rootWin(){try{return window.top||window;}catch(e){return window;}}`,
             `var rootWindow=rootWin();`,
@@ -3151,6 +3154,14 @@ ${DB_INIT_SNIPPET}
         const entries = fullCb && Array.isArray(fullCb.entries) ? fullCb.entries : [];
         const entry = entries.find(e => Array.isArray(e.keys) && e.keys.indexOf(DB_TEMPLATE_KEY) !== -1);
         if (!entry || !entry.content) return;
+        // 调试：确认当前卡的 tavern_helper 里到底有没有数据桥
+        try {
+            const th = character && character.extensions && character.extensions.tavern_helper;
+            const scripts = (th && Array.isArray(th.scripts) ? th.scripts : []).map(s => s.name + '(enabled=' + s.enabled + ')');
+            console.log('[mvu2shujuku][debug] 当前卡 tavern_helper.scripts =', JSON.stringify(scripts), '| 桥内容长度=' + (th && Array.isArray(th.scripts) && th.scripts.find(s => /数据桥/.test(String(s.name || ''))) ? String((th.scripts.find(s => /数据桥/.test(String(s.name || ''))).content || '')).length : 0));
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] 读取 tavern_helper 失败:', e);
+        }
         const key = autoInitChatId();
         if (autoInitState.done === key) return;
         autoInitState.running = true;
@@ -4153,6 +4164,14 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         const entries = fullCb && Array.isArray(fullCb.entries) ? fullCb.entries : [];
         const entry = entries.find(e => Array.isArray(e.keys) && e.keys.indexOf(DB_TEMPLATE_KEY) !== -1);
         if (!entry || !entry.content) return;
+        // 调试：确认当前卡的 tavern_helper 里到底有没有数据桥
+        try {
+            const th = character && character.extensions && character.extensions.tavern_helper;
+            const scripts = (th && Array.isArray(th.scripts) ? th.scripts : []).map(s => s.name + '(enabled=' + s.enabled + ')');
+            console.log('[mvu2shujuku][debug] 当前卡 tavern_helper.scripts =', JSON.stringify(scripts), '| 桥内容长度=' + (th && Array.isArray(th.scripts) && th.scripts.find(s => /数据桥/.test(String(s.name || ''))) ? String((th.scripts.find(s => /数据桥/.test(String(s.name || ''))).content || '')).length : 0));
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] 读取 tavern_helper 失败:', e);
+        }
         const key = autoInitChatId();
         if (autoInitState.done === key) return;
         autoInitState.running = true;
