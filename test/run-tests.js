@@ -1031,6 +1031,9 @@ test('空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删
     assert.strictEqual(opEntry.kind, 'json', '空字典且无字段线索应生成整组 JSON 表');
     const taskSheet = Object.values(r.template).find(s => s && s.name === '任务表');
     assert.deepStrictEqual(taskSheet.content[0], ['row_id', '名称', '内容'], 'JSON 表头应为 row_id/名称/内容');
+    assert.ok(!taskSheet.sourceData.note.includes('【列定义】'), 'JSON 表不应展示列定义');
+    assert.ok(!taskSheet.sourceData.note.includes('【强制约束】'), 'JSON 表不应展示强制约束');
+    assert.ok(taskSheet.sourceData.note.includes('AI 不应直接修改本表'), 'JSON 表应保留整组说明');
 
     const tables = JSON.parse(JSON.stringify(r.template));
     const fakeApi = {
