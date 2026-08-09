@@ -306,6 +306,36 @@ test('表种类推导矩阵：单例/行表/数组/混合均符合预期', () =>
     }
 });
 
+test('[mvu_plot] 剧情条目全部保留，内部 MVU 宏改写为数据库引用', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '剧情卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[mvu_plot]核心设定', content: '<核心设定>\n现代日本，催眠APP。' },
+                    { comment: '[mvu_plot]时间和地点提醒', content: '现在的时间是: {{get_message_variable::系统.当前时间}}\n可疑度({{get_message_variable::stat_data.系统.主角可疑度[0]}})' },
+                    { comment: '变量列表', content: '<status_current_variable>{{get_message_variable::stat_data}}</status_current_variable>' },
+                    { comment: '[InitVar]', content: '{"系统":{"当前时间":"09:00","主角可疑度":10}}' },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const out = r.card.data || r.card;
+    const entries = out.character_book.entries;
+    const plotHits = entries.filter(e => /\[mvu_plot\]/.test(String(e.comment || '')));
+    assert.strictEqual(plotHits.length, 2, '两个 [mvu_plot] 条目都应保留');
+    assert.ok(!entries.some(e => e.comment === '变量列表'), '变量列表条目应删除');
+    const timeEntry = plotHits.find(e => e.comment.includes('时间和地点提醒'));
+    assert.ok(timeEntry.content.includes('（数据库表「系统表」的「当前时间」）'), 'get_message_variable 应改写为数据库表引用');
+    assert.ok(timeEntry.content.includes('（数据库表「系统表」的「主角可疑度」）'), '应去掉 stat_data. 前缀与 [0]');
+    assert.ok(!timeEntry.content.includes('get_message_variable'), '不应残留 MVU 宏');
+});
+
 /* ---------------- EJS 重写 ---------------- */
 console.log('rewriteEjsConditions');
 test('getvar 数值比较 → <if cell>', () => {
@@ -536,6 +566,7 @@ test('转换产物齐全', () => {
     const tplEntry = c.character_book.entries.find(e => Array.isArray(e.keys) && e.keys.includes('__ACU_TEMPLATE_DATA__'));
     assert.ok(tplEntry, '应有 __ACU_TEMPLATE_DATA__ 世界书条目（开局自动建表用）');
     assert.ok(typeof tplEntry.content === 'string' && tplEntry.content.length > 100, '模板条目内容应为 base64');
+    assert.strictEqual(tplEntry.enabled, false, '模板条目应默认禁用（世界书绿灯关闭），仅作数据载体');
     assert.strictEqual(String(c.first_mes || ''), String((card.data || card).first_mes || ''), '开场白应保持原样（不注入脚本，纯文字开场白可用）');
 });
 
