@@ -2910,9 +2910,24 @@
             '  margin: 8px 0;',
             '  background: var(--SmartThemeBlurTintColor, rgba(0,0,0,0.2));',
             '}',
-            '#mvu2db-settings .mvu2db-row { margin: 8px 0; }',
+            '#mvu2db-settings .mvu2db-row {',
+            '  margin: 8px 0;',
+            '  display: flex;',
+            '  flex-wrap: wrap;',
+            '  gap: 8px;',
+            '  align-items: center;',
+            '}',
+            '#mvu2db-settings .mvu2db-row > * { flex: 0 0 auto; }',
+            '#mvu2db-settings .menu_button { width: auto; white-space: nowrap; }',
             '#mvu2db-settings .mvu2db-label { display: block; margin-bottom: 4px; font-weight: 600; }',
             '#mvu2db-settings .mvu2db-mode-group label { margin-right: 12px; }',
+            '#mvu2db-settings .mvu2db-help {',
+            '  font-size: 12px; opacity: 0.8;',
+            '  margin: 4px 0 10px; padding: 6px 8px;',
+            '  border-left: 3px solid var(--SmartThemeBorderColor, #666);',
+            '  background: rgba(0,0,0,0.15);',
+            '}',
+            '#mvu2db-settings .mvu2db-help code { font-family: monospace; background: rgba(255,255,255,0.1); padding: 0 3px; border-radius: 3px; }',
             '#mvu2db-settings textarea.mvu2db-report {',
             '  width: 100%; min-height: 220px;',
             '  font-family: monospace; font-size: 12px;',
@@ -3014,6 +3029,38 @@
         return null;
     }
 
+    function populateCharacterSelect(panel, context) {
+        const sel = panel.querySelector('#mvu2db-char-select');
+        if (!sel) return;
+        const chars = Array.isArray(context.characters) ? context.characters : [];
+        const currentIdx = context.characterId != null ? context.characterId : -1;
+        sel.innerHTML = '';
+        if (!chars.length) {
+            const opt = hostDocument.createElement('option');
+            opt.value = '-1';
+            opt.textContent = '（角色列表为空）';
+            sel.appendChild(opt);
+            return;
+        }
+        chars.forEach((ch, i) => {
+            const opt = hostDocument.createElement('option');
+            opt.value = String(i);
+            opt.textContent = (ch && ch.name) ? ch.name : ('角色 ' + i);
+            sel.appendChild(opt);
+        });
+        if (currentIdx >= 0 && currentIdx < chars.length) sel.value = String(currentIdx);
+    }
+
+    function selectedCharacter(panel) {
+        const sel = panel && panel.querySelector('#mvu2db-char-select');
+        if (sel && sel.value !== '' && sel.value !== '-1') {
+            const idx = Number(sel.value);
+            const context = getContextSafe();
+            if (context.characters && context.characters[idx]) return context.characters[idx];
+        }
+        return currentCharacter();
+    }
+
     function readFileAsBytes(file) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
@@ -3050,9 +3097,9 @@
         return result;
     }
 
-    async function fetchAvatarBlob() {
+    async function fetchAvatarBlob(character) {
         const context = getContextSafe();
-        const ch = currentCharacter();
+        const ch = character || currentCharacter();
         if (!ch || !ch.avatar) return null;
         try {
             const headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
@@ -3069,6 +3116,7 @@
             toast('请先转换', 'error');
             return false;
         }
+        const panel = hostDocument.getElementById(PANEL_ID);
         const context = getContextSafe();
         if (typeof context.createCharacterData !== 'function') {
             toast('当前 SillyTavern 版本不支持 createCharacterData，请改用下载', 'error');
@@ -3080,12 +3128,15 @@
             if (lastResult.meta && lastResult.meta.avatarBytes) {
                 avatarBlob = new Blob([lastResult.meta.avatarBytes], { type: lastResult.meta.avatarMime || 'application/json' });
             } else {
-                avatarBlob = await fetchAvatarBlob();
+                avatarBlob = await fetchAvatarBlob(selectedCharacter(panel));
             }
             // 新角色卡：createCharacterData(character_id=undefined, avatar, character_data, is_edit=false)
             await context.createCharacterData(undefined, avatarBlob || new Blob(), cardData, false);
             if (typeof context.getCharacters === 'function') {
-                try { await context.getCharacters(); } catch (e) {}
+                try {
+                    await context.getCharacters();
+                    if (panel) populateCharacterSelect(panel, context);
+                } catch (e) {}
             }
             toast('已保存为新角色卡：' + (cardData.name || '未知'), 'success');
             return true;
@@ -3152,28 +3203,34 @@
             '  <div class="inline-drawer-content">',
             '    <div class="mvu2db-card">',
             '      <div class="mvu2db-row">',
-            '        <button id="mvu2db-use-current" class="menu_button">使用当前角色卡</button>',
+            '        <label class="mvu2db-label" for="mvu2db-char-select">选择角色卡</label>',
+            '        <select id="mvu2db-char-select" title="从酒馆角色列表选择要转换的角色卡"></select>',
             '        <input id="mvu2db-file" type="file" accept=".json,.png,application/json,image/png" />',
             '      </div>',
             '      <div class="mvu2db-row mvu2db-mode-group">',
-            '        <span class="mvu2db-label">填表模式</span>',
+            '        <span class="mvu2db-label" title="native：AI 输出 insertRow/updateRow/deleteRow DSL；sqlite：AI 输出 SQL；双模式跟随插件当前设置">填表模式</span>',
             '        <label><input type="radio" name="mvu2db-mode" value="both" ' + (settings.mode === 'both' ? 'checked' : '') + ' /> 双模式（推荐）</label>',
             '        <label><input type="radio" name="mvu2db-mode" value="native" ' + (settings.mode === 'native' ? 'checked' : '') + ' /> native（insertRow DSL）</label>',
             '        <label><input type="radio" name="mvu2db-mode" value="sqlite" ' + (settings.mode === 'sqlite' ? 'checked' : '') + ' /> sqlite（SQL）</label>',
             '      </div>',
             '      <div class="mvu2db-row">',
-            '        <label class="mvu2db-label">Mvu 兼容层</label>',
+            '        <label class="mvu2db-label" for="mvu2db-shim">Mvu 兼容层</label>',
             '        <select id="mvu2db-shim">',
             '          <option value="auto" ' + (settings.installMvuShim === 'auto' ? 'selected' : '') + '>自动（检测到 Mvu API 才装）</option>',
             '          <option value="yes" ' + (settings.installMvuShim === 'yes' ? 'selected' : '') + '>总是安装</option>',
             '          <option value="no" ' + (settings.installMvuShim === 'no' ? 'selected' : '') + '>不安装</option>',
             '        </select>',
             '      </div>',
-            '      <div class="mvu2db-row">',
-            '        <label><input type="checkbox" id="mvu2db-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 消息收尾触发状态栏刷新</label>',
+            '      <div class="mvu2db-help">',
+            '        MVU（MagVarUpdate）是旧角色卡用的变量框架：游戏状态存在 <code>stat_data</code>，脚本/状态栏通过 <code>Mvu</code> 全局对象',
+            '        （<code>getMvuData</code> / <code>replaceMvuData</code>）读写变量。转换后数据桥会提供同名兼容对象，把旧脚本的变量读写',
+            '        自动翻译成数据库操作，旧脚本才能继续工作。若卡片脚本没用到 <code>Mvu</code>，选“不安装”即可。',
             '      </div>',
             '      <div class="mvu2db-row">',
-            '        <label class="mvu2db-label">输出格式</label>',
+            '        <label title="收到新回复后重新渲染状态栏，并处理开场白/消息里的 <UpdateVariable> 更新块"><input type="checkbox" id="mvu2db-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 消息收尾触发状态栏刷新</label>',
+            '      </div>',
+            '      <div class="mvu2db-row">',
+            '        <label class="mvu2db-label" for="mvu2db-png">输出格式</label>',
             '        <select id="mvu2db-png">',
             '          <option value="auto" ' + (settings.asPng === 'auto' ? 'selected' : '') + '>跟随输入（PNG 输入 → PNG 输出）</option>',
             '          <option value="json" ' + (settings.asPng === 'json' ? 'selected' : '') + '>总是 JSON</option>',
@@ -3181,14 +3238,14 @@
             '        </select>',
             '      </div>',
             '      <div class="mvu2db-row">',
-            '        <button id="mvu2db-convert-current" class="menu_button">转换当前角色卡</button>',
+            '        <button id="mvu2db-convert-current" class="menu_button">转换所选角色卡</button>',
             '        <button id="mvu2db-convert-file" class="menu_button">转换所选文件</button>',
             '        <button id="mvu2db-save-card" class="menu_button">保存为角色卡（直接进酒馆）</button>',
             '        <button id="mvu2db-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2db-result"></div>',
             '      <div class="mvu2db-hint">',
-            '        前提：已安装 SP·数据库（AutoCardUpdater 8.9.1）插件。转换只产出角色卡 + 表格模板 + 报告，不自动安装插件，也不迁移旧聊天。',
+            '        前提：已安装 SP·数据库 插件（不自动安装，也不迁移旧聊天）。转换只产出 角色卡 + 表格模板 + 转换报告。',
             '      </div>',
             '    </div>',
             '  </div>',
@@ -3204,15 +3261,10 @@
                 el.addEventListener('click', fn);
             }
         };
-        bind('#mvu2db-use-current', () => {
-            const ch = currentCharacter();
-            if (!ch) { toast('未找到当前角色卡', 'error'); return; }
-            toast('已选择当前角色卡：' + (ch.name || '未知'));
-            panel.dataset.pendingChar = 'current';
-        });
+        populateCharacterSelect(panel, context);
         bind('#mvu2db-convert-current', async () => {
-            const ch = currentCharacter();
-            if (!ch) { toast('未找到当前角色卡', 'error'); return; }
+            const ch = selectedCharacter(panel);
+            if (!ch) { toast('请先在角色卡下拉栏中选择角色', 'error'); return; }
             toast('正在转换…');
             try {
                 await doConvert(ch, false);
@@ -3340,17 +3392,17 @@
             'README.md': [
                 '# MVU转数据库（SillyTavern 原生扩展）',
                 '',
-                '把 MVU 变量角色卡转换为 SP·数据库（AutoCardUpdater / shujuku）角色卡。',
+                '把 MVU 变量角色卡转换为 SP·数据库 角色卡。',
                 '',
                 '## 安装',
-                '1. 将本目录放入 `data/<user>/extensions/mvu2db-converter/`（或全局 `public/scripts/extensions/third-party/`）。',
-                '2. 重启 SillyTavern 或刷新页面。',
-                '3. 前提：已安装 SP·数据库插件（AutoCardUpdater 8.9.1）。',
+                '1. 在 SillyTavern 的 Extensions 面板粘贴本仓库 GitHub 链接，或把本目录放入 `data/<user>/extensions/`。',
+                '2. 刷新页面，扩展设置面板出现「MVU转数据库」。',
+                '3. 前提：已安装 SP·数据库 插件。',
                 '',
                 '## 使用',
                 '1. 打开扩展设置面板。',
-                '2. 选择模式（双模式 / native / sqlite），选择输入（当前角色卡或文件）。',
-                '3. 点击转换，下载 角色卡 + 表格模板 JSON + 转换报告。',
+                '2. 选择模式（双模式 / native / sqlite），从下拉栏选择角色卡或选择文件。',
+                '3. 点击转换：保存为角色卡（直接进酒馆）或下载 角色卡 + 表格模板 + 转换报告。',
                 '',
                 '## 说明',
                 '- 转换不自动安装数据库插件；不迁移旧聊天；只转换角色卡本身。',
