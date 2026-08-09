@@ -1908,6 +1908,7 @@
             `'use strict';`,
             `var VERSION=${JSON.stringify(ver)};`,
             `var BRIDGE_NAME=${JSON.stringify(name)};`,
+            `console.log('['+BRIDGE_NAME+'] 桥启动 v'+VERSION);`,
             '',
             `function rootWin(){try{return window.top||window;}catch(e){return window;}}`,
             `var rootWindow=rootWin();`,
@@ -1939,24 +1940,41 @@
             `  for(var i=0;i<roots.length;i++){`,
             `    try{`,
             `      var ejs=roots[i].EjsTemplate;`,
-            `      if(ejs&&ejs.defines&&typeof ejs.defines==='object'){`,
+            `      var hasDefines=!!(ejs&&ejs.defines&&typeof ejs.defines==='object');`,
+            `      console.log('['+BRIDGE_NAME+'] installTemplateDefines root#'+i,'EjsTemplate:',!!ejs,'defines:',hasDefines,'typeof getvar:',typeof (roots[i].EjsTemplate&&roots[i].EjsTemplate.defines&&roots[i].EjsTemplate.defines.getvar));`,
+            `      if(hasDefines){`,
+            `        var before=typeof ejs.defines.mvu2shujukuGetAllVariables;`,
             `        if(typeof ejs.defines.mvu2shujukuGetAllVariables!=='function'){`,
             `          ejs.defines.mvu2shujukuGetAllVariables=function(){`,
             `            try{return window.getAllVariables?window.getAllVariables():{stat_data:{}};}catch(e){return {stat_data:{}};}`,
             `          };`,
             `        }`,
+            `        console.log('['+BRIDGE_NAME+'] 注册完成 before='+before+' after='+typeof ejs.defines.mvu2shujukuGetAllVariables);`,
             `        return true;`,
             `      }`,
-            `    }catch(e){}`,
+            `    }catch(e){console.warn('['+BRIDGE_NAME+'] installTemplateDefines root#'+i+' 异常:',e);}`,
             `  }`,
             `  return false;`,
             `}`,
             `function ensureTemplateDefines(){`,
-            `  if(!installTemplateDefines())setTimeout(ensureTemplateDefines,2000);`,
+            `  var ok=installTemplateDefines();`,
+            `  if(ok){`,
+            `    console.log('['+BRIDGE_NAME+'] ensureTemplateDefines 成功');`,
+            `  }else{`,
+            `    console.warn('['+BRIDGE_NAME+'] ensureTemplateDefines 未找到 EjsTemplate，2 秒后重试');`,
+            `    setTimeout(ensureTemplateDefines,2000);`,
+            `  }`,
             `}`,
             `ensureTemplateDefines();`,
+            `// 调试：周期确认模板上下文注册未被重置`,
+            `setTimeout(function(){`,
+            `  var ejs=null;`,
+            `  for(var i=0;i<roots.length;i++){try{if(roots[i].EjsTemplate){ejs=roots[i].EjsTemplate;break;}}catch(e){}}`,
+            `  console.log('['+BRIDGE_NAME+'] 10 秒后检查: EjsTemplate='+!!ejs+' 注册函数='+(ejs&&ejs.defines?typeof ejs.defines.mvu2shujukuGetAllVariables:'(无 defines)'));`,
+            `},10000);`,
             '',
             `var API=getApi();`,
+            `console.log('['+BRIDGE_NAME+'] 插件 API 就绪:', !!API);`,
             `if(!API){setTimeout(mvu2shujukuBridge,2000);return;}`,
             '',
             `var TEMPLATE_B64=window.__MVU2SHUJUKU_TEMPLATE_BASE64||'';`,
@@ -2103,6 +2121,7 @@
             `  try{for(var rk in runtimeDisplay){if(runtimeDisplay.hasOwnProperty(rk))setPath(data.display_data,rk.split('.'),runtimeDisplay[rk]);}}catch(e){}`,
             `  return data;`,
             `};`,
+            `console.log('['+BRIDGE_NAME+'] window.getAllVariables 已定义');`,
             `try{rootWindow.getAllVariables=window.getAllVariables;}catch(e){}`,
             `function installTavernHelperShim(){`,
             `  for(var i=0;i<roots.length;i++){`,
@@ -3895,9 +3914,35 @@ ${DB_INIT_SNIPPET}
         bindSettingsPanel(panel, context);
     }
 
+    // 调试钩子：确认 st-prompt-template 每次构建的 EJS 上下文是否包含我们的函数
+    function bindDebugHooks(context) {
+        const es = context && (context.eventSource || context.event_source);
+        if (!es || typeof es.on !== 'function') return;
+        try {
+            es.on('prompt_template_prepare', (prepared) => {
+                console.log(
+                    '[mvu2shujuku][debug] prompt_template_prepare 上下文: 键数=' + (prepared ? Object.keys(prepared).length : 0) +
+                    ' | getvar=' + typeof (prepared && prepared.getvar) +
+                    ' | mvu2shujukuGetAllVariables=' + typeof (prepared && prepared.mvu2shujukuGetAllVariables) +
+                    ' | getAllVariables=' + typeof (prepared && prepared.getAllVariables)
+                );
+            });
+            console.log('[mvu2shujuku][debug] 已监听 prompt_template_prepare 事件');
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] 监听 prompt_template_prepare 失败:', e);
+        }
+    }
+
     function main() {
         const context = getContextSafe();
         ensureSettingsPanel(context);
+        bindDebugHooks(context);
+        const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
+        console.log(
+            '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
+            ' | defines=' + !!(ejs && ejs.defines) +
+            ' | 已注册 mvu2shujukuGetAllVariables=' + typeof (ejs && ejs.defines && ejs.defines.mvu2shujukuGetAllVariables)
+        );
         bindAutoInit(context);
         hostWindow.setTimeout(autoInitDatabase, 1500);
         console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') + '）');
@@ -4841,9 +4886,35 @@ async function mvu2shujukuEnsureInit(api,b64,presetName){var out={status:"skip",
         bindSettingsPanel(panel, context);
     }
 
+    // 调试钩子：确认 st-prompt-template 每次构建的 EJS 上下文是否包含我们的函数
+    function bindDebugHooks(context) {
+        const es = context && (context.eventSource || context.event_source);
+        if (!es || typeof es.on !== 'function') return;
+        try {
+            es.on('prompt_template_prepare', (prepared) => {
+                console.log(
+                    '[mvu2shujuku][debug] prompt_template_prepare 上下文: 键数=' + (prepared ? Object.keys(prepared).length : 0) +
+                    ' | getvar=' + typeof (prepared && prepared.getvar) +
+                    ' | mvu2shujukuGetAllVariables=' + typeof (prepared && prepared.mvu2shujukuGetAllVariables) +
+                    ' | getAllVariables=' + typeof (prepared && prepared.getAllVariables)
+                );
+            });
+            console.log('[mvu2shujuku][debug] 已监听 prompt_template_prepare 事件');
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] 监听 prompt_template_prepare 失败:', e);
+        }
+    }
+
     function main() {
         const context = getContextSafe();
         ensureSettingsPanel(context);
+        bindDebugHooks(context);
+        const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
+        console.log(
+            '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
+            ' | defines=' + !!(ejs && ejs.defines) +
+            ' | 已注册 mvu2shujukuGetAllVariables=' + typeof (ejs && ejs.defines && ejs.defines.mvu2shujukuGetAllVariables)
+        );
         bindAutoInit(context);
         hostWindow.setTimeout(autoInitDatabase, 1500);
         console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') + '）');
