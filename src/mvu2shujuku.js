@@ -2691,15 +2691,15 @@
             `          if(mvu2shujukuTablesSafeToAnchor(API,tplCached2)&&typeof API.initGameSession==='function'){`,
             `            console.log('['+BRIDGE_NAME+'] 写库前：聊天缺少 full checkpoint，重建锚点…');`,
             `            var ra=await mvu2shujukuWithTimeout(API.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tplCached2,templatePresetName:currentCharName()+'模板'}),20000,'initGameSession(写前锚点)');`,
-            `            console.log('['+BRIDGE_NAME+'] 写库前锚点重建：'+(ra&&ra.success===false?(ra.message||'失败'):(ra&&ra.timeout?'超时':'完成')));`,
-            `            anchoredOK=!(ra&&ra.success===false)&&!(ra&&ra.timeout);`,
+            `            console.log('['+BRIDGE_NAME+'] 写库前锚点重建：'+(ra&&ra.success===false?(ra.message||'失败'):(ra&&ra.timeout?'超时':'完成'))+' | 锚点='+hasFullCheckpoint());`,
+            `            anchoredOK=!(ra&&ra.success===false)&&!(ra&&ra.timeout)&&hasFullCheckpoint();`,
             `          }else if(bridgeIsOpeningPhase()&&!mvu2shujukuHasExtraRows(API,tplCached2)&&typeof API.initGameSession==='function'){`,
             `            // 表无额外行（仅模板行被改动，如开局捏人写入）：重置+重放本次写入无损`,
             `            console.log('['+BRIDGE_NAME+'] 写库前：表无额外行，重置重建锚点并重放本次写入…');`,
             `            try{`,
             `              var r2b=await mvu2shujukuWithTimeout(API.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tplCached2,templatePresetName:currentCharName()+'模板'}),20000,'initGameSession(无额外行锚点)');`,
             `              console.log('['+BRIDGE_NAME+'] 无额外行重建：'+(r2b&&r2b.success===false?(r2b.message||'失败'):(r2b&&r2b.timeout?'超时':'完成'))+' | 锚点='+hasFullCheckpoint());`,
-            `              anchoredOK=!(r2b&&r2b.success===false)&&!(r2b&&r2b.timeout);`,
+            `              anchoredOK=!(r2b&&r2b.success===false)&&!(r2b&&r2b.timeout)&&hasFullCheckpoint();`,
             `            }catch(e){console.warn('['+BRIDGE_NAME+'] 无额外行重建异常:',e);}`,
             `          }else if(typeof API.importTableAsJson==='function'){`,
             `            // 表含用户数据但无锚点：把当前状态提交为 checkpoint，不丢数据`,
@@ -2710,6 +2710,16 @@
             `              console.log('['+BRIDGE_NAME+'] importTableAsJson 锚定='+(ok1?'成功':'失败'));`,
             `              anchoredOK=!!ok1;`,
             `            }catch(e){console.warn('['+BRIDGE_NAME+'] importTableAsJson 锚定异常:',e);}`,
+            `          }`,
+            `          if(!anchoredOK&&!hasFullCheckpoint()&&typeof API.importTableAsJson==='function'&&!mvu2shujukuInitSessionHung){`,
+            `            // initGameSession 可能“完成”却不建 checkpoint：再强制 importTableAsJson 建锚`,
+            `            console.log('['+BRIDGE_NAME+'] 写库前：仍未建立锚点，用 importTableAsJson 强制锚定…');`,
+            `            try{`,
+            `              var snap2=JSON.stringify(API.exportTableAsJson()||{});`,
+            `              var ok2b=await Promise.resolve(API.importTableAsJson(snap2,{}));`,
+            `              console.log('['+BRIDGE_NAME+'] importTableAsJson 强制锚定='+(ok2b?'成功':'失败')+' | 锚点='+hasFullCheckpoint());`,
+            `              anchoredOK=!!ok2b&&hasFullCheckpoint();`,
+            `            }catch(e){console.warn('['+BRIDGE_NAME+'] importTableAsJson 强制锚定异常:',e);}`,
             `          }`,
             `          if(!anchoredOK&&!hasFullCheckpoint()){`,
             `            // 表含真实数据且插件拒绝锚定：放弃本次写入，绝不重置已有数据`,
@@ -4252,8 +4262,9 @@ ${DB_INIT_SNIPPET}
                 'initGameSession(锚点)'
             );
             const ok = !(r && r.success === false) && !(r && r.timeout);
-            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')));
-            return ok;
+            const anchored = ok && hasFullShujukuCheckpoint();
+            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')) + ' | 锚点=' + anchored);
+            return anchored;
         }
         // 仅开局阶段允许重置重建：表数据只是模板行被改动（没有额外新增行，例如开局捏人写入），
         // 重置+重放本次写入是无损的（前端 replaceMvuData 带完整快照）；进入正常对话后绝不重置。
@@ -4296,7 +4307,22 @@ ${DB_INIT_SNIPPET}
     // - 表有额外行（真实积累数据）→ importTableAsJson 锚定当前状态；失败则放弃本次写入，绝不重置已有数据
     async function ensureCheckpointBeforeWrite(api, tplCached) {
         if (hasFullShujukuCheckpoint()) return true;
-        return await anchorCheckpointIfMissing(api, tplCached, '写库前');
+        await anchorCheckpointIfMissing(api, tplCached, '写库前');
+        if (hasFullShujukuCheckpoint()) return true;
+        // 插件 initGameSession 可能“完成”却不建 V2 checkpoint：改用 importTableAsJson 提交当前状态强制建锚。
+        // 开局阶段（尚无 artifacts）插件会接受并建立 full checkpoint。
+        if (typeof api.importTableAsJson === 'function' && !mvu2shujukuInitSessionHung) {
+            console.log('[mvu2shujuku][debug][锚点] 写库前：initGameSession 未建立锚点，改用 importTableAsJson 强制锚定…');
+            try {
+                const snap = JSON.stringify(api.exportTableAsJson() || {});
+                await Promise.resolve(api.importTableAsJson(snap, {}));
+            } catch (e) {
+                console.warn('[mvu2shujuku][debug][锚点] 写库前 importTableAsJson 强制锚定异常:', e);
+            }
+            if (hasFullShujukuCheckpoint()) return true;
+        }
+        console.warn('[mvu2shujuku][debug][锚点] 写库前：仍无 full checkpoint，放弃本次写入（避免无锚点 artifacts）。');
+        return false;
     }
 
     function autoInitChatId() {
