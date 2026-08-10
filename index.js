@@ -4137,6 +4137,16 @@ ${DB_INIT_SNIPPET}
     const autoInitState = { running: false, done: '', inited: false, retries: 0, anchorChat: '', anchorTries: 0, apiRetries: 0 };
     let autoInitNoEntryRetries = 0;
 
+    // 独有标记：本转换器产出的卡一定有 extensions.mvu2shujuku.converter === 'mvu2shujuku'。
+    // SP·数据库 的 __ACU_TEMPLATE_DATA__ 世界书条目是通用模板条目（其他数据库卡也可能带），
+    // 不能作为“本转换器产物”的判据；所有运行时行为都以这个独有标记为门槛，确保不碰别的卡。
+    function isConvertedMvuCard(character) {
+        try {
+            const mk = character && character.extensions && character.extensions.mvu2shujuku;
+            return !!(mk && mk.converter === 'mvu2shujuku');
+        } catch (e) { return false; }
+    }
+
     // 聊天里是否存在 SP·数据库 的 full checkpoint（V2 锚点）：扫描消息上的 TavernDB_ACU_*/_acu_* 字段。
     // 开场白切换/首楼重写会弄丢锚点，此时继续写库会产生无锚点 artifacts，触发插件的
     // “V2 boundary_after_data_mismatch”拒绝建立 full checkpoint。
@@ -4180,6 +4190,7 @@ ${DB_INIT_SNIPPET}
         } catch (e) {}
         try {
             const ch = currentCharacter();
+            if (!isConvertedMvuCard(ch)) return null;
             const cb = ch && (ch.character_book || (ch.data && ch.data.character_book));
             const entries = (cb && Array.isArray(cb.entries)) ? cb.entries : [];
             const entry = entries.find(e => Array.isArray(e.keys) && e.keys.indexOf(DB_TEMPLATE_KEY) !== -1);
@@ -4304,7 +4315,8 @@ ${DB_INIT_SNIPPET}
     }
 
     // 对应 MVU 的 init 时机：进入聊天/收到首条消息时，若卡内有模板且表格缺失则自动建表。
-    // 只处理本转换器产出的卡（世界书含 __ACU_TEMPLATE_DATA__），其余卡一律不动。
+    // 只处理本转换器产出的卡（extensions.mvu2shujuku 标记 + 世界书 __ACU_TEMPLATE_DATA__ 模板），
+    // 其余卡一律不动（别的数据库卡也可能带 __ACU_TEMPLATE_DATA__，但不会有我们的独有标记）。
     async function autoInitDatabase() {
         const key0 = autoInitChatId();
         if (autoInitState.running) {
@@ -4326,6 +4338,36 @@ ${DB_INIT_SNIPPET}
         if (!character) {
             console.log('[mvu2shujuku][debug] 开局自动建表跳过：当前角色为空（chat=' + key0 + '）');
             return;
+        }
+        const charHasExt = !!(character && character.extensions && typeof character.extensions === 'object');
+        if (!isConvertedMvuCard(character)) {
+            // 角色列表懒加载时可能只有元数据、缺 extensions：先尝试取完整卡再判断一次；
+            // 仍无独有标记说明不是本转换器产物，直接跳过，不碰任何其他卡。
+            // 对象已带 extensions 且无标记 = 完整卡且非转换产物，直接跳过，不再发请求。
+            try {
+                if (!charHasExt) {
+                    const full = await fetchFullCharacter(character, true);
+                    if (full && isConvertedMvuCard(full)) {
+                        character = full;
+                    }
+                }
+                if (!isConvertedMvuCard(character)) {
+                    console.log('[mvu2shujuku][debug] 开局自动建表跳过：当前卡无本转换器标记 extensions.mvu2shujuku（chat=' + key0 + '），不影响其他卡');
+                    // 清掉上一张转换卡残留的运行时状态，确保切到其他卡后不再接管/广播
+                    activeLayout = null;
+                    activePlaceholderNeeded = false;
+                    restoreWindowMvuShim();
+                    restoreWindowGetAllVariables();
+                    return;
+                }
+            } catch (e) {
+                console.log('[mvu2shujuku][debug] 开局自动建表跳过：读取当前卡标记失败（chat=' + key0 + '）');
+                activeLayout = null;
+                activePlaceholderNeeded = false;
+                restoreWindowMvuShim();
+                restoreWindowGetAllVariables();
+                return;
+            }
         }
         let hadWorldbook = true;
         const cb = character.character_book;
@@ -4437,6 +4479,8 @@ ${DB_INIT_SNIPPET}
     // 判断角色卡正则是否依赖 <StatusPlaceHolderImpl/>（前端注入占位符）
     function detectPlaceholderFor(character) {
         try {
+            // 只有本转换器产物的卡才维护状态栏占位符，其他卡即使正则里碰巧含同名串也不处理
+            if (!isConvertedMvuCard(character)) return false;
             const rx = character && character.extensions && character.extensions.regex_scripts;
             if (!Array.isArray(rx)) return false;
             return rx.some(r => String(r.findRegex || '').indexOf('StatusPlaceHolderImpl') !== -1);
@@ -4515,6 +4559,8 @@ ${DB_INIT_SNIPPET}
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
                     hostWindow.setTimeout(autoInitDatabase, 600);
+                    // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
+                    syncRuntimeForCurrentCard();
                     activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
                     hostWindow.setTimeout(ensureWindowStatusPlaceholder, 1200);
                     const p = hostDocument.getElementById(PANEL_ID);
@@ -4681,8 +4727,9 @@ ${DB_INIT_SNIPPET}
     async function fetchFullCharacter(character) {
         if (!character) return null;
         const cb = character.character_book;
-        if (cb && Array.isArray(cb.entries) && cb.entries.length) return character;
-        console.log('[mvu2shujuku] 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
+        // 非强制时：角色对象已有世界书即视为完整，避免无谓请求
+        if (!arguments[1] && cb && Array.isArray(cb.entries) && cb.entries.length) return character;
+        console.log('[mvu2shujuku] ' + (arguments[1] ? '按完整卡校验转换标记' : '角色列表对象缺世界书') + '，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
         try {
             const context = getContextSafe();
             const headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
@@ -4996,11 +5043,18 @@ ${DB_INIT_SNIPPET}
         }, 150);
     }
 
-    // 扩展侧提供 window.getAllVariables：用卡内布局 + 插件表格实时重建 stat_data（惰性，零冗余）
+    // 扩展侧提供 window.getAllVariables：用卡内布局 + 插件表格实时重建 stat_data（惰性，零冗余）。
+    // 只在当前卡是本转换器产物时安装；切到其他卡时恢复原函数（或删除），不污染其他卡。
+    let installedGetAllVariables = false;
+    let originalGetAllVariables = undefined;
     function installWindowGetAllVariables() {
         const core = window.MVU2SHUJUKU_CORE;
         if (typeof window.getAllVariables === 'function') return;
         if (!core || typeof core.statDataFromTables !== 'function') return;
+        if (!installedGetAllVariables) {
+            originalGetAllVariables = window.getAllVariables;
+            installedGetAllVariables = true;
+        }
         window.getAllVariables = function () {
             try {
                 const api = getAcuApi();
@@ -5012,13 +5066,27 @@ ${DB_INIT_SNIPPET}
                 return { stat_data: {}, display_data: {} };
             }
         };
+        window.getAllVariables.__mvu2shujuku = true;
         console.log('[mvu2shujuku][debug] 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
+    }
+    function restoreWindowGetAllVariables() {
+        if (!installedGetAllVariables) return;
+        try {
+            if (window.getAllVariables && window.getAllVariables.__mvu2shujuku === true) {
+                if (originalGetAllVariables === undefined) delete window.getAllVariables;
+                else window.getAllVariables = originalGetAllVariables;
+            }
+        } catch (e) {}
+        installedGetAllVariables = false;
+        originalGetAllVariables = undefined;
     }
 
     // 表格更新广播：与 MVU 原版一致，数据库一有变动就广播 VARIABLE_UPDATE_ENDED，
-    // 携带更新后的完整变量（before 在无基线时传空，前端结算逻辑会安全跳过）
+    // 携带更新后的完整变量（before 在无基线时传空，前端结算逻辑会安全跳过）。
+    // 只在本转换器产物的卡上广播（activeLayout 仅对转换卡缓存），其他数据库卡即使触发表格更新也不发 MVU 事件。
     function dispatchVariableUpdateEnded(after, before) {
         try {
+            if (!activeLayout) return;
             if (after === undefined || after === null) {
                 try { if (typeof window.getAllVariables === 'function') after = window.getAllVariables(); } catch (e) {}
             }
@@ -5253,9 +5321,17 @@ ${DB_INIT_SNIPPET}
 
     let windowMvuShimTimer = null;
     let windowMvuFake = null;
+    const originalMvuMap = new Map();
     function applyWindowMvuShim() {
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.writeStatDiffToDb !== 'function') return;
+        // 只接管本转换器产物的卡（activeLayout 仅在转换卡上缓存）；
+        // 其他卡（含真 MVU 卡）绝不覆盖 window.Mvu。避免依赖 currentCharacter()，
+        // 否则角色懒加载缺 extensions 时会把转换卡误判为非转换卡而撤销接管。
+        if (!activeLayout) {
+            restoreWindowMvuShim();
+            return;
+        }
         if (!windowMvuFake) {
             windowMvuFake = {};
             windowMvuFake.events = {
@@ -5363,6 +5439,7 @@ ${DB_INIT_SNIPPET}
         for (const w of targets) {
             try {
                 const oldM = w.Mvu;
+                if (!originalMvuMap.has(w)) originalMvuMap.set(w, oldM);
                 if (oldM && typeof oldM === 'object' && oldM !== windowMvuFake) {
                     const SKIP = { getMvuData: 1, replaceMvuData: 1, setMvuVariable: 1, getMvuVariable: 1, getRecordFromMvuData: 1, parseMessage: 1, reloadInitVar: 1, getCurrentMvuData: 1, replaceCurrentMvuData: 1, isDuringExtraAnalysis: 1, events: 1 };
                     for (const pk in oldM) {
@@ -5375,6 +5452,17 @@ ${DB_INIT_SNIPPET}
             } catch (e) {}
         }
     }
+    // 撤销 Mvu 接管：恢复各窗口原 window.Mvu，停止周期复查，切回转换卡时再接管。
+    function restoreWindowMvuShim() {
+        if (windowMvuShimTimer) {
+            hostWindow.clearInterval(windowMvuShimTimer);
+            windowMvuShimTimer = null;
+        }
+        for (const [w, orig] of originalMvuMap) {
+            try { if (w.Mvu === windowMvuFake) w.Mvu = orig; } catch (e) {}
+        }
+        originalMvuMap.clear();
+    }
     function installWindowMvuShim() {
         applyWindowMvuShim();
         if (!windowMvuShimTimer) {
@@ -5383,6 +5471,34 @@ ${DB_INIT_SNIPPET}
             try { if (typeof hostWindow.eventOn === 'function') hostWindow.eventOn('global_Mvu_initialized', () => { try { applyWindowMvuShim(); } catch (e) {} }); } catch (e) {}
         }
         console.log('[mvu2shujuku][debug] 扩展侧已安装完整 Mvu shim（接管式）');
+    }
+    // 按当前卡同步运行时：转换卡 → 接管 Mvu/定义 getAllVariables/注册表格广播；
+    // 其他卡 → 全部撤销，确保扩展不影响任何非转换卡。
+    async function syncRuntimeForCurrentCard() {
+        let ch = null;
+        try { ch = currentCharacter(); } catch (e) {}
+        if (!ch) return;
+        // 角色对象带 extensions 且无标记 = 完整卡且非转换产物，直接撤销，不用发请求；
+        // 缺 extensions（角色列表懒加载元数据）才强制取完整卡确认。
+        const hasExt = !!(ch && ch.extensions && typeof ch.extensions === 'object');
+        if (!isConvertedMvuCard(ch) && !hasExt) {
+            try {
+                // 强制取完整卡：角色列表对象可能只有元数据（缺 extensions），
+                // 不能只凭当前对象判断是否本转换器产物。
+                const full = await fetchFullCharacter(ch, true);
+                if (full && isConvertedMvuCard(full)) ch = full;
+            } catch (e) {}
+        }
+        if (isConvertedMvuCard(ch)) {
+            // 转换卡：什么都不做，布局缓存/接管由 autoInitDatabase 统一负责
+            // （它每次都会用新卡 extensions.mvu2shujuku.layout 覆盖 activeLayout），
+            // 避免这里清空与它竞争，把刚装好的接管撤销掉。
+        } else {
+            activeLayout = null;
+            activePlaceholderNeeded = false;
+            restoreWindowMvuShim();
+            restoreWindowGetAllVariables();
+        }
     }
 
     async function doConvert(inputBytes, sourceIsPng) {
@@ -6078,8 +6194,15 @@ ${DB_INIT_SNIPPET}
         ensureSettingsPanel(context);
         bindDebugHooks(context);
         ensureTemplateDefine();
-        // 运行时（建表/锚点/占位符/Mvu 兼容/getAllVariables）由转换后卡内嵌入的数据桥负责（对齐参考卡）。
-        // 扩展只做转换、面板与 EJS 数据读取，不定义任何全局函数，避免影响非转换卡。
+        // 卡内桥在 TH 沙箱中可能被隔离，运行时由扩展兜底（仅对本转换器产物生效）：
+        // - 建表：只在当前聊天缺表时 initGameSession（每聊天 done 去重一次，绝不重建/重置已有表格）；
+        // - Mvu 兼容：把前端 MVU API 调用翻译成数据库操作；
+        // - 占位符：消息收尾补 <StatusPlaceHolderImpl/> 供前端正则注入。
+        // 不做锚点重建、不做切聊天时的表管理；Mvu 接管/getAllVariables/表格广播都只对带
+        // extensions.mvu2shujuku 独有标记的卡生效，切到其他卡时全部撤销。
+        syncRuntimeForCurrentCard();
+        bindAutoInit(context);
+        hostWindow.setTimeout(autoInitDatabase, 1500);
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
         console.log(
             '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
@@ -6222,6 +6345,16 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     const autoInitState = { running: false, done: '', inited: false, retries: 0, anchorChat: '', anchorTries: 0, apiRetries: 0 };
     let autoInitNoEntryRetries = 0;
 
+    // 独有标记：本转换器产出的卡一定有 extensions.mvu2shujuku.converter === 'mvu2shujuku'。
+    // SP·数据库 的 __ACU_TEMPLATE_DATA__ 世界书条目是通用模板条目（其他数据库卡也可能带），
+    // 不能作为“本转换器产物”的判据；所有运行时行为都以这个独有标记为门槛，确保不碰别的卡。
+    function isConvertedMvuCard(character) {
+        try {
+            const mk = character && character.extensions && character.extensions.mvu2shujuku;
+            return !!(mk && mk.converter === 'mvu2shujuku');
+        } catch (e) { return false; }
+    }
+
     // 聊天里是否存在 SP·数据库 的 full checkpoint（V2 锚点）：扫描消息上的 TavernDB_ACU_*/_acu_* 字段。
     // 开场白切换/首楼重写会弄丢锚点，此时继续写库会产生无锚点 artifacts，触发插件的
     // “V2 boundary_after_data_mismatch”拒绝建立 full checkpoint。
@@ -6265,6 +6398,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         } catch (e) {}
         try {
             const ch = currentCharacter();
+            if (!isConvertedMvuCard(ch)) return null;
             const cb = ch && (ch.character_book || (ch.data && ch.data.character_book));
             const entries = (cb && Array.isArray(cb.entries)) ? cb.entries : [];
             const entry = entries.find(e => Array.isArray(e.keys) && e.keys.indexOf(DB_TEMPLATE_KEY) !== -1);
@@ -6389,7 +6523,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     }
 
     // 对应 MVU 的 init 时机：进入聊天/收到首条消息时，若卡内有模板且表格缺失则自动建表。
-    // 只处理本转换器产出的卡（世界书含 __ACU_TEMPLATE_DATA__），其余卡一律不动。
+    // 只处理本转换器产出的卡（extensions.mvu2shujuku 标记 + 世界书 __ACU_TEMPLATE_DATA__ 模板），
+    // 其余卡一律不动（别的数据库卡也可能带 __ACU_TEMPLATE_DATA__，但不会有我们的独有标记）。
     async function autoInitDatabase() {
         const key0 = autoInitChatId();
         if (autoInitState.running) {
@@ -6411,6 +6546,36 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         if (!character) {
             console.log('[mvu2shujuku][debug] 开局自动建表跳过：当前角色为空（chat=' + key0 + '）');
             return;
+        }
+        const charHasExt = !!(character && character.extensions && typeof character.extensions === 'object');
+        if (!isConvertedMvuCard(character)) {
+            // 角色列表懒加载时可能只有元数据、缺 extensions：先尝试取完整卡再判断一次；
+            // 仍无独有标记说明不是本转换器产物，直接跳过，不碰任何其他卡。
+            // 对象已带 extensions 且无标记 = 完整卡且非转换产物，直接跳过，不再发请求。
+            try {
+                if (!charHasExt) {
+                    const full = await fetchFullCharacter(character, true);
+                    if (full && isConvertedMvuCard(full)) {
+                        character = full;
+                    }
+                }
+                if (!isConvertedMvuCard(character)) {
+                    console.log('[mvu2shujuku][debug] 开局自动建表跳过：当前卡无本转换器标记 extensions.mvu2shujuku（chat=' + key0 + '），不影响其他卡');
+                    // 清掉上一张转换卡残留的运行时状态，确保切到其他卡后不再接管/广播
+                    activeLayout = null;
+                    activePlaceholderNeeded = false;
+                    restoreWindowMvuShim();
+                    restoreWindowGetAllVariables();
+                    return;
+                }
+            } catch (e) {
+                console.log('[mvu2shujuku][debug] 开局自动建表跳过：读取当前卡标记失败（chat=' + key0 + '）');
+                activeLayout = null;
+                activePlaceholderNeeded = false;
+                restoreWindowMvuShim();
+                restoreWindowGetAllVariables();
+                return;
+            }
         }
         let hadWorldbook = true;
         const cb = character.character_book;
@@ -6522,6 +6687,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     // 判断角色卡正则是否依赖 <StatusPlaceHolderImpl/>（前端注入占位符）
     function detectPlaceholderFor(character) {
         try {
+            // 只有本转换器产物的卡才维护状态栏占位符，其他卡即使正则里碰巧含同名串也不处理
+            if (!isConvertedMvuCard(character)) return false;
             const rx = character && character.extensions && character.extensions.regex_scripts;
             if (!Array.isArray(rx)) return false;
             return rx.some(r => String(r.findRegex || '').indexOf('StatusPlaceHolderImpl') !== -1);
@@ -6600,6 +6767,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
                     hostWindow.setTimeout(autoInitDatabase, 600);
+                    // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
+                    syncRuntimeForCurrentCard();
                     activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
                     hostWindow.setTimeout(ensureWindowStatusPlaceholder, 1200);
                     const p = hostDocument.getElementById(PANEL_ID);
@@ -6766,8 +6935,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     async function fetchFullCharacter(character) {
         if (!character) return null;
         const cb = character.character_book;
-        if (cb && Array.isArray(cb.entries) && cb.entries.length) return character;
-        console.log('[mvu2shujuku] 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
+        // 非强制时：角色对象已有世界书即视为完整，避免无谓请求
+        if (!arguments[1] && cb && Array.isArray(cb.entries) && cb.entries.length) return character;
+        console.log('[mvu2shujuku] ' + (arguments[1] ? '按完整卡校验转换标记' : '角色列表对象缺世界书') + '，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
         try {
             const context = getContextSafe();
             const headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
@@ -7081,11 +7251,18 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         }, 150);
     }
 
-    // 扩展侧提供 window.getAllVariables：用卡内布局 + 插件表格实时重建 stat_data（惰性，零冗余）
+    // 扩展侧提供 window.getAllVariables：用卡内布局 + 插件表格实时重建 stat_data（惰性，零冗余）。
+    // 只在当前卡是本转换器产物时安装；切到其他卡时恢复原函数（或删除），不污染其他卡。
+    let installedGetAllVariables = false;
+    let originalGetAllVariables = undefined;
     function installWindowGetAllVariables() {
         const core = window.MVU2SHUJUKU_CORE;
         if (typeof window.getAllVariables === 'function') return;
         if (!core || typeof core.statDataFromTables !== 'function') return;
+        if (!installedGetAllVariables) {
+            originalGetAllVariables = window.getAllVariables;
+            installedGetAllVariables = true;
+        }
         window.getAllVariables = function () {
             try {
                 const api = getAcuApi();
@@ -7097,13 +7274,27 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 return { stat_data: {}, display_data: {} };
             }
         };
+        window.getAllVariables.__mvu2shujuku = true;
         console.log('[mvu2shujuku][debug] 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
+    }
+    function restoreWindowGetAllVariables() {
+        if (!installedGetAllVariables) return;
+        try {
+            if (window.getAllVariables && window.getAllVariables.__mvu2shujuku === true) {
+                if (originalGetAllVariables === undefined) delete window.getAllVariables;
+                else window.getAllVariables = originalGetAllVariables;
+            }
+        } catch (e) {}
+        installedGetAllVariables = false;
+        originalGetAllVariables = undefined;
     }
 
     // 表格更新广播：与 MVU 原版一致，数据库一有变动就广播 VARIABLE_UPDATE_ENDED，
-    // 携带更新后的完整变量（before 在无基线时传空，前端结算逻辑会安全跳过）
+    // 携带更新后的完整变量（before 在无基线时传空，前端结算逻辑会安全跳过）。
+    // 只在本转换器产物的卡上广播（activeLayout 仅对转换卡缓存），其他数据库卡即使触发表格更新也不发 MVU 事件。
     function dispatchVariableUpdateEnded(after, before) {
         try {
+            if (!activeLayout) return;
             if (after === undefined || after === null) {
                 try { if (typeof window.getAllVariables === 'function') after = window.getAllVariables(); } catch (e) {}
             }
@@ -7338,9 +7529,17 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
 
     let windowMvuShimTimer = null;
     let windowMvuFake = null;
+    const originalMvuMap = new Map();
     function applyWindowMvuShim() {
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.writeStatDiffToDb !== 'function') return;
+        // 只接管本转换器产物的卡（activeLayout 仅在转换卡上缓存）；
+        // 其他卡（含真 MVU 卡）绝不覆盖 window.Mvu。避免依赖 currentCharacter()，
+        // 否则角色懒加载缺 extensions 时会把转换卡误判为非转换卡而撤销接管。
+        if (!activeLayout) {
+            restoreWindowMvuShim();
+            return;
+        }
         if (!windowMvuFake) {
             windowMvuFake = {};
             windowMvuFake.events = {
@@ -7448,6 +7647,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         for (const w of targets) {
             try {
                 const oldM = w.Mvu;
+                if (!originalMvuMap.has(w)) originalMvuMap.set(w, oldM);
                 if (oldM && typeof oldM === 'object' && oldM !== windowMvuFake) {
                     const SKIP = { getMvuData: 1, replaceMvuData: 1, setMvuVariable: 1, getMvuVariable: 1, getRecordFromMvuData: 1, parseMessage: 1, reloadInitVar: 1, getCurrentMvuData: 1, replaceCurrentMvuData: 1, isDuringExtraAnalysis: 1, events: 1 };
                     for (const pk in oldM) {
@@ -7460,6 +7660,17 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             } catch (e) {}
         }
     }
+    // 撤销 Mvu 接管：恢复各窗口原 window.Mvu，停止周期复查，切回转换卡时再接管。
+    function restoreWindowMvuShim() {
+        if (windowMvuShimTimer) {
+            hostWindow.clearInterval(windowMvuShimTimer);
+            windowMvuShimTimer = null;
+        }
+        for (const [w, orig] of originalMvuMap) {
+            try { if (w.Mvu === windowMvuFake) w.Mvu = orig; } catch (e) {}
+        }
+        originalMvuMap.clear();
+    }
     function installWindowMvuShim() {
         applyWindowMvuShim();
         if (!windowMvuShimTimer) {
@@ -7468,6 +7679,34 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             try { if (typeof hostWindow.eventOn === 'function') hostWindow.eventOn('global_Mvu_initialized', () => { try { applyWindowMvuShim(); } catch (e) {} }); } catch (e) {}
         }
         console.log('[mvu2shujuku][debug] 扩展侧已安装完整 Mvu shim（接管式）');
+    }
+    // 按当前卡同步运行时：转换卡 → 接管 Mvu/定义 getAllVariables/注册表格广播；
+    // 其他卡 → 全部撤销，确保扩展不影响任何非转换卡。
+    async function syncRuntimeForCurrentCard() {
+        let ch = null;
+        try { ch = currentCharacter(); } catch (e) {}
+        if (!ch) return;
+        // 角色对象带 extensions 且无标记 = 完整卡且非转换产物，直接撤销，不用发请求；
+        // 缺 extensions（角色列表懒加载元数据）才强制取完整卡确认。
+        const hasExt = !!(ch && ch.extensions && typeof ch.extensions === 'object');
+        if (!isConvertedMvuCard(ch) && !hasExt) {
+            try {
+                // 强制取完整卡：角色列表对象可能只有元数据（缺 extensions），
+                // 不能只凭当前对象判断是否本转换器产物。
+                const full = await fetchFullCharacter(ch, true);
+                if (full && isConvertedMvuCard(full)) ch = full;
+            } catch (e) {}
+        }
+        if (isConvertedMvuCard(ch)) {
+            // 转换卡：什么都不做，布局缓存/接管由 autoInitDatabase 统一负责
+            // （它每次都会用新卡 extensions.mvu2shujuku.layout 覆盖 activeLayout），
+            // 避免这里清空与它竞争，把刚装好的接管撤销掉。
+        } else {
+            activeLayout = null;
+            activePlaceholderNeeded = false;
+            restoreWindowMvuShim();
+            restoreWindowGetAllVariables();
+        }
     }
 
     async function doConvert(inputBytes, sourceIsPng) {
@@ -8163,8 +8402,15 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         ensureSettingsPanel(context);
         bindDebugHooks(context);
         ensureTemplateDefine();
-        // 运行时（建表/锚点/占位符/Mvu 兼容/getAllVariables）由转换后卡内嵌入的数据桥负责（对齐参考卡）。
-        // 扩展只做转换、面板与 EJS 数据读取，不定义任何全局函数，避免影响非转换卡。
+        // 卡内桥在 TH 沙箱中可能被隔离，运行时由扩展兜底（仅对本转换器产物生效）：
+        // - 建表：只在当前聊天缺表时 initGameSession（每聊天 done 去重一次，绝不重建/重置已有表格）；
+        // - Mvu 兼容：把前端 MVU API 调用翻译成数据库操作；
+        // - 占位符：消息收尾补 <StatusPlaceHolderImpl/> 供前端正则注入。
+        // 不做锚点重建、不做切聊天时的表管理；Mvu 接管/getAllVariables/表格广播都只对带
+        // extensions.mvu2shujuku 独有标记的卡生效，切到其他卡时全部撤销。
+        syncRuntimeForCurrentCard();
+        bindAutoInit(context);
+        hostWindow.setTimeout(autoInitDatabase, 1500);
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
         console.log(
             '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
