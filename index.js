@@ -3703,8 +3703,9 @@
         const m = charDefRe.exec(t);
         if (!m) return { script: t, injected: false, count: 0, group: '' };
         // 定位到 characterData 定义之后的提交调用：确认按钮 handler 里才有完整作用域
-        // （脚本前面 initMvuDefaults 等也可能调用 replaceMvuData，但那里没有 characterData）
-        const replaceRe = /Mvu\.replaceMvuData\(/g;
+        // （脚本前面 initMvuDefaults 等也可能调用 replaceMvuData，但那里没有 characterData）。
+        // 必须把注入代码插在整条语句之前（含 await 前缀），否则会生成 `await try {...}` 语法错误。
+        const replaceRe = /(?:await\s+)?Mvu\.replaceMvuData\(/g;
         let rm = null;
         let cand;
         while ((cand = replaceRe.exec(t))) {
