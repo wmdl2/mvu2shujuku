@@ -2194,7 +2194,7 @@ test('开局自动建表：单例/JSON 表仅表头且无 seedRows 时自动补�
     assert.strictEqual(sd.主角.姓名, '未知', '补行后应能读到初始值');
 });
 
-test('聊天缺 full checkpoint 时自动重建数据库锚点；已有锚点则不重复', async () => {
+test('卡内桥最小运行时：已有表格的聊天不重初始化、不重建锚点、不重置', async () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
 
@@ -2229,18 +2229,10 @@ test('聊天缺 full checkpoint 时自动重建数据库锚点；已有锚点则
         return { win, initCalls: () => initCalls };
     };
 
-    // 无锚点：ensureTemplateInit 应调用 initGameSession 补锚
-    const s1 = makeSandbox([]);
+    // 表已存在（无论是否有锚点）：桥不应调用 initGameSession（只缺表才初始化）
+    const s2 = makeSandbox([]);
     await waitBridgeFlush(500);
-    assert.ok(s1.initCalls() >= 1, '无 full checkpoint 时应调用 initGameSession 重建锚点');
-
-    // 已有锚点：不应再次调用 initGameSession 补锚
-    const s2 = makeSandbox([
-        { message_id: 0, is_user: false, mes: '你好',
-          TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) },
-    ]);
-    await waitBridgeFlush(500);
-    assert.strictEqual(s2.initCalls(), 0, '已存在 full checkpoint 时不应重复重建锚点');
+    assert.strictEqual(s2.initCalls(), 0, '已有表格的聊天不应重初始化/重建锚点（对齐参考卡：只缺表才初始化）');
 });
 
 test('桥启动即提供 eventOn 兜底，且 VARIABLE_UPDATE_ENDED 按 (after, before) 传参', async () => {
@@ -2282,7 +2274,7 @@ test('桥启动即提供 eventOn 兜底，且 VARIABLE_UPDATE_ENDED 按 (after, 
     assert.strictEqual(got[0][1].stat_data.x, 0, 'before 应按位置传参');
 });
 
-test('写库前锚点：仅模板行改动（无额外行）时重置重建并重放写入；有额外行时放弃写入不重置', async () => {
+test('写库直接 diff 落表（移除锚点前置/重置门控）', async () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
 
@@ -2336,7 +2328,7 @@ test('写库前锚点：仅模板行改动（无额外行）时重置重建并�
         return { win, tables, counters };
     };
 
-    // 场景1：主角表仅模板行被改（无额外行）+ 无锚点 → 应重建锚点并成功写入
+    // 场景1：主角表仅模板行被改 + 无锚点 → 直接写入，不重建
     const s1 = makeSandbox2((tables) => {
         const zj = Object.values(tables).find(s => s && s.name === '主角表');
         zj.content[1][zj.content[0].indexOf('姓名')] = '测试主角';
@@ -2345,27 +2337,27 @@ test('写库前锚点：仅模板行改动（无额外行）时重置重建并�
     mvu1.stat_data.主角.姓名 = '测试主角2';
     await s1.win.Mvu.replaceMvuData(mvu1);
     await waitBridgeFlush(600);
-    assert.ok(s1.counters.init >= 1, '无额外行时应通过 initGameSession 重建锚点');
+    assert.strictEqual(s1.counters.init, 0, '写库不应触发 initGameSession 重建（对齐参考卡最小运行时）');
     const zj1 = Object.values(s1.tables).find(s => s && s.name === '主角表');
-    assert.strictEqual(zj1.content[1][zj1.content[0].indexOf('姓名')], '测试主角2', '重建后应重放本次写入');
+    assert.strictEqual(zj1.content[1][zj1.content[0].indexOf('姓名')], '测试主角2', '写入应直接落表');
 
-    // 场景2：道侣表有额外行 + 无锚点 → 不重置、放弃写入
+    // 场景2：道侣表有额外行 + 无锚点 → 同样直接写入，不重置不放弃
     const s2 = makeSandbox2((tables) => {
         const dl = Object.values(tables).find(s => s && s.name === '道侣表');
         dl.content.push(['1', '测试道侣', '', '', '', '', '', '', '', '', '', '', '', '', '']);
     });
     const mvu2 = s2.win.Mvu.getMvuData();
     if (!mvu2.stat_data.主角) mvu2.stat_data.主角 = {};
-    mvu2.stat_data.主角.姓名 = '不应写入';
+    mvu2.stat_data.主角.姓名 = '测试主角3';
     await s2.win.Mvu.replaceMvuData(mvu2);
     await waitBridgeFlush(600);
-    assert.strictEqual(s2.counters.init, 0, '有额外行时不应重置重建');
+    assert.strictEqual(s2.counters.init, 0, '有额外行时也不应触发重建/重置');
     const zj2 = Object.values(s2.tables).find(s => s && s.name === '主角表');
     const nameIdx = zj2.content[0].indexOf('姓名');
-    assert.notStrictEqual(zj2.content[1][nameIdx], '不应写入', '无锚点且有额外行时应放弃写入');
+    assert.strictEqual(zj2.content[1][nameIdx], '测试主角3', '写入应直接落表（不再因锚点门控放弃）');
 });
 
-test('锚点检测与插件一致：只有 V2 full checkpoint 才算已锚定（模板派生/旧格式不算）', async () => {
+test('写库不受锚点形态门控（移除运行时锚点重建机制）', async () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const vm2 = require('vm');
@@ -2378,7 +2370,6 @@ test('锚点检测与插件一致：只有 V2 full checkpoint 才算已锚定（
         // 真正的 V2 full checkpoint——应算已锚定
         [{ message_id: 0, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) }],
     ];
-    const expected = [false, false, true];
     for (let ci = 0; ci < cases.length; ci++) {
         const chat = cases[ci];
         let initCalls = 0;
@@ -2405,11 +2396,7 @@ test('锚点检测与插件一致：只有 V2 full checkpoint 才算已锚定（
         mvu.stat_data.主角.姓名 = '测试' + ci;
         await win.Mvu.replaceMvuData(mvu);
         await waitBridgeFlush(600);
-        if (expected[ci]) {
-            assert.strictEqual(initCalls, 0, '真正的 V2 full checkpoint 存在时不应重建锚点');
-        } else {
-            assert.ok(initCalls >= 1, '非 full/旧格式 checkpoint 不应算已锚定，应触发锚点重建');
-        }
+        assert.strictEqual(initCalls, 0, '任意 checkpoint 形态都不应触发 initGameSession 重建（运行时最小化）');
     }
 });
 
