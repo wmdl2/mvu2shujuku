@@ -856,10 +856,17 @@ console.log('Mvu 兼容层');
 function bridgeSandbox(r, opts = {}) {
     const vm = require('vm');
     const tables = JSON.parse(JSON.stringify(r.template));
+    const chat = [];
+    const addCheckpoint = () => {
+        // 模拟插件提交成功后真的建立 full checkpoint
+        chat.push({ message_id: chat.length, is_user: false, mes: '模拟消息',
+            TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { ts: Date.now() } } } }) });
+    };
     const fakeApi = {
         exportTableAsJson: () => tables,
         importTemplateFromData: async () => ({ success: true }),
-        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        initGameSession: async () => { addCheckpoint(); return { success: true, runtimeReady: true }; },
+        importTableAsJson: async () => { addCheckpoint(); return true; },
         registerTableUpdateCallback: () => {},
         updateCell: async (tableName, rowIndex, col, value) => {
             const sheet = Object.values(tables).find(s => s && s.name === tableName);
@@ -879,7 +886,7 @@ function bridgeSandbox(r, opts = {}) {
         getContext: () => ({
             chatId: 'c1',
             name: '测试角色',
-            chat: [],
+            chat,
             eventSource: { on: () => {}, emit: () => {} },
             event_types: { MESSAGE_RECEIVED: 'message_received' },
         }),
@@ -1234,11 +1241,15 @@ test('性能回归：桥的 重建/写入 按批次只导出一次全表快照�
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both', installMvuShim: true });
     const tables = JSON.parse(JSON.stringify(r.template));
+    const chat = [];
     let exportCount = 0;
     const fakeApi = {
         exportTableAsJson: () => { exportCount += 1; return tables; },
         importTemplateFromData: async () => ({ success: true }),
-        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        initGameSession: async () => {
+            chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { ts: 1 } } } }) });
+            return { success: true, runtimeReady: true };
+        },
         registerTableUpdateCallback: () => {},
         updateCell: async (tableName, rowIndex, col, value) => {
             const sheet = Object.values(tables).find(s => s && s.name === tableName);
@@ -1263,7 +1274,7 @@ test('性能回归：桥的 重建/写入 按批次只导出一次全表快照�
         top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
-        getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+        getContext: () => ({ chatId: 'c1', name: '测试', chat, eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
@@ -1320,11 +1331,15 @@ test('单例/整组JSON表仅表头时自动补初始行（updateCell 不再 Row
     tables[taskKey].seedRows = JSON.parse(JSON.stringify(tables[taskKey].content.slice(1)));
     tables[sysKey].content = [tables[sysKey].content[0]];
     tables[taskKey].content = [tables[taskKey].content[0]];
+    const chat = [];
     const fakeApi = {
         exportTableAsJson: () => tables,
         getTableTemplate: () => r.template,
         importTemplateFromData: async () => ({ success: true }),
-        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        initGameSession: async () => {
+            chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { ts: 1 } } } }) });
+            return { success: true, runtimeReady: true };
+        },
         registerTableUpdateCallback: () => {},
         updateCell: async (tableName, rowIndex, col, value) => {
             const sheet = Object.values(tables).find(s => s && s.name === tableName);
@@ -1350,7 +1365,7 @@ test('单例/整组JSON表仅表头时自动补初始行（updateCell 不再 Row
         top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
-        getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+        getContext: () => ({ chatId: 'c1', name: '测试', chat, eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
@@ -2267,12 +2282,13 @@ test('写库前锚点：仅模板行改动（无额外行）时重置重建并�
         const vm2 = require('vm');
         const tables = JSON.parse(JSON.stringify(r.template));
         mutateTables(tables);
+        const chat = [];
         const win = {
             top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
             CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
             TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
             getContext: () => ({
-                chatId: 'c1', name: '测试角色', chat: [],
+                chatId: 'c1', name: '测试角色', chat,
                 eventSource: { on: () => {}, emit: () => {} },
                 event_types: { MESSAGE_RECEIVED: 'message_received' },
             }),
@@ -2282,7 +2298,11 @@ test('写库前锚点：仅模板行改动（无额外行）时重置重建并�
         win.AutoCardUpdaterAPI = {
             exportTableAsJson: () => tables,
             importTemplateFromData: async () => ({ success: true }),
-            initGameSession: async () => { counters.init += 1; return { success: true, runtimeReady: true }; },
+            initGameSession: async () => {
+                counters.init += 1;
+                chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { ts: 1 } } } }) });
+                return { success: true, runtimeReady: true };
+            },
             importTableAsJson: async () => false,
             registerTableUpdateCallback: () => {},
             updateCell: async (tableName, rowIndex, col, value) => {
