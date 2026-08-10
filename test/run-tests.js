@@ -674,6 +674,10 @@ test('initvar 注释行不产生变量组，顶层标量原样保留', () => {
     assert.ok('事件ID' in mgmt['母亲圆场'], '中英混合键 事件ID 应被正确解析');
     // 4) 混合结构对象不拆垃圾子表（不应出现 _管理考核表）
     assert.ok(!sheetNames.includes('_管理考核表'), '混合结构对象不应拆子表');
+    // 5) _ 前缀字段不进填表规则（note 不逐列列出），但数据列仍在；_ 前缀空字典也不拆表
+    assert.ok(!sys.sourceData.note.includes('列1: _数据版本'), '_ 字段不应逐列列出');
+    assert.ok(sys.sourceData.note.includes('只读'), 'note 应保留只读说明');
+    assert.ok(!sheetNames.some(n => n.startsWith('_')), '_ 前缀空字典不应拆成表');
 });
 
 test('initvar 使用与 MVU 源码同款 YAML 库：merge keys / 块标量 / 混合键', () => {
