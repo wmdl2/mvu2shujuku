@@ -2805,6 +2805,28 @@
             `}`,
             `installTavernHelperShim();`,
             '',
+            `// 与 MVU/TH 生态一致：提供裸全局 getVariables / updateVariablesWith（游戏逻辑脚本直接调用）`,
+            `function mvuBridgeStat(){try{var a=window.getAllVariables?window.getAllVariables():{stat_data:{}};return a.stat_data||{};}catch(e){return {};}}`,
+            `function mvuBridgeInstallGlobals(){`,
+            `  for(var gi=0;gi<roots.length;gi++){`,
+            `    var gw=roots[gi];`,
+            `    if(!gw)continue;`,
+            `    try{if(typeof gw.getVariables!=='function')gw.getVariables=function(){return mvuBridgeStat();};}catch(e){}`,
+            `    try{if(typeof gw.updateVariablesWith!=='function')gw.updateVariablesWith=async function(updater,opts){`,
+            `      try{`,
+            `        if(typeof updater!=='function')return false;`,
+            `        var all=window.getAllVariables?window.getAllVariables():{stat_data:{}};`,
+            `        var next=JSON.parse(JSON.stringify(all.stat_data||{}));`,
+            `        updater(next);`,
+            `        var m=window.Mvu||mvuFake;`,
+            `        if(m&&typeof m.replaceMvuData==='function')return await m.replaceMvuData({stat_data:next,display_data:all.display_data||{},delta_data:all.delta_data||{},initialized_lorebooks:all.initialized_lorebooks||{}},opts);`,
+            `        return false;`,
+            `      }catch(e){console.warn('['+BRIDGE_NAME+'] updateVariablesWith 异常:',e);return false;}`,
+            `    };}catch(e){}`,
+            `  }`,
+            `}`,
+            `mvuBridgeInstallGlobals();`,
+            '',
             `var currentStat=function(){`,
             `  try{return window.getAllVariables().stat_data||{};}catch(e){return {};}`,
             `};`,
@@ -3084,22 +3106,33 @@
             `      try{`,
             `        opts=opts||{};`,
             `        if(!mvu_data||typeof mvu_data!=='object')return false;`,
-            `        // 与 MVU 语义一致：保证 stat_data 存在（不因缺 $internal 崩溃），写入后由调用方 replaceMvuData 持久化`,
             `        if(!mvu_data.stat_data||typeof mvu_data.stat_data!=='object')mvu_data.stat_data={};`,
             `        var parts=String(path||'').split('.').filter(function(p){return p!=='';});`,
             `        if(!parts.length)return false;`,
-            `        var oldVal;`,
-            `        var has=false;`,
+            `        // 与官方 updateVariable 一致：路径不存在返回 false，不自动创建`,
             `        var cur=mvu_data.stat_data;`,
-            `        for(var i=0;i<parts.length-1;i++){if(cur[parts[i]]==null||typeof cur[parts[i]]!=='object'||Array.isArray(cur[parts[i]]))cur[parts[i]]={};cur=cur[parts[i]];}`,
-            `        if(cur&&typeof cur==='object'&&Object.prototype.hasOwnProperty.call(cur,parts[parts.length-1])){oldVal=cur[parts[parts.length-1]];has=true;}`,
+            `        var okP=true;`,
+            `        for(var i=0;i<parts.length-1;i++){if(cur[parts[i]]==null||typeof cur[parts[i]]!=='object'||Array.isArray(cur[parts[i]])){okP=false;break;}cur=cur[parts[i]];}`,
+            `        if(!okP||cur==null||typeof cur!=='object'||!Object.prototype.hasOwnProperty.call(cur,parts[parts.length-1]))return false;`,
+            `        var display_data=(mvu_data.stat_data.$internal&&mvu_data.stat_data.$internal.display_data);`,
+            `        var delta_data=(mvu_data.stat_data.$internal&&mvu_data.stat_data.$internal.delta_data);`,
+            `        var lastK=parts[parts.length-1];`,
+            `        var oldVal=cur[lastK];`,
+            `        var finalValue=new_value instanceof Date?new_value.toISOString():new_value;`,
+            `        if(Array.isArray(oldVal)&&oldVal.length===2&&typeof oldVal[1]==='string'&&!Array.isArray(oldVal[0])){`,
+            `          var oc=JSON.parse(JSON.stringify(oldVal[0]));`,
+            `          oldVal[0]=(typeof oc==='number'&&finalValue!==null)?Number(finalValue):finalValue;`,
+            `          finalValue=oldVal[0];oldVal=oc;`,
+            `        }else{`,
+            `          if(typeof oldVal==='number'&&finalValue!==null&&!isNaN(Number(finalValue)))finalValue=Number(finalValue);`,
+            `          cur[lastK]=finalValue;`,
+            `        }`,
             `        var reason=opts.reason||'';`,
-            `        var ds=has?(trimDisplay(oldVal)+'->'+trimDisplay(new_value)+(reason?(' ('+reason+')'):'')):('(新增)'+trimDisplay(new_value)+(reason?(' ('+reason+')'):''));`,
-            `        setPath(mvu_data.stat_data,parts,new_value);`,
-            `        if(!mvu_data.display_data||typeof mvu_data.display_data!=='object')mvu_data.display_data={};`,
-            `        try{setPath(mvu_data.display_data,parts,ds);}catch(e){}`,
-            `        if(mvu_data.delta_data&&typeof mvu_data.delta_data==='object'){try{setPath(mvu_data.delta_data,parts,ds);}catch(e){}}`,
-            `        console.log('['+BRIDGE_NAME+'] Mvu.setMvuVariable:',path,'=',trimDisplay(new_value)+(reason?(' ('+reason+')'):''));`,
+            `        var ds=trimDisplay(oldVal)+'->'+trimDisplay(finalValue)+(reason?(' ('+reason+')'):'');`,
+            `        if(display_data){try{setPath(display_data,parts,ds);}catch(e){}}`,
+            `        if(delta_data){try{setPath(delta_data,parts,ds);}catch(e){}}`,
+            `        console.log('['+BRIDGE_NAME+'] Mvu.setMvuVariable:',path,'=',trimDisplay(finalValue)+(reason?(' ('+reason+')'):''));`,
+            `        if(opts.is_recursive){try{emitMvuEvent('mag_variable_updated',mvu_data.stat_data,path,oldVal,finalValue);}catch(e){}}`,
             `        return true;`,
             `      }catch(e){`,
             `        console.warn('['+BRIDGE_NAME+'] Mvu.setMvuVariable 异常:',e);`,
@@ -3115,9 +3148,12 @@
             `        var out=JSON.parse(JSON.stringify(old_data||{}));`,
             `        if(!out.stat_data||typeof out.stat_data!=='object')out.stat_data={};`,
             `        if(!out.display_data||typeof out.display_data!=='object')out.display_data={};`,
+            `        if(!out.delta_data||typeof out.delta_data!=='object')out.delta_data={};`,
+            `        // 与官方 updateVariables 一致：更新期间把 display/delta 挂到 stat_data.$internal`,
+            `        out.stat_data.$internal={display_data:out.display_data,delta_data:out.delta_data};`,
             `        var cmds=parseUpdateCommands(String(message||''));`,
-            `        if(!cmds.length)return undefined;`,
-            `        applyCommandsToStat(out.stat_data,cmds,out.display_data);`,
+            `        if(cmds.length)applyCommandsToStat(out.stat_data,cmds,out.display_data);`,
+            `        delete out.stat_data.$internal;`,
             `        return out;`,
             `      }catch(e){console.warn('['+BRIDGE_NAME+'] Mvu.parseMessage 异常:',e);return undefined;}`,
             `    };`,
@@ -3428,6 +3464,8 @@
             `    if(!ok4)continue;`,
             `    var last=parts[parts.length-1];`,
             `    var existing=target[last];`,
+            `    // 官方语义：set / add 要求路径已存在（缺失跳过，不自动创建）`,
+            `    if(existing===undefined){continue;}`,
             `    if(cmd.type==='add'){`,
             `      var base=Array.isArray(existing)&&existing.length?existing[0]:existing;`,
             `      var delta=parseFloat(cmd.value);`,
@@ -3451,9 +3489,18 @@
             `        }`,
             `      }`,
             `    }else{`,
+            `      // 官方 set 语义：路径必须已存在（缺失跳过）；VWD 成对数组更新 [0]；数字强转`,
             `      var oldSet=Array.isArray(existing)&&existing.length===2?existing[0]:existing;`,
-            `      target[last]=cmd.value;`,
-            `      noteDisplay(display,cmd.path,oldSet,target[last],cmd.reason);`,
+            `      var nv2=cmd.value instanceof Date?cmd.value.toISOString():cmd.value;`,
+            `      if(Array.isArray(existing)&&existing.length===2&&typeof existing[1]==='string'&&!Array.isArray(existing[0])){`,
+            `        var oc=JSON.parse(JSON.stringify(existing[0]));`,
+            `        existing[0]=(typeof oc==='number'&&nv2!==null)?Number(nv2):nv2;`,
+            `        noteDisplay(display,cmd.path,oc,nv2,cmd.reason);`,
+            `      }else{`,
+            `        if(typeof oldSet==='number'&&nv2!==null&&!isNaN(Number(nv2)))nv2=Number(nv2);`,
+            `        target[last]=nv2;`,
+            `        noteDisplay(display,cmd.path,oldSet,nv2,cmd.reason);`,
+            `      }`,
             `    }`,
             `  }`,
             `  return stat;`,
@@ -3486,7 +3533,10 @@
             `        applyCommandsToStat(next,cmds,disp);`,
             `        return writeDiffToDb(prev,next).then(function(){`,
             `          for(var dk in disp){if(disp.hasOwnProperty(dk))runtimeDisplay[dk]=disp[dk];}`,
-            `          broadcastBridgeEvent(mvuWrap(next),mvuWrap(prev));`,
+            `          var afterWrap=mvuWrap(next);`,
+            `          try{if(afterWrap&&afterWrap.stat_data&&typeof afterWrap.stat_data==='object'&&afterWrap.stat_data.$internal===undefined){afterWrap.stat_data.$internal={display_data:afterWrap.display_data||{},delta_data:afterWrap.delta_data||{}};}}catch(e){}`,
+            `          broadcastBridgeEvent(afterWrap,mvuWrap(prev));`,
+            `          try{if(afterWrap&&afterWrap.stat_data)delete afterWrap.stat_data.$internal;}catch(e){}`,
             `        });`,
             `      }catch(e){console.warn('['+BRIDGE_NAME+'] 应用 MVU 更新块失败:',e);}`,
             `    });`,
@@ -6047,7 +6097,13 @@ ${DB_INIT_SNIPPET}
                     if (!usedSnapshot) {
                         await cleanupSingletonDuplicates(api, activeLayout);
                     }
-                    dispatchVariableUpdateEnded({ stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} }, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
+                    // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
+                    // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
+                    const afterMvu = { stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} };
+                    let hadInternal = false;
+                    try { if (target && typeof target === 'object' && target.$internal === undefined) { target.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
+                    dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
+                    try { if (hadInternal) delete target.$internal; } catch (e) {}
                 } else {
                     dbgWarn(' Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
                 }
@@ -6372,15 +6428,32 @@ ${DB_INIT_SNIPPET}
                 }
                 continue;
             }
-            const oldV = (() => { let c = stat; for (const p of parts) { c = c ? c[p] : undefined; } return c; })();
-            setPathArr(stat, parts, cmd.value);
-            note(cmd.path, oldV, cmd.value, cmd.reason);
+            // 官方 set 语义：路径必须已存在（缺失则跳过，不自动创建）；VWD 成对数组更新 [0]；数字强转
+            let cur = stat, okSet = true;
+            for (let i = 0; i < parts.length - 1; i++) {
+                cur = cur ? cur[parts[i]] : undefined;
+                if (cur === undefined || cur === null || typeof cur !== 'object' || Array.isArray(cur)) { okSet = false; break; }
+            }
+            if (!okSet || cur === undefined || cur === null || typeof cur !== 'object' || !Object.prototype.hasOwnProperty.call(cur, parts[parts.length - 1])) continue;
+            const oldV = cur[parts[parts.length - 1]];
+            let newV = cmd.value;
+            if (newV instanceof Date) newV = newV.toISOString();
+            if (Array.isArray(oldV) && oldV.length === 2 && typeof oldV[1] === 'string' && !Array.isArray(oldV[0])) {
+                const oc = JSON.parse(JSON.stringify(oldV[0]));
+                oldV[0] = (typeof oc === 'number' && newV !== null) ? Number(newV) : newV;
+                note(cmd.path, oc, newV, cmd.reason);
+            } else {
+                if (typeof oldV === 'number' && newV !== null && !isNaN(Number(newV))) newV = Number(newV);
+                cur[parts[parts.length - 1]] = newV;
+                note(cmd.path, oldV, newV, cmd.reason);
+            }
         }
     }
 
     let windowMvuShimTimer = null;
     let windowMvuFake = null;
     const originalMvuMap = new Map();
+    const originalGetVariablesMap = new Map();
     // iframe/子窗口上我们同步的 getAllVariables 原值（恢复时还原，避免污染其他卡）
     const originalGetAllVariablesMap = new Map();
     function applyWindowMvuShim() {
@@ -6436,16 +6509,34 @@ ${DB_INIT_SNIPPET}
                     if (!mvu_data.stat_data || typeof mvu_data.stat_data !== 'object') mvu_data.stat_data = {};
                     const parts = String(path || '').split('.').filter((p) => p !== '');
                     if (!parts.length) return false;
-                    let oldVal, has = false, cur = mvu_data.stat_data;
-                    for (let i = 0; i < parts.length - 1; i++) { if (cur[parts[i]] == null || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) cur[parts[i]] = {}; cur = cur[parts[i]]; }
-                    if (cur && typeof cur === 'object' && Object.prototype.hasOwnProperty.call(cur, parts[parts.length - 1])) { oldVal = cur[parts[parts.length - 1]]; has = true; }
+                    const hasObjPath = (obj, arr) => { let c = obj; for (const p of arr) { if (c == null || typeof c !== 'object') return false; c = c[p]; } return c !== undefined; };
+                    const setObjPath = (obj, arr, v) => { let c = obj; for (let i = 0; i < arr.length - 1; i++) { if (c[arr[i]] == null || typeof c[arr[i]] !== 'object') c[arr[i]] = {}; c = c[arr[i]]; } c[arr[arr.length - 1]] = v; };
+                    // 与官方 updateVariable 一致：路径不存在时不写（返回 false），不自动创建
+                    if (!hasObjPath(mvu_data.stat_data, parts)) return false;
+                    const display_data = mvu_data.stat_data.$internal && mvu_data.stat_data.$internal.display_data;
+                    const delta_data = mvu_data.stat_data.$internal && mvu_data.stat_data.$internal.delta_data;
+                    const curPath = (() => { let c = mvu_data.stat_data; for (let i = 0; i < parts.length - 1; i++) { c = c[parts[i]]; } return c; })();
+                    const lastKey = parts[parts.length - 1];
+                    let oldVal = curPath[lastKey];
+                    const isVWD = Array.isArray(oldVal) && oldVal.length === 2 && typeof oldVal[1] === 'string' && !Array.isArray(oldVal[0]);
+                    let finalValue = new_value;
+                    if (new_value instanceof Date) finalValue = new_value.toISOString();
+                    if (isVWD) {
+                        oldVal = JSON.parse(JSON.stringify(oldVal[0]));
+                        finalValue = (typeof oldVal === 'number' && finalValue !== null) ? Number(finalValue) : finalValue;
+                        curPath[lastKey] = [finalValue, curPath[lastKey][1]];
+                    } else {
+                        if (typeof oldVal === 'number' && finalValue !== null && !isNaN(Number(finalValue))) finalValue = Number(finalValue);
+                        curPath[lastKey] = finalValue;
+                    }
                     const reason = opts.reason || '';
-                    const ds = has ? (String(oldVal) + '->' + String(new_value) + (reason ? ' (' + reason + ')' : '')) : ('(新增)' + String(new_value) + (reason ? ' (' + reason + ')' : ''));
-                    cur[parts[parts.length - 1]] = new_value;
-                    if (!mvu_data.display_data || typeof mvu_data.display_data !== 'object') mvu_data.display_data = {};
-                    try { (() => { let dc = mvu_data.display_data; for (let i = 0; i < parts.length - 1; i++) { if (!dc[parts[i]] || typeof dc[parts[i]] !== 'object') dc[parts[i]] = {}; dc = dc[parts[i]]; } dc[parts[parts.length - 1]] = ds; })(); } catch (e) {}
-                    if (mvu_data.delta_data && typeof mvu_data.delta_data === 'object') { try { (() => { let dc2 = mvu_data.delta_data; for (let i = 0; i < parts.length - 1; i++) { if (!dc2[parts[i]] || typeof dc2[parts[i]] !== 'object') dc2[parts[i]] = {}; dc2 = dc2[parts[i]]; } dc2[parts[parts.length - 1]] = ds; })(); } catch (e) {} }
+                    const ds = String(oldVal) + '->' + JSON.stringify(finalValue) + (reason ? ' (' + reason + ')' : '');
+                    if (display_data) { try { setObjPath(display_data, parts, ds); } catch (e) {} }
+                    if (delta_data) { try { setObjPath(delta_data, parts, ds); } catch (e) {} }
                     dbg(' Mvu.setMvuVariable:', path, '=', String(new_value) + (reason ? ' (' + reason + ')' : ''));
+                    if (opts.is_recursive) {
+                        emitMvuEvent('mag_variable_updated', mvu_data.stat_data, path, oldVal, finalValue);
+                    }
                     return true;
                 } catch (e) {
                     dbgWarn(' Mvu.setMvuVariable 异常:', e);
@@ -6471,9 +6562,12 @@ ${DB_INIT_SNIPPET}
                     const out = JSON.parse(JSON.stringify(old_data || {}));
                     if (!out.stat_data || typeof out.stat_data !== 'object') out.stat_data = {};
                     if (!out.display_data || typeof out.display_data !== 'object') out.display_data = {};
+                    if (!out.delta_data || typeof out.delta_data !== 'object') out.delta_data = {};
+                    // 与官方 updateVariables 一致：更新期间把 display/delta 挂到 stat_data.$internal
+                    out.stat_data.$internal = { display_data: out.display_data, delta_data: out.delta_data };
                     const cmds = parseMvuCommands(String(message || ''));
-                    if (!cmds.length) return undefined;
-                    applyMvuCommands(out.stat_data, cmds, out.display_data);
+                    if (cmds.length) applyMvuCommands(out.stat_data, cmds, out.display_data);
+                    delete out.stat_data.$internal;
                     return out;
                 } catch (e) {
                     dbgWarn(' Mvu.parseMessage 异常:', e);
@@ -6516,6 +6610,36 @@ ${DB_INIT_SNIPPET}
                     if (!originalGetAllVariablesMap.has(w)) originalGetAllVariablesMap.set(w, w.getAllVariables);
                     w.getAllVariables = window.getAllVariables;
                 }
+                // 与 MVU/TH 生态一致：提供裸全局 getVariables / updateVariablesWith
+                // （游戏逻辑脚本常直接调用，如 人妻公寓 的 updateVariablesWith(t => …)）。
+                // 数据库模型下所有 type 都返回当前 stat_data；写入走 Mvu.replaceMvuData。
+                const makeGetVariables = () => {
+                    try {
+                        const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                        return all.stat_data || {};
+                    } catch (e) { return {}; }
+                };
+                if (typeof w.getVariables !== 'function') {
+                    if (!originalGetVariablesMap.has(w)) originalGetVariablesMap.set(w, w.getVariables);
+                    w.getVariables = function () { return makeGetVariables(); };
+                }
+                if (typeof w.updateVariablesWith !== 'function') {
+                    w.updateVariablesWith = async function (updater, opts) {
+                        try {
+                            if (typeof updater !== 'function') return false;
+                            const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                            const next = JSON.parse(JSON.stringify(all.stat_data || {}));
+                            updater(next);
+                            return windowMvuFake.replaceMvuData({ stat_data: next, display_data: all.display_data || {}, delta_data: all.delta_data || {}, initialized_lorebooks: all.initialized_lorebooks || {} }, opts);
+                        } catch (e) {
+                            dbgWarn(' updateVariablesWith 异常:', e);
+                            return false;
+                        }
+                    };
+                    if (!originalGetVariablesMap.has(w)) originalGetVariablesMap.set(w, { get: typeof w.getVariables === 'function' ? w.getVariables : undefined, upd: undefined });
+                } else if (!originalGetVariablesMap.has(w)) {
+                    originalGetVariablesMap.set(w, { get: typeof w.getVariables === 'function' ? w.getVariables : undefined, upd: w.updateVariablesWith });
+                }
                 // 前端状态栏在消息 iframe 里用 eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, ...) 监听刷新。
                 // 若 iframe 没有 TH 注入的 eventOn，就补一个绑定到 CustomEvent 的兜底，
                 // 这样 emitMvuEvent 的 dispatchEvent 一定能触发前端刷新（不会因事件源不一致而收不到）。
@@ -6550,6 +6674,15 @@ ${DB_INIT_SNIPPET}
             try { if (w.getAllVariables === window.getAllVariables) w.getAllVariables = orig; } catch (e) {}
         }
         originalGetAllVariablesMap.clear();
+        for (const [w, rec] of originalGetVariablesMap) {
+            try {
+                if (rec.get !== undefined) w.getVariables = rec.get;
+                else if (typeof w.getVariables === 'function') delete w.getVariables;
+                if (rec.upd !== undefined) w.updateVariablesWith = rec.upd;
+                else if (typeof w.updateVariablesWith === 'function') delete w.updateVariablesWith;
+            } catch (e) {}
+        }
+        originalGetVariablesMap.clear();
     }
     function installWindowMvuShim() {
         applyWindowMvuShim();
@@ -20030,7 +20163,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     if (!usedSnapshot) {
                         await cleanupSingletonDuplicates(api, activeLayout);
                     }
-                    dispatchVariableUpdateEnded({ stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} }, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
+                    // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
+                    // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
+                    const afterMvu = { stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} };
+                    let hadInternal = false;
+                    try { if (target && typeof target === 'object' && target.$internal === undefined) { target.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
+                    dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
+                    try { if (hadInternal) delete target.$internal; } catch (e) {}
                 } else {
                     dbgWarn(' Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
                 }
@@ -20355,15 +20494,32 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 }
                 continue;
             }
-            const oldV = (() => { let c = stat; for (const p of parts) { c = c ? c[p] : undefined; } return c; })();
-            setPathArr(stat, parts, cmd.value);
-            note(cmd.path, oldV, cmd.value, cmd.reason);
+            // 官方 set 语义：路径必须已存在（缺失则跳过，不自动创建）；VWD 成对数组更新 [0]；数字强转
+            let cur = stat, okSet = true;
+            for (let i = 0; i < parts.length - 1; i++) {
+                cur = cur ? cur[parts[i]] : undefined;
+                if (cur === undefined || cur === null || typeof cur !== 'object' || Array.isArray(cur)) { okSet = false; break; }
+            }
+            if (!okSet || cur === undefined || cur === null || typeof cur !== 'object' || !Object.prototype.hasOwnProperty.call(cur, parts[parts.length - 1])) continue;
+            const oldV = cur[parts[parts.length - 1]];
+            let newV = cmd.value;
+            if (newV instanceof Date) newV = newV.toISOString();
+            if (Array.isArray(oldV) && oldV.length === 2 && typeof oldV[1] === 'string' && !Array.isArray(oldV[0])) {
+                const oc = JSON.parse(JSON.stringify(oldV[0]));
+                oldV[0] = (typeof oc === 'number' && newV !== null) ? Number(newV) : newV;
+                note(cmd.path, oc, newV, cmd.reason);
+            } else {
+                if (typeof oldV === 'number' && newV !== null && !isNaN(Number(newV))) newV = Number(newV);
+                cur[parts[parts.length - 1]] = newV;
+                note(cmd.path, oldV, newV, cmd.reason);
+            }
         }
     }
 
     let windowMvuShimTimer = null;
     let windowMvuFake = null;
     const originalMvuMap = new Map();
+    const originalGetVariablesMap = new Map();
     // iframe/子窗口上我们同步的 getAllVariables 原值（恢复时还原，避免污染其他卡）
     const originalGetAllVariablesMap = new Map();
     function applyWindowMvuShim() {
@@ -20419,16 +20575,34 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     if (!mvu_data.stat_data || typeof mvu_data.stat_data !== 'object') mvu_data.stat_data = {};
                     const parts = String(path || '').split('.').filter((p) => p !== '');
                     if (!parts.length) return false;
-                    let oldVal, has = false, cur = mvu_data.stat_data;
-                    for (let i = 0; i < parts.length - 1; i++) { if (cur[parts[i]] == null || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) cur[parts[i]] = {}; cur = cur[parts[i]]; }
-                    if (cur && typeof cur === 'object' && Object.prototype.hasOwnProperty.call(cur, parts[parts.length - 1])) { oldVal = cur[parts[parts.length - 1]]; has = true; }
+                    const hasObjPath = (obj, arr) => { let c = obj; for (const p of arr) { if (c == null || typeof c !== 'object') return false; c = c[p]; } return c !== undefined; };
+                    const setObjPath = (obj, arr, v) => { let c = obj; for (let i = 0; i < arr.length - 1; i++) { if (c[arr[i]] == null || typeof c[arr[i]] !== 'object') c[arr[i]] = {}; c = c[arr[i]]; } c[arr[arr.length - 1]] = v; };
+                    // 与官方 updateVariable 一致：路径不存在时不写（返回 false），不自动创建
+                    if (!hasObjPath(mvu_data.stat_data, parts)) return false;
+                    const display_data = mvu_data.stat_data.$internal && mvu_data.stat_data.$internal.display_data;
+                    const delta_data = mvu_data.stat_data.$internal && mvu_data.stat_data.$internal.delta_data;
+                    const curPath = (() => { let c = mvu_data.stat_data; for (let i = 0; i < parts.length - 1; i++) { c = c[parts[i]]; } return c; })();
+                    const lastKey = parts[parts.length - 1];
+                    let oldVal = curPath[lastKey];
+                    const isVWD = Array.isArray(oldVal) && oldVal.length === 2 && typeof oldVal[1] === 'string' && !Array.isArray(oldVal[0]);
+                    let finalValue = new_value;
+                    if (new_value instanceof Date) finalValue = new_value.toISOString();
+                    if (isVWD) {
+                        oldVal = JSON.parse(JSON.stringify(oldVal[0]));
+                        finalValue = (typeof oldVal === 'number' && finalValue !== null) ? Number(finalValue) : finalValue;
+                        curPath[lastKey] = [finalValue, curPath[lastKey][1]];
+                    } else {
+                        if (typeof oldVal === 'number' && finalValue !== null && !isNaN(Number(finalValue))) finalValue = Number(finalValue);
+                        curPath[lastKey] = finalValue;
+                    }
                     const reason = opts.reason || '';
-                    const ds = has ? (String(oldVal) + '->' + String(new_value) + (reason ? ' (' + reason + ')' : '')) : ('(新增)' + String(new_value) + (reason ? ' (' + reason + ')' : ''));
-                    cur[parts[parts.length - 1]] = new_value;
-                    if (!mvu_data.display_data || typeof mvu_data.display_data !== 'object') mvu_data.display_data = {};
-                    try { (() => { let dc = mvu_data.display_data; for (let i = 0; i < parts.length - 1; i++) { if (!dc[parts[i]] || typeof dc[parts[i]] !== 'object') dc[parts[i]] = {}; dc = dc[parts[i]]; } dc[parts[parts.length - 1]] = ds; })(); } catch (e) {}
-                    if (mvu_data.delta_data && typeof mvu_data.delta_data === 'object') { try { (() => { let dc2 = mvu_data.delta_data; for (let i = 0; i < parts.length - 1; i++) { if (!dc2[parts[i]] || typeof dc2[parts[i]] !== 'object') dc2[parts[i]] = {}; dc2 = dc2[parts[i]]; } dc2[parts[parts.length - 1]] = ds; })(); } catch (e) {} }
+                    const ds = String(oldVal) + '->' + JSON.stringify(finalValue) + (reason ? ' (' + reason + ')' : '');
+                    if (display_data) { try { setObjPath(display_data, parts, ds); } catch (e) {} }
+                    if (delta_data) { try { setObjPath(delta_data, parts, ds); } catch (e) {} }
                     dbg(' Mvu.setMvuVariable:', path, '=', String(new_value) + (reason ? ' (' + reason + ')' : ''));
+                    if (opts.is_recursive) {
+                        emitMvuEvent('mag_variable_updated', mvu_data.stat_data, path, oldVal, finalValue);
+                    }
                     return true;
                 } catch (e) {
                     dbgWarn(' Mvu.setMvuVariable 异常:', e);
@@ -20454,9 +20628,12 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     const out = JSON.parse(JSON.stringify(old_data || {}));
                     if (!out.stat_data || typeof out.stat_data !== 'object') out.stat_data = {};
                     if (!out.display_data || typeof out.display_data !== 'object') out.display_data = {};
+                    if (!out.delta_data || typeof out.delta_data !== 'object') out.delta_data = {};
+                    // 与官方 updateVariables 一致：更新期间把 display/delta 挂到 stat_data.$internal
+                    out.stat_data.$internal = { display_data: out.display_data, delta_data: out.delta_data };
                     const cmds = parseMvuCommands(String(message || ''));
-                    if (!cmds.length) return undefined;
-                    applyMvuCommands(out.stat_data, cmds, out.display_data);
+                    if (cmds.length) applyMvuCommands(out.stat_data, cmds, out.display_data);
+                    delete out.stat_data.$internal;
                     return out;
                 } catch (e) {
                     dbgWarn(' Mvu.parseMessage 异常:', e);
@@ -20499,6 +20676,36 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     if (!originalGetAllVariablesMap.has(w)) originalGetAllVariablesMap.set(w, w.getAllVariables);
                     w.getAllVariables = window.getAllVariables;
                 }
+                // 与 MVU/TH 生态一致：提供裸全局 getVariables / updateVariablesWith
+                // （游戏逻辑脚本常直接调用，如 人妻公寓 的 updateVariablesWith(t => …)）。
+                // 数据库模型下所有 type 都返回当前 stat_data；写入走 Mvu.replaceMvuData。
+                const makeGetVariables = () => {
+                    try {
+                        const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                        return all.stat_data || {};
+                    } catch (e) { return {}; }
+                };
+                if (typeof w.getVariables !== 'function') {
+                    if (!originalGetVariablesMap.has(w)) originalGetVariablesMap.set(w, w.getVariables);
+                    w.getVariables = function () { return makeGetVariables(); };
+                }
+                if (typeof w.updateVariablesWith !== 'function') {
+                    w.updateVariablesWith = async function (updater, opts) {
+                        try {
+                            if (typeof updater !== 'function') return false;
+                            const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                            const next = JSON.parse(JSON.stringify(all.stat_data || {}));
+                            updater(next);
+                            return windowMvuFake.replaceMvuData({ stat_data: next, display_data: all.display_data || {}, delta_data: all.delta_data || {}, initialized_lorebooks: all.initialized_lorebooks || {} }, opts);
+                        } catch (e) {
+                            dbgWarn(' updateVariablesWith 异常:', e);
+                            return false;
+                        }
+                    };
+                    if (!originalGetVariablesMap.has(w)) originalGetVariablesMap.set(w, { get: typeof w.getVariables === 'function' ? w.getVariables : undefined, upd: undefined });
+                } else if (!originalGetVariablesMap.has(w)) {
+                    originalGetVariablesMap.set(w, { get: typeof w.getVariables === 'function' ? w.getVariables : undefined, upd: w.updateVariablesWith });
+                }
                 // 前端状态栏在消息 iframe 里用 eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, ...) 监听刷新。
                 // 若 iframe 没有 TH 注入的 eventOn，就补一个绑定到 CustomEvent 的兜底，
                 // 这样 emitMvuEvent 的 dispatchEvent 一定能触发前端刷新（不会因事件源不一致而收不到）。
@@ -20533,6 +20740,15 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             try { if (w.getAllVariables === window.getAllVariables) w.getAllVariables = orig; } catch (e) {}
         }
         originalGetAllVariablesMap.clear();
+        for (const [w, rec] of originalGetVariablesMap) {
+            try {
+                if (rec.get !== undefined) w.getVariables = rec.get;
+                else if (typeof w.getVariables === 'function') delete w.getVariables;
+                if (rec.upd !== undefined) w.updateVariablesWith = rec.upd;
+                else if (typeof w.updateVariablesWith === 'function') delete w.updateVariablesWith;
+            } catch (e) {}
+        }
+        originalGetVariablesMap.clear();
     }
     function installWindowMvuShim() {
         applyWindowMvuShim();

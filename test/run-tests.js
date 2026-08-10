@@ -1097,11 +1097,17 @@ test('Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessag
     assert.ok(data && typeof data.stat_data === 'object', 'getMvuData 应返回 stat_data 对象');
     assert.ok(data.display_data && typeof data.display_data === 'object', 'getMvuData 应返回 display_data');
     assert.ok('delta_data' in data && 'initialized_lorebooks' in data, 'getMvuData 字段齐全');
-    // setMvuVariable：mvu 缺 stat_data 也不应崩溃（旧 MVU 会因 $internal 崩溃），且写入成功
+    // setMvuVariable：与官方 updateVariable 一致——缺 stat_data 不崩溃；路径不存在返回 false；路径存在才写入
     const empty = {};
     return Promise.resolve(Mvu.setMvuVariable(empty, '系统.测试字段', 42, { reason: '测试' }))
         .then((ok) => {
-            assert.strictEqual(ok, true, 'setMvuVariable 应返回 true');
+            assert.strictEqual(ok, false, 'setMvuVariable 对不存在的路径应返回 false（与 MVU 官方一致）');
+            // 已存在的路径：写入并返回 true
+            empty.stat_data = { 系统: { 测试字段: 0 } };
+            return Mvu.setMvuVariable(empty, '系统.测试字段', 42, { reason: '测试' });
+        })
+        .then((ok) => {
+            assert.strictEqual(ok, true, 'setMvuVariable 对已存在路径应返回 true');
             assert.strictEqual(empty.stat_data.系统.测试字段, 42, 'setMvuVariable 应写入 stat_data');
             // getMvuVariable / getRecordFromMvuData
             assert.strictEqual(Mvu.getMvuVariable(empty, '系统.测试字段'), 42, 'getMvuVariable 应读到新值');
@@ -1111,19 +1117,20 @@ test('Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessag
             // VWD（数组长度 2）取第一个元素
             const vwd = { stat_data: { 系统: { 值: [7, '说明'] } } };
             assert.strictEqual(Mvu.getMvuVariable(vwd, '系统.值'), 7, 'VWD 应取第一个元素');
-            // parseMessage：在副本上应用 _.set / _.add 命令
-            const base = { stat_data: { 主角: { 修为: 10 } } };
+            // parseMessage：在副本上应用 _.set / _.add 命令（add 要求路径已存在，与官方一致）
+            const base = { stat_data: { 主角: { 修为: 10, 灵气: 0 } } };
             return Mvu.parseMessage("<UpdateVariable>\n_.set('主角.修为', 20);\n_.add('主角.灵气', 5);\n</UpdateVariable>", base).then((parsed) => ({ parsed, base }));
         })
         .then(({ parsed, base }) => {
             assert.ok(parsed && parsed.stat_data.主角.修为 === 20, 'parseMessage 应应用 _.set');
             assert.strictEqual(parsed.stat_data.主角.灵气, 5, 'parseMessage 应应用 _.add');
             assert.strictEqual(base.stat_data.主角.修为, 10, 'parseMessage 不应改动传入对象');
-            // 无更新命令时返回 undefined（与 MVU 一致）
+            // 无更新命令时官方实现仍返回未变更的副本（updateVariables 返回后直接 return result）
             return Mvu.parseMessage('纯文本没有命令', base);
         })
         .then((none) => {
-            assert.strictEqual(none, undefined, '无更新命令时 parseMessage 应返回 undefined');
+            assert.ok(none && typeof none === 'object' && none.stat_data, '无更新命令时 parseMessage 应返回副本（与官方实现一致）');
+            assert.strictEqual(none.stat_data.主角.修为, 10, '无命令副本应与传入数据一致');
             // deprecated 包装与工具方法
             assert.strictEqual(typeof Mvu.getCurrentMvuData, 'function');
             assert.strictEqual(typeof Mvu.replaceCurrentMvuData, 'function');
