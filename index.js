@@ -19,6 +19,23 @@
 
     const VERSION = '0.1.0';
 
+    // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
+    // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
+    function mvu2shujukuDebugOn() {
+        try {
+            const w = (typeof window !== 'undefined' ? window : root);
+            return !!(w && w.__mvu2shujukuDebug);
+        } catch (e) { return false; }
+    }
+    function dbg() {
+        if (!mvu2shujukuDebugOn()) return;
+        try { console.log.apply(console, ['[mvu2shujuku][debug]'].concat(Array.prototype.slice.call(arguments))); } catch (e) {}
+    }
+    function dbgWarn() {
+        if (!mvu2shujukuDebugOn()) return;
+        try { console.warn.apply(console, ['[mvu2shujuku][debug]'].concat(Array.prototype.slice.call(arguments))); } catch (e) {}
+    }
+
     /* ================================================================
      * 开局建表核心流程（对应 MVU 的 init 时机 → SP·数据库 的初始化）
      *
@@ -2291,9 +2308,9 @@
                 if (!sObj) { sObj = {}; if (SE.kind === 'json') { sObj[SE0.keyCol] = SE0.keyValue; sObj['内容'] = '{}'; } }
                 try {
                     await Promise.resolve(api.insertRow(SE0.table, sObj));
-                    console.log('[mvu2shujuku][debug] 已为表「' + SE0.table + '」补初始行（原表仅表头）。');
+                    dbg(' 已为表「' + SE0.table + '」补初始行（原表仅表头）。');
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug] 补初始行失败:', e);
+                    dbgWarn(' 补初始行失败:', e);
                 }
             }
             try { tables = api.exportTableAsJson() || {}; } catch (e) {}
@@ -2315,7 +2332,7 @@
             if (op.json && E.kind === 'json') {
                 const jcIdx = header.indexOf('内容');
                 if (jcIdx === -1) {
-                    console.warn('[mvu2shujuku][debug] 整组JSON表「' + L.table + '」缺少「内容」列（旧模板/旧聊天），写入已跳过；请重新转换角色卡并新开聊天。');
+                    dbgWarn(' 整组JSON表「' + L.table + '」缺少「内容」列（旧模板/旧聊天），写入已跳过；请重新转换角色卡并新开聊天。');
                     continue;
                 }
                 const jNew = op.value === undefined || op.value === null ? '{}' : JSON.stringify(op.value);
@@ -2327,7 +2344,7 @@
             if (op.overflow) {
                 const ovcIdx = header.indexOf('_扩展数据');
                 if (ovcIdx === -1) {
-                    console.warn('[mvu2shujuku][debug] 表「' + L.table + '」缺少「_扩展数据」列（旧模板/旧聊天），动态字段写入已跳过；请重新转换角色卡并新开聊天。');
+                    dbgWarn(' 表「' + L.table + '」缺少「_扩展数据」列（旧模板/旧聊天），动态字段写入已跳过；请重新转换角色卡并新开聊天。');
                     continue;
                 }
                 let ovRow = 1;
@@ -2342,7 +2359,7 @@
                             ? findRowByColumn({ content: [srH2, ...sheet.seedRows] }, L.keyCol, ovKey)
                             : -1;
                         if (srF2 !== -1) {
-                            console.log('[mvu2shujuku][debug] 表「' + L.table + '」键「' + ovKey + '」存在于 seedRows，溢出字段跳过（等待插件物化）。');
+                            dbg(' 表「' + L.table + '」键「' + ovKey + '」存在于 seedRows，溢出字段跳过（等待插件物化）。');
                             continue;
                         }
                         // 合并进同一新行（与已声明字段同一条 INSERT，避免重复 INSERT 撞 UNIQUE）
@@ -2398,7 +2415,7 @@
                         ? findRowByColumn({ content: [srHeader, ...sheet.seedRows] }, L.keyCol, keyVal)
                         : -1;
                     if (srFound !== -1) {
-                        console.log('[mvu2shujuku][debug] 表「' + L.table + '」键「' + keyVal + '」存在于 seedRows，跳过 INSERT（等待插件物化）。');
+                        dbg(' 表「' + L.table + '」键「' + keyVal + '」存在于 seedRows，跳过 INSERT（等待插件物化）。');
                         continue;
                     }
                     // 同一新行的多个字段合并为一条 INSERT，避免重复 INSERT 撞 UNIQUE
@@ -2499,7 +2516,7 @@
                     return resolved.length + directOps.length;
                 }
             } catch (e) {
-                console.warn('[mvu2shujuku][debug] SQL 批量写入失败，回退逐条写入：' + (e && e.message ? e.message : e));
+                dbgWarn(' SQL 批量写入失败，回退逐条写入：' + (e && e.message ? e.message : e));
             }
         }
 
@@ -2536,7 +2553,7 @@
                     else if (d.kind === 'overflow') await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', d.value));
                     else if (d.kind === 'overflow-insert') await Promise.resolve(api.insertRow(d.layout.table, d.rowObj));
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug] 整组JSON/溢出列写入失败:', e);
+                    dbgWarn(' 整组JSON/溢出列写入失败:', e);
                 }
             }
         }
@@ -4283,6 +4300,22 @@
     const SETTINGS_KEY = 'mvu2shujuku';
     const state = { timer: null };
 
+    // debug 开关：读 window.__mvu2shujukuDebug（由设置面板/加载时写入）
+    function mvu2shujukuDebugOn() {
+        try {
+            const w = (typeof window !== 'undefined' ? window : globalThis);
+            return !!(w && w.__mvu2shujukuDebug);
+        } catch (e) { return false; }
+    }
+    function dbg() {
+        if (!mvu2shujukuDebugOn()) return;
+        try { console.log.apply(console, ['[mvu2shujuku][debug]'].concat(Array.prototype.slice.call(arguments))); } catch (e) {}
+    }
+    function dbgWarn() {
+        if (!mvu2shujukuDebugOn()) return;
+        try { console.warn.apply(console, ['[mvu2shujuku][debug]'].concat(Array.prototype.slice.call(arguments))); } catch (e) {}
+    }
+
     // 开局建表核心流程（与卡内数据桥同一份逻辑：缺表时调用 SP·数据库 的 initGameSession）
 ${DB_INIT_SNIPPET}
 
@@ -4376,7 +4409,7 @@ ${DB_INIT_SNIPPET}
     async function anchorCheckpointIfMissing(api, tplCached, reason) {
         if (!api || !tplCached) return false;
         if (mvu2shujukuInitSessionHung) {
-            console.warn('[mvu2shujuku][debug][锚点] ' + reason + '：initGameSession 曾挂起，跳过重建。');
+            dbgWarn('[锚点] ' + reason + '：initGameSession 曾挂起，跳过重建。');
             return false;
         }
         if (hasFullShujukuCheckpoint()) return true;
@@ -4384,10 +4417,10 @@ ${DB_INIT_SNIPPET}
             const expected = mvu2shujukuExpectedTableNames(tplCached);
             const missing = mvu2shujukuMissingTableNames(api, expected);
             if (missing.length) {
-                console.log('[mvu2shujuku][debug][锚点] ' + reason + '：缺表 ' + missing.join('、') + '，交给建表流程处理。');
+                dbg('[锚点] ' + reason + '：缺表 ' + missing.join('、') + '，交给建表流程处理。');
                 return false;
             }
-            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：聊天缺少 full checkpoint，重建数据库锚点…');
+            dbg('[锚点] ' + reason + '：聊天缺少 full checkpoint，重建数据库锚点…');
             const r = await mvu2shujukuWithTimeout(
                 api.initGameSession({}, { injectTemplate: true, loadPreset: false, templateData: tplCached, templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板' }),
                 20000,
@@ -4395,7 +4428,7 @@ ${DB_INIT_SNIPPET}
             );
             const ok = !(r && r.success === false) && !(r && r.timeout);
             const anchored = ok && hasFullShujukuCheckpoint();
-            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')) + ' | 锚点=' + anchored);
+            dbg('[锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')) + ' | 锚点=' + anchored);
             return anchored;
         }
         // 表数据与模板不一致（含“模板行被注入/捏人改动”）时，**绝不** initGameSession 重置——
@@ -4403,18 +4436,18 @@ ${DB_INIT_SNIPPET}
         // 因此这里不再区分“有额外行/无额外行”，只要不一致就走下方 importTableAsJson 锚定当前状态。
         // 表已含用户数据但无锚点：用插件提交 API 把当前状态落成 full checkpoint（不丢数据）
         if (typeof api.importTableAsJson === 'function') {
-            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：表含数据且无锚点，用 importTableAsJson 把当前状态提交为 checkpoint…');
+            dbg('[锚点] ' + reason + '：表含数据且无锚点，用 importTableAsJson 把当前状态提交为 checkpoint…');
             try {
                 const snap = JSON.stringify(api.exportTableAsJson() || {});
                 const ok2 = await Promise.resolve(api.importTableAsJson(snap, {}));
-                console.log('[mvu2shujuku][debug][锚点] ' + reason + '：importTableAsJson 锚定=' + (ok2 ? '成功' : '失败'));
+                dbg('[锚点] ' + reason + '：importTableAsJson 锚定=' + (ok2 ? '成功' : '失败'));
                 return !!ok2;
             } catch (e) {
-                console.warn('[mvu2shujuku][debug][锚点] ' + reason + '：importTableAsJson 锚定异常:', e);
+                dbgWarn('[锚点] ' + reason + '：importTableAsJson 锚定异常:', e);
                 return false;
             }
         }
-        console.warn('[mvu2shujuku][debug][锚点] ' + reason + '：表含数据且无锚点，且插件无 importTableAsJson，无法锚定。');
+        dbgWarn('[锚点] ' + reason + '：表含数据且无锚点，且插件无 importTableAsJson，无法锚定。');
         return false;
     }
 
@@ -4424,23 +4457,23 @@ ${DB_INIT_SNIPPET}
     // - 表有额外行（真实积累数据）→ importTableAsJson 锚定当前状态；失败则放弃本次写入，绝不重置已有数据
     async function ensureCheckpointBeforeWrite(api, tplCached) {
         const hasCp = hasFullShujukuCheckpoint();
-        console.log('[mvu2shujuku][debug][流程] 写库前锚点状态：hasCheckpoint=' + hasCp);
+        dbg('[流程] 写库前锚点状态：hasCheckpoint=' + hasCp);
         if (hasCp) return true;
         await anchorCheckpointIfMissing(api, tplCached, '写库前');
         if (hasFullShujukuCheckpoint()) return true;
         // 插件 initGameSession 可能“完成”却不建 V2 checkpoint：改用 importTableAsJson 提交当前状态强制建锚。
         // 开局阶段（尚无 artifacts）插件会接受并建立 full checkpoint。
         if (typeof api.importTableAsJson === 'function' && !mvu2shujukuInitSessionHung) {
-            console.log('[mvu2shujuku][debug][锚点] 写库前：initGameSession 未建立锚点，改用 importTableAsJson 强制锚定…');
+            dbg('[锚点] 写库前：initGameSession 未建立锚点，改用 importTableAsJson 强制锚定…');
             try {
                 const snap = JSON.stringify(api.exportTableAsJson() || {});
                 await Promise.resolve(api.importTableAsJson(snap, {}));
             } catch (e) {
-                console.warn('[mvu2shujuku][debug][锚点] 写库前 importTableAsJson 强制锚定异常:', e);
+                dbgWarn('[锚点] 写库前 importTableAsJson 强制锚定异常:', e);
             }
             if (hasFullShujukuCheckpoint()) return true;
         }
-        console.warn('[mvu2shujuku][debug][锚点] 写库前：仍无 full checkpoint，放弃本次写入（避免无锚点 artifacts）。');
+        dbgWarn('[锚点] 写库前：仍无 full checkpoint，放弃本次写入（避免无锚点 artifacts）。');
         return false;
     }
 
@@ -4471,7 +4504,7 @@ ${DB_INIT_SNIPPET}
                 const k = key + '|' + reason;
                 if (reAnchorSkipLog[k]) return;
                 reAnchorSkipLog[k] = true;
-                console.log('[mvu2shujuku][debug][重锚] 跳过（' + reason + '，chat=' + key + '）');
+                dbg('[重锚] 跳过（' + reason + '，chat=' + key + '）');
             };
             // 廉价门控先跑：非转换卡 / 不在开局阶段时直接返回，避免周期自检的开销
             const ch = currentCharacter();
@@ -4505,7 +4538,7 @@ ${DB_INIT_SNIPPET}
                         const iso0 = c0 && c0.TavernDB_ACU_IsolatedData;
                         if (iso0) msg0info = 'msg0.isolatedLen=' + String(JSON.stringify(iso0) || '').length;
                     } catch (e2) {}
-                    console.log('[mvu2shujuku][debug][锚点自检] chatLen=' + chat.length + ' | hasCp=' + hasFullShujukuCheckpoint() +
+                    dbg('[锚点自检] chatLen=' + chat.length + ' | hasCp=' + hasFullShujukuCheckpoint() +
                         ' | ' + msg0info + ' | exportRows=' + rowCount + '（chat=' + key + '）');
                 } catch (e3) {}
             }
@@ -4519,7 +4552,7 @@ ${DB_INIT_SNIPPET}
                 // （initGameSession 被开场流程并发回滚、或持久化的是默认模板），
                 // 需要重建干净锚点；校验通过才跳过。
                 if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
-                    console.log('[mvu2shujuku][debug][重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
+                    dbg('[重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
                 } else {
                     logSkip('聊天仍有 full checkpoint'); return;
                 }
@@ -4542,7 +4575,7 @@ ${DB_INIT_SNIPPET}
                 if (s && Array.isArray(s.seedRows) && s.seedRows.length) { hasRows = true; break; }
             }
             if (!hasRows && !statForCheck) { logSkip('表格无数据行'); return; }
-            console.log('[mvu2shujuku][debug][重锚] full checkpoint 缺失或缺少注入数据（chat=' + key + '，尝试 #' + reAnchorAttempts + '），重建锚点…');
+            dbg('[重锚] full checkpoint 缺失或缺少注入数据（chat=' + key + '，尝试 #' + reAnchorAttempts + '），重建锚点…');
             // 重建模板：优先用缓存的开场 stat（精确含用户注入值，不依赖运行时状态），
             // 否则退回用当前运行时数据合并回模板（保留 sourceData/规则）。
             const reTpl = statForCheck
@@ -4556,7 +4589,7 @@ ${DB_INIT_SNIPPET}
                 templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板',
             }));
             const ok = !(initResult && initResult.success === false);
-            console.log('[mvu2shujuku][debug][重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
+            dbg('[重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
                 ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint() +
                 ' | checkpoint含注入数据=' + (statForCheck ? checkpointHasStatData(activeLayout, statForCheck) : 'N/A'));
             // 重建成功后，运行时必须物化为稳定 key 的 checkpoint 数据：
@@ -4576,7 +4609,7 @@ ${DB_INIT_SNIPPET}
                                 return n;
                             } catch (e) { return -1; }
                         })();
-                        console.log('[mvu2shujuku][debug][重锚] 重建后运行时已按 checkpoint 物化（exportRows=' + afterRows + '）。');
+                        dbg('[重锚] 重建后运行时已按 checkpoint 物化（exportRows=' + afterRows + '）。');
                     }
                 }
             }
@@ -4593,19 +4626,19 @@ ${DB_INIT_SNIPPET}
                         for (let attempt = 0; attempt < 2; attempt++) {
                             try {
                                 await Promise.resolve(saveFn2());
-                                console.log('[mvu2shujuku][debug][重锚] 重建后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
+                                dbg('[重锚] 重建后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
                                 break;
                             } catch (saveErr) {
-                                console.warn('[mvu2shujuku][debug][重锚] 重建后保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                                dbgWarn('[重锚] 重建后保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
                             }
                         }
                     }
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug][重锚] 重建后保存异常:', e && e.message ? e.message : e);
+                    dbgWarn('[重锚] 重建后保存异常:', e && e.message ? e.message : e);
                 }
             }
         } catch (e) {
-            console.warn('[mvu2shujuku][debug][重锚] 异常:', e && e.message ? e.message : e);
+            dbgWarn('[重锚] 异常:', e && e.message ? e.message : e);
         }
     }
     function scheduleReAnchorCheckpoint() {
@@ -4629,12 +4662,12 @@ ${DB_INIT_SNIPPET}
     async function autoInitDatabase() {
         const key0 = autoInitChatId();
         if (autoInitState.running) {
-            console.log('[mvu2shujuku][debug] 开局自动建表跳过：上一轮仍在运行（chat=' + key0 + '）');
+            dbg(' 开局自动建表跳过：上一轮仍在运行（chat=' + key0 + '）');
             return;
         }
         const api = getAcuApi();
         if (!api) {
-            console.log('[mvu2shujuku][debug] 开局自动建表跳过：未找到 SP·数据库 API（chat=' + key0 + '）');
+            dbg(' 开局自动建表跳过：未找到 SP·数据库 API（chat=' + key0 + '）');
             // 插件可能晚于聊天加载就绪：API 缺失时轮询重试，确保锚点在用户操作前建立
             if (autoInitState.apiRetries < 12) {
                 autoInitState.apiRetries += 1;
@@ -4645,7 +4678,7 @@ ${DB_INIT_SNIPPET}
         let character = null;
         try { character = currentCharacter(); } catch (e) {}
         if (!character) {
-            console.log('[mvu2shujuku][debug] 开局自动建表跳过：当前角色为空（chat=' + key0 + '）');
+            dbg(' 开局自动建表跳过：当前角色为空（chat=' + key0 + '）');
             return;
         }
         const charHasExt = !!(character && character.extensions && typeof character.extensions === 'object');
@@ -4661,7 +4694,7 @@ ${DB_INIT_SNIPPET}
                     } else if (full === null) {
                         // 获取完整卡失败（接口返回异常对象/网络问题），不能判定为非转换卡：
                         // 保留运行时状态并重试，避免把本转换器产物误判成普通卡而跳过建表。
-                        console.log('[mvu2shujuku][debug] 开局自动建表：获取完整卡失败，稍后重试（chat=' + key0 + '）');
+                        dbg(' 开局自动建表：获取完整卡失败，稍后重试（chat=' + key0 + '）');
                         if (autoInitNoEntryRetries < 8) {
                             autoInitNoEntryRetries += 1;
                             hostWindow.setTimeout(autoInitDatabase, 3000);
@@ -4670,7 +4703,7 @@ ${DB_INIT_SNIPPET}
                     }
                 }
                 if (!isConvertedMvuCard(character)) {
-                    console.log('[mvu2shujuku][debug] 开局自动建表跳过：当前卡无本转换器标记 extensions.mvu2shujuku（chat=' + key0 + '），不影响其他卡');
+                    dbg(' 开局自动建表跳过：当前卡无本转换器标记 extensions.mvu2shujuku（chat=' + key0 + '），不影响其他卡');
                     // 清掉上一张转换卡残留的运行时状态，确保切到其他卡后不再接管/广播
                     activeLayout = null;
                     activePlaceholderNeeded = false;
@@ -4679,7 +4712,7 @@ ${DB_INIT_SNIPPET}
                     return;
                 }
             } catch (e) {
-                console.log('[mvu2shujuku][debug] 开局自动建表跳过：读取当前卡标记失败（chat=' + key0 + '）');
+                dbg(' 开局自动建表跳过：读取当前卡标记失败（chat=' + key0 + '）');
                 activeLayout = null;
                 activePlaceholderNeeded = false;
                 restoreWindowMvuShim();
@@ -4691,23 +4724,23 @@ ${DB_INIT_SNIPPET}
         const cb = character.character_book;
         if (!(cb && Array.isArray(cb.entries) && cb.entries.length)) {
             hadWorldbook = false;
-            console.log('[mvu2shujuku][debug] 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡（chat=' + key0 + '）');
+            dbg(' 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡（chat=' + key0 + '）');
             try {
                 const full = await fetchFullCharacter(character);
                 if (full && full.character_book && Array.isArray(full.character_book.entries) && full.character_book.entries.length) {
                     character = full;
                     hadWorldbook = true;
                 } else {
-                    console.warn('[mvu2shujuku][debug] /api/characters/get 未能取回世界书（chat=' + key0 + '）');
+                    dbgWarn(' /api/characters/get 未能取回世界书（chat=' + key0 + '）');
                 }
             } catch (e) {
-                console.warn('[mvu2shujuku][debug] /api/characters/get 异常：' + (e && e.message ? e.message : e) + '（chat=' + key0 + '）');
+                dbgWarn(' /api/characters/get 异常：' + (e && e.message ? e.message : e) + '（chat=' + key0 + '）');
             }
             // 完整卡获取失败（含接口返回异常对象）且当前对象无世界书时，稍后重试，
             // 避免“新聊天没有初始化数据/表格为空”的误判。
             if (!(character && character.character_book && Array.isArray(character.character_book.entries) && character.character_book.entries.length) &&
                 autoInitNoEntryRetries < 8) {
-                console.log('[mvu2shujuku][debug] 开局自动建表：完整卡获取失败，稍后重试（chat=' + key0 + '）');
+                dbg(' 开局自动建表：完整卡获取失败，稍后重试（chat=' + key0 + '）');
                 autoInitNoEntryRetries += 1;
                 hostWindow.setTimeout(autoInitDatabase, 3000);
                 return;
@@ -4717,7 +4750,7 @@ ${DB_INIT_SNIPPET}
         const entries = fullCb && Array.isArray(fullCb.entries) ? fullCb.entries : [];
         const entry = entries.find(e => Array.isArray(e.keys) && e.keys.indexOf(DB_TEMPLATE_KEY) !== -1);
         if (!entry || !entry.content) {
-            console.warn('[mvu2shujuku][debug] 未找到 __ACU_TEMPLATE_DATA__ 世界书条目（entries=' + entries.length + '；chat=' + key0 + '）');
+            dbgWarn(' 未找到 __ACU_TEMPLATE_DATA__ 世界书条目（entries=' + entries.length + '；chat=' + key0 + '）');
             if (!hadWorldbook && autoInitNoEntryRetries < 8) {
                 // 懒加载角色列表可能晚于首次触发；轮询重试（4s），最多约 40s
                 autoInitNoEntryRetries += 1;
@@ -4730,25 +4763,25 @@ ${DB_INIT_SNIPPET}
         try {
             const th = character && character.extensions && character.extensions.tavern_helper;
             const scripts = (th && Array.isArray(th.scripts) ? th.scripts : []).map(s => s.name + '(enabled=' + s.enabled + ')');
-            console.log('[mvu2shujuku][debug] 当前卡 tavern_helper.scripts =', JSON.stringify(scripts), '| 桥内容长度=' + (th && Array.isArray(th.scripts) && th.scripts.find(s => /数据桥/.test(String(s.name || ''))) ? String((th.scripts.find(s => /数据桥/.test(String(s.name || ''))).content || '')).length : 0));
+            dbg(' 当前卡 tavern_helper.scripts =', JSON.stringify(scripts), '| 桥内容长度=' + (th && Array.isArray(th.scripts) && th.scripts.find(s => /数据桥/.test(String(s.name || ''))) ? String((th.scripts.find(s => /数据桥/.test(String(s.name || ''))).content || '')).length : 0));
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 读取 tavern_helper 失败:', e);
+            dbgWarn(' 读取 tavern_helper 失败:', e);
         }
         // 缓存当前卡布局，供 EJS 数据读取（window.getAllVariables）
         try {
             const mk = character && character.extensions && character.extensions.mvu2shujuku;
             if (mk && typeof mk.layout === 'string') {
                 activeLayout = JSON.parse(mk.layout);
-                console.log('[mvu2shujuku][debug] 已缓存当前卡布局，条目数=' + (Array.isArray(activeLayout) ? activeLayout.length : 0));
+                dbg(' 已缓存当前卡布局，条目数=' + (Array.isArray(activeLayout) ? activeLayout.length : 0));
             }
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 解析卡布局失败:', e);
+            dbgWarn(' 解析卡布局失败:', e);
         }
         activePlaceholderNeeded = detectPlaceholderFor(character);
-        console.log('[mvu2shujuku][debug][占位符] 当前卡依赖状态栏占位符=' + activePlaceholderNeeded);
+        dbg('[占位符] 当前卡依赖状态栏占位符=' + activePlaceholderNeeded);
         installWindowGetAllVariables();
         const key = autoInitChatId();
-        if (key !== key0) console.log('[mvu2shujuku][debug] 开局自动建表 chat 已切换：' + key0 + ' → ' + key);
+        if (key !== key0) dbg(' 开局自动建表 chat 已切换：' + key0 + ' → ' + key);
         if (autoInitState.apiRetries > 0 && autoInitState.anchorChat !== key) autoInitState.apiRetries = 0;
         // 缓存卡内模板（供写路径补行与锚点重建使用）
         try {
@@ -4860,20 +4893,20 @@ ${DB_INIT_SNIPPET}
             const setter = findSetChatMessages();
             if (setter) {
                 setter([{ message_id: msg.message_id != null ? msg.message_id : (context.chat.length - 1), message: next, mes: next }], { refresh: 'affected' });
-                console.log('[mvu2shujuku][debug][占位符] 已追加到消息 id=' + (msg.message_id != null ? msg.message_id : (context.chat.length - 1)));
+                dbg('[占位符] 已追加到消息 id=' + (msg.message_id != null ? msg.message_id : (context.chat.length - 1)));
             } else {
                 // 找不到 setChatMessages：只改内存，不调 saveChat（避免每次保存超时形成风暴）；
                 // 落盘依赖酒馆自身保存，显示刷新依赖酒馆重渲染
                 msg.mes = next; if (msg.message !== undefined) msg.message = next;
                 if (!window.__mvu2shujukuPlaceholderFallbackWarned) {
                     window.__mvu2shujukuPlaceholderFallbackWarned = true;
-                    console.warn('[mvu2shujuku][debug][占位符] 未找到 setChatMessages，已直接写入内存消息（依赖酒馆下次保存落盘；若前端未刷新请升级酒馆）');
+                    dbgWarn('[占位符] 未找到 setChatMessages，已直接写入内存消息（依赖酒馆下次保存落盘；若前端未刷新请升级酒馆）');
                 }
             }
             lastPlaceholderMsgKey = msgKey;
             lastPlaceholderAt = now;
         } catch (e) {
-            console.warn('[mvu2shujuku][debug][占位符] 追加失败:', e);
+            dbgWarn('[占位符] 追加失败:', e);
         }
     }
 
@@ -4981,6 +5014,7 @@ ${DB_INIT_SNIPPET}
                 installMvuShim: 'auto',
                 appendPlaceholder: true,
                 asPng: 'auto',
+                debug: false,
             };
         }
         return context.extensionSettings[SETTINGS_KEY];
@@ -5079,7 +5113,7 @@ ${DB_INIT_SNIPPET}
         const cb = character.character_book;
         // 非强制时：角色对象已有世界书即视为完整，避免无谓请求
         if (!arguments[1] && cb && Array.isArray(cb.entries) && cb.entries.length) return character;
-        console.log('[mvu2shujuku] ' + (arguments[1] ? '按完整卡校验转换标记' : '角色列表对象缺世界书') + '，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
+        dbg('按完整卡校验转换标记' + (arguments[1] ? '（角色列表对象缺 extensions）' : '（缺世界书）') + '，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
         try {
             const context = getContextSafe();
             const headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
@@ -5088,16 +5122,16 @@ ${DB_INIT_SNIPPET}
                 headers,
                 body: JSON.stringify({ avatar_url: character.avatar }),
             });
-            console.log('[mvu2shujuku] /api/characters/get 状态:', res.status);
+                dbg('/api/characters/get 状态:', res.status);
             if (res.ok) {
                 const full = await res.json();
                 const target = (full && full.data && full.data.character_book) ? full.data : full;
-                console.log('[mvu2shujuku] 完整卡对象 keys:', Object.keys(full || {}).join(','), '| character_book.entries=', target && target.character_book ? target.character_book.entries.length : 'N/A');
+                dbg('完整卡对象 keys:', Object.keys(full || {}).join(','), '| character_book.entries=', target && target.character_book ? target.character_book.entries.length : 'N/A');
                 if (target && target.character_book && Array.isArray(target.character_book.entries) && target.character_book.entries.length) return target;
                 // 接口返回了异常对象（如 {mode,baseHash,nextHash,ops} 哈希差异、空对象等），
                 // 不能当作“完整卡”，否则会把本转换器产物误判为非转换卡而跳过建表。
                 // 返回 null 让调用方区分“获取失败（可重试）”与“确实非转换卡”。
-                console.warn('[mvu2shujuku] /api/characters/get 响应缺少角色卡结构（keys=' + Object.keys(full || {}).join(',') + '），本次视为获取失败，稍后可重试。');
+                dbgWarn('/api/characters/get 响应缺少角色卡结构（keys=' + Object.keys(full || {}).join(',') + '），本次视为获取失败，稍后可重试。');
                 return null;
             }
         } catch (e) {}
@@ -5173,13 +5207,13 @@ ${DB_INIT_SNIPPET}
                     // 插件 insertRow 失败时返回 -1 / false / null，不抛异常；必须检查返回值，
                     // 否则会误报「已物化」而表里其实没有初始行（单例表初始化丢失的根因之一）。
                     if (inserted === -1 || inserted === false || inserted === null || inserted === undefined) {
-                        console.warn('[mvu2shujuku][debug] 物化单例/JSON表初始行失败（insertRow 返回 ' + String(inserted) + '）：' + L.table);
+                        dbgWarn(' 物化单例/JSON表初始行失败（insertRow 返回 ' + String(inserted) + '）：' + L.table);
                     } else {
-                        console.log('[mvu2shujuku][debug] 已物化单例/JSON表初始行：' + L.table + '（新行索引=' + inserted + '）');
+                        dbg(' 已物化单例/JSON表初始行：' + L.table + '（新行索引=' + inserted + '）');
                     }
                 } catch (e) {
                     // 行已存在（UNIQUE 冲突等）→ 已物化，无需处理
-                    console.log('[mvu2shujuku][debug] 单例/JSON表初始行已存在，跳过物化：' + L.table + '（' + (e && e.message ? e.message : e) + '）');
+                    dbg(' 单例/JSON表初始行已存在，跳过物化：' + L.table + '（' + (e && e.message ? e.message : e) + '）');
                 }
             }
             // 诊断：物化后输出单例/JSON 表的行数，便于确认初始行是否真的落表
@@ -5191,7 +5225,7 @@ ${DB_INIT_SNIPPET}
                         if (k.indexOf('sheet_') === 0 && allT[k] && allT[k].name === L.table) {
                             const c = Array.isArray(allT[k].content) ? allT[k].content.length - 1 : 0;
                             const s = Array.isArray(allT[k].seedRows) ? allT[k].seedRows.length : 0;
-                            console.log('[mvu2shujuku][debug] 物化后单例表「' + L.table + '」content 行数=' + c + '，seedRows=' + s);
+                            dbg(' 物化后单例表「' + L.table + '」content 行数=' + c + '，seedRows=' + s);
                             break;
                         }
                     }
@@ -5229,9 +5263,9 @@ ${DB_INIT_SNIPPET}
                         // x.ri 正是 content 数组索引，直接传 x.ri；传 x.ri-1 会把表头当目标，
                         // 实际误删 row_id=1 的注入数据行（日志却按 x.id 打印成“已清理 row_id=2”）。
                         await Promise.resolve(api.deleteRow(L.table, x.ri));
-                        console.log('[mvu2shujuku][debug] 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
+                        dbg(' 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
                     } catch (e) {
-                        console.warn('[mvu2shujuku][debug] 清理单例表多余行失败:', e);
+                        dbgWarn(' 清理单例表多余行失败:', e);
                     }
                 }
             }
@@ -5445,7 +5479,7 @@ ${DB_INIT_SNIPPET}
             }
             return out;
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 合并注入模板失败:', e && e.message ? e.message : e);
+            dbgWarn(' 合并注入模板失败:', e && e.message ? e.message : e);
             return null;
         }
     }
@@ -5622,7 +5656,7 @@ ${DB_INIT_SNIPPET}
             }
             return out;
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] applyTargetToTemplate 失败:', e && e.message ? e.message : e);
+            dbgWarn(' applyTargetToTemplate 失败:', e && e.message ? e.message : e);
             return tplCached;
         }
     }
@@ -5776,10 +5810,10 @@ ${DB_INIT_SNIPPET}
             const cpData = readFullCheckpointData();
             if (!cpData || typeof api.importTableAsJson !== 'function') return false;
             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(cpData), { persist: false, mode: 'restore' }));
-            console.log('[mvu2shujuku][debug] 运行时按 checkpoint 数据物化（稳定 key，persist:false）=' + (ok ? '成功' : '失败'));
+            dbg(' 运行时按 checkpoint 数据物化（稳定 key，persist:false）=' + (ok ? '成功' : '失败'));
             return !!ok;
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 运行时按 checkpoint 物化异常:', e && e.message ? e.message : e);
+            dbgWarn(' 运行时按 checkpoint 物化异常:', e && e.message ? e.message : e);
             return false;
         }
     }
@@ -5802,13 +5836,13 @@ ${DB_INIT_SNIPPET}
                     // 触发插件 V2 boundary_after_data_mismatch。锚点无法建立则放弃本次写入。
                     const tplCached = cachedTemplateForCurrentCard();
                     if (!tplCached) {
-                        console.warn('[mvu2shujuku][debug][流程] 写库前无模板缓存，放弃本次写入（等待自动建表）。');
+                        dbgWarn('[流程] 写库前无模板缓存，放弃本次写入（等待自动建表）。');
                         pendingStatWrite = null;
                         return;
                     }
                     const anchored = await ensureCheckpointBeforeWrite(api, tplCached);
                     if (!anchored) {
-                        console.warn('[mvu2shujuku][debug][流程] 写库前无法建立 full checkpoint，放弃本次写入，避免产生无锚点 artifacts。');
+                        dbgWarn('[流程] 写库前无法建立 full checkpoint，放弃本次写入，避免产生无锚点 artifacts。');
                         pendingStatWrite = null;
                         return;
                     }
@@ -5842,7 +5876,7 @@ ${DB_INIT_SNIPPET}
                             const heroName = target.主角 && target.主角.姓名;
                             const mtProt = mergedTemplate && mergedTemplate.sheet_zhujiaobiao;
                             const mtRow = mtProt && Array.isArray(mtProt.content) ? mtProt.content[1] : null;
-                            console.log('[mvu2shujuku][debug][注入合并] 首次写库=' + isFirstWrite + ' | target.主角.姓名=' + heroName +
+                            dbg('[注入合并] 首次写库=' + isFirstWrite + ' | target.主角.姓名=' + heroName +
                                 ' | 合并模板主角表 content 行数=' + (mtProt && Array.isArray(mtProt.content) ? mtProt.content.length : 'N/A') +
                                 ' | content[1]=' + (mtRow ? JSON.stringify(mtRow).slice(0, 160) : '无'));
                         } catch (e) {}
@@ -5854,7 +5888,7 @@ ${DB_INIT_SNIPPET}
                                 templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板',
                             }));
                             if (initResult && initResult.success === false) {
-                                console.warn('[mvu2shujuku][debug] initGameSession(注入合并) 失败：' + (initResult.message || '未知错误') + '，回退快照提交');
+                                dbgWarn(' initGameSession(注入合并) 失败：' + (initResult.message || '未知错误') + '，回退快照提交');
                             } else {
                                 const initInfo = initResult ? JSON.stringify({
                                     success: initResult.success,
@@ -5862,7 +5896,7 @@ ${DB_INIT_SNIPPET}
                                     warning: initResult.warning || '',
                                     message: initResult.message || '',
                                 }) : 'undefined';
-                                console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）| initResult=' + initInfo.slice(0, 300));
+                                dbg(' Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）| initResult=' + initInfo.slice(0, 300));
                                 // initGameSession 成功即已写入干净 full checkpoint（logEntries=0，与参考卡一致），
                                 // 持久化完成，标记为成功。**绝不能**再走 importTableAsJson(persist) 兜底——
                                 // 它会追加一条 data_replace logEntry 弄脏链，刷新回放失败导致数据回默认（实测根因）。
@@ -5871,22 +5905,22 @@ ${DB_INIT_SNIPPET}
                                 // 等不到就用运行时专用通道（persist:false）物化——只改内存，不写任何 logEntry。
                                 const injected = await verifyTemplateInjected(api, activeLayout, target, 1800);
                                 if (injected) {
-                                    console.log('[mvu2shujuku][debug][注入合并] initGameSession 后已在运行时表格确认注入数据。');
+                                    dbg('[注入合并] initGameSession 后已在运行时表格确认注入数据。');
                                 } else {
                                     // 运行时物化只能使用插件规范化后的 checkpoint 数据（稳定 key）。
                                     // 若此刻 checkpoint 尚未就绪/未含注入数据，本次跳过物化，
                                     // 由稍后的重锚重建 checkpoint 后用稳定 key 数据补物化——
                                     // 绝不能用原始 key 的 mergedTemplate 灌运行时（会导致后续编辑的
                                     // baseRevision 用原始 key，刷新回放失败、整链回默认）。
-                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后运行时未确认注入数据，尝试用 checkpoint 数据物化（稳定 key，persist:false，不写 logEntry）…');
+                                    dbgWarn('[注入合并] initGameSession 后运行时未确认注入数据，尝试用 checkpoint 数据物化（稳定 key，persist:false，不写 logEntry）…');
                                     const cpReady = checkpointHasStatData(activeLayout, target);
                                     if (cpReady) {
                                         const rtOk = await materializeRuntimeFromCheckpoint(api);
-                                        console.log('[mvu2shujuku][debug][注入合并] checkpoint 物化结果=' + (rtOk ? '成功' : '失败'));
+                                        dbg('[注入合并] checkpoint 物化结果=' + (rtOk ? '成功' : '失败'));
                                         const injected2 = await verifyTemplateInjected(api, activeLayout, target, 1000);
-                                        console.log('[mvu2shujuku][debug][注入合并] 物化后确认注入数据=' + injected2);
+                                        dbg('[注入合并] 物化后确认注入数据=' + injected2);
                                     } else {
-                                        console.warn('[mvu2shujuku][debug][注入合并] checkpoint 尚未含注入数据，本次跳过运行时物化，等重锚后用稳定 key 数据补物化。');
+                                        dbgWarn('[注入合并] checkpoint 尚未含注入数据，本次跳过运行时物化，等重锚后用稳定 key 数据补物化。');
                                     }
                                 }
                                 // 持久化层校验：full checkpoint 里必须真的含注入数据（而不是默认值）。
@@ -5897,13 +5931,13 @@ ${DB_INIT_SNIPPET}
                                     if (holder) holder.__mvu2shujukuOpeningStat = { chat: chatKeyNow, stat: target, at: Date.now() };
                                     const cpOk = checkpointHasStatData(activeLayout, target);
                                     if (!cpOk) {
-                                        console.warn('[mvu2shujuku][debug][注入合并] full checkpoint 中未确认注入数据（可能被开场流程回滚），安排重锚重建干净 checkpoint。');
+                                        dbgWarn('[注入合并] full checkpoint 中未确认注入数据（可能被开场流程回滚），安排重锚重建干净 checkpoint。');
                                         scheduleReAnchorCheckpoint();
                                     } else {
-                                        console.log('[mvu2shujuku][debug][注入合并] full checkpoint 已包含注入数据（持久化校验通过）。');
+                                        dbg('[注入合并] full checkpoint 已包含注入数据（持久化校验通过）。');
                                     }
                                 } catch (e2) {
-                                    console.warn('[mvu2shujuku][debug][注入合并] checkpoint 数据校验异常:', e2 && e2.message ? e2.message : e2);
+                                    dbgWarn('[注入合并] checkpoint 数据校验异常:', e2 && e2.message ? e2.message : e2);
                                 }
                             }
                         }
@@ -5917,9 +5951,9 @@ ${DB_INIT_SNIPPET}
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
                                 usedSnapshot = true;
-                                console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
+                                dbg(' Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
                             } else {
-                                console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交失败，回退差异写入');
+                                dbgWarn(' importTableAsJson 快照提交失败，回退差异写入');
                             }
                         }
                         if (usedSnapshot) {
@@ -5937,19 +5971,19 @@ ${DB_INIT_SNIPPET}
                                     for (let attempt = 0; attempt < 2; attempt++) {
                                         try {
                                             await Promise.resolve(saveFn2());
-                                            console.log('[mvu2shujuku][debug][保存] 首写快照提交后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
+                                            dbg('[保存] 首写快照提交后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
                                             break;
                                         } catch (saveErr) {
-                                            console.warn('[mvu2shujuku][debug][保存] 首写后等待酒馆保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                                            dbgWarn('[保存] 首写后等待酒馆保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
                                         }
                                     }
                                 }
                             } catch (e) {
-                                console.warn('[mvu2shujuku][debug][保存] 首写后等待酒馆保存异常（不影响内存数据）:', e && e.message ? e.message : e);
+                                dbgWarn('[保存] 首写后等待酒馆保存异常（不影响内存数据）:', e && e.message ? e.message : e);
                             }
                         }
                     } catch (e) {
-                        console.warn('[mvu2shujuku][debug] 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
+                        dbgWarn(' 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
                     }
                     if (!usedSnapshot) {
                         // 差异写入（裸 updateCell/insertRow）——作为 initGameSession/importTableAsJson
@@ -5957,7 +5991,7 @@ ${DB_INIT_SNIPPET}
                         // 主动 saveChat 落盘、以及清理多余的垫底行。
                         await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                         n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
-                        if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                        if (n > 0) dbg(' Mvu 合并写入完成：差异 ' + n + ' 条');
                         // 降级路径依赖酒馆 saveChat 落盘（importTableAsJson 成功时插件已自己持久化，无需额外保存）
                         try {
                             const ctx3 = getContextSafe();
@@ -5969,10 +6003,10 @@ ${DB_INIT_SNIPPET}
                                 for (let attempt = 0; attempt < 2; attempt++) {
                                     try {
                                         await Promise.resolve(saveFn3());
-                                        console.log('[mvu2shujuku][debug][保存] 差异写入后已主动保存聊天（attempt=' + (attempt + 1) + '）');
+                                        dbg('[保存] 差异写入后已主动保存聊天（attempt=' + (attempt + 1) + '）');
                                         break;
                                     } catch (saveErr) {
-                                        console.warn('[mvu2shujuku][debug][保存] 主动保存聊天失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                                        dbgWarn('[保存] 主动保存聊天失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
                                     }
                                 }
                             }
@@ -5997,12 +6031,12 @@ ${DB_INIT_SNIPPET}
                                 const heroName = sd.主角 && sd.主角.姓名;
                                 containsUserData = heroName && heroName !== '未知' && s.indexOf(String(heroName)) !== -1;
                             } catch (e) {}
-                            console.log('[mvu2shujuku][debug][checkpoint] 消息' + mi + ' 有 IsolatedData | json长度=' + (JSON.stringify(iso) || '').length + ' | 含主角姓名=' + containsUserData);
+                            dbg('[checkpoint] 消息' + mi + ' 有 IsolatedData | json长度=' + (JSON.stringify(iso) || '').length + ' | 含主角姓名=' + containsUserData);
                             break;
                         }
                     } catch (e) {}
                     if (!hasFullShujukuCheckpoint()) {
-                        console.warn('[mvu2shujuku][debug][流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
+                        dbgWarn('[流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
                     }
                     // 单例/JSON 表去重：仅在降级裸写路径物化过垫底行时需要清理；
                     // initGameSession/importTableAsJson 成功后表格本身是干净的，无需清理。
@@ -6011,10 +6045,10 @@ ${DB_INIT_SNIPPET}
                     }
                     dispatchVariableUpdateEnded({ stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} }, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
                 } else {
-                    console.warn('[mvu2shujuku][debug] Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
+                    dbgWarn(' Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
                 }
             } catch (e) {
-                console.warn('[mvu2shujuku][debug] Mvu 合并写入异常:', e);
+                dbgWarn(' Mvu 合并写入异常:', e);
             } finally {
                 if (statWriteOverlayGen === gen) pendingStatWrite = null;
             }
@@ -6045,7 +6079,7 @@ ${DB_INIT_SNIPPET}
             }
         };
         window.getAllVariables.__mvu2shujuku = true;
-        console.log('[mvu2shujuku][debug] 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
+        dbg(' 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
     }
     function restoreWindowGetAllVariables() {
         if (!installedGetAllVariables) return;
@@ -6367,10 +6401,10 @@ ${DB_INIT_SNIPPET}
                     if (!mvu_data.display_data || typeof mvu_data.display_data !== 'object') mvu_data.display_data = {};
                     try { (() => { let dc = mvu_data.display_data; for (let i = 0; i < parts.length - 1; i++) { if (!dc[parts[i]] || typeof dc[parts[i]] !== 'object') dc[parts[i]] = {}; dc = dc[parts[i]]; } dc[parts[parts.length - 1]] = ds; })(); } catch (e) {}
                     if (mvu_data.delta_data && typeof mvu_data.delta_data === 'object') { try { (() => { let dc2 = mvu_data.delta_data; for (let i = 0; i < parts.length - 1; i++) { if (!dc2[parts[i]] || typeof dc2[parts[i]] !== 'object') dc2[parts[i]] = {}; dc2 = dc2[parts[i]]; } dc2[parts[parts.length - 1]] = ds; })(); } catch (e) {} }
-                    console.log('[mvu2shujuku][debug] Mvu.setMvuVariable:', path, '=', String(new_value) + (reason ? ' (' + reason + ')' : ''));
+                    dbg(' Mvu.setMvuVariable:', path, '=', String(new_value) + (reason ? ' (' + reason + ')' : ''));
                     return true;
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug] Mvu.setMvuVariable 异常:', e);
+                    dbgWarn(' Mvu.setMvuVariable 异常:', e);
                     return false;
                 }
             };
@@ -6378,13 +6412,13 @@ ${DB_INIT_SNIPPET}
                 try {
                     const api = getAcuApi();
                     if (!api || !activeLayout) {
-                        console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空') + '（自动建表尚未缓存布局，或当前卡不是转换产物）');
+                        dbgWarn(' Mvu.replaceMvuData 被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空') + '（自动建表尚未缓存布局，或当前卡不是转换产物）');
                         return false;
                     }
                     scheduleWindowStatOverlay((data && data.stat_data) || {});
                     return true;
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 异常:', e);
+                    dbgWarn(' Mvu.replaceMvuData 异常:', e);
                     return false;
                 }
             };
@@ -6398,7 +6432,7 @@ ${DB_INIT_SNIPPET}
                     applyMvuCommands(out.stat_data, cmds, out.display_data);
                     return out;
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug] Mvu.parseMessage 异常:', e);
+                    dbgWarn(' Mvu.parseMessage 异常:', e);
                     return undefined;
                 }
             };
@@ -6480,7 +6514,7 @@ ${DB_INIT_SNIPPET}
             windowMvuShimTimer = hostWindow.setInterval(() => { try { applyWindowMvuShim(); } catch (e) {} }, 2000);
             try { if (typeof hostWindow.eventOn === 'function') hostWindow.eventOn('global_Mvu_initialized', () => { try { applyWindowMvuShim(); } catch (e) {} }); } catch (e) {}
         }
-        console.log('[mvu2shujuku][debug] 扩展侧已安装完整 Mvu shim（接管式）');
+        dbg(' 扩展侧已安装完整 Mvu shim（接管式）');
     }
     // 按当前卡同步运行时：转换卡 → 接管 Mvu/定义 getAllVariables/注册表格广播；
     // 其他卡 → 全部撤销，确保扩展不影响任何非转换卡。
@@ -6500,7 +6534,7 @@ ${DB_INIT_SNIPPET}
                 else if (full === null) {
                     // 获取完整卡失败（宿主扩展可能劫持了 fetch 返回 diff 对象）：
                     // 不能据此撤销运行时，保留现状等 autoInitDatabase 重试。
-                    console.log('[mvu2shujuku][debug] 同步运行时：获取完整卡失败，暂不撤销（等自动建表重试）');
+                    dbg(' 同步运行时：获取完整卡失败，暂不撤销（等自动建表重试）');
                     return;
                 }
             } catch (e) {}
@@ -6570,11 +6604,11 @@ ${DB_INIT_SNIPPET}
                 presetCount = names.length;
                 presetOk = true;
             } catch (e) {
-                console.warn('[mvu2shujuku][debug] getTemplatePresetNames 异常:', e);
+                dbgWarn(' getTemplatePresetNames 异常:', e);
             }
         }
-        console.log(
-            '[mvu2shujuku][debug] populateMergeSource: api=' + !!api +
+        dbg(
+            'populateMergeSource: api=' + !!api +
             ' | 有 getTemplatePresetNames=' + !!(api && typeof api.getTemplatePresetNames === 'function') +
             ' | 预设数=' + presetCount + ' | 可读=' + presetOk
         );
@@ -6604,7 +6638,7 @@ ${DB_INIT_SNIPPET}
         const v = sel.value;
         if (!v) { toast('请先选择模板来源', 'error'); return; }
         const api = getAcuApi();
-        console.log('[mvu2shujuku][debug] loadMergeTables: 来源=' + v + ' | api=' + !!api + ' | 有 getTableTemplate=' + !!(api && typeof api.getTableTemplate === 'function'));
+        dbg(' loadMergeTables: 来源=' + v + ' | api=' + !!api + ' | 有 getTableTemplate=' + !!(api && typeof api.getTableTemplate === 'function'));
         if (!api || typeof api.getTableTemplate !== 'function') {
             toast('未找到 SP·数据库 插件 API', 'error');
             return;
@@ -6628,14 +6662,14 @@ ${DB_INIT_SNIPPET}
         } else {
             try { tpl = api.getTableTemplate({ scope, presetName }) || null; } catch (e) { tpl = null; }
         }
-        console.log('[mvu2shujuku][debug] loadMergeTables: scope=' + scope + ' | presetName=' + presetName + ' | 读到的模板=' + !!tpl + ' | sheet 数=' + (tpl ? Object.keys(tpl).filter(k => k.indexOf('sheet_') === 0).length : 0));
+        dbg(' loadMergeTables: scope=' + scope + ' | presetName=' + presetName + ' | 读到的模板=' + !!tpl + ' | sheet 数=' + (tpl ? Object.keys(tpl).filter(k => k.indexOf('sheet_') === 0).length : 0));
         if (!tpl || typeof tpl !== 'object') {
             toast('未读取到模板（该来源为空或插件未就绪）', 'error');
             return;
         }
         mergeState.sourceTemplate = tpl;
         const sheets = Object.keys(tpl).filter(k => k.startsWith('sheet_') && tpl[k] && typeof tpl[k] === 'object' && !Array.isArray(tpl[k]));
-        console.log('[mvu2shujuku][debug] loadMergeTables: 有效表=' + sheets.length + ' | 表名=' + sheets.map(k => tpl[k].name).join('、'));
+        dbg(' loadMergeTables: 有效表=' + sheets.length + ' | 表名=' + sheets.map(k => tpl[k].name).join('、'));
         if (!sheets.length) {
             box.innerHTML = '';
             toast('该模板没有表格', 'error');
@@ -6685,7 +6719,7 @@ ${DB_INIT_SNIPPET}
             return;
         }
         const merged = core.mergeTemplates(lastResult.template, mergeState.sourceTemplate, checked);
-        console.log('[mvu2shujuku][debug] applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
+        dbg(' applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
         if (!merged.added.length) { toast('没有可并入的表（全部重名或无效）', 'error'); return; }
         const settings = getSettings();
         const mode = settings.mode === 'native' ? 'native' : settings.mode === 'sqlite' ? 'sqlite' : 'both';
@@ -6705,7 +6739,7 @@ ${DB_INIT_SNIPPET}
             }
             lastResult = result;
             renderResult(result);
-            console.log('[mvu2shujuku][debug] applyMergeTables 重新转换完成: meta.tableCount=' + result.meta.tableCount + ' | tableNames=' + result.meta.tableNames.join('、'));
+            dbg(' applyMergeTables 重新转换完成: meta.tableCount=' + result.meta.tableCount + ' | tableNames=' + result.meta.tableNames.join('、'));
             const msg = '合并完成：新增 ' + merged.added.length + ' 张表' + (merged.skipped.length ? '，跳过重名：' + merged.skipped.join('、') : '');
             if (status) status.textContent = msg;
             toast(msg, 'info');
@@ -6969,6 +7003,9 @@ ${DB_INIT_SNIPPET}
             '      <div class="mvu2shujuku-row">',
             '        <label title="状态栏刷新由数据库表格更新回调驱动；此选项额外在 AI 回复结束时补一次刷新并处理消息里的 <UpdateVariable>/<json_patch> 更新块"><input type="checkbox" id="mvu2shujuku-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 表格更新后自动刷新状态栏（含消息收尾兜底）</label>',
             '      </div>',
+            '      <div class="mvu2shujuku-row">',
+            '        <label title="勾选后输出 [mvu2shujuku][debug] 调试日志（排查问题时开启，平时关闭）"><input type="checkbox" id="mvu2shujuku-debug" ' + (settings.debug ? 'checked' : '') + ' /> 输出 debug 日志</label>',
+            '      </div>',
             '      <div class="mvu2shujuku-help">',
             '        状态栏刷新与 MVU 原版一致：数据库一有变动就广播 <code>mag_variable_update_ended</code>（VARIABLE_UPDATE_ENDED），前端原 eventOn 监听直接生效。',
             '        勾选上方选项后，还会在每次 AI 回复结束时补一次刷新，并顺带处理开场白/消息里的 <code>&lt;UpdateVariable&gt;</code> / <code>&lt;json_patch&gt;</code> 旧式更新块。',
@@ -7135,6 +7172,17 @@ ${DB_INIT_SNIPPET}
                 saveSettings();
             });
         }
+        const debugBox = panel.querySelector('#mvu2shujuku-debug');
+        if (debugBox && debugBox.dataset.bound !== 'true') {
+            debugBox.dataset.bound = 'true';
+            debugBox.addEventListener('change', () => {
+                getSettings().debug = debugBox.checked;
+                try {
+                    if (typeof window !== 'undefined') window.__mvu2shujukuDebug = debugBox.checked;
+                } catch (e) {}
+                saveSettings();
+            });
+        }
         const pngSel = panel.querySelector('#mvu2shujuku-png');
         if (pngSel && pngSel.dataset.bound !== 'true') {
             pngSel.dataset.bound = 'true';
@@ -7173,14 +7221,14 @@ ${DB_INIT_SNIPPET}
                     ejs.defines.mvu2shujukuGetAllVariables = function () {
                         try { return window.getAllVariables ? window.getAllVariables() : { stat_data: {} }; } catch (e) { return { stat_data: {} }; }
                     };
-                    console.log('[mvu2shujuku][debug] 扩展侧注册 mvu2shujukuGetAllVariables 完成');
+                    dbg(' 扩展侧注册 mvu2shujukuGetAllVariables 完成');
                 }
                 defineTimer = null;
             } else if (!defineTimer) {
                 defineTimer = hostWindow.setTimeout(() => { defineTimer = null; ensureTemplateDefine(); }, 2000);
             }
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 扩展侧注册异常:', e);
+            dbgWarn(' 扩展侧注册异常:', e);
         }
     }
     function bindDebugHooks(context) {
@@ -7193,8 +7241,8 @@ ${DB_INIT_SNIPPET}
                 if (firstPreparedLogged) return;
                 firstPreparedLogged = true;
                 const pageEjs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
-                console.log(
-                    '[mvu2shujuku][debug] prompt_template_prepare 首次上下文: 键数=' + (prepared ? Object.keys(prepared).length : 0) +
+                dbg(
+                    'prompt_template_prepare 首次上下文: 键数=' + (prepared ? Object.keys(prepared).length : 0) +
                     ' | getvar=' + typeof (prepared && prepared.getvar) +
                     ' | mvu2shujukuGetAllVariables=' + typeof (prepared && prepared.mvu2shujukuGetAllVariables) +
                     ' | getAllVariables=' + typeof (prepared && prepared.getAllVariables) +
@@ -7202,14 +7250,19 @@ ${DB_INIT_SNIPPET}
                     ' | 页面defines注册函数=' + typeof (pageEjs && pageEjs.defines && pageEjs.defines.mvu2shujukuGetAllVariables)
                 );
             });
-            console.log('[mvu2shujuku][debug] 已监听 prompt_template_prepare 事件（仅首次打印上下文）');
+            dbg(' 已监听 prompt_template_prepare 事件（仅首次打印上下文）');
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 监听 prompt_template_prepare 失败:', e);
+            dbgWarn(' 监听 prompt_template_prepare 失败:', e);
         }
     }
 
     function main() {
         const context = getContextSafe();
+        // 按设置初始化 debug 全局标记（dbg/dbgWarn 都读它）
+        try {
+            const s = getSettings();
+            if (typeof window !== 'undefined') window.__mvu2shujukuDebug = !!s.debug;
+        } catch (e) {}
         installEarlyEventOnFallback();
         ensureSettingsPanel(context);
         bindDebugHooks(context);
@@ -7224,8 +7277,8 @@ ${DB_INIT_SNIPPET}
         bindAutoInit(context);
         hostWindow.setTimeout(autoInitDatabase, 1500);
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
-        console.log(
-            '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
+        dbg(
+            '加载时 EjsTemplate=' + !!ejs +
             ' | defines=' + !!(ejs && ejs.defines) +
             ' | 已注册 mvu2shujukuGetAllVariables=' + typeof (ejs && ejs.defines && ejs.defines.mvu2shujukuGetAllVariables)
         );
@@ -7348,6 +7401,22 @@ root.__MVU2SHUJUKU_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢�
     const SETTINGS_KEY = 'mvu2shujuku';
     const state = { timer: null };
 
+    // debug 开关：读 window.__mvu2shujukuDebug（由设置面板/加载时写入）
+    function mvu2shujukuDebugOn() {
+        try {
+            const w = (typeof window !== 'undefined' ? window : globalThis);
+            return !!(w && w.__mvu2shujukuDebug);
+        } catch (e) { return false; }
+    }
+    function dbg() {
+        if (!mvu2shujukuDebugOn()) return;
+        try { console.log.apply(console, ['[mvu2shujuku][debug]'].concat(Array.prototype.slice.call(arguments))); } catch (e) {}
+    }
+    function dbgWarn() {
+        if (!mvu2shujukuDebugOn()) return;
+        try { console.warn.apply(console, ['[mvu2shujuku][debug]'].concat(Array.prototype.slice.call(arguments))); } catch (e) {}
+    }
+
     // 开局建表核心流程（与卡内数据桥同一份逻辑：缺表时调用 SP·数据库 的 initGameSession）
 function mvu2shujukuDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}
 function mvu2shujukuExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}
@@ -7453,7 +7522,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     async function anchorCheckpointIfMissing(api, tplCached, reason) {
         if (!api || !tplCached) return false;
         if (mvu2shujukuInitSessionHung) {
-            console.warn('[mvu2shujuku][debug][锚点] ' + reason + '：initGameSession 曾挂起，跳过重建。');
+            dbgWarn('[锚点] ' + reason + '：initGameSession 曾挂起，跳过重建。');
             return false;
         }
         if (hasFullShujukuCheckpoint()) return true;
@@ -7461,10 +7530,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const expected = mvu2shujukuExpectedTableNames(tplCached);
             const missing = mvu2shujukuMissingTableNames(api, expected);
             if (missing.length) {
-                console.log('[mvu2shujuku][debug][锚点] ' + reason + '：缺表 ' + missing.join('、') + '，交给建表流程处理。');
+                dbg('[锚点] ' + reason + '：缺表 ' + missing.join('、') + '，交给建表流程处理。');
                 return false;
             }
-            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：聊天缺少 full checkpoint，重建数据库锚点…');
+            dbg('[锚点] ' + reason + '：聊天缺少 full checkpoint，重建数据库锚点…');
             const r = await mvu2shujukuWithTimeout(
                 api.initGameSession({}, { injectTemplate: true, loadPreset: false, templateData: tplCached, templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板' }),
                 20000,
@@ -7472,7 +7541,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             );
             const ok = !(r && r.success === false) && !(r && r.timeout);
             const anchored = ok && hasFullShujukuCheckpoint();
-            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')) + ' | 锚点=' + anchored);
+            dbg('[锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')) + ' | 锚点=' + anchored);
             return anchored;
         }
         // 表数据与模板不一致（含“模板行被注入/捏人改动”）时，**绝不** initGameSession 重置——
@@ -7480,18 +7549,18 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         // 因此这里不再区分“有额外行/无额外行”，只要不一致就走下方 importTableAsJson 锚定当前状态。
         // 表已含用户数据但无锚点：用插件提交 API 把当前状态落成 full checkpoint（不丢数据）
         if (typeof api.importTableAsJson === 'function') {
-            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：表含数据且无锚点，用 importTableAsJson 把当前状态提交为 checkpoint…');
+            dbg('[锚点] ' + reason + '：表含数据且无锚点，用 importTableAsJson 把当前状态提交为 checkpoint…');
             try {
                 const snap = JSON.stringify(api.exportTableAsJson() || {});
                 const ok2 = await Promise.resolve(api.importTableAsJson(snap, {}));
-                console.log('[mvu2shujuku][debug][锚点] ' + reason + '：importTableAsJson 锚定=' + (ok2 ? '成功' : '失败'));
+                dbg('[锚点] ' + reason + '：importTableAsJson 锚定=' + (ok2 ? '成功' : '失败'));
                 return !!ok2;
             } catch (e) {
-                console.warn('[mvu2shujuku][debug][锚点] ' + reason + '：importTableAsJson 锚定异常:', e);
+                dbgWarn('[锚点] ' + reason + '：importTableAsJson 锚定异常:', e);
                 return false;
             }
         }
-        console.warn('[mvu2shujuku][debug][锚点] ' + reason + '：表含数据且无锚点，且插件无 importTableAsJson，无法锚定。');
+        dbgWarn('[锚点] ' + reason + '：表含数据且无锚点，且插件无 importTableAsJson，无法锚定。');
         return false;
     }
 
@@ -7501,23 +7570,23 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     // - 表有额外行（真实积累数据）→ importTableAsJson 锚定当前状态；失败则放弃本次写入，绝不重置已有数据
     async function ensureCheckpointBeforeWrite(api, tplCached) {
         const hasCp = hasFullShujukuCheckpoint();
-        console.log('[mvu2shujuku][debug][流程] 写库前锚点状态：hasCheckpoint=' + hasCp);
+        dbg('[流程] 写库前锚点状态：hasCheckpoint=' + hasCp);
         if (hasCp) return true;
         await anchorCheckpointIfMissing(api, tplCached, '写库前');
         if (hasFullShujukuCheckpoint()) return true;
         // 插件 initGameSession 可能“完成”却不建 V2 checkpoint：改用 importTableAsJson 提交当前状态强制建锚。
         // 开局阶段（尚无 artifacts）插件会接受并建立 full checkpoint。
         if (typeof api.importTableAsJson === 'function' && !mvu2shujukuInitSessionHung) {
-            console.log('[mvu2shujuku][debug][锚点] 写库前：initGameSession 未建立锚点，改用 importTableAsJson 强制锚定…');
+            dbg('[锚点] 写库前：initGameSession 未建立锚点，改用 importTableAsJson 强制锚定…');
             try {
                 const snap = JSON.stringify(api.exportTableAsJson() || {});
                 await Promise.resolve(api.importTableAsJson(snap, {}));
             } catch (e) {
-                console.warn('[mvu2shujuku][debug][锚点] 写库前 importTableAsJson 强制锚定异常:', e);
+                dbgWarn('[锚点] 写库前 importTableAsJson 强制锚定异常:', e);
             }
             if (hasFullShujukuCheckpoint()) return true;
         }
-        console.warn('[mvu2shujuku][debug][锚点] 写库前：仍无 full checkpoint，放弃本次写入（避免无锚点 artifacts）。');
+        dbgWarn('[锚点] 写库前：仍无 full checkpoint，放弃本次写入（避免无锚点 artifacts）。');
         return false;
     }
 
@@ -7548,7 +7617,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 const k = key + '|' + reason;
                 if (reAnchorSkipLog[k]) return;
                 reAnchorSkipLog[k] = true;
-                console.log('[mvu2shujuku][debug][重锚] 跳过（' + reason + '，chat=' + key + '）');
+                dbg('[重锚] 跳过（' + reason + '，chat=' + key + '）');
             };
             // 廉价门控先跑：非转换卡 / 不在开局阶段时直接返回，避免周期自检的开销
             const ch = currentCharacter();
@@ -7582,7 +7651,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         const iso0 = c0 && c0.TavernDB_ACU_IsolatedData;
                         if (iso0) msg0info = 'msg0.isolatedLen=' + String(JSON.stringify(iso0) || '').length;
                     } catch (e2) {}
-                    console.log('[mvu2shujuku][debug][锚点自检] chatLen=' + chat.length + ' | hasCp=' + hasFullShujukuCheckpoint() +
+                    dbg('[锚点自检] chatLen=' + chat.length + ' | hasCp=' + hasFullShujukuCheckpoint() +
                         ' | ' + msg0info + ' | exportRows=' + rowCount + '（chat=' + key + '）');
                 } catch (e3) {}
             }
@@ -7596,7 +7665,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 // （initGameSession 被开场流程并发回滚、或持久化的是默认模板），
                 // 需要重建干净锚点；校验通过才跳过。
                 if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
-                    console.log('[mvu2shujuku][debug][重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
+                    dbg('[重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
                 } else {
                     logSkip('聊天仍有 full checkpoint'); return;
                 }
@@ -7619,7 +7688,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (s && Array.isArray(s.seedRows) && s.seedRows.length) { hasRows = true; break; }
             }
             if (!hasRows && !statForCheck) { logSkip('表格无数据行'); return; }
-            console.log('[mvu2shujuku][debug][重锚] full checkpoint 缺失或缺少注入数据（chat=' + key + '，尝试 #' + reAnchorAttempts + '），重建锚点…');
+            dbg('[重锚] full checkpoint 缺失或缺少注入数据（chat=' + key + '，尝试 #' + reAnchorAttempts + '），重建锚点…');
             // 重建模板：优先用缓存的开场 stat（精确含用户注入值，不依赖运行时状态），
             // 否则退回用当前运行时数据合并回模板（保留 sourceData/规则）。
             const reTpl = statForCheck
@@ -7633,7 +7702,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板',
             }));
             const ok = !(initResult && initResult.success === false);
-            console.log('[mvu2shujuku][debug][重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
+            dbg('[重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
                 ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint() +
                 ' | checkpoint含注入数据=' + (statForCheck ? checkpointHasStatData(activeLayout, statForCheck) : 'N/A'));
             // 重建成功后，运行时必须物化为稳定 key 的 checkpoint 数据：
@@ -7653,7 +7722,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 return n;
                             } catch (e) { return -1; }
                         })();
-                        console.log('[mvu2shujuku][debug][重锚] 重建后运行时已按 checkpoint 物化（exportRows=' + afterRows + '）。');
+                        dbg('[重锚] 重建后运行时已按 checkpoint 物化（exportRows=' + afterRows + '）。');
                     }
                 }
             }
@@ -7670,19 +7739,19 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         for (let attempt = 0; attempt < 2; attempt++) {
                             try {
                                 await Promise.resolve(saveFn2());
-                                console.log('[mvu2shujuku][debug][重锚] 重建后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
+                                dbg('[重锚] 重建后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
                                 break;
                             } catch (saveErr) {
-                                console.warn('[mvu2shujuku][debug][重锚] 重建后保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                                dbgWarn('[重锚] 重建后保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
                             }
                         }
                     }
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug][重锚] 重建后保存异常:', e && e.message ? e.message : e);
+                    dbgWarn('[重锚] 重建后保存异常:', e && e.message ? e.message : e);
                 }
             }
         } catch (e) {
-            console.warn('[mvu2shujuku][debug][重锚] 异常:', e && e.message ? e.message : e);
+            dbgWarn('[重锚] 异常:', e && e.message ? e.message : e);
         }
     }
     function scheduleReAnchorCheckpoint() {
@@ -7706,12 +7775,12 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     async function autoInitDatabase() {
         const key0 = autoInitChatId();
         if (autoInitState.running) {
-            console.log('[mvu2shujuku][debug] 开局自动建表跳过：上一轮仍在运行（chat=' + key0 + '）');
+            dbg(' 开局自动建表跳过：上一轮仍在运行（chat=' + key0 + '）');
             return;
         }
         const api = getAcuApi();
         if (!api) {
-            console.log('[mvu2shujuku][debug] 开局自动建表跳过：未找到 SP·数据库 API（chat=' + key0 + '）');
+            dbg(' 开局自动建表跳过：未找到 SP·数据库 API（chat=' + key0 + '）');
             // 插件可能晚于聊天加载就绪：API 缺失时轮询重试，确保锚点在用户操作前建立
             if (autoInitState.apiRetries < 12) {
                 autoInitState.apiRetries += 1;
@@ -7722,7 +7791,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         let character = null;
         try { character = currentCharacter(); } catch (e) {}
         if (!character) {
-            console.log('[mvu2shujuku][debug] 开局自动建表跳过：当前角色为空（chat=' + key0 + '）');
+            dbg(' 开局自动建表跳过：当前角色为空（chat=' + key0 + '）');
             return;
         }
         const charHasExt = !!(character && character.extensions && typeof character.extensions === 'object');
@@ -7738,7 +7807,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     } else if (full === null) {
                         // 获取完整卡失败（接口返回异常对象/网络问题），不能判定为非转换卡：
                         // 保留运行时状态并重试，避免把本转换器产物误判成普通卡而跳过建表。
-                        console.log('[mvu2shujuku][debug] 开局自动建表：获取完整卡失败，稍后重试（chat=' + key0 + '）');
+                        dbg(' 开局自动建表：获取完整卡失败，稍后重试（chat=' + key0 + '）');
                         if (autoInitNoEntryRetries < 8) {
                             autoInitNoEntryRetries += 1;
                             hostWindow.setTimeout(autoInitDatabase, 3000);
@@ -7747,7 +7816,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     }
                 }
                 if (!isConvertedMvuCard(character)) {
-                    console.log('[mvu2shujuku][debug] 开局自动建表跳过：当前卡无本转换器标记 extensions.mvu2shujuku（chat=' + key0 + '），不影响其他卡');
+                    dbg(' 开局自动建表跳过：当前卡无本转换器标记 extensions.mvu2shujuku（chat=' + key0 + '），不影响其他卡');
                     // 清掉上一张转换卡残留的运行时状态，确保切到其他卡后不再接管/广播
                     activeLayout = null;
                     activePlaceholderNeeded = false;
@@ -7756,7 +7825,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     return;
                 }
             } catch (e) {
-                console.log('[mvu2shujuku][debug] 开局自动建表跳过：读取当前卡标记失败（chat=' + key0 + '）');
+                dbg(' 开局自动建表跳过：读取当前卡标记失败（chat=' + key0 + '）');
                 activeLayout = null;
                 activePlaceholderNeeded = false;
                 restoreWindowMvuShim();
@@ -7768,23 +7837,23 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         const cb = character.character_book;
         if (!(cb && Array.isArray(cb.entries) && cb.entries.length)) {
             hadWorldbook = false;
-            console.log('[mvu2shujuku][debug] 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡（chat=' + key0 + '）');
+            dbg(' 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡（chat=' + key0 + '）');
             try {
                 const full = await fetchFullCharacter(character);
                 if (full && full.character_book && Array.isArray(full.character_book.entries) && full.character_book.entries.length) {
                     character = full;
                     hadWorldbook = true;
                 } else {
-                    console.warn('[mvu2shujuku][debug] /api/characters/get 未能取回世界书（chat=' + key0 + '）');
+                    dbgWarn(' /api/characters/get 未能取回世界书（chat=' + key0 + '）');
                 }
             } catch (e) {
-                console.warn('[mvu2shujuku][debug] /api/characters/get 异常：' + (e && e.message ? e.message : e) + '（chat=' + key0 + '）');
+                dbgWarn(' /api/characters/get 异常：' + (e && e.message ? e.message : e) + '（chat=' + key0 + '）');
             }
             // 完整卡获取失败（含接口返回异常对象）且当前对象无世界书时，稍后重试，
             // 避免“新聊天没有初始化数据/表格为空”的误判。
             if (!(character && character.character_book && Array.isArray(character.character_book.entries) && character.character_book.entries.length) &&
                 autoInitNoEntryRetries < 8) {
-                console.log('[mvu2shujuku][debug] 开局自动建表：完整卡获取失败，稍后重试（chat=' + key0 + '）');
+                dbg(' 开局自动建表：完整卡获取失败，稍后重试（chat=' + key0 + '）');
                 autoInitNoEntryRetries += 1;
                 hostWindow.setTimeout(autoInitDatabase, 3000);
                 return;
@@ -7794,7 +7863,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         const entries = fullCb && Array.isArray(fullCb.entries) ? fullCb.entries : [];
         const entry = entries.find(e => Array.isArray(e.keys) && e.keys.indexOf(DB_TEMPLATE_KEY) !== -1);
         if (!entry || !entry.content) {
-            console.warn('[mvu2shujuku][debug] 未找到 __ACU_TEMPLATE_DATA__ 世界书条目（entries=' + entries.length + '；chat=' + key0 + '）');
+            dbgWarn(' 未找到 __ACU_TEMPLATE_DATA__ 世界书条目（entries=' + entries.length + '；chat=' + key0 + '）');
             if (!hadWorldbook && autoInitNoEntryRetries < 8) {
                 // 懒加载角色列表可能晚于首次触发；轮询重试（4s），最多约 40s
                 autoInitNoEntryRetries += 1;
@@ -7807,25 +7876,25 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         try {
             const th = character && character.extensions && character.extensions.tavern_helper;
             const scripts = (th && Array.isArray(th.scripts) ? th.scripts : []).map(s => s.name + '(enabled=' + s.enabled + ')');
-            console.log('[mvu2shujuku][debug] 当前卡 tavern_helper.scripts =', JSON.stringify(scripts), '| 桥内容长度=' + (th && Array.isArray(th.scripts) && th.scripts.find(s => /数据桥/.test(String(s.name || ''))) ? String((th.scripts.find(s => /数据桥/.test(String(s.name || ''))).content || '')).length : 0));
+            dbg(' 当前卡 tavern_helper.scripts =', JSON.stringify(scripts), '| 桥内容长度=' + (th && Array.isArray(th.scripts) && th.scripts.find(s => /数据桥/.test(String(s.name || ''))) ? String((th.scripts.find(s => /数据桥/.test(String(s.name || ''))).content || '')).length : 0));
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 读取 tavern_helper 失败:', e);
+            dbgWarn(' 读取 tavern_helper 失败:', e);
         }
         // 缓存当前卡布局，供 EJS 数据读取（window.getAllVariables）
         try {
             const mk = character && character.extensions && character.extensions.mvu2shujuku;
             if (mk && typeof mk.layout === 'string') {
                 activeLayout = JSON.parse(mk.layout);
-                console.log('[mvu2shujuku][debug] 已缓存当前卡布局，条目数=' + (Array.isArray(activeLayout) ? activeLayout.length : 0));
+                dbg(' 已缓存当前卡布局，条目数=' + (Array.isArray(activeLayout) ? activeLayout.length : 0));
             }
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 解析卡布局失败:', e);
+            dbgWarn(' 解析卡布局失败:', e);
         }
         activePlaceholderNeeded = detectPlaceholderFor(character);
-        console.log('[mvu2shujuku][debug][占位符] 当前卡依赖状态栏占位符=' + activePlaceholderNeeded);
+        dbg('[占位符] 当前卡依赖状态栏占位符=' + activePlaceholderNeeded);
         installWindowGetAllVariables();
         const key = autoInitChatId();
-        if (key !== key0) console.log('[mvu2shujuku][debug] 开局自动建表 chat 已切换：' + key0 + ' → ' + key);
+        if (key !== key0) dbg(' 开局自动建表 chat 已切换：' + key0 + ' → ' + key);
         if (autoInitState.apiRetries > 0 && autoInitState.anchorChat !== key) autoInitState.apiRetries = 0;
         // 缓存卡内模板（供写路径补行与锚点重建使用）
         try {
@@ -7937,20 +8006,20 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const setter = findSetChatMessages();
             if (setter) {
                 setter([{ message_id: msg.message_id != null ? msg.message_id : (context.chat.length - 1), message: next, mes: next }], { refresh: 'affected' });
-                console.log('[mvu2shujuku][debug][占位符] 已追加到消息 id=' + (msg.message_id != null ? msg.message_id : (context.chat.length - 1)));
+                dbg('[占位符] 已追加到消息 id=' + (msg.message_id != null ? msg.message_id : (context.chat.length - 1)));
             } else {
                 // 找不到 setChatMessages：只改内存，不调 saveChat（避免每次保存超时形成风暴）；
                 // 落盘依赖酒馆自身保存，显示刷新依赖酒馆重渲染
                 msg.mes = next; if (msg.message !== undefined) msg.message = next;
                 if (!window.__mvu2shujukuPlaceholderFallbackWarned) {
                     window.__mvu2shujukuPlaceholderFallbackWarned = true;
-                    console.warn('[mvu2shujuku][debug][占位符] 未找到 setChatMessages，已直接写入内存消息（依赖酒馆下次保存落盘；若前端未刷新请升级酒馆）');
+                    dbgWarn('[占位符] 未找到 setChatMessages，已直接写入内存消息（依赖酒馆下次保存落盘；若前端未刷新请升级酒馆）');
                 }
             }
             lastPlaceholderMsgKey = msgKey;
             lastPlaceholderAt = now;
         } catch (e) {
-            console.warn('[mvu2shujuku][debug][占位符] 追加失败:', e);
+            dbgWarn('[占位符] 追加失败:', e);
         }
     }
 
@@ -8058,6 +8127,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 installMvuShim: 'auto',
                 appendPlaceholder: true,
                 asPng: 'auto',
+                debug: false,
             };
         }
         return context.extensionSettings[SETTINGS_KEY];
@@ -8156,7 +8226,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         const cb = character.character_book;
         // 非强制时：角色对象已有世界书即视为完整，避免无谓请求
         if (!arguments[1] && cb && Array.isArray(cb.entries) && cb.entries.length) return character;
-        console.log('[mvu2shujuku] ' + (arguments[1] ? '按完整卡校验转换标记' : '角色列表对象缺世界书') + '，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
+        dbg('按完整卡校验转换标记' + (arguments[1] ? '（角色列表对象缺 extensions）' : '（缺世界书）') + '，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
         try {
             const context = getContextSafe();
             const headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
@@ -8165,16 +8235,16 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 headers,
                 body: JSON.stringify({ avatar_url: character.avatar }),
             });
-            console.log('[mvu2shujuku] /api/characters/get 状态:', res.status);
+                dbg('/api/characters/get 状态:', res.status);
             if (res.ok) {
                 const full = await res.json();
                 const target = (full && full.data && full.data.character_book) ? full.data : full;
-                console.log('[mvu2shujuku] 完整卡对象 keys:', Object.keys(full || {}).join(','), '| character_book.entries=', target && target.character_book ? target.character_book.entries.length : 'N/A');
+                dbg('完整卡对象 keys:', Object.keys(full || {}).join(','), '| character_book.entries=', target && target.character_book ? target.character_book.entries.length : 'N/A');
                 if (target && target.character_book && Array.isArray(target.character_book.entries) && target.character_book.entries.length) return target;
                 // 接口返回了异常对象（如 {mode,baseHash,nextHash,ops} 哈希差异、空对象等），
                 // 不能当作“完整卡”，否则会把本转换器产物误判为非转换卡而跳过建表。
                 // 返回 null 让调用方区分“获取失败（可重试）”与“确实非转换卡”。
-                console.warn('[mvu2shujuku] /api/characters/get 响应缺少角色卡结构（keys=' + Object.keys(full || {}).join(',') + '），本次视为获取失败，稍后可重试。');
+                dbgWarn('/api/characters/get 响应缺少角色卡结构（keys=' + Object.keys(full || {}).join(',') + '），本次视为获取失败，稍后可重试。');
                 return null;
             }
         } catch (e) {}
@@ -8250,13 +8320,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     // 插件 insertRow 失败时返回 -1 / false / null，不抛异常；必须检查返回值，
                     // 否则会误报「已物化」而表里其实没有初始行（单例表初始化丢失的根因之一）。
                     if (inserted === -1 || inserted === false || inserted === null || inserted === undefined) {
-                        console.warn('[mvu2shujuku][debug] 物化单例/JSON表初始行失败（insertRow 返回 ' + String(inserted) + '）：' + L.table);
+                        dbgWarn(' 物化单例/JSON表初始行失败（insertRow 返回 ' + String(inserted) + '）：' + L.table);
                     } else {
-                        console.log('[mvu2shujuku][debug] 已物化单例/JSON表初始行：' + L.table + '（新行索引=' + inserted + '）');
+                        dbg(' 已物化单例/JSON表初始行：' + L.table + '（新行索引=' + inserted + '）');
                     }
                 } catch (e) {
                     // 行已存在（UNIQUE 冲突等）→ 已物化，无需处理
-                    console.log('[mvu2shujuku][debug] 单例/JSON表初始行已存在，跳过物化：' + L.table + '（' + (e && e.message ? e.message : e) + '）');
+                    dbg(' 单例/JSON表初始行已存在，跳过物化：' + L.table + '（' + (e && e.message ? e.message : e) + '）');
                 }
             }
             // 诊断：物化后输出单例/JSON 表的行数，便于确认初始行是否真的落表
@@ -8268,7 +8338,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         if (k.indexOf('sheet_') === 0 && allT[k] && allT[k].name === L.table) {
                             const c = Array.isArray(allT[k].content) ? allT[k].content.length - 1 : 0;
                             const s = Array.isArray(allT[k].seedRows) ? allT[k].seedRows.length : 0;
-                            console.log('[mvu2shujuku][debug] 物化后单例表「' + L.table + '」content 行数=' + c + '，seedRows=' + s);
+                            dbg(' 物化后单例表「' + L.table + '」content 行数=' + c + '，seedRows=' + s);
                             break;
                         }
                     }
@@ -8306,9 +8376,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         // x.ri 正是 content 数组索引，直接传 x.ri；传 x.ri-1 会把表头当目标，
                         // 实际误删 row_id=1 的注入数据行（日志却按 x.id 打印成“已清理 row_id=2”）。
                         await Promise.resolve(api.deleteRow(L.table, x.ri));
-                        console.log('[mvu2shujuku][debug] 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
+                        dbg(' 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
                     } catch (e) {
-                        console.warn('[mvu2shujuku][debug] 清理单例表多余行失败:', e);
+                        dbgWarn(' 清理单例表多余行失败:', e);
                     }
                 }
             }
@@ -8522,7 +8592,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             }
             return out;
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 合并注入模板失败:', e && e.message ? e.message : e);
+            dbgWarn(' 合并注入模板失败:', e && e.message ? e.message : e);
             return null;
         }
     }
@@ -8699,7 +8769,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             }
             return out;
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] applyTargetToTemplate 失败:', e && e.message ? e.message : e);
+            dbgWarn(' applyTargetToTemplate 失败:', e && e.message ? e.message : e);
             return tplCached;
         }
     }
@@ -8853,10 +8923,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const cpData = readFullCheckpointData();
             if (!cpData || typeof api.importTableAsJson !== 'function') return false;
             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(cpData), { persist: false, mode: 'restore' }));
-            console.log('[mvu2shujuku][debug] 运行时按 checkpoint 数据物化（稳定 key，persist:false）=' + (ok ? '成功' : '失败'));
+            dbg(' 运行时按 checkpoint 数据物化（稳定 key，persist:false）=' + (ok ? '成功' : '失败'));
             return !!ok;
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 运行时按 checkpoint 物化异常:', e && e.message ? e.message : e);
+            dbgWarn(' 运行时按 checkpoint 物化异常:', e && e.message ? e.message : e);
             return false;
         }
     }
@@ -8879,13 +8949,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     // 触发插件 V2 boundary_after_data_mismatch。锚点无法建立则放弃本次写入。
                     const tplCached = cachedTemplateForCurrentCard();
                     if (!tplCached) {
-                        console.warn('[mvu2shujuku][debug][流程] 写库前无模板缓存，放弃本次写入（等待自动建表）。');
+                        dbgWarn('[流程] 写库前无模板缓存，放弃本次写入（等待自动建表）。');
                         pendingStatWrite = null;
                         return;
                     }
                     const anchored = await ensureCheckpointBeforeWrite(api, tplCached);
                     if (!anchored) {
-                        console.warn('[mvu2shujuku][debug][流程] 写库前无法建立 full checkpoint，放弃本次写入，避免产生无锚点 artifacts。');
+                        dbgWarn('[流程] 写库前无法建立 full checkpoint，放弃本次写入，避免产生无锚点 artifacts。');
                         pendingStatWrite = null;
                         return;
                     }
@@ -8919,7 +8989,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             const heroName = target.主角 && target.主角.姓名;
                             const mtProt = mergedTemplate && mergedTemplate.sheet_zhujiaobiao;
                             const mtRow = mtProt && Array.isArray(mtProt.content) ? mtProt.content[1] : null;
-                            console.log('[mvu2shujuku][debug][注入合并] 首次写库=' + isFirstWrite + ' | target.主角.姓名=' + heroName +
+                            dbg('[注入合并] 首次写库=' + isFirstWrite + ' | target.主角.姓名=' + heroName +
                                 ' | 合并模板主角表 content 行数=' + (mtProt && Array.isArray(mtProt.content) ? mtProt.content.length : 'N/A') +
                                 ' | content[1]=' + (mtRow ? JSON.stringify(mtRow).slice(0, 160) : '无'));
                         } catch (e) {}
@@ -8931,7 +9001,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板',
                             }));
                             if (initResult && initResult.success === false) {
-                                console.warn('[mvu2shujuku][debug] initGameSession(注入合并) 失败：' + (initResult.message || '未知错误') + '，回退快照提交');
+                                dbgWarn(' initGameSession(注入合并) 失败：' + (initResult.message || '未知错误') + '，回退快照提交');
                             } else {
                                 const initInfo = initResult ? JSON.stringify({
                                     success: initResult.success,
@@ -8939,7 +9009,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                     warning: initResult.warning || '',
                                     message: initResult.message || '',
                                 }) : 'undefined';
-                                console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）| initResult=' + initInfo.slice(0, 300));
+                                dbg(' Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）| initResult=' + initInfo.slice(0, 300));
                                 // initGameSession 成功即已写入干净 full checkpoint（logEntries=0，与参考卡一致），
                                 // 持久化完成，标记为成功。**绝不能**再走 importTableAsJson(persist) 兜底——
                                 // 它会追加一条 data_replace logEntry 弄脏链，刷新回放失败导致数据回默认（实测根因）。
@@ -8948,22 +9018,22 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 // 等不到就用运行时专用通道（persist:false）物化——只改内存，不写任何 logEntry。
                                 const injected = await verifyTemplateInjected(api, activeLayout, target, 1800);
                                 if (injected) {
-                                    console.log('[mvu2shujuku][debug][注入合并] initGameSession 后已在运行时表格确认注入数据。');
+                                    dbg('[注入合并] initGameSession 后已在运行时表格确认注入数据。');
                                 } else {
                                     // 运行时物化只能使用插件规范化后的 checkpoint 数据（稳定 key）。
                                     // 若此刻 checkpoint 尚未就绪/未含注入数据，本次跳过物化，
                                     // 由稍后的重锚重建 checkpoint 后用稳定 key 数据补物化——
                                     // 绝不能用原始 key 的 mergedTemplate 灌运行时（会导致后续编辑的
                                     // baseRevision 用原始 key，刷新回放失败、整链回默认）。
-                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后运行时未确认注入数据，尝试用 checkpoint 数据物化（稳定 key，persist:false，不写 logEntry）…');
+                                    dbgWarn('[注入合并] initGameSession 后运行时未确认注入数据，尝试用 checkpoint 数据物化（稳定 key，persist:false，不写 logEntry）…');
                                     const cpReady = checkpointHasStatData(activeLayout, target);
                                     if (cpReady) {
                                         const rtOk = await materializeRuntimeFromCheckpoint(api);
-                                        console.log('[mvu2shujuku][debug][注入合并] checkpoint 物化结果=' + (rtOk ? '成功' : '失败'));
+                                        dbg('[注入合并] checkpoint 物化结果=' + (rtOk ? '成功' : '失败'));
                                         const injected2 = await verifyTemplateInjected(api, activeLayout, target, 1000);
-                                        console.log('[mvu2shujuku][debug][注入合并] 物化后确认注入数据=' + injected2);
+                                        dbg('[注入合并] 物化后确认注入数据=' + injected2);
                                     } else {
-                                        console.warn('[mvu2shujuku][debug][注入合并] checkpoint 尚未含注入数据，本次跳过运行时物化，等重锚后用稳定 key 数据补物化。');
+                                        dbgWarn('[注入合并] checkpoint 尚未含注入数据，本次跳过运行时物化，等重锚后用稳定 key 数据补物化。');
                                     }
                                 }
                                 // 持久化层校验：full checkpoint 里必须真的含注入数据（而不是默认值）。
@@ -8974,13 +9044,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                     if (holder) holder.__mvu2shujukuOpeningStat = { chat: chatKeyNow, stat: target, at: Date.now() };
                                     const cpOk = checkpointHasStatData(activeLayout, target);
                                     if (!cpOk) {
-                                        console.warn('[mvu2shujuku][debug][注入合并] full checkpoint 中未确认注入数据（可能被开场流程回滚），安排重锚重建干净 checkpoint。');
+                                        dbgWarn('[注入合并] full checkpoint 中未确认注入数据（可能被开场流程回滚），安排重锚重建干净 checkpoint。');
                                         scheduleReAnchorCheckpoint();
                                     } else {
-                                        console.log('[mvu2shujuku][debug][注入合并] full checkpoint 已包含注入数据（持久化校验通过）。');
+                                        dbg('[注入合并] full checkpoint 已包含注入数据（持久化校验通过）。');
                                     }
                                 } catch (e2) {
-                                    console.warn('[mvu2shujuku][debug][注入合并] checkpoint 数据校验异常:', e2 && e2.message ? e2.message : e2);
+                                    dbgWarn('[注入合并] checkpoint 数据校验异常:', e2 && e2.message ? e2.message : e2);
                                 }
                             }
                         }
@@ -8994,9 +9064,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
                                 usedSnapshot = true;
-                                console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
+                                dbg(' Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
                             } else {
-                                console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交失败，回退差异写入');
+                                dbgWarn(' importTableAsJson 快照提交失败，回退差异写入');
                             }
                         }
                         if (usedSnapshot) {
@@ -9014,19 +9084,19 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                     for (let attempt = 0; attempt < 2; attempt++) {
                                         try {
                                             await Promise.resolve(saveFn2());
-                                            console.log('[mvu2shujuku][debug][保存] 首写快照提交后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
+                                            dbg('[保存] 首写快照提交后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
                                             break;
                                         } catch (saveErr) {
-                                            console.warn('[mvu2shujuku][debug][保存] 首写后等待酒馆保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                                            dbgWarn('[保存] 首写后等待酒馆保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
                                         }
                                     }
                                 }
                             } catch (e) {
-                                console.warn('[mvu2shujuku][debug][保存] 首写后等待酒馆保存异常（不影响内存数据）:', e && e.message ? e.message : e);
+                                dbgWarn('[保存] 首写后等待酒馆保存异常（不影响内存数据）:', e && e.message ? e.message : e);
                             }
                         }
                     } catch (e) {
-                        console.warn('[mvu2shujuku][debug] 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
+                        dbgWarn(' 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
                     }
                     if (!usedSnapshot) {
                         // 差异写入（裸 updateCell/insertRow）——作为 initGameSession/importTableAsJson
@@ -9034,7 +9104,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         // 主动 saveChat 落盘、以及清理多余的垫底行。
                         await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                         n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
-                        if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                        if (n > 0) dbg(' Mvu 合并写入完成：差异 ' + n + ' 条');
                         // 降级路径依赖酒馆 saveChat 落盘（importTableAsJson 成功时插件已自己持久化，无需额外保存）
                         try {
                             const ctx3 = getContextSafe();
@@ -9046,10 +9116,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 for (let attempt = 0; attempt < 2; attempt++) {
                                     try {
                                         await Promise.resolve(saveFn3());
-                                        console.log('[mvu2shujuku][debug][保存] 差异写入后已主动保存聊天（attempt=' + (attempt + 1) + '）');
+                                        dbg('[保存] 差异写入后已主动保存聊天（attempt=' + (attempt + 1) + '）');
                                         break;
                                     } catch (saveErr) {
-                                        console.warn('[mvu2shujuku][debug][保存] 主动保存聊天失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                                        dbgWarn('[保存] 主动保存聊天失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
                                     }
                                 }
                             }
@@ -9074,12 +9144,12 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 const heroName = sd.主角 && sd.主角.姓名;
                                 containsUserData = heroName && heroName !== '未知' && s.indexOf(String(heroName)) !== -1;
                             } catch (e) {}
-                            console.log('[mvu2shujuku][debug][checkpoint] 消息' + mi + ' 有 IsolatedData | json长度=' + (JSON.stringify(iso) || '').length + ' | 含主角姓名=' + containsUserData);
+                            dbg('[checkpoint] 消息' + mi + ' 有 IsolatedData | json长度=' + (JSON.stringify(iso) || '').length + ' | 含主角姓名=' + containsUserData);
                             break;
                         }
                     } catch (e) {}
                     if (!hasFullShujukuCheckpoint()) {
-                        console.warn('[mvu2shujuku][debug][流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
+                        dbgWarn('[流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
                     }
                     // 单例/JSON 表去重：仅在降级裸写路径物化过垫底行时需要清理；
                     // initGameSession/importTableAsJson 成功后表格本身是干净的，无需清理。
@@ -9088,10 +9158,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     }
                     dispatchVariableUpdateEnded({ stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} }, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
                 } else {
-                    console.warn('[mvu2shujuku][debug] Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
+                    dbgWarn(' Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
                 }
             } catch (e) {
-                console.warn('[mvu2shujuku][debug] Mvu 合并写入异常:', e);
+                dbgWarn(' Mvu 合并写入异常:', e);
             } finally {
                 if (statWriteOverlayGen === gen) pendingStatWrite = null;
             }
@@ -9122,7 +9192,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             }
         };
         window.getAllVariables.__mvu2shujuku = true;
-        console.log('[mvu2shujuku][debug] 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
+        dbg(' 扩展侧已定义 window.getAllVariables（读插件表格重建 stat_data）');
     }
     function restoreWindowGetAllVariables() {
         if (!installedGetAllVariables) return;
@@ -9444,10 +9514,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     if (!mvu_data.display_data || typeof mvu_data.display_data !== 'object') mvu_data.display_data = {};
                     try { (() => { let dc = mvu_data.display_data; for (let i = 0; i < parts.length - 1; i++) { if (!dc[parts[i]] || typeof dc[parts[i]] !== 'object') dc[parts[i]] = {}; dc = dc[parts[i]]; } dc[parts[parts.length - 1]] = ds; })(); } catch (e) {}
                     if (mvu_data.delta_data && typeof mvu_data.delta_data === 'object') { try { (() => { let dc2 = mvu_data.delta_data; for (let i = 0; i < parts.length - 1; i++) { if (!dc2[parts[i]] || typeof dc2[parts[i]] !== 'object') dc2[parts[i]] = {}; dc2 = dc2[parts[i]]; } dc2[parts[parts.length - 1]] = ds; })(); } catch (e) {} }
-                    console.log('[mvu2shujuku][debug] Mvu.setMvuVariable:', path, '=', String(new_value) + (reason ? ' (' + reason + ')' : ''));
+                    dbg(' Mvu.setMvuVariable:', path, '=', String(new_value) + (reason ? ' (' + reason + ')' : ''));
                     return true;
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug] Mvu.setMvuVariable 异常:', e);
+                    dbgWarn(' Mvu.setMvuVariable 异常:', e);
                     return false;
                 }
             };
@@ -9455,13 +9525,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 try {
                     const api = getAcuApi();
                     if (!api || !activeLayout) {
-                        console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空') + '（自动建表尚未缓存布局，或当前卡不是转换产物）');
+                        dbgWarn(' Mvu.replaceMvuData 被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空') + '（自动建表尚未缓存布局，或当前卡不是转换产物）');
                         return false;
                     }
                     scheduleWindowStatOverlay((data && data.stat_data) || {});
                     return true;
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug] Mvu.replaceMvuData 异常:', e);
+                    dbgWarn(' Mvu.replaceMvuData 异常:', e);
                     return false;
                 }
             };
@@ -9475,7 +9545,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     applyMvuCommands(out.stat_data, cmds, out.display_data);
                     return out;
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug] Mvu.parseMessage 异常:', e);
+                    dbgWarn(' Mvu.parseMessage 异常:', e);
                     return undefined;
                 }
             };
@@ -9557,7 +9627,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             windowMvuShimTimer = hostWindow.setInterval(() => { try { applyWindowMvuShim(); } catch (e) {} }, 2000);
             try { if (typeof hostWindow.eventOn === 'function') hostWindow.eventOn('global_Mvu_initialized', () => { try { applyWindowMvuShim(); } catch (e) {} }); } catch (e) {}
         }
-        console.log('[mvu2shujuku][debug] 扩展侧已安装完整 Mvu shim（接管式）');
+        dbg(' 扩展侧已安装完整 Mvu shim（接管式）');
     }
     // 按当前卡同步运行时：转换卡 → 接管 Mvu/定义 getAllVariables/注册表格广播；
     // 其他卡 → 全部撤销，确保扩展不影响任何非转换卡。
@@ -9577,7 +9647,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 else if (full === null) {
                     // 获取完整卡失败（宿主扩展可能劫持了 fetch 返回 diff 对象）：
                     // 不能据此撤销运行时，保留现状等 autoInitDatabase 重试。
-                    console.log('[mvu2shujuku][debug] 同步运行时：获取完整卡失败，暂不撤销（等自动建表重试）');
+                    dbg(' 同步运行时：获取完整卡失败，暂不撤销（等自动建表重试）');
                     return;
                 }
             } catch (e) {}
@@ -9647,11 +9717,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 presetCount = names.length;
                 presetOk = true;
             } catch (e) {
-                console.warn('[mvu2shujuku][debug] getTemplatePresetNames 异常:', e);
+                dbgWarn(' getTemplatePresetNames 异常:', e);
             }
         }
-        console.log(
-            '[mvu2shujuku][debug] populateMergeSource: api=' + !!api +
+        dbg(
+            'populateMergeSource: api=' + !!api +
             ' | 有 getTemplatePresetNames=' + !!(api && typeof api.getTemplatePresetNames === 'function') +
             ' | 预设数=' + presetCount + ' | 可读=' + presetOk
         );
@@ -9681,7 +9751,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         const v = sel.value;
         if (!v) { toast('请先选择模板来源', 'error'); return; }
         const api = getAcuApi();
-        console.log('[mvu2shujuku][debug] loadMergeTables: 来源=' + v + ' | api=' + !!api + ' | 有 getTableTemplate=' + !!(api && typeof api.getTableTemplate === 'function'));
+        dbg(' loadMergeTables: 来源=' + v + ' | api=' + !!api + ' | 有 getTableTemplate=' + !!(api && typeof api.getTableTemplate === 'function'));
         if (!api || typeof api.getTableTemplate !== 'function') {
             toast('未找到 SP·数据库 插件 API', 'error');
             return;
@@ -9705,14 +9775,14 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         } else {
             try { tpl = api.getTableTemplate({ scope, presetName }) || null; } catch (e) { tpl = null; }
         }
-        console.log('[mvu2shujuku][debug] loadMergeTables: scope=' + scope + ' | presetName=' + presetName + ' | 读到的模板=' + !!tpl + ' | sheet 数=' + (tpl ? Object.keys(tpl).filter(k => k.indexOf('sheet_') === 0).length : 0));
+        dbg(' loadMergeTables: scope=' + scope + ' | presetName=' + presetName + ' | 读到的模板=' + !!tpl + ' | sheet 数=' + (tpl ? Object.keys(tpl).filter(k => k.indexOf('sheet_') === 0).length : 0));
         if (!tpl || typeof tpl !== 'object') {
             toast('未读取到模板（该来源为空或插件未就绪）', 'error');
             return;
         }
         mergeState.sourceTemplate = tpl;
         const sheets = Object.keys(tpl).filter(k => k.startsWith('sheet_') && tpl[k] && typeof tpl[k] === 'object' && !Array.isArray(tpl[k]));
-        console.log('[mvu2shujuku][debug] loadMergeTables: 有效表=' + sheets.length + ' | 表名=' + sheets.map(k => tpl[k].name).join('、'));
+        dbg(' loadMergeTables: 有效表=' + sheets.length + ' | 表名=' + sheets.map(k => tpl[k].name).join('、'));
         if (!sheets.length) {
             box.innerHTML = '';
             toast('该模板没有表格', 'error');
@@ -9762,7 +9832,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             return;
         }
         const merged = core.mergeTemplates(lastResult.template, mergeState.sourceTemplate, checked);
-        console.log('[mvu2shujuku][debug] applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
+        dbg(' applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
         if (!merged.added.length) { toast('没有可并入的表（全部重名或无效）', 'error'); return; }
         const settings = getSettings();
         const mode = settings.mode === 'native' ? 'native' : settings.mode === 'sqlite' ? 'sqlite' : 'both';
@@ -9782,7 +9852,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             }
             lastResult = result;
             renderResult(result);
-            console.log('[mvu2shujuku][debug] applyMergeTables 重新转换完成: meta.tableCount=' + result.meta.tableCount + ' | tableNames=' + result.meta.tableNames.join('、'));
+            dbg(' applyMergeTables 重新转换完成: meta.tableCount=' + result.meta.tableCount + ' | tableNames=' + result.meta.tableNames.join('、'));
             const msg = '合并完成：新增 ' + merged.added.length + ' 张表' + (merged.skipped.length ? '，跳过重名：' + merged.skipped.join('、') : '');
             if (status) status.textContent = msg;
             toast(msg, 'info');
@@ -10046,6 +10116,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             '      <div class="mvu2shujuku-row">',
             '        <label title="状态栏刷新由数据库表格更新回调驱动；此选项额外在 AI 回复结束时补一次刷新并处理消息里的 <UpdateVariable>/<json_patch> 更新块"><input type="checkbox" id="mvu2shujuku-placeholder" ' + (settings.appendPlaceholder !== false ? 'checked' : '') + ' /> 表格更新后自动刷新状态栏（含消息收尾兜底）</label>',
             '      </div>',
+            '      <div class="mvu2shujuku-row">',
+            '        <label title="勾选后输出 [mvu2shujuku][debug] 调试日志（排查问题时开启，平时关闭）"><input type="checkbox" id="mvu2shujuku-debug" ' + (settings.debug ? 'checked' : '') + ' /> 输出 debug 日志</label>',
+            '      </div>',
             '      <div class="mvu2shujuku-help">',
             '        状态栏刷新与 MVU 原版一致：数据库一有变动就广播 <code>mag_variable_update_ended</code>（VARIABLE_UPDATE_ENDED），前端原 eventOn 监听直接生效。',
             '        勾选上方选项后，还会在每次 AI 回复结束时补一次刷新，并顺带处理开场白/消息里的 <code>&lt;UpdateVariable&gt;</code> / <code>&lt;json_patch&gt;</code> 旧式更新块。',
@@ -10212,6 +10285,17 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 saveSettings();
             });
         }
+        const debugBox = panel.querySelector('#mvu2shujuku-debug');
+        if (debugBox && debugBox.dataset.bound !== 'true') {
+            debugBox.dataset.bound = 'true';
+            debugBox.addEventListener('change', () => {
+                getSettings().debug = debugBox.checked;
+                try {
+                    if (typeof window !== 'undefined') window.__mvu2shujukuDebug = debugBox.checked;
+                } catch (e) {}
+                saveSettings();
+            });
+        }
         const pngSel = panel.querySelector('#mvu2shujuku-png');
         if (pngSel && pngSel.dataset.bound !== 'true') {
             pngSel.dataset.bound = 'true';
@@ -10250,14 +10334,14 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     ejs.defines.mvu2shujukuGetAllVariables = function () {
                         try { return window.getAllVariables ? window.getAllVariables() : { stat_data: {} }; } catch (e) { return { stat_data: {} }; }
                     };
-                    console.log('[mvu2shujuku][debug] 扩展侧注册 mvu2shujukuGetAllVariables 完成');
+                    dbg(' 扩展侧注册 mvu2shujukuGetAllVariables 完成');
                 }
                 defineTimer = null;
             } else if (!defineTimer) {
                 defineTimer = hostWindow.setTimeout(() => { defineTimer = null; ensureTemplateDefine(); }, 2000);
             }
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 扩展侧注册异常:', e);
+            dbgWarn(' 扩展侧注册异常:', e);
         }
     }
     function bindDebugHooks(context) {
@@ -10270,8 +10354,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (firstPreparedLogged) return;
                 firstPreparedLogged = true;
                 const pageEjs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
-                console.log(
-                    '[mvu2shujuku][debug] prompt_template_prepare 首次上下文: 键数=' + (prepared ? Object.keys(prepared).length : 0) +
+                dbg(
+                    'prompt_template_prepare 首次上下文: 键数=' + (prepared ? Object.keys(prepared).length : 0) +
                     ' | getvar=' + typeof (prepared && prepared.getvar) +
                     ' | mvu2shujukuGetAllVariables=' + typeof (prepared && prepared.mvu2shujukuGetAllVariables) +
                     ' | getAllVariables=' + typeof (prepared && prepared.getAllVariables) +
@@ -10279,14 +10363,19 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     ' | 页面defines注册函数=' + typeof (pageEjs && pageEjs.defines && pageEjs.defines.mvu2shujukuGetAllVariables)
                 );
             });
-            console.log('[mvu2shujuku][debug] 已监听 prompt_template_prepare 事件（仅首次打印上下文）');
+            dbg(' 已监听 prompt_template_prepare 事件（仅首次打印上下文）');
         } catch (e) {
-            console.warn('[mvu2shujuku][debug] 监听 prompt_template_prepare 失败:', e);
+            dbgWarn(' 监听 prompt_template_prepare 失败:', e);
         }
     }
 
     function main() {
         const context = getContextSafe();
+        // 按设置初始化 debug 全局标记（dbg/dbgWarn 都读它）
+        try {
+            const s = getSettings();
+            if (typeof window !== 'undefined') window.__mvu2shujukuDebug = !!s.debug;
+        } catch (e) {}
         installEarlyEventOnFallback();
         ensureSettingsPanel(context);
         bindDebugHooks(context);
@@ -10301,8 +10390,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         bindAutoInit(context);
         hostWindow.setTimeout(autoInitDatabase, 1500);
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
-        console.log(
-            '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
+        dbg(
+            '加载时 EjsTemplate=' + !!ejs +
             ' | defines=' + !!(ejs && ejs.defines) +
             ' | 已注册 mvu2shujukuGetAllVariables=' + typeof (ejs && ejs.defines && ejs.defines.mvu2shujukuGetAllVariables)
         );
