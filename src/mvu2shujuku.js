@@ -91,6 +91,20 @@
         throw new Error('缺少 MVU 解析库（src/vendor/mvu-yaml-libs.js 未内联/未安装）');
     }
 
+    // jsonrepair 源码（用于把容错解析内联进卡内桥）：Node 端读 vendor 文件，浏览器端由构建内联。
+    function getJsonrepairSource() {
+        if (root.__MVU2SHUJUKU_JSONREPAIR_SRC__) return root.__MVU2SHUJUKU_JSONREPAIR_SRC__;
+        try {
+            if (typeof require === 'function' && typeof __dirname !== 'undefined') {
+                const fs = require('fs');
+                const path = require('path');
+                root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = fs.readFileSync(path.join(__dirname, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+                return root.__MVU2SHUJUKU_JSONREPAIR_SRC__;
+            }
+        } catch (e) { /* 浏览器端由扩展构建时内联 */ }
+        return '';
+    }
+
     let pinyinReverse = null;
     function pinyinOf(char) {
         if (!pinyinReverse) {
@@ -2526,6 +2540,7 @@
         const statusPlaceholderNeeded = !!opts.statusPlaceholderNeeded;
         const name = opts.bridgeScriptName || 'MVU转数据库-数据桥';
         const ver = opts.version || VERSION;
+        const jsonrepairInline = opts.jsonrepairInline || '';
 
         const script = [
             `window.__MVU2SHUJUKU_TEMPLATE_BASE64="${b64}";`,
@@ -2535,6 +2550,17 @@
             `var VERSION=${JSON.stringify(ver)};`,
             `var BRIDGE_NAME=${JSON.stringify(name)};`,
             `console.log('['+BRIDGE_NAME+'] 桥启动 v'+VERSION);`,
+            ...(jsonrepairInline ? [
+                `// jsonrepair（与 MVU 源码同款，JSONPatch 容错解析；扩展内联的完整库优先）`,
+                `var mvuBridgeJsonrepair=(function(){`,
+                `  try{var full=(rootWindow.__MVU2SHUJUKU_YAML_LIBS__&&rootWindow.__MVU2SHUJUKU_YAML_LIBS__.jsonrepair);if(typeof full==='function')return full;}catch(e){}`,
+                `  var module={exports:{}};`,
+                `  var exports=module.exports;`,
+                jsonrepairInline,
+                `  return module.exports.jsonrepair||module.exports;`,
+                `})();`,
+                '',
+            ] : []),
             '',
             `function rootWin(){try{return window.top||window;}catch(e){return window;}}`,
             `var rootWindow=rootWin();`,
@@ -3339,7 +3365,10 @@
             `    if(sub){inner=sub[0].replace(/<[^>]+>/g,'').trim();isJsonBlock=true;}`,
             `    if(isJsonBlock){`,
             `      try{`,
-            `        var patch=JSON.parse(inner);`,
+            `        var patch=null;`,
+            `        try{patch=JSON.parse(inner);}catch(e){`,
+            `          try{patch=JSON.parse((typeof mvuBridgeJsonrepair==='function'?mvuBridgeJsonrepair(inner):inner));}catch(e2){patch=null;}`,
+            `        }`,
             `        if(Array.isArray(patch)){`,
             `          for(var pi=0;pi<patch.length;pi++){`,
             `            var op=patch[pi]||{};`,
@@ -3959,6 +3988,7 @@
             appendPlaceholder: opts.appendPlaceholder !== false,
             statusPlaceholderNeeded,
             bridgeScriptName: opts.bridgeScriptName || `${data.name || '角色'}·数据库数据桥`,
+            jsonrepairInline: getJsonrepairSource(),
         });
 
         // 3. 世界书处理
@@ -6279,7 +6309,13 @@ ${DB_INIT_SNIPPET}
             if (sub) { inner = sub[0].replace(/<[^>]+>/g, '').trim(); isJsonBlock = true; }
             if (isJsonBlock) {
                 try {
-                    const patch = JSON.parse(inner);
+                    let patch = null;
+                    try { patch = JSON.parse(inner); } catch (e) {
+                        try {
+                            const libs = getMvuYamlLibs();
+                            patch = JSON.parse((libs && typeof libs.jsonrepair === 'function') ? libs.jsonrepair(inner) : inner);
+                        } catch (e2) { patch = null; }
+                    }
                     if (Array.isArray(patch)) {
                         for (const op of patch) {
                             if (!op || (!op.path && !op.to)) continue;
@@ -7482,6 +7518,7 @@ ${DB_INIT_SNIPPET}
         const coreSource = opts.coreSource || '';
         const pinyinInline = opts.pinyinInline || '';
         const yamlLibsInline = opts.yamlLibsInline || '';
+        const jsonrepairInline = opts.jsonrepairInline || '';
         const indexJs = [
             '// MVU转数据库 · SillyTavern 原生扩展',
             '// 生成自 转换器/src/mvu2shujuku.js（' + VERSION + '），核心源码内联如下',
@@ -7491,6 +7528,7 @@ ${DB_INIT_SNIPPET}
             pinyinInline ? '\n' + pinyinInline : '',
             '})(typeof globalThis !== "undefined" ? globalThis : this);',
             yamlLibsInline ? '\n' + yamlLibsInline : '',
+            jsonrepairInline ? '\n' + jsonrepairInline : '',
             '',
             extensionIndexUi(),
         ].join('\n');

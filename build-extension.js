@@ -12,6 +12,7 @@ const ROOT = __dirname;
 const CORE_SRC = path.join(__dirname, 'src', 'mvu2shujuku.js');
 const PINYIN_SRC = path.join(__dirname, 'src', 'pinyin-data.js');
 const YAML_LIBS_SRC = path.join(__dirname, 'src', 'vendor', 'mvu-yaml-libs.js');
+const JSONREPAIR_SRC = path.join(__dirname, 'src', 'vendor', 'jsonrepair-lite.js');
 const OUT_DIR = process.argv[2]
     ? path.resolve(process.argv[2])
     : ROOT;
@@ -19,6 +20,7 @@ const OUT_DIR = process.argv[2]
 const coreSource = fs.readFileSync(CORE_SRC, 'utf8');
 const pinyinData = fs.readFileSync(PINYIN_SRC, 'utf8');
 const yamlLibsData = fs.readFileSync(YAML_LIBS_SRC, 'utf8');
+const jsonrepairData = fs.readFileSync(JSONREPAIR_SRC, 'utf8');
 const core = require(CORE_SRC);
 
 // 浏览器端没有 require：把拼音字典内联成 root.__MVU2SHUJUKU_PINYIN__
@@ -39,7 +41,10 @@ const yamlLibsInline = [
     '',
 ].join('\n');
 
-const files = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline });
+// jsonrepair 源码内联为全局：转换流程（浏览器端）生成卡内桥时读取并嵌入
+const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+
+const files = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline });
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 // 只写扩展运行文件；README 以仓库根目录的手写文档为准
