@@ -2696,58 +2696,9 @@
             `  var gen=statOverlayGen;`,
             `  (async function(){`,
             `    try{`,
-            `      // 写库前确保 full checkpoint 存在：无锚点且表仍为模板初始状态时先重建，`,
-            `      // 避免写入产生无锚点 artifacts 触发插件 V2 boundary_after_data_mismatch`,
-            `      try{`,
-            `        var tplCached2=null;`,
-            `        try{tplCached2=JSON.parse(mvu2shujukuDecodeB64(TEMPLATE_B64));}catch(e){tplCached2=null;}`,
-            `        if(tplCached2&&!hasFullCheckpoint()&&!mvu2shujukuInitSessionHung){`,
-            `          console.log('['+BRIDGE_NAME+'][流程] 写库前锚点状态：hasCheckpoint=false（桥内判定）');`,
-            `          var anchoredOK=false;`,
-            `          if(mvu2shujukuTablesSafeToAnchor(API,tplCached2)&&typeof API.initGameSession==='function'){`,
-            `            console.log('['+BRIDGE_NAME+'] 写库前：聊天缺少 full checkpoint，重建锚点…');`,
-            `            var ra=await mvu2shujukuWithTimeout(API.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tplCached2,templatePresetName:currentCharName()+'模板'}),20000,'initGameSession(写前锚点)');`,
-            `            console.log('['+BRIDGE_NAME+'] 写库前锚点重建：'+(ra&&ra.success===false?(ra.message||'失败'):(ra&&ra.timeout?'超时':'完成'))+' | 锚点='+hasFullCheckpoint());`,
-            `            anchoredOK=!(ra&&ra.success===false)&&!(ra&&ra.timeout)&&hasFullCheckpoint();`,
-            `          }else if(bridgeIsOpeningPhase()&&!mvu2shujukuHasExtraRows(API,tplCached2)&&typeof API.initGameSession==='function'){`,
-            `            // 表无额外行（仅模板行被改动，如开局捏人写入）：重置+重放本次写入无损`,
-            `            console.log('['+BRIDGE_NAME+'] 写库前：表无额外行，重置重建锚点并重放本次写入…');`,
-            `            try{`,
-            `              var r2b=await mvu2shujukuWithTimeout(API.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tplCached2,templatePresetName:currentCharName()+'模板'}),20000,'initGameSession(无额外行锚点)');`,
-            `              console.log('['+BRIDGE_NAME+'] 无额外行重建：'+(r2b&&r2b.success===false?(r2b.message||'失败'):(r2b&&r2b.timeout?'超时':'完成'))+' | 锚点='+hasFullCheckpoint());`,
-            `              anchoredOK=!(r2b&&r2b.success===false)&&!(r2b&&r2b.timeout)&&hasFullCheckpoint();`,
-            `            }catch(e){console.warn('['+BRIDGE_NAME+'] 无额外行重建异常:',e);}`,
-            `          }else if(typeof API.importTableAsJson==='function'){`,
-            `            // 表含用户数据但无锚点：把当前状态提交为 checkpoint，不丢数据`,
-            `            console.log('['+BRIDGE_NAME+'] 写库前：表含数据且无锚点，用 importTableAsJson 锚定当前状态…');`,
-            `            try{`,
-            `              var snap1=JSON.stringify(API.exportTableAsJson()||{});`,
-            `              var ok1=await Promise.resolve(API.importTableAsJson(snap1,{}));`,
-            `              console.log('['+BRIDGE_NAME+'] importTableAsJson 锚定='+(ok1?'成功':'失败'));`,
-            `              anchoredOK=!!ok1;`,
-            `            }catch(e){console.warn('['+BRIDGE_NAME+'] importTableAsJson 锚定异常:',e);}`,
-            `          }`,
-            `          if(!anchoredOK&&!hasFullCheckpoint()&&typeof API.importTableAsJson==='function'&&!mvu2shujukuInitSessionHung){`,
-            `            // initGameSession 可能“完成”却不建 checkpoint：再强制 importTableAsJson 建锚`,
-            `            console.log('['+BRIDGE_NAME+'] 写库前：仍未建立锚点，用 importTableAsJson 强制锚定…');`,
-            `            try{`,
-            `              var snap2=JSON.stringify(API.exportTableAsJson()||{});`,
-            `              var ok2b=await Promise.resolve(API.importTableAsJson(snap2,{}));`,
-            `              console.log('['+BRIDGE_NAME+'] importTableAsJson 强制锚定='+(ok2b?'成功':'失败')+' | 锚点='+hasFullCheckpoint());`,
-            `              anchoredOK=!!ok2b&&hasFullCheckpoint();`,
-            `            }catch(e){console.warn('['+BRIDGE_NAME+'] importTableAsJson 强制锚定异常:',e);}`,
-            `          }`,
-            `          if(!anchoredOK&&!hasFullCheckpoint()){`,
-            `            // 表含真实数据且插件拒绝锚定：放弃本次写入，绝不重置已有数据`,
-            `            console.warn('['+BRIDGE_NAME+'] 写库前：表含数据且无法建立锚点，放弃本次写入（避免无锚点 artifacts 与数据重置）。');`,
-            `            if(statOverlayGen===gen)pendingStatOverlay=null;`,
-            `            return;`,
-            `          }`,
-            `        }`,
-            `      }catch(e){console.warn('['+BRIDGE_NAME+'] 写库前锚点重建异常:',e);}`,
+            `      // 对齐参考卡：写库直接 diff 落表，不做锚点重建/表重置（运行时保持最小）`,
             `      var prev=currentStat();`,
             `      await writeDiffToDb(prev,target);`,
-            `      try{if(!hasFullCheckpoint())console.warn('['+BRIDGE_NAME+'] 写库完成后聊天仍无 full checkpoint！后续插件自动填表提交可能出现 V2 mismatch。');}catch(e){}`,
             `      broadcastBridgeEvent(mvuWrap(target),mvuWrap(prev));`,
             `    }catch(e){console.warn('['+BRIDGE_NAME+'] 合并写库异常:',e);}`,
             `    finally{if(statOverlayGen===gen)pendingStatOverlay=null;}`,
@@ -3279,32 +3230,8 @@
             `  var key=currentChatKey();`,
             `  console.log('['+BRIDGE_NAME+'] ensureTemplateInit: key='+key+' | done='+initState.done+' | running='+initState.running+' | retries='+initRetries);`,
             `  if(initState.key!==key)initRetries=0;`,
-            `  // 锚点检查：开场白切换会丢 full checkpoint，导致写库产生无锚点 artifacts，`,
-            `  // 触发插件 V2 boundary_after_data_mismatch；表已存在且缺锚点时重建一次（最多 3 次）`,
-            `  if(anchorChat!==key){anchorChat=key;anchorTries=0;}`,
-            `  if(!mvu2shujukuInitSessionHung&&anchorTries<3){`,
-            `    try{`,
-            `      var tpl=parseTemplate();`,
-            `      if(tpl&&!hasFullCheckpoint()){`,
-            `        var miss=mvu2shujukuMissingTableNames(API,mvu2shujukuExpectedTableNames(tpl));`,
-            `        if(miss.length===0&&mvu2shujukuTablesSafeToAnchor(API,tpl)&&typeof API.initGameSession==='function'){`,
-            `          anchorTries++;`,
-            `          console.log('['+BRIDGE_NAME+'] 聊天缺少 full checkpoint，重建数据库锚点…');`,
-            `          var r3=await mvu2shujukuWithTimeout(API.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:currentCharName()+'模板'}),20000,'initGameSession(锚点)');`,
-            `          console.log('['+BRIDGE_NAME+'] 数据库锚点重建：'+(r3&&r3.success===false?(r3.message||'失败'):(r3&&r3.timeout?'超时':'完成')));`,
-            `        }else if(miss.length===0&&typeof API.importTableAsJson==='function'){`,
-            `          // 表含用户数据但无锚点：把当前状态提交为 checkpoint，不丢数据`,
-            `          anchorTries++;`,
-            `          console.log('['+BRIDGE_NAME+'] 表含数据且无锚点，用 importTableAsJson 锚定当前状态…');`,
-            `          try{`,
-            `            var snap0=JSON.stringify(API.exportTableAsJson()||{});`,
-            `            var ok2=await Promise.resolve(API.importTableAsJson(snap0,{}));`,
-            `            console.log('['+BRIDGE_NAME+'] importTableAsJson 锚定='+(ok2?'成功':'失败'));`,
-            `          }catch(e){console.warn('['+BRIDGE_NAME+'] importTableAsJson 锚定异常:',e);}`,
-            `        }`,
-            `      }`,
-            `    }catch(e){anchorTries++;console.warn('['+BRIDGE_NAME+'] 数据库锚点重建异常:',e);}`,
-            `  }`,
+            `  // 对齐参考卡：只做“缺表才初始化”（initGameSession，每个聊天 done 去重一次）；`,
+            `  // 不做锚点重建/表重置，避免切聊天误清数据。`,
             `  if(initState.done&&initState.key===key)return;`,
             `  if(initState.running)return;`,
             `  initState.running=true;`,
@@ -6138,22 +6065,14 @@ ${DB_INIT_SNIPPET}
         bindDebugHooks(context);
         ensureTemplateDefine();
         installWindowGetAllVariables();
-        installWindowMvuShim();
-        // 表格更新回调：插件就绪后自动重试注册
-        if (!installTableUpdateHook()) {
-            hostWindow.setTimeout(function retryHook() {
-                if (!installTableUpdateHook()) hostWindow.setTimeout(retryHook, 2000);
-            }, 2000);
-        }
+        // 运行时（建表/锚点/占位符/Mvu 兼容）由转换后卡内嵌入的数据桥负责（对齐参考卡）；
+        // 扩展只做转换、面板与 EJS 数据读取，不做任何运行时表管理，避免切聊天误重置。
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
         console.log(
             '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
             ' | defines=' + !!(ejs && ejs.defines) +
             ' | 已注册 mvu2shujukuGetAllVariables=' + typeof (ejs && ejs.defines && ejs.defines.mvu2shujukuGetAllVariables)
         );
-        bindAutoInit(context);
-        hostWindow.setTimeout(autoInitDatabase, 1500);
-        activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
         console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') +
             ' | 预写锚点=' + (typeof ensureCheckpointBeforeWrite === 'function' ? '已启用' : '缺失') +
             ' | 校验锚点=' + (typeof hasFullShujukuCheckpoint === 'function' ? '已启用' : '缺失') + '）');
@@ -8232,22 +8151,14 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         bindDebugHooks(context);
         ensureTemplateDefine();
         installWindowGetAllVariables();
-        installWindowMvuShim();
-        // 表格更新回调：插件就绪后自动重试注册
-        if (!installTableUpdateHook()) {
-            hostWindow.setTimeout(function retryHook() {
-                if (!installTableUpdateHook()) hostWindow.setTimeout(retryHook, 2000);
-            }, 2000);
-        }
+        // 运行时（建表/锚点/占位符/Mvu 兼容）由转换后卡内嵌入的数据桥负责（对齐参考卡）；
+        // 扩展只做转换、面板与 EJS 数据读取，不做任何运行时表管理，避免切聊天误重置。
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
         console.log(
             '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
             ' | defines=' + !!(ejs && ejs.defines) +
             ' | 已注册 mvu2shujukuGetAllVariables=' + typeof (ejs && ejs.defines && ejs.defines.mvu2shujukuGetAllVariables)
         );
-        bindAutoInit(context);
-        hostWindow.setTimeout(autoInitDatabase, 1500);
-        activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
         console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') +
             ' | 预写锚点=' + (typeof ensureCheckpointBeforeWrite === 'function' ? '已启用' : '缺失') +
             ' | 校验锚点=' + (typeof hasFullShujukuCheckpoint === 'function' ? '已启用' : '缺失') + '）');
