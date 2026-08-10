@@ -4554,6 +4554,27 @@ ${DB_INIT_SNIPPET}
             console.log('[mvu2shujuku][debug][重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
                 ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint() +
                 ' | checkpoint含注入数据=' + (statForCheck ? checkpointHasStatData(activeLayout, statForCheck) : 'N/A'));
+            // 重建成功后，运行时必须物化为稳定 key 的 checkpoint 数据：
+            // 否则后续编辑器/AI 写入的 baseRevision 会引用原始 key，刷新回放失败（实测根因）。
+            if (ok || hasFullShujukuCheckpoint()) {
+                const cpHasData = statForCheck ? checkpointHasStatData(activeLayout, statForCheck) : false;
+                if (cpHasData) {
+                    const rtOk = await materializeRuntimeFromCheckpoint(api);
+                    if (rtOk) {
+                        const afterRows = (() => {
+                            try {
+                                const all2 = api.exportTableAsJson() || {};
+                                let n = 0;
+                                for (const k in all2) {
+                                    if (k.indexOf('sheet_') === 0 && all2[k] && Array.isArray(all2[k].content)) n += Math.max(0, all2[k].content.length - 1);
+                                }
+                                return n;
+                            } catch (e) { return -1; }
+                        })();
+                        console.log('[mvu2shujuku][debug][重锚] 重建后运行时已按 checkpoint 物化（exportRows=' + afterRows + '）。');
+                    }
+                }
+            }
             // 重锚成功必须落盘：首楼替换后 chat 已被插件/酒馆重新保存过（不带 checkpoint 或带旧默认值），
             // 仅改内存会在下一次保存或刷新时再次丢失。
             if (ok || hasFullShujukuCheckpoint()) {
@@ -5741,6 +5762,23 @@ ${DB_INIT_SNIPPET}
         } catch (e) { return false; }
     }
 
+    // 运行时物化唯一允许的数据源：插件规范化后的 full checkpoint 数据（稳定 sheet key）。
+    // 绝不能把转换器原始 key 的模板灌进运行时——否则后续编辑（可视化编辑器/AI 填表）
+    // 的 baseRevision 会带着原始 key，挂在稳定 key 的 checkpoint 上，刷新回放失败、整链回默认。
+    // 返回 true 表示运行时已（重新）用 checkpoint 数据物化。
+    async function materializeRuntimeFromCheckpoint(api) {
+        try {
+            const cpData = readFullCheckpointData();
+            if (!cpData || typeof api.importTableAsJson !== 'function') return false;
+            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(cpData), { persist: false, mode: 'restore' }));
+            console.log('[mvu2shujuku][debug] 运行时按 checkpoint 数据物化（稳定 key，persist:false）=' + (ok ? '成功' : '失败'));
+            return !!ok;
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] 运行时按 checkpoint 物化异常:', e && e.message ? e.message : e);
+            return false;
+        }
+    }
+
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
@@ -5830,14 +5868,20 @@ ${DB_INIT_SNIPPET}
                                 if (injected) {
                                     console.log('[mvu2shujuku][debug][注入合并] initGameSession 后已在运行时表格确认注入数据。');
                                 } else {
-                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后运行时未确认注入数据，使用运行时专用通道物化（persist:false，不写 logEntry）…');
-                                    try {
-                                        const rtOk = await Promise.resolve(api.importTableAsJson(JSON.stringify(mergedTemplate), { persist: false, mode: 'restore' }));
-                                        console.log('[mvu2shujuku][debug] 运行时物化（persist:false）=' + (rtOk ? '成功' : '失败'));
+                                    // 运行时物化只能使用插件规范化后的 checkpoint 数据（稳定 key）。
+                                    // 若此刻 checkpoint 尚未就绪/未含注入数据，本次跳过物化，
+                                    // 由稍后的重锚重建 checkpoint 后用稳定 key 数据补物化——
+                                    // 绝不能用原始 key 的 mergedTemplate 灌运行时（会导致后续编辑的
+                                    // baseRevision 用原始 key，刷新回放失败、整链回默认）。
+                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后运行时未确认注入数据，尝试用 checkpoint 数据物化（稳定 key，persist:false，不写 logEntry）…');
+                                    const cpReady = checkpointHasStatData(activeLayout, target);
+                                    if (cpReady) {
+                                        const rtOk = await materializeRuntimeFromCheckpoint(api);
+                                        console.log('[mvu2shujuku][debug][注入合并] checkpoint 物化结果=' + (rtOk ? '成功' : '失败'));
                                         const injected2 = await verifyTemplateInjected(api, activeLayout, target, 1000);
                                         console.log('[mvu2shujuku][debug][注入合并] 物化后确认注入数据=' + injected2);
-                                    } catch (e) {
-                                        console.warn('[mvu2shujuku][debug] 运行时物化异常（不影响已写入的 checkpoint）:', e && e.message ? e.message : e);
+                                    } else {
+                                        console.warn('[mvu2shujuku][debug][注入合并] checkpoint 尚未含注入数据，本次跳过运行时物化，等重锚后用稳定 key 数据补物化。');
                                     }
                                 }
                                 // 持久化层校验：full checkpoint 里必须真的含注入数据（而不是默认值）。
@@ -5864,7 +5908,8 @@ ${DB_INIT_SNIPPET}
                             // 开局时 export 可能为空，空快照会把注入数据覆盖成空表。
                             // 注意：无现有锚点时该提交不会写 checkpoint（插件语义），
                             // 仅作运行时物化与最后手段，失败后仍有差异写入兜底。
-                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(mergedTemplate || snap), {}));
+                            const fallbackData = readFullCheckpointData() || mergedTemplate || snap;
+                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
                                 usedSnapshot = true;
                                 console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
@@ -7584,6 +7629,27 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             console.log('[mvu2shujuku][debug][重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
                 ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint() +
                 ' | checkpoint含注入数据=' + (statForCheck ? checkpointHasStatData(activeLayout, statForCheck) : 'N/A'));
+            // 重建成功后，运行时必须物化为稳定 key 的 checkpoint 数据：
+            // 否则后续编辑器/AI 写入的 baseRevision 会引用原始 key，刷新回放失败（实测根因）。
+            if (ok || hasFullShujukuCheckpoint()) {
+                const cpHasData = statForCheck ? checkpointHasStatData(activeLayout, statForCheck) : false;
+                if (cpHasData) {
+                    const rtOk = await materializeRuntimeFromCheckpoint(api);
+                    if (rtOk) {
+                        const afterRows = (() => {
+                            try {
+                                const all2 = api.exportTableAsJson() || {};
+                                let n = 0;
+                                for (const k in all2) {
+                                    if (k.indexOf('sheet_') === 0 && all2[k] && Array.isArray(all2[k].content)) n += Math.max(0, all2[k].content.length - 1);
+                                }
+                                return n;
+                            } catch (e) { return -1; }
+                        })();
+                        console.log('[mvu2shujuku][debug][重锚] 重建后运行时已按 checkpoint 物化（exportRows=' + afterRows + '）。');
+                    }
+                }
+            }
             // 重锚成功必须落盘：首楼替换后 chat 已被插件/酒馆重新保存过（不带 checkpoint 或带旧默认值），
             // 仅改内存会在下一次保存或刷新时再次丢失。
             if (ok || hasFullShujukuCheckpoint()) {
@@ -8771,6 +8837,23 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         } catch (e) { return false; }
     }
 
+    // 运行时物化唯一允许的数据源：插件规范化后的 full checkpoint 数据（稳定 sheet key）。
+    // 绝不能把转换器原始 key 的模板灌进运行时——否则后续编辑（可视化编辑器/AI 填表）
+    // 的 baseRevision 会带着原始 key，挂在稳定 key 的 checkpoint 上，刷新回放失败、整链回默认。
+    // 返回 true 表示运行时已（重新）用 checkpoint 数据物化。
+    async function materializeRuntimeFromCheckpoint(api) {
+        try {
+            const cpData = readFullCheckpointData();
+            if (!cpData || typeof api.importTableAsJson !== 'function') return false;
+            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(cpData), { persist: false, mode: 'restore' }));
+            console.log('[mvu2shujuku][debug] 运行时按 checkpoint 数据物化（稳定 key，persist:false）=' + (ok ? '成功' : '失败'));
+            return !!ok;
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] 运行时按 checkpoint 物化异常:', e && e.message ? e.message : e);
+            return false;
+        }
+    }
+
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
@@ -8860,14 +8943,20 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 if (injected) {
                                     console.log('[mvu2shujuku][debug][注入合并] initGameSession 后已在运行时表格确认注入数据。');
                                 } else {
-                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后运行时未确认注入数据，使用运行时专用通道物化（persist:false，不写 logEntry）…');
-                                    try {
-                                        const rtOk = await Promise.resolve(api.importTableAsJson(JSON.stringify(mergedTemplate), { persist: false, mode: 'restore' }));
-                                        console.log('[mvu2shujuku][debug] 运行时物化（persist:false）=' + (rtOk ? '成功' : '失败'));
+                                    // 运行时物化只能使用插件规范化后的 checkpoint 数据（稳定 key）。
+                                    // 若此刻 checkpoint 尚未就绪/未含注入数据，本次跳过物化，
+                                    // 由稍后的重锚重建 checkpoint 后用稳定 key 数据补物化——
+                                    // 绝不能用原始 key 的 mergedTemplate 灌运行时（会导致后续编辑的
+                                    // baseRevision 用原始 key，刷新回放失败、整链回默认）。
+                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后运行时未确认注入数据，尝试用 checkpoint 数据物化（稳定 key，persist:false，不写 logEntry）…');
+                                    const cpReady = checkpointHasStatData(activeLayout, target);
+                                    if (cpReady) {
+                                        const rtOk = await materializeRuntimeFromCheckpoint(api);
+                                        console.log('[mvu2shujuku][debug][注入合并] checkpoint 物化结果=' + (rtOk ? '成功' : '失败'));
                                         const injected2 = await verifyTemplateInjected(api, activeLayout, target, 1000);
                                         console.log('[mvu2shujuku][debug][注入合并] 物化后确认注入数据=' + injected2);
-                                    } catch (e) {
-                                        console.warn('[mvu2shujuku][debug] 运行时物化异常（不影响已写入的 checkpoint）:', e && e.message ? e.message : e);
+                                    } else {
+                                        console.warn('[mvu2shujuku][debug][注入合并] checkpoint 尚未含注入数据，本次跳过运行时物化，等重锚后用稳定 key 数据补物化。');
                                     }
                                 }
                                 // 持久化层校验：full checkpoint 里必须真的含注入数据（而不是默认值）。
@@ -8894,7 +8983,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             // 开局时 export 可能为空，空快照会把注入数据覆盖成空表。
                             // 注意：无现有锚点时该提交不会写 checkpoint（插件语义），
                             // 仅作运行时物化与最后手段，失败后仍有差异写入兜底。
-                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(mergedTemplate || snap), {}));
+                            const fallbackData = readFullCheckpointData() || mergedTemplate || snap;
+                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
                                 usedSnapshot = true;
                                 console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
