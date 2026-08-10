@@ -2500,7 +2500,9 @@
             try {
                 if (r.kind === 'array') {
                     for (let rr = r.sheet.content.length - 1; rr >= 1; rr--) {
-                        try { await Promise.resolve(api.deleteRow(L.table, rr - 1)); } catch (e) {}
+                        // deleteRow 的 rowIndex 是 content 数组索引（0=表头，1=第一数据行），
+                        // rr 正是数组索引，直接传 rr；传 rr-1 会误删表头/前一数据行。
+                        try { await Promise.resolve(api.deleteRow(L.table, rr)); } catch (e) {}
                     }
                     for (let ai = 0; ai < r.arr.length; ai++) {
                         const o = {}; o[r.header[1] || '名称'] = String(r.arr[ai]);
@@ -2972,7 +2974,8 @@
             `      for(var rv=1;rv<sheet.content.length;rv++)oldVals.push(sheet.content[rv]?sheet.content[rv][1]:undefined);`,
             `      var arrSame=oldVals.length===arr.length&&oldVals.every(function(v,i){return String(v)===String(arr[i]);});`,
             `      if(arrSame)continue;`,
-            `      for(var rr=sheet.content.length-1;rr>=1;rr--){try{await Promise.resolve(API.deleteRow(L.table,rr-1));}catch(e){}}`,
+            `      // deleteRow 的 rowIndex 是 content 数组索引（0=表头，1=第一数据行），rr 即数组索引`,
+            `      for(var rr=sheet.content.length-1;rr>=1;rr--){try{await Promise.resolve(API.deleteRow(L.table,rr));}catch(e){}}`,
             `      for(var ai=0;ai<arr.length;ai++){`,
             `        var o={};o[header[1]||'名称']=String(arr[ai]);`,
             `        try{await Promise.resolve(API.insertRow(L.table,o));}catch(e){console.warn('['+BRIDGE_NAME+'] insertRow 失败:',e);}`,
@@ -5013,7 +5016,10 @@ ${DB_INIT_SNIPPET}
                 for (const x of idRows) {
                     if (x.id === '1') continue;
                     try {
-                        await Promise.resolve(api.deleteRow(L.table, x.ri - 1));
+                        // 插件 deleteRow 的 rowIndex 是 content 数组索引（0=表头，1=第一数据行）。
+                        // x.ri 正是 content 数组索引，直接传 x.ri；传 x.ri-1 会把表头当目标，
+                        // 实际误删 row_id=1 的注入数据行（日志却按 x.id 打印成“已清理 row_id=2”）。
+                        await Promise.resolve(api.deleteRow(L.table, x.ri));
                         console.log('[mvu2shujuku][debug] 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
                     } catch (e) {
                         console.warn('[mvu2shujuku][debug] 清理单例表多余行失败:', e);
