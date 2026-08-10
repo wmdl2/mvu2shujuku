@@ -5318,6 +5318,9 @@ ${DB_INIT_SNIPPET}
         for (const t of targets) {
             try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: { after: a, before: b } })); } catch (e) {}
             try { if (t.eventSource && typeof t.eventSource.emit === 'function') t.eventSource.emit(name, a, b); } catch (e) {}
+            // 前端 iframe 的 eventOn 可能是 TH 注入的、绑定在 TH 事件总线（eventEmit）上；
+            // 只对主窗口调 eventEmit 收不到，必须对每个 target（含消息 iframe）也广播 eventEmit。
+            try { if (typeof t.eventEmit === 'function') t.eventEmit(name, a, b); } catch (e) {}
         }
         // 与 MVU 原版一致：尽量走 TH 的事件总线（前端 eventOn 监听的就是它）
         try { if (typeof hostWindow.eventEmit === 'function') hostWindow.eventEmit(name, a, b); } catch (e) {}
@@ -7603,6 +7606,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         for (const t of targets) {
             try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: { after: a, before: b } })); } catch (e) {}
             try { if (t.eventSource && typeof t.eventSource.emit === 'function') t.eventSource.emit(name, a, b); } catch (e) {}
+            // 前端 iframe 的 eventOn 可能是 TH 注入的、绑定在 TH 事件总线（eventEmit）上；
+            // 只对主窗口调 eventEmit 收不到，必须对每个 target（含消息 iframe）也广播 eventEmit。
+            try { if (typeof t.eventEmit === 'function') t.eventEmit(name, a, b); } catch (e) {}
         }
         // 与 MVU 原版一致：尽量走 TH 的事件总线（前端 eventOn 监听的就是它）
         try { if (typeof hostWindow.eventEmit === 'function') hostWindow.eventEmit(name, a, b); } catch (e) {}
