@@ -1004,9 +1004,14 @@
                     });
                 }
             } else if (values.length === 0 || allObject) {
-                // 条目字典（如 道侣.{林若悠:{...}}）与空字典（如 主角.储物袋 / 系统._摄像头布设，
-                // 初始为空、运行期由脚本/AI 按条目填充）→ 子行表，每个条目一行
-                if (opts.childTables) {
+                // 条目字典（如 道侣.{林若悠:{...}}）与空字典（如 主角.储物袋，
+                // 初始为空、运行期由脚本/AI 按条目填充）→ 子行表，每个条目一行。
+                // 例外：_ 前缀 = 脚本维护的只读状态（如 系统._摄像头布设），不拆表，
+                // 整对象存 JSON 列（AI 见不到、脚本整体读写）。
+                if (String(key).startsWith('_')) {
+                    const jcol = jsonColumnFromObject(key, v, path, usedIdents);
+                    if (jcol) cols.push(jcol);
+                } else if (opts.childTables) {
                     opts.childTables.push({ key, value: v, path });
                 } else {
                     report.warn(`发现嵌套对象「${key}」，需拆分为子行表（当前未启用子表提取）`, 'schema');
@@ -1709,20 +1714,21 @@
             L.push(`${group.tableName}。${describeGroup(group)}`);
         }
         // JSON 表整组由脚本/前端管理：完全不展示列定义与约束；其余表隐藏内部列（_扩展数据）
-        const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据');
-        const hasReadonlyCols = aiCols.some(c => String(c.zh).startsWith('_'));
+        // 下划线开头字段 = 脚本维护的只读状态：不进填表规则（AI 仍能在数据表里看到值，
+        // 但没有更新规则），只在表级用一行说明约束，避免逐列占提示词。
+        const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+        const hasReadonlyCols = (group.columns || []).some(c => String(c.zh).startsWith('_'));
+        if (hasReadonlyCols) {
+            // MVU 规范：下划线开头字段（如 _xxx）是脚本维护的只读状态，AI 禁止更新
+            L.push('下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新，更新会被回滚。');
+        }
         if (aiCols.length) {
-            if (hasReadonlyCols) {
-                // MVU 规范：下划线开头字段（如 _xxx）是脚本维护的只读状态，AI 禁止更新
-                L.push('下划线开头字段（如 _xxx）为脚本/系统维护的只读状态：AI 只能读取、严禁更新，更新会被回滚。');
-            }
             L.push('【列定义】');
             // 对齐默认模板：列定义只列中文名 + 标识符；字段说明与约束放【强制约束】
             aiCols.forEach((c, i) => L.push(`- 列${i + 1}: ${c.zh} ${c.ident}`));
             L.push('【强制约束】');
             for (const c of aiCols) {
                 const parts = [];
-                if (String(c.zh).startsWith('_')) parts.push('只读，禁止更新');
                 if (c.range) parts.push(`数值范围 ${c.range[0]}~${c.range[1]}`);
                 if (c.enum) parts.push(`可选值：${c.enum.join(' / ')}`);
                 if (c.format) parts.push(`格式要求：${String(c.format).replace(/\n/g, ' ')}`);
@@ -1738,6 +1744,9 @@
                 if (c.check && c.check.length > 20) L.push(`- ${c.zh}：…（共 ${c.check.length} 条规则，其余略）`);
             }
             (group.reminders || []).forEach(r => L.push(`- 每次回复必须维护：${r}`));
+        }
+        if (hasReadonlyCols && aiCols.length === 0 && group.kind !== 'json') {
+            L.push('本表全部字段均为脚本/系统维护的只读状态：AI 无需填表，仅供读取。');
         }
         if (group.kind !== 'json') {
             L.push('只在正文明确造成状态变化时更新对应字段；不得为凑表而虚构数据。');
