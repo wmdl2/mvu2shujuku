@@ -4006,9 +4006,19 @@
         const template = opts.template || generateTemplate(schema, { mode, report });
 
         // 2. 检测卡内是否依赖 MVU API
+        // 静态扫描只能看到卡内文本；tavern_helper 里 `import 'https://…'` 的外部脚本
+        // （CDN 拉取的游戏逻辑）在卡内只有一行 import，看不到实际调用。
+        // 这类卡默认也装 MVU 兼容层，避免“看不见就不装”导致外部脚本调 Mvu.* 时落空。
         const blobs = cardTextBlobs(card);
         const usesMvu = blobs.some(b => /Mvu\s*\./i.test(b.text));
-        const installMvuShim = opts.installMvuShim !== undefined ? !!opts.installMvuShim : usesMvu;
+        const hasExternalImport = blobs.some(b => (
+            /(?:^|[^.\w])import\s*(?:\(\s*)?['"](?:https?:)?\/\//i.test(b.text) ||
+            /import\s*\(\s*['"]https?:\/\//i.test(b.text)
+        ));
+        const installMvuShim = opts.installMvuShim !== undefined ? !!opts.installMvuShim : (usesMvu || hasExternalImport);
+        if (hasExternalImport && !usesMvu) {
+            report.note('检测到外部 import 脚本（卡内只有 import 行，静态扫描无法确认是否调用 MVU API），默认安装 MVU 兼容层兜底。');
+        }
         // 转换时即确定是否依赖 <StatusPlaceHolderImpl/>（前端注入正则），写死进桥，
         // 避免运行时读取懒加载角色对象导致检测失败
         const statusPlaceholderNeeded = ((data.extensions && data.extensions.regex_scripts) || [])
@@ -4148,7 +4158,10 @@
                 report.note(`已移除 tavern_helper 脚本「${s.name}」（MVU 相关：${content.slice(0, 80)}…）。`);
                 continue;
             }
-            report.manual(`保留 tavern_helper 脚本「${s.name}」（未检测到 MVU API；若依赖 MVU 变量请人工检查）。`);
+            const isExternal = /(?:^|[^.\w])import\s*(?:\(\s*)?['"](?:https?:)?\/\//i.test(content) || /import\s*\(\s*['"]https?:\/\//i.test(content);
+            report.manual(
+                `保留 tavern_helper 脚本「${s.name}」（${isExternal ? '外部 import，无法静态确认其内部调用；已默认安装 MVU 兼容层兜底，若仍有异常请人工检查' : '未检测到 MVU API；若依赖 MVU 变量请人工检查'}）。`
+            );
             keptScripts.push(deepClone(s));
         }
         keptScripts.push({
