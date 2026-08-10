@@ -78,6 +78,19 @@
         return root.__MVU2SHUJUKU_PINYIN__;
     }
 
+    // 与 MVU 源码同款解析库（yaml@2.8 / json5@2.2 / jsonrepair@3.13）：
+    // Node 端 require src/vendor/mvu-yaml-libs.js；浏览器端由构建脚本内联成 root.__MVU2SHUJUKU_YAML_LIBS__。
+    function getMvuYamlLibs() {
+        if (root.__MVU2SHUJUKU_YAML_LIBS__) return root.__MVU2SHUJUKU_YAML_LIBS__;
+        try {
+            if (typeof require === 'function') {
+                root.__MVU2SHUJUKU_YAML_LIBS__ = require('./vendor/mvu-yaml-libs.js');
+                return root.__MVU2SHUJUKU_YAML_LIBS__;
+            }
+        } catch (e) { /* 浏览器端由扩展构建时内联 */ }
+        throw new Error('缺少 MVU 解析库（src/vendor/mvu-yaml-libs.js 未内联/未安装）');
+    }
+
     let pinyinReverse = null;
     function pinyinOf(char) {
         if (!pinyinReverse) {
@@ -243,179 +256,42 @@
     }
 
     /* ================================================================
-     * initvar 解析（YAML 子集 + JSON5 兼容）
+     * initvar 解析（与 MVU 源码 util/common.ts parseString 完全一致）：
+     *   非 { / [ 开头 → YAML.parseDocument(content, { merge:true }).toJS()
+     *   { / [ 开头或 YAML 失败 → JSON5 → JSON(jsonrepair) → YAML 兜底
+     * 使用内联的同款库（yaml@2.8 / json5@2.2 / jsonrepair@3.13），
+     * 支持注释、行内对象、中英混合键、merge keys、成对数组等全部官方写法。
      * ================================================================ */
-
-    function parseScalar(token) {
-        const t = String(token).trim();
-        if (t === '') return '';
-        if (t === '{}') return {};
-        if (t === '[]') return [];
-        if (/^\[.*\]$/s.test(t)) {
-            // 内联数组 [a, b] / ["a", "b"] / [1, 2]
-            const inner = t.slice(1, -1).trim();
-            if (!inner) return [];
-            const items = [];
-            let cur = '';
-            let depth = 0;
-            let inStr = null;
-            for (let i = 0; i < inner.length; i++) {
-                const ch = inner[i];
-                if (inStr) {
-                    cur += ch;
-                    if (ch === '\\') { cur += inner[i + 1] || ''; i++; continue; }
-                    if (ch === inStr) inStr = null;
-                    continue;
-                }
-                if (ch === '"' || ch === "'") { inStr = ch; cur += ch; continue; }
-                if (ch === '[' || ch === '{') depth++;
-                if (ch === ']' || ch === '}') depth--;
-                if (ch === ',' && depth === 0) { items.push(parseScalar(cur)); cur = ''; continue; }
-                cur += ch;
-            }
-            if (cur.trim()) items.push(parseScalar(cur));
-            return items;
-        }
-        if (t.startsWith('{') && t.endsWith('}')) {
-            // 行内对象 { 当前值: 8, 训练经验: 0 }（YAML/JSON5 混合写法）：
-            // 尝试按 JSON5 解析成对象，失败则退回原字符串（避免把嵌套状态存成坏文本）
-            try {
-                const obj = parseInitVar(t);
-                if (obj && typeof obj === 'object' && !Array.isArray(obj)) return obj;
-            } catch (e) { /* fallthrough */ }
-        }
-        if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
-        if (t === 'true') return true;
-        if (t === 'false') return false;
-        if (t === 'null' || t === '~') return null;
-        const q = t[0];
-        if ((q === '"' || q === "'") && t[t.length - 1] === q) {
-            return t.slice(1, -1).replace(/\\"/g, '"').replace(/\\n/g, '\n');
-        }
-        return t;
-    }
-
-    // 行解析：返回 {indent, key, value} 或 null
-    function parseYamlLine(line) {
-        const m = line.match(/^(\s*)([^:]+):\s*(.*)$/);
-        if (!m) return null;
-        const indent = m[1].replace(/\t/g, '    ').length;
-        const key = m[2].trim().replace(/^["']|["']$/g, '');
-        const value = m[3].trim();
-        return { indent, key, value };
-    }
-
-    /**
-     * 解析 initvar 条目内容。
-     * 先按 JSON5（内容以 { 开头）尝试；再按 YAML 子集（缩进 + key: value）解析。
-     * 支持：
-     *   - 叶子标量
-     *   - ["初始值", "条件描述"] 数组叶子
-     *   - 嵌套字典、`- item` 列表
-     *   - {}/[] 空容器
-     */
     function parseInitVar(content) {
         const text = String(content || '').replace(/^\uFEFF/, '');
         const trimmed = text.trim();
         if (!trimmed) return {};
-        if (/^[[{]/s.test(trimmed)) {
+        const libs = getMvuYamlLibs();
+        const jsonFirst = /^[[{]/s.test(trimmed);
+        const parseYaml = () => libs.YAML.parseDocument(trimmed, { merge: true }).toJS();
+        try {
+            if (jsonFirst) throw new Error('json-first');
+            return parseYaml();
+        } catch (yamlErr) {
             try {
-                return JSON.parse(trimmed);
-            } catch (e) { /* fallthrough */ }
-            try {
-                return JSON.parse(json5Lite(trimmed));
-            } catch (e) { /* fallthrough */ }
-            // 以 { / [ 开头就是内联 JSON/JSON5：解析失败时返回原字符串（由调用方
-            // 决定保留为字符串或兜底），绝不能回落成 YAML 树解析——
-            // 那会把 "{ 上次生成期" 整段当成键名，产生 {"{ 上次生成期": "-1, ..."} 这类坏结构。
-            return trimmed;
-        }
-        return parseYamlTree(text);
-    }
-
-    function parseYamlTree(text) {
-        const lines = text.split(/\r?\n/);
-        const root = {};
-        // 栈：{ indent, obj }，obj 为当前层容器
-        const stack = [{ indent: -1, obj: root, key: null, isList: false }];
-        let pendingList = null; // 当前待插入的列表（- item 连续行）
-
-        function current() { return stack[stack.length - 1]; }
-
-        function ensureListOwner(indent) {
-            // 如果当前栈顶不是 list 且该 list 还没归属，则在当前 obj 下建一个 _list 容器
-            const top = current();
-            if (top.isList && top.indent === indent) return top;
-            return null;
-        }
-
-        for (const raw of lines) {
-            const line = raw.replace(/\t/g, '    ');
-            // 空行与 # 注释行直接跳过（注释绝不能当成变量组）
-            if (!line.trim() || line.trim().startsWith('#')) continue;
-            const m = line.match(/^(\s*)(-)?\s*(.*)$/);
-            const indent = m[1].length;
-            const isDash = m[2] === '-';
-            const rest = m[3];
-            if (isDash) {
-                // 列表项
-                const p = parseYamlLine(rest ? `x: ${rest}` : 'x:');
-                // 找最近的列表归属
-                while (stack.length > 1 && stack[stack.length - 1].indent > indent) stack.pop();
-                const top = current();
-                if (!top.isList) {
-                    // 隐式列表：键在上一个“只有 key 无 value”的行
-                    const parent = stack[stack.length - 1].obj;
-                    const listKey = stack[stack.length - 1].key;
-                    const list = [];
-                    if (listKey) parent[listKey] = list;
-                    stack.push({ indent, obj: list, key: null, isList: true });
-                }
-                const list = current().obj;
-                if (p) {
-                    // "key: value" 形式 → 列表项是对象
-                    const item = {};
-                    const v = p.value;
-                    if (v !== '') {
-                        item[p.key] = parseScalar(v);
-                    } else {
-                        list.push(item);
-                        stack.push({ indent: indent + 2, obj: item, key: p.key, isList: false });
-                        continue;
-                    }
-                    list.push(item);
-                    if (v === '') stack.push({ indent: indent + 2, obj: item, key: null, isList: false });
-                } else {
-                    // 纯标量列表项
-                    const v = rest.trim();
-                    if (v.startsWith('{') || v.startsWith('[')) {
-                        try { list.push(parseInitVar(v)); } catch (e) { list.push(parseScalar(v)); }
-                    } else {
-                        list.push(parseScalar(v));
+                return libs.JSON5.parse(trimmed);
+            } catch (json5Err) {
+                try {
+                    return JSON.parse(libs.jsonrepair(trimmed));
+                } catch (jsonErr) {
+                    try {
+                        if (!jsonFirst) throw new Error('not-json-first');
+                        return parseYaml();
+                    } catch (yamlErr2) {
+                        // 与官方一致：解析失败抛错（由调用方捕获并在转换报告里提示）
+                        const msg = `initvar 解析失败（不是合法 YAML/JSON5/JSON）: ${String(trimmed).slice(0, 120)}`;
+                        const e = new Error(msg);
+                        e.cause = { yaml: yamlErr && yamlErr.message, json5: json5Err && json5Err.message, json: jsonErr && jsonErr.message };
+                        throw e;
                     }
                 }
-                continue;
-            }
-
-            const p = parseYamlLine(line);
-            if (!p) continue;
-            // 弹出缩进更深的栈
-            while (stack.length > 1 && stack[stack.length - 1].indent >= p.indent) stack.pop();
-            const top = current();
-            const container = top.isList ? top.obj[top.obj.length - 1] : top.obj;
-            const target = (container && typeof container === 'object' && !Array.isArray(container)) ? container : top.obj;
-            if (p.value === '') {
-                // 进入子层（可能是对象，也可能是行表）
-                const child = {};
-                target[p.key] = child;
-                stack.push({ indent: p.indent, obj: child, key: p.key, isList: false });
-            } else if (p.value === '{}' || p.value === '[]') {
-                target[p.key] = p.value === '{}' ? {} : [];
-            } else {
-                target[p.key] = parseScalar(p.value);
             }
         }
-        return root;
     }
 
     // 解析 [value, desc] 叶子：返回 { value, desc }
@@ -3949,11 +3825,17 @@
                 if (wrapped) content = wrapped[1];
                 const codeblock = content.match(/^\s*```[^\n]*\n?([\s\S]*?)\n?\s*```\s*$/);
                 if (codeblock) content = codeblock[1];
-                const parsed = parseInitVar(content);
+                let parsed;
+                try {
+                    parsed = parseInitVar(content);
+                } catch (parseErr) {
+                    report.warn(`[InitVar] 条目解析失败，已跳过该条目：${parseErr && parseErr.message ? parseErr.message : parseErr}`, 'schema');
+                    continue;
+                }
                 if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
                     initvar = deepMerge(initvar, parsed);
                 } else {
-                    report.warn(`[InitVar] 条目解析结果不是对象（可能是 JSON5 解析失败），已跳过该条目`, 'schema');
+                    report.warn(`[InitVar] 条目解析结果不是对象，已跳过该条目`, 'schema');
                 }
             }
             report.note(`已解析 ${initEntries.length} 个 [initvar] 条目（合并）：顶层组 ${Object.keys(initvar).join('、') || '（空）'}。`);
@@ -3965,7 +3847,13 @@
                 let m;
                 while ((m = blockRe.exec(String(g || '')))) {
                     greetingBlockCount++;
-                    const parsed = parseInitVar(m[1]);
+                    let parsed;
+                    try {
+                        parsed = parseInitVar(m[1]);
+                    } catch (parseErr) {
+                        report.warn(`<initvar> 块解析失败，已跳过：${parseErr && parseErr.message ? parseErr.message : parseErr}`, 'schema');
+                        continue;
+                    }
                     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
                         initvar = deepMerge(initvar, parsed);
                     }
@@ -7460,6 +7348,7 @@ ${DB_INIT_SNIPPET}
     function assembleExtension(opts = {}) {
         const coreSource = opts.coreSource || '';
         const pinyinInline = opts.pinyinInline || '';
+        const yamlLibsInline = opts.yamlLibsInline || '';
         const indexJs = [
             '// MVU转数据库 · SillyTavern 原生扩展',
             '// 生成自 转换器/src/mvu2shujuku.js（' + VERSION + '），核心源码内联如下',
@@ -7468,6 +7357,7 @@ ${DB_INIT_SNIPPET}
             coreSource,
             pinyinInline ? '\n' + pinyinInline : '',
             '})(typeof globalThis !== "undefined" ? globalThis : this);',
+            yamlLibsInline ? '\n' + yamlLibsInline : '',
             '',
             extensionIndexUi(),
         ].join('\n');
@@ -7506,7 +7396,6 @@ ${DB_INIT_SNIPPET}
         parseCardPng,
         writeCardPng,
         parseInitVar,
-        parseScalar,
         leafInfo,
         json5Lite,
         stableHash,
