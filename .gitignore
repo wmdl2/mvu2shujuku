@@ -6,6 +6,7 @@ test/fixtures/
 
 # 常规忽略
 node_modules/
+.tools/
 .DS_Store
 *.log
 *.tgz

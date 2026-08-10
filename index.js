@@ -3559,6 +3559,10 @@
                 `    },250);`,
                 `  }`,
                 `  es.on(evName,onMessage);`,
+                `  // 开场白/首楼换 swipe 会丢插件 full checkpoint，需及时重建锚点避免 V2 写库 mismatch`,
+                `  for(var ei=0;ei<['MESSAGE_SWIPED','MESSAGE_UPDATED','MESSAGE_EDITED'].length;ei++){`,
+                `    try{var evName2=et[['MESSAGE_SWIPED','MESSAGE_UPDATED','MESSAGE_EDITED'][ei]];if(evName2&&typeof evName2==='string')es.on(evName2,onMessage);}catch(e){}`,
+                `  }`,
                 `  if(placeholderRuntime){placeholderRuntime.bound=true;placeholderRuntime.handler=onMessage;}`,
                 `  else placeholderRuntime={bound:true,handler:onMessage};`,
                 `}`,
@@ -4394,8 +4398,19 @@ ${DB_INIT_SNIPPET}
                     // 复刻 MVU：AI 回复后追加状态栏占位符，前端注入正则才能命中每条消息
                     ensureWindowStatusPlaceholder();
                 });
+                // 开场白切换/首楼换 swipe 会丢掉插件的 full checkpoint：必须立即重建锚点，
+                // 否则捏人 UI 的写库会产生无锚点 artifacts，触发插件 V2 boundary_after_data_mismatch。
+                // CHAT_CHANGED 只在换聊天时触发，swipe 切换不会触发，所以要单独监听。
+                for (const evName of [et.MESSAGE_SWIPED, et.MESSAGE_UPDATED, et.MESSAGE_EDITED]) {
+                    if (evName && typeof evName === 'string') {
+                        es.on(evName, () => hostWindow.setTimeout(autoInitDatabase, 300));
+                    }
+                }
                 if (et.GENERATION_ENDED) {
-                    es.on(et.GENERATION_ENDED, () => ensureWindowStatusPlaceholder());
+                    es.on(et.GENERATION_ENDED, () => {
+                        ensureWindowStatusPlaceholder();
+                        hostWindow.setTimeout(autoInitDatabase, 100);
+                    });
                 }
                 autoInitState.inited = true;
             }
@@ -6091,8 +6106,19 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     // 复刻 MVU：AI 回复后追加状态栏占位符，前端注入正则才能命中每条消息
                     ensureWindowStatusPlaceholder();
                 });
+                // 开场白切换/首楼换 swipe 会丢掉插件的 full checkpoint：必须立即重建锚点，
+                // 否则捏人 UI 的写库会产生无锚点 artifacts，触发插件 V2 boundary_after_data_mismatch。
+                // CHAT_CHANGED 只在换聊天时触发，swipe 切换不会触发，所以要单独监听。
+                for (const evName of [et.MESSAGE_SWIPED, et.MESSAGE_UPDATED, et.MESSAGE_EDITED]) {
+                    if (evName && typeof evName === 'string') {
+                        es.on(evName, () => hostWindow.setTimeout(autoInitDatabase, 300));
+                    }
+                }
                 if (et.GENERATION_ENDED) {
-                    es.on(et.GENERATION_ENDED, () => ensureWindowStatusPlaceholder());
+                    es.on(et.GENERATION_ENDED, () => {
+                        ensureWindowStatusPlaceholder();
+                        hostWindow.setTimeout(autoInitDatabase, 100);
+                    });
                 }
                 autoInitState.inited = true;
             }
