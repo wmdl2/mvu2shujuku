@@ -4929,6 +4929,9 @@ ${DB_INIT_SNIPPET}
     let statWriteFlushPromise = null;
     let statWriteOverlayGen = 0;
     const materializedChats = new Set();
+    // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
+    // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
+    const initializedViaGameSession = new Set();
 
     // 每个聊天首次写库前，一次性为所有单例/JSON 表物化模板初始行。
     // 背景：插件 export 可能把 seedRows 合并显示成“有行”，但运行期未物化，导致 updateCell row 1 out of bounds。
@@ -5166,6 +5169,29 @@ ${DB_INIT_SNIPPET}
         return tables;
     }
 
+    // 把「注入后的表格快照」合并回原始模板：保留模板的 sourceData(DDL/规则)/updateConfig/exportConfig，
+    // 用快照里的 content（含注入数据）替换模板行，生成可供 initGameSession 一次性建表带数据的 templateData。
+    function mergeSnapshotIntoTemplate(tplCached, snapshot) {
+        try {
+            if (!tplCached || typeof tplCached !== 'object' || !snapshot || typeof snapshot !== 'object') return null;
+            const out = JSON.parse(JSON.stringify(tplCached));
+            for (const k of Object.keys(out)) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const tplSheet = out[k];
+                const snapSheet = snapshot[k];
+                if (!tplSheet || !snapSheet || typeof tplSheet !== 'object' || typeof snapSheet !== 'object') continue;
+                if (Array.isArray(snapSheet.content) && snapSheet.content.length > 0) {
+                    tplSheet.content = JSON.parse(JSON.stringify(snapSheet.content));
+                }
+                if (Array.isArray(snapSheet.seedRows)) tplSheet.seedRows = JSON.parse(JSON.stringify(snapSheet.seedRows));
+            }
+            return out;
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] 合并注入模板失败:', e && e.message ? e.message : e);
+            return null;
+        }
+    }
+
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
@@ -5198,25 +5224,51 @@ ${DB_INIT_SNIPPET}
                     await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     const prev = all.stat_data || {};
-                    // 写入主路径：用插件自己的持久化通道（importTableAsJson 完整快照提交）。
-                    // 插件会走 runTableUpdateCommit → persistTablesToChatMessage，把完整表格状态
-                    // 写入聊天消息的 V2 checkpoint 并保存——刷新/重进时从 checkpoint 恢复，数据不丢。
-                    // 早期曾因 importTableAsJson 丢 checkpoint 而改用裸 updateCell/insertRow，
-                    // 但裸写只更新运行时、依赖酒馆 saveChat 落盘，反而被环境（如 cocktail-plus）
-                    // 拦截导致刷新后数据消失。现恢复插件自身持久化为主路径。
+                    // 写入主路径：开局（表格仍是模板初始状态、无真实数据）时，把注入后的
+                    // stat_data 合并进模板，走插件 initGameSession 一次性建表。
+                    // 关键：initGameSession 会同时写入 TavernDB_ACU_IsolatedData +
+                    // InternalSheetGuide + ScopedConfig 三个字段——插件 UI 靠后两个判定
+                    // “已初始化”，刷新后从完整 checkpoint 恢复，数据不丢。
+                    // 之前用 importTableAsJson 只写数据帧，不建 guide/scope，UI 显示
+                    // “未初始/待初始”，刷新后数据消失。
                     let n = 0;
                     let usedSnapshot = false;
                     try {
+                        // 每聊天首次写库：用注入数据合并模板再 initGameSession 一次性建表。
+                        // 这样插件会写入 IsolatedData + InternalSheetGuide + ScopedConfig 完整初始化状态，
+                        // UI 显示“已初始化”，刷新后从 full checkpoint 恢复。
+                        // 注意不能依赖 mvu2shujukuTablesSafeToAnchor 判断：物化垫脚行会让它误判非初始。
+                        const chatKeyNow = autoInitChatId();
+                        const isFirstWrite = !initializedViaGameSession.has(chatKeyNow);
                         const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
-                        const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
-                        if (ok) {
-                            usedSnapshot = true;
-                            console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
-                        } else {
-                            console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交失败，回退差异写入');
+                        const mergedTemplate = mergeSnapshotIntoTemplate(tplCached, snap);
+                        if (isFirstWrite && mergedTemplate && typeof api.initGameSession === 'function') {
+                            const initResult = await Promise.resolve(api.initGameSession({}, {
+                                injectTemplate: true,
+                                loadPreset: false,
+                                templateData: mergedTemplate,
+                                templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板',
+                            }));
+                            if (initResult && initResult.success === false) {
+                                console.warn('[mvu2shujuku][debug] initGameSession(注入合并) 失败：' + (initResult.message || '未知错误') + '，回退快照提交');
+                            } else {
+                                usedSnapshot = true;
+                                console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）');
+                            }
                         }
+                        if (!usedSnapshot && typeof api.importTableAsJson === 'function') {
+                            // 非开局/initGameSession 失败：回退完整快照提交（插件自身持久化，至少保证数据落盘）
+                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
+                            if (ok) {
+                                usedSnapshot = true;
+                                console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
+                            } else {
+                                console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交失败，回退差异写入');
+                            }
+                        }
+                        if (usedSnapshot) initializedViaGameSession.add(chatKeyNow);
                     } catch (e) {
-                        console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
+                        console.warn('[mvu2shujuku][debug] 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
                     }
                     if (!usedSnapshot) {
                         // 差异写入（裸 updateCell/insertRow）——作为 importTableAsJson 失败时的降级路径
@@ -7270,6 +7322,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     let statWriteFlushPromise = null;
     let statWriteOverlayGen = 0;
     const materializedChats = new Set();
+    // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
+    // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
+    const initializedViaGameSession = new Set();
 
     // 每个聊天首次写库前，一次性为所有单例/JSON 表物化模板初始行。
     // 背景：插件 export 可能把 seedRows 合并显示成“有行”，但运行期未物化，导致 updateCell row 1 out of bounds。
@@ -7507,6 +7562,29 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         return tables;
     }
 
+    // 把「注入后的表格快照」合并回原始模板：保留模板的 sourceData(DDL/规则)/updateConfig/exportConfig，
+    // 用快照里的 content（含注入数据）替换模板行，生成可供 initGameSession 一次性建表带数据的 templateData。
+    function mergeSnapshotIntoTemplate(tplCached, snapshot) {
+        try {
+            if (!tplCached || typeof tplCached !== 'object' || !snapshot || typeof snapshot !== 'object') return null;
+            const out = JSON.parse(JSON.stringify(tplCached));
+            for (const k of Object.keys(out)) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const tplSheet = out[k];
+                const snapSheet = snapshot[k];
+                if (!tplSheet || !snapSheet || typeof tplSheet !== 'object' || typeof snapSheet !== 'object') continue;
+                if (Array.isArray(snapSheet.content) && snapSheet.content.length > 0) {
+                    tplSheet.content = JSON.parse(JSON.stringify(snapSheet.content));
+                }
+                if (Array.isArray(snapSheet.seedRows)) tplSheet.seedRows = JSON.parse(JSON.stringify(snapSheet.seedRows));
+            }
+            return out;
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] 合并注入模板失败:', e && e.message ? e.message : e);
+            return null;
+        }
+    }
+
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
@@ -7539,25 +7617,51 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     const prev = all.stat_data || {};
-                    // 写入主路径：用插件自己的持久化通道（importTableAsJson 完整快照提交）。
-                    // 插件会走 runTableUpdateCommit → persistTablesToChatMessage，把完整表格状态
-                    // 写入聊天消息的 V2 checkpoint 并保存——刷新/重进时从 checkpoint 恢复，数据不丢。
-                    // 早期曾因 importTableAsJson 丢 checkpoint 而改用裸 updateCell/insertRow，
-                    // 但裸写只更新运行时、依赖酒馆 saveChat 落盘，反而被环境（如 cocktail-plus）
-                    // 拦截导致刷新后数据消失。现恢复插件自身持久化为主路径。
+                    // 写入主路径：开局（表格仍是模板初始状态、无真实数据）时，把注入后的
+                    // stat_data 合并进模板，走插件 initGameSession 一次性建表。
+                    // 关键：initGameSession 会同时写入 TavernDB_ACU_IsolatedData +
+                    // InternalSheetGuide + ScopedConfig 三个字段——插件 UI 靠后两个判定
+                    // “已初始化”，刷新后从完整 checkpoint 恢复，数据不丢。
+                    // 之前用 importTableAsJson 只写数据帧，不建 guide/scope，UI 显示
+                    // “未初始/待初始”，刷新后数据消失。
                     let n = 0;
                     let usedSnapshot = false;
                     try {
+                        // 每聊天首次写库：用注入数据合并模板再 initGameSession 一次性建表。
+                        // 这样插件会写入 IsolatedData + InternalSheetGuide + ScopedConfig 完整初始化状态，
+                        // UI 显示“已初始化”，刷新后从 full checkpoint 恢复。
+                        // 注意不能依赖 mvu2shujukuTablesSafeToAnchor 判断：物化垫脚行会让它误判非初始。
+                        const chatKeyNow = autoInitChatId();
+                        const isFirstWrite = !initializedViaGameSession.has(chatKeyNow);
                         const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
-                        const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
-                        if (ok) {
-                            usedSnapshot = true;
-                            console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
-                        } else {
-                            console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交失败，回退差异写入');
+                        const mergedTemplate = mergeSnapshotIntoTemplate(tplCached, snap);
+                        if (isFirstWrite && mergedTemplate && typeof api.initGameSession === 'function') {
+                            const initResult = await Promise.resolve(api.initGameSession({}, {
+                                injectTemplate: true,
+                                loadPreset: false,
+                                templateData: mergedTemplate,
+                                templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板',
+                            }));
+                            if (initResult && initResult.success === false) {
+                                console.warn('[mvu2shujuku][debug] initGameSession(注入合并) 失败：' + (initResult.message || '未知错误') + '，回退快照提交');
+                            } else {
+                                usedSnapshot = true;
+                                console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）');
+                            }
                         }
+                        if (!usedSnapshot && typeof api.importTableAsJson === 'function') {
+                            // 非开局/initGameSession 失败：回退完整快照提交（插件自身持久化，至少保证数据落盘）
+                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
+                            if (ok) {
+                                usedSnapshot = true;
+                                console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
+                            } else {
+                                console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交失败，回退差异写入');
+                            }
+                        }
+                        if (usedSnapshot) initializedViaGameSession.add(chatKeyNow);
                     } catch (e) {
-                        console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
+                        console.warn('[mvu2shujuku][debug] 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
                     }
                     if (!usedSnapshot) {
                         // 差异写入（裸 updateCell/insertRow）——作为 importTableAsJson 失败时的降级路径
