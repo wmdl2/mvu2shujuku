@@ -6060,9 +6060,8 @@ ${DB_INIT_SNIPPET}
         ensureSettingsPanel(context);
         bindDebugHooks(context);
         ensureTemplateDefine();
-        installWindowGetAllVariables();
-        // 运行时（建表/锚点/占位符/Mvu 兼容）由转换后卡内嵌入的数据桥负责（对齐参考卡）；
-        // 扩展只做转换、面板与 EJS 数据读取，不做任何运行时表管理，避免切聊天误重置。
+        // 运行时（建表/锚点/占位符/Mvu 兼容/getAllVariables）由转换后卡内嵌入的数据桥负责（对齐参考卡）。
+        // 扩展只做转换、面板与 EJS 数据读取，不定义任何全局函数，避免影响非转换卡。
         const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
         console.log(
             '[mvu2shujuku][debug] 加载时 EjsTemplate=' + !!ejs +
