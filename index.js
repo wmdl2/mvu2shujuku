@@ -5074,7 +5074,21 @@ ${DB_INIT_SNIPPET}
             const sheet = found.sheet;
             if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0])) continue;
             const header = sheet.content[0];
-            const value = sd[L.group];
+            // 嵌套组（如 主角.气运 / 主角.储物袋）的值在 stat_data 里位于 writePaths 路径下，
+            // 与读侧 statDataFromTables 的 setPath(writePaths) 一一对应；顶层组退回 sd[L.group]。
+            const valueOf = (LE) => {
+                const wp = (LE.writePaths || [])[0];
+                if (Array.isArray(wp) && wp.length) {
+                    let cur = sd;
+                    for (const p of wp) {
+                        if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+                        cur = cur[p];
+                    }
+                    if (cur !== undefined) return cur;
+                }
+                return sd[LE.group];
+            };
+            const value = valueOf(L);
             const declared = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
             // 子表路径（如 世界.动向 / 主角.气运）不是本表的溢出字段，绝不能写进本表 _扩展数据
             const childGroupKeys = new Set();
@@ -5083,12 +5097,18 @@ ${DB_INIT_SNIPPET}
                 const wp = (L2.writePaths || [])[0];
                 if (Array.isArray(wp) && wp.length >= 2 && wp[0] === L.group) childGroupKeys.add(wp[1]);
             }
+            // 已展平为列的嵌套容器（如 主角.炼丹.阶级 → 列「炼丹阶级」）：整容器不重复写进溢出列
+            const flattenedContainers = new Set();
+            for (const c of (L.cols || [])) {
+                const cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
+                if (Array.isArray(cp) && cp.length > 1 && cp[0] === L.group) flattenedContainers.add(cp[1]);
+            }
             const mergeOverflow = (row, obj) => {
                 const ovIdx = header.indexOf('_扩展数据');
                 if (ovIdx === -1) return;
                 const overflow = {};
                 for (const k of Object.keys(obj)) {
-                    if (!declared.includes(k) && k !== L.keyCol && !childGroupKeys.has(k)) overflow[k] = obj[k];
+                    if (!declared.includes(k) && k !== L.keyCol && !childGroupKeys.has(k) && !flattenedContainers.has(k)) overflow[k] = obj[k];
                 }
                 if (!Object.keys(overflow).length) return;
                 let cur = {};
@@ -5127,10 +5147,40 @@ ${DB_INIT_SNIPPET}
                     sheet.content.push(tRow);
                 }
                 const row = sheet.content[1];
+                // 列值优先按布局列的路径解析（如 主角.炼丹.阶级 → 列「炼丹阶级」）；
+                // 顶层字段直接取 obj[col]。
+                const colPathOf = (zh) => {
+                    for (const c of (L.cols || [])) {
+                        const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                        if (czh === zh) return Array.isArray(c) ? (c[3] || []) : (c.path || []);
+                    }
+                    return null;
+                };
+                const colValueOf = (zh) => {
+                    const cp = colPathOf(zh);
+                    if (Array.isArray(cp) && cp.length > 1 && cp[0] === L.group) {
+                        let cur = obj;
+                        for (let pi = 1; pi < cp.length; pi++) {
+                            if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+                            cur = cur[cp[pi]];
+                        }
+                        if (cur !== undefined) return cur;
+                    }
+                    return Object.prototype.hasOwnProperty.call(obj, zh) ? obj[zh] : undefined;
+                };
+                const colTypeOf = (zh) => {
+                    for (const c of (L.cols || [])) {
+                        const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                        if (czh === zh) return Array.isArray(c) ? String(c[1] || '') : String(c.type || '');
+                    }
+                    return '';
+                };
                 for (let ci = 1; ci < header.length; ci++) {
                     const col = header[ci];
                     if (col === '_扩展数据') continue;
-                    if (Object.prototype.hasOwnProperty.call(obj, col)) row[ci] = text(obj[col]);
+                    const cv = colValueOf(col);
+                    if (cv === undefined) continue;
+                    row[ci] = /object|json/i.test(colTypeOf(col)) ? (typeof cv === 'string' ? cv : JSON.stringify(cv === undefined || cv === null ? '' : cv)) : text(cv);
                 }
                 mergeOverflow(row, obj);
                 continue;
@@ -5161,7 +5211,15 @@ ${DB_INIT_SNIPPET}
                 for (let ci = 1; ci < header.length; ci++) {
                     const col = header[ci];
                     if (col === '_扩展数据') continue;
-                    if (Object.prototype.hasOwnProperty.call(item, col)) row[ci] = text(item[col]);
+                    if (Object.prototype.hasOwnProperty.call(item, col)) {
+                        const iv = item[col];
+                        let colT = '';
+                        for (const c of (L.cols || [])) {
+                            const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                            if (czh === col) { colT = Array.isArray(c) ? String(c[1] || '') : String(c.type || ''); break; }
+                        }
+                        row[ci] = /object|json/i.test(colT) ? (typeof iv === 'string' ? iv : JSON.stringify(iv === undefined || iv === null ? '' : iv)) : text(iv);
+                    }
                 }
                 mergeOverflow(row, item);
             }
@@ -5190,6 +5248,244 @@ ${DB_INIT_SNIPPET}
             console.warn('[mvu2shujuku][debug] 合并注入模板失败:', e && e.message ? e.message : e);
             return null;
         }
+    }
+
+    // 直接用注入后的 stat_data 覆盖模板行（不依赖 export 当前状态）：
+    // 模板的 content 一定带 row_id=1 初始行（转换时写入），我们只需把 target 的值盖上去。
+    // 这样即使 SQLite 运行时 content 是空的（数据在 seedRows），模板行也在，注入数据不会丢。
+    // 这等价于参考卡 buildOpeningTemplateData：在模板 content 里直接替换用户数据。
+    function applyTargetToTemplate(tplCached, layoutEntries, targetStat) {
+        try {
+            if (!tplCached || typeof tplCached !== 'object' || !targetStat) return tplCached;
+            const out = JSON.parse(JSON.stringify(tplCached));
+            const sd = targetStat || {};
+            const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+            const text = (v) => (v === undefined || v === null ? '' : String(v));
+            for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                const sheet = Object.keys(out)
+                    .filter(k => k.indexOf('sheet_') === 0)
+                    .map(k => out[k])
+                    .find(s => s && s.name === L.table);
+                if (!sheet || !Array.isArray(sheet.content) || !Array.isArray(sheet.content[0])) continue;
+                const header = sheet.content[0];
+                // 嵌套组（如 主角.气运 / 主角.储物袋）的值在 stat_data 里位于 writePaths 路径下，
+                // 与读侧 statDataFromTables 的 setPath(writePaths) 一一对应；顶层组退回 sd[L.group]。
+                const valueOf = (LE) => {
+                    const wp = (LE.writePaths || [])[0];
+                    if (Array.isArray(wp) && wp.length) {
+                        let cur = sd;
+                        for (const p of wp) {
+                            if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+                            cur = cur[p];
+                        }
+                        if (cur !== undefined) return cur;
+                    }
+                    return sd[LE.group];
+                };
+                const value = valueOf(L);
+                if (L.kind === 'singleton' || L.kind === 'json') {
+                    const obj = isObj(value) ? value : {};
+                    // 模板至少带 row_id=1 的初始行；若没有则补一行
+                    if (sheet.content.length < 2) {
+                        const tRow = header.map(() => '');
+                        tRow[0] = 1;
+                        sheet.content.push(tRow);
+                    }
+                    const row = sheet.content[1];
+                    row[0] = 1;
+                    if (L.kind === 'json') {
+                        const jIdx = header.indexOf('内容');
+                        if (jIdx >= 0) row[jIdx] = JSON.stringify(value === undefined ? {} : value);
+                    }
+                    // 列值优先按布局列的路径解析（如 主角.炼丹.阶级 → 列「炼丹阶级」）；
+                    // 顶层字段直接取 obj[col]。
+                    const colPathOf = (zh) => {
+                        for (const c of (L.cols || [])) {
+                            const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                            if (czh === zh) return Array.isArray(c) ? (c[3] || []) : (c.path || []);
+                        }
+                        return null;
+                    };
+                    const colValueOf = (zh) => {
+                        const cp = colPathOf(zh);
+                        if (Array.isArray(cp) && cp.length > 1 && cp[0] === L.group) {
+                            let cur = obj;
+                            for (let pi = 1; pi < cp.length; pi++) {
+                                if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+                                cur = cur[cp[pi]];
+                            }
+                            if (cur !== undefined) return cur;
+                        }
+                        return Object.prototype.hasOwnProperty.call(obj, zh) ? obj[zh] : undefined;
+                    };
+                    const colTypeOf = (zh) => {
+                        for (const c of (L.cols || [])) {
+                            const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                            if (czh === zh) return Array.isArray(c) ? String(c[1] || '') : String(c.type || '');
+                        }
+                        return '';
+                    };
+                    // 子表路径（如 世界.动向 / 主角.气运）与已展平容器（如 主角.炼丹）都不能进本表溢出列
+                    const childGroupKeys = new Set();
+                    for (const L2 of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                        if (L2 === L) continue;
+                        const wp2 = (L2.writePaths || [])[0];
+                        if (Array.isArray(wp2) && wp2.length >= 2 && wp2[0] === L.group) childGroupKeys.add(wp2[1]);
+                    }
+                    const flattenedContainers = new Set();
+                    for (const c of (L.cols || [])) {
+                        const cp2 = Array.isArray(c) ? (c[3] || []) : (c.path || []);
+                        if (Array.isArray(cp2) && cp2.length > 1 && cp2[0] === L.group) flattenedContainers.add(cp2[1]);
+                    }
+                    for (let ci = 1; ci < header.length; ci++) {
+                        const col = header[ci];
+                        if (col === '_扩展数据' || col === '内容') continue;
+                        const cv = colValueOf(col);
+                        if (cv === undefined) continue;
+                        row[ci] = /object|json/i.test(colTypeOf(col)) ? (typeof cv === 'string' ? cv : JSON.stringify(cv === undefined || cv === null ? '' : cv)) : text(cv);
+                    }
+                    // 溢出字段合并进 _扩展数据（AI 不应直接修改的内部字段）
+                    const ovIdx = header.indexOf('_扩展数据');
+                    if (ovIdx >= 0) {
+                        const overflow = {};
+                        for (const k of Object.keys(obj)) {
+                            if (!header.includes(k) && k !== L.keyCol && !childGroupKeys.has(k) && !flattenedContainers.has(k)) overflow[k] = obj[k];
+                        }
+                        if (Object.keys(overflow).length) {
+                            let cur = {};
+                            try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e) {}
+                            Object.assign(cur, overflow);
+                            row[ovIdx] = JSON.stringify(cur);
+                        }
+                    }
+                    continue;
+                }
+                if (L.kind === 'array') {
+                    const arr = Array.isArray(value) ? value : [];
+                    const vCol = header[1] || '内容';
+                    sheet.content = [header];
+                    arr.forEach((item, i) => {
+                        const row = header.map(() => '');
+                        row[0] = i + 1;
+                        row[1] = text(item);
+                        sheet.content.push(row);
+                    });
+                    continue;
+                }
+                // rows：按 keyCol upsert
+                if (!isObj(value)) continue;
+                const keyIdx = header.indexOf(L.keyCol);
+                if (keyIdx === -1) continue;
+                for (const k of Object.keys(value)) {
+                    const item = value[k];
+                    if (!isObj(item)) continue;
+                    let ri = -1;
+                    for (let r = 1; r < sheet.content.length; r++) {
+                        const row = sheet.content[r];
+                        if (row && row[keyIdx] !== undefined && row[keyIdx] !== null && String(row[keyIdx]) === String(k)) { ri = r; break; }
+                    }
+                    if (ri === -1) {
+                        const row = header.map(() => '');
+                        row[0] = sheet.content.length;
+                        row[keyIdx] = text(k);
+                        sheet.content.push(row);
+                        ri = sheet.content.length - 1;
+                    }
+                    const row = sheet.content[ri];
+                    for (let ci = 1; ci < header.length; ci++) {
+                        const col = header[ci];
+                        if (col === '_扩展数据' || col === L.keyCol) continue;
+                        if (Object.prototype.hasOwnProperty.call(item, col)) {
+                            const iv = item[col];
+                            let colT = '';
+                            for (const c of (L.cols || [])) {
+                                const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                                if (czh === col) { colT = Array.isArray(c) ? String(c[1] || '') : String(c.type || ''); break; }
+                            }
+                            row[ci] = /object|json/i.test(colT) ? (typeof iv === 'string' ? iv : JSON.stringify(iv === undefined || iv === null ? '' : iv)) : text(iv);
+                        }
+                    }
+                    const ovIdx = header.indexOf('_扩展数据');
+                    if (ovIdx >= 0) {
+                        const overflow = {};
+                        for (const f of Object.keys(item)) {
+                            if (!header.includes(f) && f !== L.keyCol) overflow[f] = item[f];
+                        }
+                        if (Object.keys(overflow).length) {
+                            let cur = {};
+                            try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e) {}
+                            Object.assign(cur, overflow);
+                            row[ovIdx] = JSON.stringify(cur);
+                        }
+                    }
+                }
+            }
+            return out;
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] applyTargetToTemplate 失败:', e && e.message ? e.message : e);
+            return tplCached;
+        }
+    }
+
+    // 对齐参考卡 waitForOpeningDatabase：initGameSession 后运行时可能异步物化表格，
+    // 短轮询确认注入数据真的进了 exportTableAsJson；确认不了再由调用方回退快照提交。
+    // 只校验“目标 stat_data 里有非默认值”的表，没有任何注入值视为成功（纯文本开场白等场景）。
+    async function verifyTemplateInjected(api, layoutEntries, targetStat, timeoutMs) {
+        const sd = targetStat || {};
+        const checks = [];
+        const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            const wp = (L.writePaths || [])[0];
+            let v = undefined;
+            if (Array.isArray(wp) && wp.length) {
+                let cur = sd;
+                for (const p of wp) {
+                    if (cur === null || cur === undefined || typeof cur !== 'object') { v = undefined; break; }
+                    cur = cur[p];
+                    v = cur;
+                }
+            } else {
+                v = sd[L.group];
+            }
+            if (!isObj(v)) continue;
+            if (L.kind === 'rows') {
+                const keys = Object.keys(v).filter(k => isObj(v[k]));
+                if (keys.length) checks.push({ table: L.table, needles: keys.map(k => String(k)) });
+            } else if (L.kind === 'singleton') {
+                const cols = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
+                const needles = [];
+                for (const c of cols) {
+                    const cv = v[c];
+                    if (cv !== undefined && cv !== null && cv !== '') needles.push(String(cv));
+                }
+                if (needles.length) checks.push({ table: L.table, needles });
+            }
+        }
+        if (!checks.length) return true;
+        const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+        while (Date.now() < deadline) {
+            try {
+                const all = api.exportTableAsJson() || {};
+                let allOk = true;
+                for (const chk of checks) {
+                    let sheet = null;
+                    for (const k in all) {
+                        if (k.indexOf('sheet_') === 0 && all[k] && all[k].name === chk.table) { sheet = all[k]; break; }
+                    }
+                    if (!sheet || !Array.isArray(sheet.content)) { allOk = false; break; }
+                    let found = false;
+                    for (let r = 1; r < sheet.content.length; r++) {
+                        const row = sheet.content[r];
+                        if (!Array.isArray(row)) continue;
+                        if (chk.needles.some(n => n && row.some(cell => String(cell == null ? '' : cell) === n))) { found = true; break; }
+                    }
+                    if (!found) { allOk = false; break; }
+                }
+                if (allOk) return true;
+            } catch (e) {}
+            await new Promise(res => hostWindow.setTimeout(res, 150));
+        }
+        return false;
     }
 
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
@@ -5239,7 +5535,12 @@ ${DB_INIT_SNIPPET}
                         const chatKeyNow = autoInitChatId();
                         const isFirstWrite = !initializedViaGameSession.has(chatKeyNow);
                         const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
-                        const mergedTemplate = mergeSnapshotIntoTemplate(tplCached, snap);
+                        // 首次写库直接用注入后的 stat_data 覆盖模板行（等价于参考卡 buildOpeningTemplateData）：
+                        // 开局时运行时表格常为空，exportTableAsJson 拿不到任何表，快照合并会把用户数据丢掉；
+                        // 直接改模板 content 则无论运行时状态如何，注入数据都在传入 initGameSession 的模板里。
+                        const mergedTemplate = (isFirstWrite && Array.isArray(activeLayout))
+                            ? applyTargetToTemplate(tplCached, activeLayout, target)
+                            : mergeSnapshotIntoTemplate(tplCached, snap);
                         // 诊断：确认注入数据是否真的进了合并模板（主角表 content 第一行）
                         try {
                             const heroName = target.主角 && target.主角.姓名;
@@ -5259,26 +5560,28 @@ ${DB_INIT_SNIPPET}
                             if (initResult && initResult.success === false) {
                                 console.warn('[mvu2shujuku][debug] initGameSession(注入合并) 失败：' + (initResult.message || '未知错误') + '，回退快照提交');
                             } else {
-                                usedSnapshot = true;
-                                console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）');
-                                // 诊断：initGameSession 后立即检查表格是否真的带上了注入数据
-                                try {
-                                    const afterAll = api.exportTableAsJson() || {};
-                                    for (const k in afterAll) {
-                                        if (k.indexOf('sheet_') === 0 && afterAll[k] && afterAll[k].name === '主角表' &&
-                                            Array.isArray(afterAll[k].content)) {
-                                            const row1 = afterAll[k].content[1] || [];
-                                            console.log('[mvu2shujuku][debug][注入合并] initGameSession 后主角表 content 行数=' + (afterAll[k].content.length - 1) +
-                                                ' | row1=' + JSON.stringify(row1).slice(0, 160) + ' | seedRows=' + (Array.isArray(afterAll[k].seedRows) ? afterAll[k].seedRows.length : 0));
-                                            break;
-                                        }
-                                    }
-                                } catch (e) {}
+                                const initInfo = initResult ? JSON.stringify({
+                                    success: initResult.success,
+                                    runtimeReady: initResult.runtimeReady,
+                                    warning: initResult.warning || '',
+                                    message: initResult.message || '',
+                                }) : 'undefined';
+                                console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）| initResult=' + initInfo.slice(0, 300));
+                                // 对齐参考卡：initGameSession 后运行时可能异步物化，短轮询确认注入数据落表；
+                                // 确认不了则回退 importTableAsJson 快照提交（用合并模板，保证数据不丢）。
+                                const injected = await verifyTemplateInjected(api, activeLayout, target, 1800);
+                                if (injected) {
+                                    usedSnapshot = true;
+                                } else {
+                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后未在运行时表格中确认注入数据，回退 importTableAsJson 快照提交。');
+                                }
                             }
                         }
                         if (!usedSnapshot && typeof api.importTableAsJson === 'function') {
-                            // 非开局/initGameSession 失败：回退完整快照提交（插件自身持久化，至少保证数据落盘）
-                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
+                            // 非开局/initGameSession 失败/运行时未确认：回退完整快照提交。
+                            // 用合并后的模板（含注入数据）而不是 exportTableAsJson 快照——
+                            // 开局时 export 可能为空，空快照会把注入数据覆盖成空表。
+                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(mergedTemplate || snap), {}));
                             if (ok) {
                                 usedSnapshot = true;
                                 console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
@@ -7493,7 +7796,21 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const sheet = found.sheet;
             if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0])) continue;
             const header = sheet.content[0];
-            const value = sd[L.group];
+            // 嵌套组（如 主角.气运 / 主角.储物袋）的值在 stat_data 里位于 writePaths 路径下，
+            // 与读侧 statDataFromTables 的 setPath(writePaths) 一一对应；顶层组退回 sd[L.group]。
+            const valueOf = (LE) => {
+                const wp = (LE.writePaths || [])[0];
+                if (Array.isArray(wp) && wp.length) {
+                    let cur = sd;
+                    for (const p of wp) {
+                        if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+                        cur = cur[p];
+                    }
+                    if (cur !== undefined) return cur;
+                }
+                return sd[LE.group];
+            };
+            const value = valueOf(L);
             const declared = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
             // 子表路径（如 世界.动向 / 主角.气运）不是本表的溢出字段，绝不能写进本表 _扩展数据
             const childGroupKeys = new Set();
@@ -7502,12 +7819,18 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 const wp = (L2.writePaths || [])[0];
                 if (Array.isArray(wp) && wp.length >= 2 && wp[0] === L.group) childGroupKeys.add(wp[1]);
             }
+            // 已展平为列的嵌套容器（如 主角.炼丹.阶级 → 列「炼丹阶级」）：整容器不重复写进溢出列
+            const flattenedContainers = new Set();
+            for (const c of (L.cols || [])) {
+                const cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
+                if (Array.isArray(cp) && cp.length > 1 && cp[0] === L.group) flattenedContainers.add(cp[1]);
+            }
             const mergeOverflow = (row, obj) => {
                 const ovIdx = header.indexOf('_扩展数据');
                 if (ovIdx === -1) return;
                 const overflow = {};
                 for (const k of Object.keys(obj)) {
-                    if (!declared.includes(k) && k !== L.keyCol && !childGroupKeys.has(k)) overflow[k] = obj[k];
+                    if (!declared.includes(k) && k !== L.keyCol && !childGroupKeys.has(k) && !flattenedContainers.has(k)) overflow[k] = obj[k];
                 }
                 if (!Object.keys(overflow).length) return;
                 let cur = {};
@@ -7546,10 +7869,40 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     sheet.content.push(tRow);
                 }
                 const row = sheet.content[1];
+                // 列值优先按布局列的路径解析（如 主角.炼丹.阶级 → 列「炼丹阶级」）；
+                // 顶层字段直接取 obj[col]。
+                const colPathOf = (zh) => {
+                    for (const c of (L.cols || [])) {
+                        const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                        if (czh === zh) return Array.isArray(c) ? (c[3] || []) : (c.path || []);
+                    }
+                    return null;
+                };
+                const colValueOf = (zh) => {
+                    const cp = colPathOf(zh);
+                    if (Array.isArray(cp) && cp.length > 1 && cp[0] === L.group) {
+                        let cur = obj;
+                        for (let pi = 1; pi < cp.length; pi++) {
+                            if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+                            cur = cur[cp[pi]];
+                        }
+                        if (cur !== undefined) return cur;
+                    }
+                    return Object.prototype.hasOwnProperty.call(obj, zh) ? obj[zh] : undefined;
+                };
+                const colTypeOf = (zh) => {
+                    for (const c of (L.cols || [])) {
+                        const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                        if (czh === zh) return Array.isArray(c) ? String(c[1] || '') : String(c.type || '');
+                    }
+                    return '';
+                };
                 for (let ci = 1; ci < header.length; ci++) {
                     const col = header[ci];
                     if (col === '_扩展数据') continue;
-                    if (Object.prototype.hasOwnProperty.call(obj, col)) row[ci] = text(obj[col]);
+                    const cv = colValueOf(col);
+                    if (cv === undefined) continue;
+                    row[ci] = /object|json/i.test(colTypeOf(col)) ? (typeof cv === 'string' ? cv : JSON.stringify(cv === undefined || cv === null ? '' : cv)) : text(cv);
                 }
                 mergeOverflow(row, obj);
                 continue;
@@ -7580,7 +7933,15 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 for (let ci = 1; ci < header.length; ci++) {
                     const col = header[ci];
                     if (col === '_扩展数据') continue;
-                    if (Object.prototype.hasOwnProperty.call(item, col)) row[ci] = text(item[col]);
+                    if (Object.prototype.hasOwnProperty.call(item, col)) {
+                        const iv = item[col];
+                        let colT = '';
+                        for (const c of (L.cols || [])) {
+                            const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                            if (czh === col) { colT = Array.isArray(c) ? String(c[1] || '') : String(c.type || ''); break; }
+                        }
+                        row[ci] = /object|json/i.test(colT) ? (typeof iv === 'string' ? iv : JSON.stringify(iv === undefined || iv === null ? '' : iv)) : text(iv);
+                    }
                 }
                 mergeOverflow(row, item);
             }
@@ -7609,6 +7970,244 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             console.warn('[mvu2shujuku][debug] 合并注入模板失败:', e && e.message ? e.message : e);
             return null;
         }
+    }
+
+    // 直接用注入后的 stat_data 覆盖模板行（不依赖 export 当前状态）：
+    // 模板的 content 一定带 row_id=1 初始行（转换时写入），我们只需把 target 的值盖上去。
+    // 这样即使 SQLite 运行时 content 是空的（数据在 seedRows），模板行也在，注入数据不会丢。
+    // 这等价于参考卡 buildOpeningTemplateData：在模板 content 里直接替换用户数据。
+    function applyTargetToTemplate(tplCached, layoutEntries, targetStat) {
+        try {
+            if (!tplCached || typeof tplCached !== 'object' || !targetStat) return tplCached;
+            const out = JSON.parse(JSON.stringify(tplCached));
+            const sd = targetStat || {};
+            const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+            const text = (v) => (v === undefined || v === null ? '' : String(v));
+            for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                const sheet = Object.keys(out)
+                    .filter(k => k.indexOf('sheet_') === 0)
+                    .map(k => out[k])
+                    .find(s => s && s.name === L.table);
+                if (!sheet || !Array.isArray(sheet.content) || !Array.isArray(sheet.content[0])) continue;
+                const header = sheet.content[0];
+                // 嵌套组（如 主角.气运 / 主角.储物袋）的值在 stat_data 里位于 writePaths 路径下，
+                // 与读侧 statDataFromTables 的 setPath(writePaths) 一一对应；顶层组退回 sd[L.group]。
+                const valueOf = (LE) => {
+                    const wp = (LE.writePaths || [])[0];
+                    if (Array.isArray(wp) && wp.length) {
+                        let cur = sd;
+                        for (const p of wp) {
+                            if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+                            cur = cur[p];
+                        }
+                        if (cur !== undefined) return cur;
+                    }
+                    return sd[LE.group];
+                };
+                const value = valueOf(L);
+                if (L.kind === 'singleton' || L.kind === 'json') {
+                    const obj = isObj(value) ? value : {};
+                    // 模板至少带 row_id=1 的初始行；若没有则补一行
+                    if (sheet.content.length < 2) {
+                        const tRow = header.map(() => '');
+                        tRow[0] = 1;
+                        sheet.content.push(tRow);
+                    }
+                    const row = sheet.content[1];
+                    row[0] = 1;
+                    if (L.kind === 'json') {
+                        const jIdx = header.indexOf('内容');
+                        if (jIdx >= 0) row[jIdx] = JSON.stringify(value === undefined ? {} : value);
+                    }
+                    // 列值优先按布局列的路径解析（如 主角.炼丹.阶级 → 列「炼丹阶级」）；
+                    // 顶层字段直接取 obj[col]。
+                    const colPathOf = (zh) => {
+                        for (const c of (L.cols || [])) {
+                            const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                            if (czh === zh) return Array.isArray(c) ? (c[3] || []) : (c.path || []);
+                        }
+                        return null;
+                    };
+                    const colValueOf = (zh) => {
+                        const cp = colPathOf(zh);
+                        if (Array.isArray(cp) && cp.length > 1 && cp[0] === L.group) {
+                            let cur = obj;
+                            for (let pi = 1; pi < cp.length; pi++) {
+                                if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+                                cur = cur[cp[pi]];
+                            }
+                            if (cur !== undefined) return cur;
+                        }
+                        return Object.prototype.hasOwnProperty.call(obj, zh) ? obj[zh] : undefined;
+                    };
+                    const colTypeOf = (zh) => {
+                        for (const c of (L.cols || [])) {
+                            const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                            if (czh === zh) return Array.isArray(c) ? String(c[1] || '') : String(c.type || '');
+                        }
+                        return '';
+                    };
+                    // 子表路径（如 世界.动向 / 主角.气运）与已展平容器（如 主角.炼丹）都不能进本表溢出列
+                    const childGroupKeys = new Set();
+                    for (const L2 of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                        if (L2 === L) continue;
+                        const wp2 = (L2.writePaths || [])[0];
+                        if (Array.isArray(wp2) && wp2.length >= 2 && wp2[0] === L.group) childGroupKeys.add(wp2[1]);
+                    }
+                    const flattenedContainers = new Set();
+                    for (const c of (L.cols || [])) {
+                        const cp2 = Array.isArray(c) ? (c[3] || []) : (c.path || []);
+                        if (Array.isArray(cp2) && cp2.length > 1 && cp2[0] === L.group) flattenedContainers.add(cp2[1]);
+                    }
+                    for (let ci = 1; ci < header.length; ci++) {
+                        const col = header[ci];
+                        if (col === '_扩展数据' || col === '内容') continue;
+                        const cv = colValueOf(col);
+                        if (cv === undefined) continue;
+                        row[ci] = /object|json/i.test(colTypeOf(col)) ? (typeof cv === 'string' ? cv : JSON.stringify(cv === undefined || cv === null ? '' : cv)) : text(cv);
+                    }
+                    // 溢出字段合并进 _扩展数据（AI 不应直接修改的内部字段）
+                    const ovIdx = header.indexOf('_扩展数据');
+                    if (ovIdx >= 0) {
+                        const overflow = {};
+                        for (const k of Object.keys(obj)) {
+                            if (!header.includes(k) && k !== L.keyCol && !childGroupKeys.has(k) && !flattenedContainers.has(k)) overflow[k] = obj[k];
+                        }
+                        if (Object.keys(overflow).length) {
+                            let cur = {};
+                            try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e) {}
+                            Object.assign(cur, overflow);
+                            row[ovIdx] = JSON.stringify(cur);
+                        }
+                    }
+                    continue;
+                }
+                if (L.kind === 'array') {
+                    const arr = Array.isArray(value) ? value : [];
+                    const vCol = header[1] || '内容';
+                    sheet.content = [header];
+                    arr.forEach((item, i) => {
+                        const row = header.map(() => '');
+                        row[0] = i + 1;
+                        row[1] = text(item);
+                        sheet.content.push(row);
+                    });
+                    continue;
+                }
+                // rows：按 keyCol upsert
+                if (!isObj(value)) continue;
+                const keyIdx = header.indexOf(L.keyCol);
+                if (keyIdx === -1) continue;
+                for (const k of Object.keys(value)) {
+                    const item = value[k];
+                    if (!isObj(item)) continue;
+                    let ri = -1;
+                    for (let r = 1; r < sheet.content.length; r++) {
+                        const row = sheet.content[r];
+                        if (row && row[keyIdx] !== undefined && row[keyIdx] !== null && String(row[keyIdx]) === String(k)) { ri = r; break; }
+                    }
+                    if (ri === -1) {
+                        const row = header.map(() => '');
+                        row[0] = sheet.content.length;
+                        row[keyIdx] = text(k);
+                        sheet.content.push(row);
+                        ri = sheet.content.length - 1;
+                    }
+                    const row = sheet.content[ri];
+                    for (let ci = 1; ci < header.length; ci++) {
+                        const col = header[ci];
+                        if (col === '_扩展数据' || col === L.keyCol) continue;
+                        if (Object.prototype.hasOwnProperty.call(item, col)) {
+                            const iv = item[col];
+                            let colT = '';
+                            for (const c of (L.cols || [])) {
+                                const czh = Array.isArray(c) ? c[0] : (c && c.zh);
+                                if (czh === col) { colT = Array.isArray(c) ? String(c[1] || '') : String(c.type || ''); break; }
+                            }
+                            row[ci] = /object|json/i.test(colT) ? (typeof iv === 'string' ? iv : JSON.stringify(iv === undefined || iv === null ? '' : iv)) : text(iv);
+                        }
+                    }
+                    const ovIdx = header.indexOf('_扩展数据');
+                    if (ovIdx >= 0) {
+                        const overflow = {};
+                        for (const f of Object.keys(item)) {
+                            if (!header.includes(f) && f !== L.keyCol) overflow[f] = item[f];
+                        }
+                        if (Object.keys(overflow).length) {
+                            let cur = {};
+                            try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e) {}
+                            Object.assign(cur, overflow);
+                            row[ovIdx] = JSON.stringify(cur);
+                        }
+                    }
+                }
+            }
+            return out;
+        } catch (e) {
+            console.warn('[mvu2shujuku][debug] applyTargetToTemplate 失败:', e && e.message ? e.message : e);
+            return tplCached;
+        }
+    }
+
+    // 对齐参考卡 waitForOpeningDatabase：initGameSession 后运行时可能异步物化表格，
+    // 短轮询确认注入数据真的进了 exportTableAsJson；确认不了再由调用方回退快照提交。
+    // 只校验“目标 stat_data 里有非默认值”的表，没有任何注入值视为成功（纯文本开场白等场景）。
+    async function verifyTemplateInjected(api, layoutEntries, targetStat, timeoutMs) {
+        const sd = targetStat || {};
+        const checks = [];
+        const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            const wp = (L.writePaths || [])[0];
+            let v = undefined;
+            if (Array.isArray(wp) && wp.length) {
+                let cur = sd;
+                for (const p of wp) {
+                    if (cur === null || cur === undefined || typeof cur !== 'object') { v = undefined; break; }
+                    cur = cur[p];
+                    v = cur;
+                }
+            } else {
+                v = sd[L.group];
+            }
+            if (!isObj(v)) continue;
+            if (L.kind === 'rows') {
+                const keys = Object.keys(v).filter(k => isObj(v[k]));
+                if (keys.length) checks.push({ table: L.table, needles: keys.map(k => String(k)) });
+            } else if (L.kind === 'singleton') {
+                const cols = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
+                const needles = [];
+                for (const c of cols) {
+                    const cv = v[c];
+                    if (cv !== undefined && cv !== null && cv !== '') needles.push(String(cv));
+                }
+                if (needles.length) checks.push({ table: L.table, needles });
+            }
+        }
+        if (!checks.length) return true;
+        const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+        while (Date.now() < deadline) {
+            try {
+                const all = api.exportTableAsJson() || {};
+                let allOk = true;
+                for (const chk of checks) {
+                    let sheet = null;
+                    for (const k in all) {
+                        if (k.indexOf('sheet_') === 0 && all[k] && all[k].name === chk.table) { sheet = all[k]; break; }
+                    }
+                    if (!sheet || !Array.isArray(sheet.content)) { allOk = false; break; }
+                    let found = false;
+                    for (let r = 1; r < sheet.content.length; r++) {
+                        const row = sheet.content[r];
+                        if (!Array.isArray(row)) continue;
+                        if (chk.needles.some(n => n && row.some(cell => String(cell == null ? '' : cell) === n))) { found = true; break; }
+                    }
+                    if (!found) { allOk = false; break; }
+                }
+                if (allOk) return true;
+            } catch (e) {}
+            await new Promise(res => hostWindow.setTimeout(res, 150));
+        }
+        return false;
     }
 
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
@@ -7658,7 +8257,12 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         const chatKeyNow = autoInitChatId();
                         const isFirstWrite = !initializedViaGameSession.has(chatKeyNow);
                         const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
-                        const mergedTemplate = mergeSnapshotIntoTemplate(tplCached, snap);
+                        // 首次写库直接用注入后的 stat_data 覆盖模板行（等价于参考卡 buildOpeningTemplateData）：
+                        // 开局时运行时表格常为空，exportTableAsJson 拿不到任何表，快照合并会把用户数据丢掉；
+                        // 直接改模板 content 则无论运行时状态如何，注入数据都在传入 initGameSession 的模板里。
+                        const mergedTemplate = (isFirstWrite && Array.isArray(activeLayout))
+                            ? applyTargetToTemplate(tplCached, activeLayout, target)
+                            : mergeSnapshotIntoTemplate(tplCached, snap);
                         // 诊断：确认注入数据是否真的进了合并模板（主角表 content 第一行）
                         try {
                             const heroName = target.主角 && target.主角.姓名;
@@ -7678,26 +8282,28 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             if (initResult && initResult.success === false) {
                                 console.warn('[mvu2shujuku][debug] initGameSession(注入合并) 失败：' + (initResult.message || '未知错误') + '，回退快照提交');
                             } else {
-                                usedSnapshot = true;
-                                console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）');
-                                // 诊断：initGameSession 后立即检查表格是否真的带上了注入数据
-                                try {
-                                    const afterAll = api.exportTableAsJson() || {};
-                                    for (const k in afterAll) {
-                                        if (k.indexOf('sheet_') === 0 && afterAll[k] && afterAll[k].name === '主角表' &&
-                                            Array.isArray(afterAll[k].content)) {
-                                            const row1 = afterAll[k].content[1] || [];
-                                            console.log('[mvu2shujuku][debug][注入合并] initGameSession 后主角表 content 行数=' + (afterAll[k].content.length - 1) +
-                                                ' | row1=' + JSON.stringify(row1).slice(0, 160) + ' | seedRows=' + (Array.isArray(afterAll[k].seedRows) ? afterAll[k].seedRows.length : 0));
-                                            break;
-                                        }
-                                    }
-                                } catch (e) {}
+                                const initInfo = initResult ? JSON.stringify({
+                                    success: initResult.success,
+                                    runtimeReady: initResult.runtimeReady,
+                                    warning: initResult.warning || '',
+                                    message: initResult.message || '',
+                                }) : 'undefined';
+                                console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）| initResult=' + initInfo.slice(0, 300));
+                                // 对齐参考卡：initGameSession 后运行时可能异步物化，短轮询确认注入数据落表；
+                                // 确认不了则回退 importTableAsJson 快照提交（用合并模板，保证数据不丢）。
+                                const injected = await verifyTemplateInjected(api, activeLayout, target, 1800);
+                                if (injected) {
+                                    usedSnapshot = true;
+                                } else {
+                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后未在运行时表格中确认注入数据，回退 importTableAsJson 快照提交。');
+                                }
                             }
                         }
                         if (!usedSnapshot && typeof api.importTableAsJson === 'function') {
-                            // 非开局/initGameSession 失败：回退完整快照提交（插件自身持久化，至少保证数据落盘）
-                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
+                            // 非开局/initGameSession 失败/运行时未确认：回退完整快照提交。
+                            // 用合并后的模板（含注入数据）而不是 exportTableAsJson 快照——
+                            // 开局时 export 可能为空，空快照会把注入数据覆盖成空表。
+                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(mergedTemplate || snap), {}));
                             if (ok) {
                                 usedSnapshot = true;
                                 console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
