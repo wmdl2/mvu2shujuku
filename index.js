@@ -2375,7 +2375,13 @@
             let newRowArr = null;
             let newRowObj = null;
             if (E.kind === 'singleton') {
+                // 显式定位 row_id=1（模板单例行）：垫脚行等其他 row_id 的行不应成为写入目标，
+                // 否则数据会落在垫脚行上、随后被去重删掉
                 rowIndex = 1;
+                for (let ri = 1; ri < sheet.content.length; ri++) {
+                    const r = sheet.content[ri];
+                    if (r && String(r[0]) === '1') { rowIndex = ri; break; }
+                }
             } else if (E.kind === 'rows') {
                 const keyVal = parts[E.prefix.length];
                 if (keyVal === undefined) continue;
@@ -2519,28 +2525,9 @@
         async function runDirectOps() {
             for (const d of directOps) {
                 try {
-                    const sqlLit = (v) => {
-                        const s = String(v === undefined || v === null ? '' : v);
-                        return "'" + s.replace(/'/g, "''") + "'";
-                    };
-                    if (d.kind === 'json') {
-                        // 优先 SQL 定位 row_id（JS 视图可能显示有行但运行期未物化，updateCell 会越界）
-                        const rid = d.sheet && d.sheet.content && d.sheet.content[1] ? d.sheet.content[1][0] : undefined;
-                        if (rid !== undefined && typeof api.executeSqlBatch === 'function') {
-                            await Promise.resolve(api.executeSqlBatch('UPDATE ' + d.layout.table + ' SET 内容 = ' + sqlLit(d.value) + ' WHERE row_id = ' + Number(rid) + ';', {}));
-                            continue;
-                        }
-                        await Promise.resolve(api.updateCell(d.layout.table, 1, '内容', d.value));
-                    } else if (d.kind === 'overflow') {
-                        const rid = d.sheet && d.sheet.content && d.sheet.content[d.rowIndex] ? d.sheet.content[d.rowIndex][0] : undefined;
-                        if (rid !== undefined && typeof api.executeSqlBatch === 'function') {
-                            await Promise.resolve(api.executeSqlBatch('UPDATE ' + d.layout.table + ' SET _扩展数据 = ' + sqlLit(d.value) + ' WHERE row_id = ' + Number(rid) + ';', {}));
-                            continue;
-                        }
-                        await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', d.value));
-                    } else if (d.kind === 'overflow-insert') {
-                        await Promise.resolve(api.insertRow(d.layout.table, d.rowObj));
-                    }
+                    if (d.kind === 'json') await Promise.resolve(api.updateCell(d.layout.table, 1, '内容', d.value));
+                    else if (d.kind === 'overflow') await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', d.value));
+                    else if (d.kind === 'overflow-insert') await Promise.resolve(api.insertRow(d.layout.table, d.rowObj));
                 } catch (e) {
                     console.warn('[mvu2shujuku][debug] 整组JSON/溢出列写入失败:', e);
                 }
@@ -4810,13 +4797,6 @@ ${DB_INIT_SNIPPET}
             materializedChats.add(chatKey);
             for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
                 if (L.kind !== 'singleton' && L.kind !== 'json') continue;
-                // 仅当 export 确实没有任何行时才物化：有行说明 row_id=1 已存在（写入走 SQL 定位 row_id=1），
-                // 此时补行会产生 row_id=2 垫脚行，写入若落在它上面会被去重删掉导致数据丢失。
-                try {
-                    const cur = api.exportTableAsJson() || {};
-                    const curSheet = (() => { for (const k in cur) { if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name === L.table) return cur[k]; } return null; })();
-                    if (curSheet && Array.isArray(curSheet.content) && curSheet.content.length > 1) continue;
-                } catch (e) {}
                 try {
                     const obj = {};
                     if (tplCached) {
@@ -6911,13 +6891,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             materializedChats.add(chatKey);
             for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
                 if (L.kind !== 'singleton' && L.kind !== 'json') continue;
-                // 仅当 export 确实没有任何行时才物化：有行说明 row_id=1 已存在（写入走 SQL 定位 row_id=1），
-                // 此时补行会产生 row_id=2 垫脚行，写入若落在它上面会被去重删掉导致数据丢失。
-                try {
-                    const cur = api.exportTableAsJson() || {};
-                    const curSheet = (() => { for (const k in cur) { if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name === L.table) return cur[k]; } return null; })();
-                    if (curSheet && Array.isArray(curSheet.content) && curSheet.content.length > 1) continue;
-                } catch (e) {}
                 try {
                     const obj = {};
                     if (tplCached) {
