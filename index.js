@@ -32,6 +32,7 @@
         'function mvu2shujukuDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}',
         'function mvu2shujukuExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}',
         'function mvu2shujukuSheetByName(tpl,name){if(!tpl||typeof tpl!=="object")return null;for(var k in tpl){if(k.indexOf("sheet_")===0&&tpl[k]&&tpl[k].name===name)return tpl[k];}return null;}',
+        'function mvu2shujukuTablesSafeToAnchor(api,tpl){try{var all=api.exportTableAsJson()||{};var names=mvu2shujukuExpectedTableNames(tpl);for(var i=0;i<names.length;i++){var name=names[i];var rs=null;for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&all[k].name===name){rs=all[k];break;}}if(!rs)continue;var rows=(Array.isArray(rs.content)?rs.content.length:0)-1;var seed=Array.isArray(rs.seedRows)?rs.seedRows.length:0;var ts=mvu2shujukuSheetByName(tpl,name);var tRows=ts&&Array.isArray(ts.content)?ts.content.length-1:0;if(rows+seed>tRows)return false;if(rows>0&&ts&&Array.isArray(ts.content)&&ts.content[1]&&Array.isArray(rs.content)&&rs.content[1]){var th=ts.content[0]||[];var r1=rs.content[1]||[];for(var ci=1;ci<th.length;ci++){if(String(ts.content[1][ci]==null?"":ts.content[1][ci])!==String(r1[ci]==null?"":r1[ci]))return false;}}}return true;}catch(e){return false;}}',
         'function mvu2shujukuMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}',
         'function mvu2shujukuExpectedColumns(tpl){var map={};if(!tpl||typeof tpl!=="object")return map;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object"||typeof s.name!=="string")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var cols=[];for(var i=1;i<hdr.length;i++){if(cols.indexOf(hdr[i])===-1)cols.push(hdr[i]);}map[s.name]=cols;}return map;}',
         'function mvu2shujukuMissingColumns(api,expected){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=all[k];}var mismatch=[];for(var name in expected){var sheet=have[name];if(!sheet)continue;var hdr=Array.isArray(sheet.content)&&Array.isArray(sheet.content[0])?sheet.content[0]:[];var exp=expected[name];for(var i=0;i<exp.length;i++){if(hdr.indexOf(exp[i])===-1){mismatch.push(name+"(缺列:"+exp[i]+")");break;}}}return mismatch;}',
@@ -2557,6 +2558,22 @@
             `try{addRoot(window.top);}catch(e){}`,
             `addRoot(rootWindow);`,
             '',
+            `// 尽早提供 eventOn/eventOff：前端（body.load 注入）可能在 TH 全局就绪前就调用 eventOn，`,
+            `// 若此时没有 eventOn，前端的 VARIABLE_UPDATE_ENDED 监听会注册失败，导致写入后不刷新`,
+            `(function installEventOnEarly(){`,
+            `  for(var i=0;i<roots.length;i++){`,
+            `    var w=roots[i];`,
+            `    if(!w||typeof w.addEventListener!=='function')continue;`,
+            `    if(typeof w.eventOn==='function')continue;`,
+            `    w.eventOn=function(evName,handler){`,
+            `      var wrapped=function(e){try{var d=e&&e.detail;if(d&&Object.prototype.hasOwnProperty.call(d,'after')){handler(d.after,d.before);}else{handler(d);}}catch(err){}};`,
+            `      w.addEventListener(evName,wrapped);`,
+            `      return {stop:function(){try{w.removeEventListener(evName,wrapped);}catch(e2){}}};`,
+            `    };`,
+            `    w.eventOff=function(evName,handler){try{w.removeEventListener(evName,handler);}catch(e2){}};`,
+            `  }`,
+            `})();`,
+            '',
             `function getApi(){`,
             `  for(var i=0;i<roots.length;i++){`,
             `    try{var a=roots[i].AutoCardUpdaterAPI;if(a&&typeof a.exportTableAsJson==='function')return a;}catch(e){}`,
@@ -3009,7 +3026,7 @@
             `      var w=targets[t2];`,
             `      if(w&&typeof w.eventOn!=='function'&&typeof w.addEventListener==='function'){`,
             `        w.eventOn=function(evName,handler){`,
-            `          var wrapped=function(e){try{handler(e&&e.detail);}catch(err){}};`,
+            `          var wrapped=function(e){try{var d=e&&e.detail;if(d&&Object.prototype.hasOwnProperty.call(d,'after')){handler(d.after,d.before);}else{handler(d);}}catch(err){}};`,
             `          w.addEventListener(evName,wrapped);`,
             `          return {stop:function(){try{w.removeEventListener(evName,wrapped);}catch(e2){}}};`,
             `        };`,
@@ -3204,7 +3221,7 @@
             `      var tpl=parseTemplate();`,
             `      if(tpl&&!hasFullCheckpoint()){`,
             `        var miss=mvu2shujukuMissingTableNames(API,mvu2shujukuExpectedTableNames(tpl));`,
-            `        if(miss.length===0&&typeof API.initGameSession==='function'){`,
+            `        if(miss.length===0&&mvu2shujukuTablesSafeToAnchor(API,tpl)&&typeof API.initGameSession==='function'){`,
             `          anchorTries++;`,
             `          console.log('['+BRIDGE_NAME+'] 聊天缺少 full checkpoint，重建数据库锚点…');`,
             `          var r3=await mvu2shujukuWithTimeout(API.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:currentCharName()+'模板'}),20000,'initGameSession(锚点)');`,
@@ -4224,7 +4241,8 @@ ${DB_INIT_SNIPPET}
                 if (tplCached && !hasFullShujukuCheckpoint()) {
                     const expected = mvu2shujukuExpectedTableNames(tplCached);
                     const missing = mvu2shujukuMissingTableNames(api, expected);
-                    if (missing.length === 0) {
+                    // 只有表仍是模板初始状态（无用户数据）才重建锚点，避免切换聊天时误清已有数据
+                    if (missing.length === 0 && mvu2shujukuTablesSafeToAnchor(api, tplCached)) {
                         autoInitState.anchorTries += 1;
                         console.log('[mvu2shujuku][debug] 聊天缺少 full checkpoint，重建数据库锚点…');
                         const r3 = await mvu2shujukuWithTimeout(
@@ -4629,6 +4647,25 @@ ${DB_INIT_SNIPPET}
     // 事件广播：与 MVU 原版一致，优先走 TH 事件总线（eventEmit，前端 eventOn 监听的就是它）；
     // 另发同名 CustomEvent + ST eventSource，覆盖 window/parent/top/同源 iframe；
     // 缺少 ST 事件总线的窗口（如消息 iframe）补一个绑定到同名 CustomEvent 的 eventOn/eventOff 兜底。
+    function installEarlyEventOnFallback() {
+        try {
+            for (const w of [window, hostWindow]) {
+                if (!w || typeof w.addEventListener !== 'function' || typeof w.eventOn === 'function') continue;
+                w.eventOn = (evName, handler) => {
+                    const wrapped = (e) => {
+                        try {
+                            const d = e && e.detail;
+                            if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
+                            else handler(d);
+                        } catch (err) {}
+                    };
+                    w.addEventListener(evName, wrapped);
+                    return { stop: () => { try { w.removeEventListener(evName, wrapped); } catch (e2) {} } };
+                };
+                w.eventOff = (evName, handler) => { try { w.removeEventListener(evName, handler); } catch (e2) {} };
+            }
+        } catch (e) {}
+    }
     function emitMvuEvent(name, a, b) {
         const targets = [];
         const add = (t) => { try { if (t && typeof t.dispatchEvent === 'function' && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
@@ -4653,7 +4690,13 @@ ${DB_INIT_SNIPPET}
             try {
                 if (t && typeof t.eventOn !== 'function' && typeof t.addEventListener === 'function') {
                     t.eventOn = (evName, handler) => {
-                        const wrapped = (e) => { try { handler(e && e.detail); } catch (err) {} };
+                        const wrapped = (e) => {
+                            try {
+                                const d = e && e.detail;
+                                if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
+                                else handler(d);
+                            } catch (err) {}
+                        };
                         t.addEventListener(evName, wrapped);
                         return { stop: () => { try { t.removeEventListener(evName, wrapped); } catch (e) {} } };
                     };
@@ -5615,6 +5658,7 @@ ${DB_INIT_SNIPPET}
 
     function main() {
         const context = getContextSafe();
+        installEarlyEventOnFallback();
         ensureSettingsPanel(context);
         bindDebugHooks(context);
         ensureTemplateDefine();
@@ -5756,6 +5800,7 @@ root.__MVU2SHUJUKU_PINYIN__ = {"bǎng páng pāng":"膀","líng":"〇伶凌刢�
 function mvu2shujukuDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}
 function mvu2shujukuExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}
 function mvu2shujukuSheetByName(tpl,name){if(!tpl||typeof tpl!=="object")return null;for(var k in tpl){if(k.indexOf("sheet_")===0&&tpl[k]&&tpl[k].name===name)return tpl[k];}return null;}
+function mvu2shujukuTablesSafeToAnchor(api,tpl){try{var all=api.exportTableAsJson()||{};var names=mvu2shujukuExpectedTableNames(tpl);for(var i=0;i<names.length;i++){var name=names[i];var rs=null;for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&all[k].name===name){rs=all[k];break;}}if(!rs)continue;var rows=(Array.isArray(rs.content)?rs.content.length:0)-1;var seed=Array.isArray(rs.seedRows)?rs.seedRows.length:0;var ts=mvu2shujukuSheetByName(tpl,name);var tRows=ts&&Array.isArray(ts.content)?ts.content.length-1:0;if(rows+seed>tRows)return false;if(rows>0&&ts&&Array.isArray(ts.content)&&ts.content[1]&&Array.isArray(rs.content)&&rs.content[1]){var th=ts.content[0]||[];var r1=rs.content[1]||[];for(var ci=1;ci<th.length;ci++){if(String(ts.content[1][ci]==null?"":ts.content[1][ci])!==String(r1[ci]==null?"":r1[ci]))return false;}}}return true;}catch(e){return false;}}
 function mvu2shujukuMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}
 function mvu2shujukuExpectedColumns(tpl){var map={};if(!tpl||typeof tpl!=="object")return map;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object"||typeof s.name!=="string")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var cols=[];for(var i=1;i<hdr.length;i++){if(cols.indexOf(hdr[i])===-1)cols.push(hdr[i]);}map[s.name]=cols;}return map;}
 function mvu2shujukuMissingColumns(api,expected){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=all[k];}var mismatch=[];for(var name in expected){var sheet=have[name];if(!sheet)continue;var hdr=Array.isArray(sheet.content)&&Array.isArray(sheet.content[0])?sheet.content[0]:[];var exp=expected[name];for(var i=0;i<exp.length;i++){if(hdr.indexOf(exp[i])===-1){mismatch.push(name+"(缺列:"+exp[i]+")");break;}}}return mismatch;}
@@ -5893,7 +5938,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (tplCached && !hasFullShujukuCheckpoint()) {
                     const expected = mvu2shujukuExpectedTableNames(tplCached);
                     const missing = mvu2shujukuMissingTableNames(api, expected);
-                    if (missing.length === 0) {
+                    // 只有表仍是模板初始状态（无用户数据）才重建锚点，避免切换聊天时误清已有数据
+                    if (missing.length === 0 && mvu2shujukuTablesSafeToAnchor(api, tplCached)) {
                         autoInitState.anchorTries += 1;
                         console.log('[mvu2shujuku][debug] 聊天缺少 full checkpoint，重建数据库锚点…');
                         const r3 = await mvu2shujukuWithTimeout(
@@ -6298,6 +6344,25 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     // 事件广播：与 MVU 原版一致，优先走 TH 事件总线（eventEmit，前端 eventOn 监听的就是它）；
     // 另发同名 CustomEvent + ST eventSource，覆盖 window/parent/top/同源 iframe；
     // 缺少 ST 事件总线的窗口（如消息 iframe）补一个绑定到同名 CustomEvent 的 eventOn/eventOff 兜底。
+    function installEarlyEventOnFallback() {
+        try {
+            for (const w of [window, hostWindow]) {
+                if (!w || typeof w.addEventListener !== 'function' || typeof w.eventOn === 'function') continue;
+                w.eventOn = (evName, handler) => {
+                    const wrapped = (e) => {
+                        try {
+                            const d = e && e.detail;
+                            if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
+                            else handler(d);
+                        } catch (err) {}
+                    };
+                    w.addEventListener(evName, wrapped);
+                    return { stop: () => { try { w.removeEventListener(evName, wrapped); } catch (e2) {} } };
+                };
+                w.eventOff = (evName, handler) => { try { w.removeEventListener(evName, handler); } catch (e2) {} };
+            }
+        } catch (e) {}
+    }
     function emitMvuEvent(name, a, b) {
         const targets = [];
         const add = (t) => { try { if (t && typeof t.dispatchEvent === 'function' && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
@@ -6322,7 +6387,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             try {
                 if (t && typeof t.eventOn !== 'function' && typeof t.addEventListener === 'function') {
                     t.eventOn = (evName, handler) => {
-                        const wrapped = (e) => { try { handler(e && e.detail); } catch (err) {} };
+                        const wrapped = (e) => {
+                            try {
+                                const d = e && e.detail;
+                                if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
+                                else handler(d);
+                            } catch (err) {}
+                        };
                         t.addEventListener(evName, wrapped);
                         return { stop: () => { try { t.removeEventListener(evName, wrapped); } catch (e) {} } };
                     };
@@ -7284,6 +7355,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
 
     function main() {
         const context = getContextSafe();
+        installEarlyEventOnFallback();
         ensureSettingsPanel(context);
         bindDebugHooks(context);
         ensureTemplateDefine();
