@@ -2237,13 +2237,25 @@
             }
         };
         collect(prevStat || {}, nextStat || {}, '');
+        try {
+            const dump = {};
+            for (const op of ops.slice(0, 10)) {
+                if (!op || !op.entry || !op.entry.layout) continue;
+                const f = sheetOf(op.entry.layout.table);
+                dump[op.np] = { kind: op.entry.kind, overflow: !!op.overflow, json: !!op.json, contentLen: f ? f.sheet.content.length : -1 };
+            }
+            console.log('[mvu2shujuku][debug][写库] ops=' + ops.length + ' → ' + JSON.stringify(dump));
+        } catch (e) {}
 
         // 单例/整组JSON表若缺初始行（插件可能只保留表头+seedRows，未物化到 content），先按模板补行，
         // 避免 updateCell: Row index 1 out of bounds 导致写入落空
         const seedNeeded = {};
         for (const op of ops) {
             if (op && op.entry && op.entry.layout && (op.entry.kind === 'singleton' || op.entry.kind === 'json')) {
-                seedNeeded[op.entry.layout.table] = op.entry;
+                // 只对真正有变化的操作补行：值未变化的 op 不会产生写入，也不需要物化初始行
+                if (op.overflow || op.json || op.value !== op.prev) {
+                    seedNeeded[op.entry.layout.table] = op.entry;
+                }
             }
         }
         if (Object.keys(seedNeeded).length) {
@@ -2260,7 +2272,12 @@
                 const SE = seedNeeded[tableName];
                 const SE0 = SE.layout || SE;
                 const found2 = sheetOf(SE0.table);
-                if (!found2 || !Array.isArray(found2.sheet.content) || found2.sheet.content.length > 1) continue;
+                // 诊断：插件 export 可能把 seedRows 合并显示成“有行”，但运行期未物化，导致 updateCell row 1 out of bounds
+                console.log('[mvu2shujuku][debug][写库] 补行前「' + SE0.table + '」contentLen=' + (found2 && found2.sheet && found2.sheet.content ? found2.sheet.content.length : -1) +
+                    ' seedRows=' + (found2 && Array.isArray(found2.sheet.seedRows) ? found2.sheet.seedRows.length : 0));
+                // 只要写入涉及单例/JSON 表，就尝试物化初始行：行已存在时插件会以 UNIQUE 拒绝（静默），
+                // 仅当行确实缺失时才真正补入——避免“显示有行但运行期没行”的 out of bounds。
+                if (!found2 || !Array.isArray(found2.sheet.content) || !found2.sheet.content.length) continue;
                 let sObj = null;
                 if (tplSrc && typeof tplSrc === 'object') {
                     for (const k in tplSrc) {
@@ -2279,7 +2296,8 @@
                     await Promise.resolve(api.insertRow(SE0.table, sObj));
                     console.log('[mvu2shujuku][debug] 已为表「' + SE0.table + '」补初始行（原表仅表头）。');
                 } catch (e) {
-                    console.warn('[mvu2shujuku][debug] 补初始行失败:', e);
+                    // UNIQUE 冲突等说明行已存在（可能只是 seedRows 未物化），记录但不阻塞
+                    console.log('[mvu2shujuku][debug] 补初始行跳过（行已存在或冲突）: ' + (e && e.message ? e.message : e));
                 }
             }
             try { tables = api.exportTableAsJson() || {}; } catch (e) {}
