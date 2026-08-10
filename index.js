@@ -4390,25 +4390,9 @@ ${DB_INIT_SNIPPET}
             console.log('[mvu2shujuku][debug][锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')) + ' | 锚点=' + anchored);
             return anchored;
         }
-        // 仅“写库前”允许重置重建：表数据只是模板行被改动（没有额外新增行，例如开局捏人写入），
-        // 且此刻有待重放写入（前端 replaceMvuData 带完整快照），重置+重放无损。
-        // 开局锚点路径没有待重放写入，绝不能重置已有数据（会清掉捏人结果）。
-        if (reason === '写库前' && isOpeningPhase() && !mvu2shujukuHasExtraRows(api, tplCached) && !mvu2shujukuInitSessionHung && typeof api.initGameSession === 'function') {
-            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：表无额外行（仅模板行被改动），重置重建锚点并重放本次写入…');
-            try {
-                const r2 = await mvu2shujukuWithTimeout(
-                    api.initGameSession({}, { injectTemplate: true, loadPreset: false, templateData: tplCached, templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板' }),
-                    20000,
-                    'initGameSession(无额外行锚点)'
-                );
-                const ok2 = !(r2 && r2.success === false) && !(r2 && r2.timeout);
-                console.log('[mvu2shujuku][debug][锚点] ' + reason + '：无额外行重建=' + (r2 && r2.timeout ? '超时' : (r2 && r2.success === false ? (r2.message || '失败') : '完成')) + ' | 锚点=' + hasFullShujukuCheckpoint());
-                return ok2 && hasFullShujukuCheckpoint();
-            } catch (e) {
-                console.warn('[mvu2shujuku][debug][锚点] ' + reason + '：无额外行重建异常:', e);
-                return false;
-            }
-        }
+        // 表数据与模板不一致（含“模板行被注入/捏人改动”）时，**绝不** initGameSession 重置——
+        // 重置会用模板覆盖表格，把开场白注入的数据清掉；只允许表格仍与模板完全一致时重置（无损）。
+        // 因此这里不再区分“有额外行/无额外行”，只要不一致就走下方 importTableAsJson 锚定当前状态。
         // 表已含用户数据但无锚点：用插件提交 API 把当前状态落成 full checkpoint（不丢数据）
         if (typeof api.importTableAsJson === 'function') {
             console.log('[mvu2shujuku][debug][锚点] ' + reason + '：表含数据且无锚点，用 importTableAsJson 把当前状态提交为 checkpoint…');
@@ -4931,24 +4915,10 @@ ${DB_INIT_SNIPPET}
             for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
                 if (L.kind !== 'singleton' && L.kind !== 'json') continue;
                 try {
-                    // 表里已有数据行（row_id=1 已存在）就不重复物化：
-                    // 初始化默认行由 initGameSession 建表时写入，这里只兜底“建表后仍空表”的情况，
-                    // 避免每次写库前插入 row_id=2 再清理的多余循环（也会让注入数据误落垫脚行）。
-                    let hasDataRow = false;
-                    try {
-                        const allT = api.exportTableAsJson() || {};
-                        for (const k in allT) {
-                            if (k.indexOf('sheet_') === 0 && allT[k] && allT[k].name === L.table &&
-                                Array.isArray(allT[k].content) && allT[k].content.length > 1) {
-                                hasDataRow = true;
-                                break;
-                            }
-                        }
-                    } catch (e) {}
-                    if (hasDataRow) {
-                        console.log('[mvu2shujuku][debug] 单例/JSON表已有数据行，跳过物化：' + L.table);
-                        continue;
-                    }
+                    // 注意：不能用 exportTableAsJson 的 content 判断“已有数据行”——
+                    // 插件的 export 是含 seedRows 的合并视图（显示有行≠运行期已物化），
+                    // 误判会跳过 insertRow，导致后续 updateCell row 1 out of bounds。
+                    // 这里无条件尝试物化，行已存在时 UNIQUE 冲突走 catch 静默跳过即可。
                     const obj = {};
                     if (tplCached) {
                         for (const k in tplCached) {
@@ -6666,25 +6636,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             console.log('[mvu2shujuku][debug][锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')) + ' | 锚点=' + anchored);
             return anchored;
         }
-        // 仅“写库前”允许重置重建：表数据只是模板行被改动（没有额外新增行，例如开局捏人写入），
-        // 且此刻有待重放写入（前端 replaceMvuData 带完整快照），重置+重放无损。
-        // 开局锚点路径没有待重放写入，绝不能重置已有数据（会清掉捏人结果）。
-        if (reason === '写库前' && isOpeningPhase() && !mvu2shujukuHasExtraRows(api, tplCached) && !mvu2shujukuInitSessionHung && typeof api.initGameSession === 'function') {
-            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：表无额外行（仅模板行被改动），重置重建锚点并重放本次写入…');
-            try {
-                const r2 = await mvu2shujukuWithTimeout(
-                    api.initGameSession({}, { injectTemplate: true, loadPreset: false, templateData: tplCached, templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板' }),
-                    20000,
-                    'initGameSession(无额外行锚点)'
-                );
-                const ok2 = !(r2 && r2.success === false) && !(r2 && r2.timeout);
-                console.log('[mvu2shujuku][debug][锚点] ' + reason + '：无额外行重建=' + (r2 && r2.timeout ? '超时' : (r2 && r2.success === false ? (r2.message || '失败') : '完成')) + ' | 锚点=' + hasFullShujukuCheckpoint());
-                return ok2 && hasFullShujukuCheckpoint();
-            } catch (e) {
-                console.warn('[mvu2shujuku][debug][锚点] ' + reason + '：无额外行重建异常:', e);
-                return false;
-            }
-        }
+        // 表数据与模板不一致（含“模板行被注入/捏人改动”）时，**绝不** initGameSession 重置——
+        // 重置会用模板覆盖表格，把开场白注入的数据清掉；只允许表格仍与模板完全一致时重置（无损）。
+        // 因此这里不再区分“有额外行/无额外行”，只要不一致就走下方 importTableAsJson 锚定当前状态。
         // 表已含用户数据但无锚点：用插件提交 API 把当前状态落成 full checkpoint（不丢数据）
         if (typeof api.importTableAsJson === 'function') {
             console.log('[mvu2shujuku][debug][锚点] ' + reason + '：表含数据且无锚点，用 importTableAsJson 把当前状态提交为 checkpoint…');
@@ -7207,24 +7161,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
                 if (L.kind !== 'singleton' && L.kind !== 'json') continue;
                 try {
-                    // 表里已有数据行（row_id=1 已存在）就不重复物化：
-                    // 初始化默认行由 initGameSession 建表时写入，这里只兜底“建表后仍空表”的情况，
-                    // 避免每次写库前插入 row_id=2 再清理的多余循环（也会让注入数据误落垫脚行）。
-                    let hasDataRow = false;
-                    try {
-                        const allT = api.exportTableAsJson() || {};
-                        for (const k in allT) {
-                            if (k.indexOf('sheet_') === 0 && allT[k] && allT[k].name === L.table &&
-                                Array.isArray(allT[k].content) && allT[k].content.length > 1) {
-                                hasDataRow = true;
-                                break;
-                            }
-                        }
-                    } catch (e) {}
-                    if (hasDataRow) {
-                        console.log('[mvu2shujuku][debug] 单例/JSON表已有数据行，跳过物化：' + L.table);
-                        continue;
-                    }
+                    // 注意：不能用 exportTableAsJson 的 content 判断“已有数据行”——
+                    // 插件的 export 是含 seedRows 的合并视图（显示有行≠运行期已物化），
+                    // 误判会跳过 insertRow，导致后续 updateCell row 1 out of bounds。
+                    // 这里无条件尝试物化，行已存在时 UNIQUE 冲突走 catch 静默跳过即可。
                     const obj = {};
                     if (tplCached) {
                         for (const k in tplCached) {
