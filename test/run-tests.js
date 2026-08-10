@@ -2259,4 +2259,82 @@ test('桥启动即提供 eventOn 兜底，且 VARIABLE_UPDATE_ENDED 按 (after, 
     assert.strictEqual(got[0][1].stat_data.x, 0, 'before 应按位置传参');
 });
 
+test('写库前锚点：仅模板行改动（无额外行）时重置重建并重放写入；有额外行时放弃写入不重置', async () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+
+    const makeSandbox2 = (mutateTables) => {
+        const vm2 = require('vm');
+        const tables = JSON.parse(JSON.stringify(r.template));
+        mutateTables(tables);
+        const win = {
+            top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
+            CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+            TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+            getContext: () => ({
+                chatId: 'c1', name: '测试角色', chat: [],
+                eventSource: { on: () => {}, emit: () => {} },
+                event_types: { MESSAGE_RECEIVED: 'message_received' },
+            }),
+        };
+        win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+        const counters = { init: 0 };
+        win.AutoCardUpdaterAPI = {
+            exportTableAsJson: () => tables,
+            importTemplateFromData: async () => ({ success: true }),
+            initGameSession: async () => { counters.init += 1; return { success: true, runtimeReady: true }; },
+            importTableAsJson: async () => false,
+            registerTableUpdateCallback: () => {},
+            updateCell: async (tableName, rowIndex, col, value) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s || !s.content[rowIndex]) throw new Error('Row index ' + rowIndex + ' out of bounds in table "' + tableName + '".');
+                const ci = s.content[0].indexOf(col);
+                if (ci === -1) return false;
+                s.content[rowIndex][ci] = String(value);
+                return true;
+            },
+            insertRow: async (tableName, obj) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s) return 0;
+                const row = s.content[0].map(h => (obj[h] !== undefined && obj[h] !== null) ? String(obj[h]) : '');
+                row[0] = s.content.length || 1;
+                s.content.push(row);
+                return row[0];
+            },
+            deleteRow: async () => true,
+        };
+        vm2.createContext(win);
+        vm2.runInContext(r.bridgeScript, win);
+        return { win, tables, counters };
+    };
+
+    // 场景1：主角表仅模板行被改（无额外行）+ 无锚点 → 应重建锚点并成功写入
+    const s1 = makeSandbox2((tables) => {
+        const zj = Object.values(tables).find(s => s && s.name === '主角表');
+        zj.content[1][zj.content[0].indexOf('姓名')] = '测试主角';
+    });
+    const mvu1 = s1.win.Mvu.getMvuData();
+    mvu1.stat_data.主角.姓名 = '测试主角2';
+    await s1.win.Mvu.replaceMvuData(mvu1);
+    await waitBridgeFlush(600);
+    assert.ok(s1.counters.init >= 1, '无额外行时应通过 initGameSession 重建锚点');
+    const zj1 = Object.values(s1.tables).find(s => s && s.name === '主角表');
+    assert.strictEqual(zj1.content[1][zj1.content[0].indexOf('姓名')], '测试主角2', '重建后应重放本次写入');
+
+    // 场景2：道侣表有额外行 + 无锚点 → 不重置、放弃写入
+    const s2 = makeSandbox2((tables) => {
+        const dl = Object.values(tables).find(s => s && s.name === '道侣表');
+        dl.content.push(['1', '测试道侣', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+    });
+    const mvu2 = s2.win.Mvu.getMvuData();
+    if (!mvu2.stat_data.主角) mvu2.stat_data.主角 = {};
+    mvu2.stat_data.主角.姓名 = '不应写入';
+    await s2.win.Mvu.replaceMvuData(mvu2);
+    await waitBridgeFlush(600);
+    assert.strictEqual(s2.counters.init, 0, '有额外行时不应重置重建');
+    const zj2 = Object.values(s2.tables).find(s => s && s.name === '主角表');
+    const nameIdx = zj2.content[0].indexOf('姓名');
+    assert.notStrictEqual(zj2.content[1][nameIdx], '不应写入', '无锚点且有额外行时应放弃写入');
+});
+
 runTests();

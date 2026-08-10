@@ -28,6 +28,7 @@
         'function mvu2shujukuDecodeB64(b){try{var bin=atob(b);var bytes=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);return new TextDecoder("utf-8").decode(bytes);}catch(e){return decodeURIComponent(escape(atob(b)));}}',
         'function mvu2shujukuExpectedTableNames(tpl){var names=[];if(!tpl||typeof tpl!=="object")return names;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(s&&typeof s==="object"&&typeof s.name==="string"&&names.indexOf(s.name)===-1)names.push(s.name);}return names;}',
         'function mvu2shujukuSheetByName(tpl,name){if(!tpl||typeof tpl!=="object")return null;for(var k in tpl){if(k.indexOf("sheet_")===0&&tpl[k]&&tpl[k].name===name)return tpl[k];}return null;}',
+        'function mvu2shujukuHasExtraRows(api,tpl){try{var all=api.exportTableAsJson()||{};for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var ts=tpl[k];if(!ts||typeof ts!=="object"||typeof ts.name!=="string")continue;var rs=null;for(var k2 in all){if(k2.indexOf("sheet_")===0&&all[k2]&&all[k2].name===ts.name){rs=all[k2];break;}}if(!rs)continue;var tRows=Array.isArray(ts.content)?ts.content.length-1:0;var rRows=Array.isArray(rs.content)?rs.content.length-1:0;var rSeed=Array.isArray(rs.seedRows)?rs.seedRows.length:0;if(rRows+rSeed>tRows)return true;}return false;}catch(e){return false;}}',
         'function mvu2shujukuTablesSafeToAnchor(api,tpl){try{var all=api.exportTableAsJson()||{};var names=mvu2shujukuExpectedTableNames(tpl);for(var i=0;i<names.length;i++){var name=names[i];var rs=null;for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&all[k].name===name){rs=all[k];break;}}if(!rs)continue;var rows=(Array.isArray(rs.content)?rs.content.length:0)-1;var seed=Array.isArray(rs.seedRows)?rs.seedRows.length:0;var ts=mvu2shujukuSheetByName(tpl,name);var tRows=ts&&Array.isArray(ts.content)?ts.content.length-1:0;if(rows+seed>tRows)return false;if(rows>0&&ts&&Array.isArray(ts.content)&&ts.content[1]&&Array.isArray(rs.content)&&rs.content[1]){var th=ts.content[0]||[];var r1=rs.content[1]||[];for(var ci=1;ci<th.length;ci++){if(String(ts.content[1][ci]==null?"":ts.content[1][ci])!==String(r1[ci]==null?"":r1[ci]))return false;}}}return true;}catch(e){return false;}}',
         'function mvu2shujukuMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}',
         'function mvu2shujukuExpectedColumns(tpl){var map={};if(!tpl||typeof tpl!=="object")return map;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object"||typeof s.name!=="string")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var cols=[];for(var i=1;i<hdr.length;i++){if(cols.indexOf(hdr[i])===-1)cols.push(hdr[i]);}map[s.name]=cols;}return map;}',
@@ -2692,6 +2693,14 @@
             `            var ra=await mvu2shujukuWithTimeout(API.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tplCached2,templatePresetName:currentCharName()+'模板'}),20000,'initGameSession(写前锚点)');`,
             `            console.log('['+BRIDGE_NAME+'] 写库前锚点重建：'+(ra&&ra.success===false?(ra.message||'失败'):(ra&&ra.timeout?'超时':'完成')));`,
             `            anchoredOK=!(ra&&ra.success===false)&&!(ra&&ra.timeout);`,
+            `          }else if(bridgeIsOpeningPhase()&&!mvu2shujukuHasExtraRows(API,tplCached2)&&typeof API.initGameSession==='function'){`,
+            `            // 表无额外行（仅模板行被改动，如开局捏人写入）：重置+重放本次写入无损`,
+            `            console.log('['+BRIDGE_NAME+'] 写库前：表无额外行，重置重建锚点并重放本次写入…');`,
+            `            try{`,
+            `              var r2b=await mvu2shujukuWithTimeout(API.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tplCached2,templatePresetName:currentCharName()+'模板'}),20000,'initGameSession(无额外行锚点)');`,
+            `              console.log('['+BRIDGE_NAME+'] 无额外行重建：'+(r2b&&r2b.success===false?(r2b.message||'失败'):(r2b&&r2b.timeout?'超时':'完成'))+' | 锚点='+hasFullCheckpoint());`,
+            `              anchoredOK=!(r2b&&r2b.success===false)&&!(r2b&&r2b.timeout);`,
+            `            }catch(e){console.warn('['+BRIDGE_NAME+'] 无额外行重建异常:',e);}`,
             `          }else if(typeof API.importTableAsJson==='function'){`,
             `            // 表含用户数据但无锚点：把当前状态提交为 checkpoint，不丢数据`,
             `            console.log('['+BRIDGE_NAME+'] 写库前：表含数据且无锚点，用 importTableAsJson 锚定当前状态…');`,
@@ -2702,13 +2711,11 @@
             `              anchoredOK=!!ok1;`,
             `            }catch(e){console.warn('['+BRIDGE_NAME+'] importTableAsJson 锚定异常:',e);}`,
             `          }`,
-            `          if(!anchoredOK&&!hasFullCheckpoint()&&typeof API.initGameSession==='function'){`,
-            `            // 轻量锚定失败（插件拒绝无锚点升级）：强制用模板重置重建，随后重放本次写入`,
-            `            console.log('['+BRIDGE_NAME+'] 写库前：轻量锚定失败，改用 initGameSession 重置重建…');`,
-            `            try{`,
-            `              var rf=await mvu2shujukuWithTimeout(API.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tplCached2,templatePresetName:currentCharName()+'模板'}),20000,'initGameSession(强制锚点)');`,
-            `              console.log('['+BRIDGE_NAME+'] 写库前强制重建：'+(rf&&rf.success===false?(rf.message||'失败'):(rf&&rf.timeout?'超时':'完成'))+' | 锚点='+hasFullCheckpoint());`,
-            `            }catch(e){console.warn('['+BRIDGE_NAME+'] 写库前强制重建异常:',e);}`,
+            `          if(!anchoredOK&&!hasFullCheckpoint()){`,
+            `            // 表含真实数据且插件拒绝锚定：放弃本次写入，绝不重置已有数据`,
+            `            console.warn('['+BRIDGE_NAME+'] 写库前：表含数据且无法建立锚点，放弃本次写入（避免无锚点 artifacts 与数据重置）。');`,
+            `            if(statOverlayGen===gen)pendingStatOverlay=null;`,
+            `            return;`,
             `          }`,
             `        }`,
             `      }catch(e){console.warn('['+BRIDGE_NAME+'] 写库前锚点重建异常:',e);}`,
@@ -3236,6 +3243,9 @@
             `    }`,
             `  }catch(e){}`,
             `  return false;`,
+            `}`,
+            `function bridgeIsOpeningPhase(){`,
+            `  try{var ctx=getContext();var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];return chat.length<=2;}catch(e){return true;}`,
             `}`,
             `async function ensureTemplateInit(){`,
             `  if(!TEMPLATE_B64)return;`,
@@ -4207,6 +4217,16 @@ ${DB_INIT_SNIPPET}
         return null;
     }
 
+    // 是否仍处于开局阶段：聊天只有 1~2 条消息（首楼 + 可能的首轮回复）。
+    // 只有开局阶段才允许"重置重建锚点"；一旦进入正常对话，绝不重置已有数据。
+    function isOpeningPhase() {
+        try {
+            const context = getContextSafe();
+            const chat = Array.isArray(context.chat) ? context.chat : [];
+            return chat.length <= 2;
+        } catch (e) { return true; }
+    }
+
     // 聊天缺 full checkpoint 时重建锚点，供开局自动建表与每次写库前调用。
     // 表仍是模板初始状态 → initGameSession 重建（不丢数据）；
     // 表已含用户数据 → 用插件 importTableAsJson 把当前状态提交成 full checkpoint（同样不丢数据）。
@@ -4235,6 +4255,24 @@ ${DB_INIT_SNIPPET}
             console.log('[mvu2shujuku][debug][锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')));
             return ok;
         }
+        // 仅开局阶段允许重置重建：表数据只是模板行被改动（没有额外新增行，例如开局捏人写入），
+        // 重置+重放本次写入是无损的（前端 replaceMvuData 带完整快照）；进入正常对话后绝不重置。
+        if (isOpeningPhase() && !mvu2shujukuHasExtraRows(api, tplCached) && !mvu2shujukuInitSessionHung && typeof api.initGameSession === 'function') {
+            console.log('[mvu2shujuku][debug][锚点] ' + reason + '：表无额外行（仅模板行被改动），重置重建锚点并重放本次写入…');
+            try {
+                const r2 = await mvu2shujukuWithTimeout(
+                    api.initGameSession({}, { injectTemplate: true, loadPreset: false, templateData: tplCached, templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板' }),
+                    20000,
+                    'initGameSession(无额外行锚点)'
+                );
+                const ok2 = !(r2 && r2.success === false) && !(r2 && r2.timeout);
+                console.log('[mvu2shujuku][debug][锚点] ' + reason + '：无额外行重建=' + (r2 && r2.timeout ? '超时' : (r2 && r2.success === false ? (r2.message || '失败') : '完成')) + ' | 锚点=' + hasFullShujukuCheckpoint());
+                return ok2 && hasFullShujukuCheckpoint();
+            } catch (e) {
+                console.warn('[mvu2shujuku][debug][锚点] ' + reason + '：无额外行重建异常:', e);
+                return false;
+            }
+        }
         // 表已含用户数据但无锚点：用插件提交 API 把当前状态落成 full checkpoint（不丢数据）
         if (typeof api.importTableAsJson === 'function') {
             console.log('[mvu2shujuku][debug][锚点] ' + reason + '：表含数据且无锚点，用 importTableAsJson 把当前状态提交为 checkpoint…');
@@ -4252,31 +4290,13 @@ ${DB_INIT_SNIPPET}
         return false;
     }
 
-    // 写库前保证 full checkpoint 存在。轻量锚定（initGameSession / importTableAsJson）失败时，
-    // 强制用卡内模板重置重建（initGameSession reset）建立锚点——随后本次写入会重放到重建后的表上，
-    // 不会丢数据，也不会产生无锚点 artifacts。
+    // 写库前保证 full checkpoint 存在。
+    // - 表仍是模板初始状态（无真实用户数据）→ initGameSession 重建（重置不丢数据，随后重放本次写入）
+    // - 表无额外行（仅模板行被改动，如开局捏人写入）→ 重置+重放本次写入无损，也可重建
+    // - 表有额外行（真实积累数据）→ importTableAsJson 锚定当前状态；失败则放弃本次写入，绝不重置已有数据
     async function ensureCheckpointBeforeWrite(api, tplCached) {
         if (hasFullShujukuCheckpoint()) return true;
-        const okLight = await anchorCheckpointIfMissing(api, tplCached, '写库前');
-        if (okLight) return true;
-        if (mvu2shujukuInitSessionHung) {
-            console.warn('[mvu2shujuku][debug][锚点] 写库前：initGameSession 曾挂起，无法强制重建，放弃本次写入。');
-            return false;
-        }
-        console.log('[mvu2shujuku][debug][锚点] 写库前：轻量锚定失败，改用 initGameSession 重置重建（随后重放本次写入）…');
-        try {
-            const r = await mvu2shujukuWithTimeout(
-                api.initGameSession({}, { injectTemplate: true, loadPreset: false, templateData: tplCached, templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板' }),
-                20000,
-                'initGameSession(强制锚点)'
-            );
-            const ok = !(r && r.success === false) && !(r && r.timeout);
-            console.log('[mvu2shujuku][debug][锚点] 写库前强制重建=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')) + ' | 锚点=' + hasFullShujukuCheckpoint());
-            return ok && hasFullShujukuCheckpoint();
-        } catch (e) {
-            console.warn('[mvu2shujuku][debug][锚点] 写库前强制重建异常:', e);
-            return false;
-        }
+        return await anchorCheckpointIfMissing(api, tplCached, '写库前');
     }
 
     function autoInitChatId() {
