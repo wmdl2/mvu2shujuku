@@ -4792,6 +4792,130 @@ ${DB_INIT_SNIPPET}
     let statWriteFlushPromise = null;
     let statWriteOverlayGen = 0;
 
+    // 把目标 stat_data 还原成完整表格 JSON：以当前导出为基座，覆盖目标值。
+    // 供 importTableAsJson 走插件自己的提交管线——插件自己管理 V2 checkpoint，
+    // 避免裸 updateCell 破坏锚点（实测裸写会触发 boundary_after_data_mismatch）。
+    function buildTableSnapshotFromStat(api, layoutEntries, tplCached, targetStat) {
+        const tables = {};
+        try {
+            const cur = api.exportTableAsJson() || {};
+            for (const k of Object.keys(cur)) tables[k] = JSON.parse(JSON.stringify(cur[k]));
+        } catch (e) {}
+        const sd = targetStat || {};
+        const sheetOf = (name) => {
+            for (const k in tables) {
+                if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return { key: k, sheet: tables[k] };
+            }
+            return null;
+        };
+        const tplRowOf = (name) => {
+            try {
+                if (!tplCached) return null;
+                for (const k in tplCached) {
+                    if (k.indexOf('sheet_') === 0 && tplCached[k] && tplCached[k].name === name &&
+                        Array.isArray(tplCached[k].content) && tplCached[k].content[1]) {
+                        return tplCached[k].content[1].slice();
+                    }
+                }
+            } catch (e) {}
+            return null;
+        };
+        const text = (v) => (v === undefined || v === null ? '' : String(v));
+        const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            const found = sheetOf(L.table);
+            if (!found) continue;
+            const sheet = found.sheet;
+            if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0])) continue;
+            const header = sheet.content[0];
+            const value = sd[L.group];
+            const declared = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
+            const mergeOverflow = (row, obj) => {
+                const ovIdx = header.indexOf('_扩展数据');
+                if (ovIdx === -1) return;
+                const overflow = {};
+                for (const k of Object.keys(obj)) {
+                    if (!declared.includes(k) && k !== L.keyCol) overflow[k] = obj[k];
+                }
+                if (!Object.keys(overflow).length) return;
+                let cur = {};
+                try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e2) {}
+                Object.assign(cur, overflow);
+                row[ovIdx] = JSON.stringify(cur);
+            };
+            if (L.kind === 'array') {
+                const arr = Array.isArray(value) ? value : [];
+                const vCol = header[1] || '内容';
+                sheet.content = [header];
+                for (const item of arr) {
+                    const row = header.map(() => '');
+                    row[0] = sheet.content.length;
+                    row[1] = text(item);
+                    sheet.content.push(row);
+                }
+                continue;
+            }
+            if (L.kind === 'json') {
+                const jIdx = header.indexOf('内容');
+                if (jIdx === -1) continue;
+                if (sheet.content.length < 2) {
+                    const tRow = tplRowOf(L.table) || header.map(() => '');
+                    tRow[0] = 1;
+                    sheet.content.push(tRow);
+                }
+                sheet.content[1][jIdx] = JSON.stringify(value === undefined ? {} : value);
+                continue;
+            }
+            if (L.kind === 'singleton') {
+                const obj = isObj(value) ? value : {};
+                if (sheet.content.length < 2) {
+                    const tRow = tplRowOf(L.table) || header.map(() => '');
+                    if (tRow[0] === undefined || tRow[0] === null || tRow[0] === '') tRow[0] = 1;
+                    sheet.content.push(tRow);
+                }
+                const row = sheet.content[1];
+                for (let ci = 1; ci < header.length; ci++) {
+                    const col = header[ci];
+                    if (col === '_扩展数据') continue;
+                    if (Object.prototype.hasOwnProperty.call(obj, col)) row[ci] = text(obj[col]);
+                }
+                mergeOverflow(row, obj);
+                continue;
+            }
+            // rows：按 keyCol upsert
+            const dict = isObj(value) ? value : {};
+            const keyIdx = header.indexOf(L.keyCol);
+            if (keyIdx === -1) continue;
+            const existing = new Map();
+            for (let ri = 1; ri < sheet.content.length; ri++) {
+                const r = sheet.content[ri];
+                if (r && r[keyIdx] !== undefined && r[keyIdx] !== null && r[keyIdx] !== '') existing.set(String(r[keyIdx]), ri);
+            }
+            for (const k of Object.keys(dict)) {
+                const item = dict[k];
+                if (!isObj(item)) continue;
+                let ri = existing.get(String(k));
+                if (ri === undefined) {
+                    const tRow = tplRowOf(L.table) || header.map(() => '');
+                    sheet.content.push(tRow);
+                    ri = sheet.content.length - 1;
+                    const r = sheet.content[ri];
+                    r[0] = ri;
+                    if (keyIdx >= 0) r[keyIdx] = text(k);
+                    existing.set(String(k), ri);
+                }
+                const row = sheet.content[ri];
+                for (let ci = 1; ci < header.length; ci++) {
+                    const col = header[ci];
+                    if (col === '_扩展数据') continue;
+                    if (Object.prototype.hasOwnProperty.call(item, col)) row[ci] = text(item[col]);
+                }
+                mergeOverflow(row, item);
+            }
+        }
+        return tables;
+    }
+
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
@@ -4822,8 +4946,27 @@ ${DB_INIT_SNIPPET}
                     }
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     const prev = all.stat_data || {};
-                    const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
-                    if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                    // 走插件自己的提交管线：构建完整表格快照 → importTableAsJson。
+                    // 插件自己管理 V2 checkpoint（裸 updateCell 会破坏锚点触发 mismatch）。
+                    let wrote = false;
+                    if (typeof api.importTableAsJson === 'function') {
+                        try {
+                            const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
+                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
+                            if (ok) {
+                                console.log('[mvu2shujuku][debug] Mvu 合并写入完成：已通过 importTableAsJson 提交表格快照');
+                                wrote = true;
+                            } else {
+                                console.warn('[mvu2shujuku][debug] importTableAsJson 提交失败，回退差异写入');
+                            }
+                        } catch (e) {
+                            console.warn('[mvu2shujuku][debug] importTableAsJson 提交异常，回退差异写入:', e);
+                        }
+                    }
+                    if (!wrote) {
+                        const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
+                        if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                    }
                     if (!hasFullShujukuCheckpoint()) {
                         console.warn('[mvu2shujuku][debug][流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
                     }
@@ -6681,6 +6824,130 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     let statWriteFlushPromise = null;
     let statWriteOverlayGen = 0;
 
+    // 把目标 stat_data 还原成完整表格 JSON：以当前导出为基座，覆盖目标值。
+    // 供 importTableAsJson 走插件自己的提交管线——插件自己管理 V2 checkpoint，
+    // 避免裸 updateCell 破坏锚点（实测裸写会触发 boundary_after_data_mismatch）。
+    function buildTableSnapshotFromStat(api, layoutEntries, tplCached, targetStat) {
+        const tables = {};
+        try {
+            const cur = api.exportTableAsJson() || {};
+            for (const k of Object.keys(cur)) tables[k] = JSON.parse(JSON.stringify(cur[k]));
+        } catch (e) {}
+        const sd = targetStat || {};
+        const sheetOf = (name) => {
+            for (const k in tables) {
+                if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return { key: k, sheet: tables[k] };
+            }
+            return null;
+        };
+        const tplRowOf = (name) => {
+            try {
+                if (!tplCached) return null;
+                for (const k in tplCached) {
+                    if (k.indexOf('sheet_') === 0 && tplCached[k] && tplCached[k].name === name &&
+                        Array.isArray(tplCached[k].content) && tplCached[k].content[1]) {
+                        return tplCached[k].content[1].slice();
+                    }
+                }
+            } catch (e) {}
+            return null;
+        };
+        const text = (v) => (v === undefined || v === null ? '' : String(v));
+        const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            const found = sheetOf(L.table);
+            if (!found) continue;
+            const sheet = found.sheet;
+            if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0])) continue;
+            const header = sheet.content[0];
+            const value = sd[L.group];
+            const declared = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
+            const mergeOverflow = (row, obj) => {
+                const ovIdx = header.indexOf('_扩展数据');
+                if (ovIdx === -1) return;
+                const overflow = {};
+                for (const k of Object.keys(obj)) {
+                    if (!declared.includes(k) && k !== L.keyCol) overflow[k] = obj[k];
+                }
+                if (!Object.keys(overflow).length) return;
+                let cur = {};
+                try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e2) {}
+                Object.assign(cur, overflow);
+                row[ovIdx] = JSON.stringify(cur);
+            };
+            if (L.kind === 'array') {
+                const arr = Array.isArray(value) ? value : [];
+                const vCol = header[1] || '内容';
+                sheet.content = [header];
+                for (const item of arr) {
+                    const row = header.map(() => '');
+                    row[0] = sheet.content.length;
+                    row[1] = text(item);
+                    sheet.content.push(row);
+                }
+                continue;
+            }
+            if (L.kind === 'json') {
+                const jIdx = header.indexOf('内容');
+                if (jIdx === -1) continue;
+                if (sheet.content.length < 2) {
+                    const tRow = tplRowOf(L.table) || header.map(() => '');
+                    tRow[0] = 1;
+                    sheet.content.push(tRow);
+                }
+                sheet.content[1][jIdx] = JSON.stringify(value === undefined ? {} : value);
+                continue;
+            }
+            if (L.kind === 'singleton') {
+                const obj = isObj(value) ? value : {};
+                if (sheet.content.length < 2) {
+                    const tRow = tplRowOf(L.table) || header.map(() => '');
+                    if (tRow[0] === undefined || tRow[0] === null || tRow[0] === '') tRow[0] = 1;
+                    sheet.content.push(tRow);
+                }
+                const row = sheet.content[1];
+                for (let ci = 1; ci < header.length; ci++) {
+                    const col = header[ci];
+                    if (col === '_扩展数据') continue;
+                    if (Object.prototype.hasOwnProperty.call(obj, col)) row[ci] = text(obj[col]);
+                }
+                mergeOverflow(row, obj);
+                continue;
+            }
+            // rows：按 keyCol upsert
+            const dict = isObj(value) ? value : {};
+            const keyIdx = header.indexOf(L.keyCol);
+            if (keyIdx === -1) continue;
+            const existing = new Map();
+            for (let ri = 1; ri < sheet.content.length; ri++) {
+                const r = sheet.content[ri];
+                if (r && r[keyIdx] !== undefined && r[keyIdx] !== null && r[keyIdx] !== '') existing.set(String(r[keyIdx]), ri);
+            }
+            for (const k of Object.keys(dict)) {
+                const item = dict[k];
+                if (!isObj(item)) continue;
+                let ri = existing.get(String(k));
+                if (ri === undefined) {
+                    const tRow = tplRowOf(L.table) || header.map(() => '');
+                    sheet.content.push(tRow);
+                    ri = sheet.content.length - 1;
+                    const r = sheet.content[ri];
+                    r[0] = ri;
+                    if (keyIdx >= 0) r[keyIdx] = text(k);
+                    existing.set(String(k), ri);
+                }
+                const row = sheet.content[ri];
+                for (let ci = 1; ci < header.length; ci++) {
+                    const col = header[ci];
+                    if (col === '_扩展数据') continue;
+                    if (Object.prototype.hasOwnProperty.call(item, col)) row[ci] = text(item[col]);
+                }
+                mergeOverflow(row, item);
+            }
+        }
+        return tables;
+    }
+
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
@@ -6711,8 +6978,27 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     }
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     const prev = all.stat_data || {};
-                    const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
-                    if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                    // 走插件自己的提交管线：构建完整表格快照 → importTableAsJson。
+                    // 插件自己管理 V2 checkpoint（裸 updateCell 会破坏锚点触发 mismatch）。
+                    let wrote = false;
+                    if (typeof api.importTableAsJson === 'function') {
+                        try {
+                            const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
+                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
+                            if (ok) {
+                                console.log('[mvu2shujuku][debug] Mvu 合并写入完成：已通过 importTableAsJson 提交表格快照');
+                                wrote = true;
+                            } else {
+                                console.warn('[mvu2shujuku][debug] importTableAsJson 提交失败，回退差异写入');
+                            }
+                        } catch (e) {
+                            console.warn('[mvu2shujuku][debug] importTableAsJson 提交异常，回退差异写入:', e);
+                        }
+                    }
+                    if (!wrote) {
+                        const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
+                        if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                    }
                     if (!hasFullShujukuCheckpoint()) {
                         console.warn('[mvu2shujuku][debug][流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
                     }
