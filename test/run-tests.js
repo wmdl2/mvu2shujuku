@@ -1200,16 +1200,24 @@ test('表结构校验：旧模板（同名表缺列）会被识别并重新导�
     const taskKey = Object.keys(tables).find(k => tables[k].name === '任务表');
     tables[taskKey].content = [['row_id', '名称'], [1, '任务']];
     let importCalls = 0;
+    let initCalls = 0;
+    const fixFromTemplate = (tpl) => {
+        const exp = Object.keys(tpl).find(k => tpl[k].name === '任务表');
+        if (exp) tables[taskKey].content = JSON.parse(JSON.stringify(tpl[exp].content));
+    };
     const fakeApi = {
         exportTableAsJson: () => tables,
         importTemplateFromData: async (tpl) => {
             importCalls += 1;
-            // 导入后按模板恢复正确表头
-            const exp = Object.keys(tpl).find(k => tpl[k].name === '任务表');
-            if (exp) tables[taskKey].content = JSON.parse(JSON.stringify(tpl[exp].content));
+            fixFromTemplate(tpl);
             return { success: true };
         },
-        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        initGameSession: async (charData, opts) => {
+            initCalls += 1;
+            // initGameSession(injectTemplate) 同样会按模板重建表结构
+            if (opts && opts.templateData) fixFromTemplate(opts.templateData);
+            return { success: true, runtimeReady: true };
+        },
         registerTableUpdateCallback: () => {},
         updateCell: async () => true,
         insertRow: async () => 1,
@@ -1228,7 +1236,7 @@ test('表结构校验：旧模板（同名表缺列）会被识别并重新导�
     return new Promise((resolve, reject) => {
         setTimeout(() => {
             try {
-                assert.ok(importCalls >= 1, '旧模板缺列时应触发重新导入（importTemplateFromData 被调用）');
+                assert.ok(initCalls >= 1 || importCalls >= 1, '旧模板缺列时应触发重新建表（initGameSession 或 importTemplateFromData）');
                 assert.deepStrictEqual(tables[taskKey].content[0], ['row_id', '名称', '内容'], '导入后任务表应恢复为名称+内容结构');
                 resolve();
             } catch (e) { reject(e); }
