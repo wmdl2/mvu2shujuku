@@ -1698,26 +1698,29 @@
             return `整组 JSON 存储表：本组数据以 JSON 整体保存、读取时还原任意形状（对象/字典/标量）；内部数据，AI 不应直接修改。`;
         }
         if (group.kind === 'array') {
-            return '数组表，每行一个元素，通常整体替换。';
+            return '数组表：每行一个数组元素，行号即数组顺序；新增元素用 INSERT，移除用 DELETE，修改用 UPDATE。';
         }
         return `条目表，以「${group.keyCol}」为唯一标识；同名记录只存在一行，更新用 UPDATE，新增用 INSERT。`;
     }
 
     function buildNote(group) {
         const L = [];
+        const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+        const hasReadonlyCols = (group.columns || []).some(c => String(c.zh).startsWith('_'));
         if (group.kind === 'json') {
             L.push(`整组 JSON 存储表（row_id=1）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除记录。`);
         } else if (group.kind === 'singleton') {
-            // 单例表不重复描述（“全表固定一条记录”等），直接给出开局记录说明
-            L.push(`本表唯一记录已由开局模板插入（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`);
+            // 单例表不重复描述（“全表固定一条记录”等），直接给出开局记录说明；
+            // 全只读单例（全部为 _ 字段）不写“只允许 UPDATE”，避免与“AI 无需填表”冲突
+            L.push(aiCols.length
+                ? `本表唯一记录已由开局模板插入（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`
+                : `本表唯一记录已由开局模板插入（row_id=1）；全部字段为脚本/系统维护，AI 无需填表。`);
         } else {
             L.push(`${group.tableName}。${describeGroup(group)}`);
         }
         // JSON 表整组由脚本/前端管理：完全不展示列定义与约束；其余表隐藏内部列（_扩展数据）
         // 下划线开头字段 = 脚本维护的只读状态：不进填表规则（AI 仍能在数据表里看到值，
         // 但没有更新规则），只在表级用一行说明约束，避免逐列占提示词。
-        const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
-        const hasReadonlyCols = (group.columns || []).some(c => String(c.zh).startsWith('_'));
         if (hasReadonlyCols) {
             // MVU 规范：下划线开头字段（如 _xxx）是脚本维护的只读状态，AI 禁止更新
             L.push('下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新，更新会被回滚。');
@@ -1748,7 +1751,7 @@
         if (hasReadonlyCols && aiCols.length === 0 && group.kind !== 'json') {
             L.push('本表全部字段均为脚本/系统维护的只读状态：AI 无需填表，仅供读取。');
         }
-        if (group.kind !== 'json') {
+        if (group.kind !== 'json' && aiCols.length) {
             L.push('只在正文明确造成状态变化时更新对应字段；不得为凑表而虚构数据。');
         }
         return L.join('\n');
@@ -1759,12 +1762,15 @@
             return `开局模板已初始化整组数据（row_id=1）；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
         }
         if (group.kind === 'singleton') {
-            return `开局模板已包含唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`;
+            const aiCols = (group.columns || []).filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+            return aiCols.length
+                ? `开局模板已包含唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`
+                : `开局模板已包含唯一记录（row_id=1）；全部字段由脚本/系统维护，自动填表阶段不修改本表。`;
         }
         if (group.kind === 'array') {
             return group.rows.length
-                ? `已在模板中初始化 ${group.rows.length} 个元素；此后按 updateNode 规则整体替换。`
-                : '无（开局时由剧情按需填充）。';
+                ? `已在模板中初始化 ${group.rows.length} 个元素；后续新增元素按 insertNode 规则 INSERT 新行，移除按 deleteNode 规则 DELETE，修改按 updateNode 规则 UPDATE。`
+                : '无（开局为空；剧情出现新元素时按 insertNode 规则 INSERT 新行）。';
         }
         if (group.rows.length) {
             const names = group.rows.slice(0, 5).map(r => r[1]).filter(Boolean).join('、');
@@ -1780,12 +1786,15 @@
         }
         if (group.kind === 'singleton') {
             if (kind === 'update') {
-                // 用首个业务列给出具体示例（有初始值用真实值，否则“列名示例”）
-                const col = group.columns[0];
-                const ident = col ? col.ident : '字段';
-                const zh = col ? col.zh : '字段';
-                const raw = group.rows && group.rows[0] && group.rows[0][1] !== undefined && group.rows[0][1] !== null && String(group.rows[0][1]) !== ''
-                    ? group.rows[0][1]
+                // 用首个可写业务列给出具体示例（有初始值用真实值，否则“列名示例”）；
+                // 全只读单例（全部为 _ 字段）不生成可执行的 UPDATE 示例，避免教 AI 写只读字段
+                const col = (group.columns || []).find(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+                if (!col) return '本表全部字段均为脚本/系统维护的只读状态，AI 不应修改本表。';
+                const ident = col.ident;
+                const zh = col.zh;
+                const colIdx = group.columns.indexOf(col);
+                const raw = group.rows && group.rows[0] && group.rows[0][colIdx + 1] !== undefined && group.rows[0][colIdx + 1] !== null && String(group.rows[0][colIdx + 1]) !== ''
+                    ? group.rows[0][colIdx + 1]
                     : `'${zh}示例'`;
                 const val = typeof raw === 'number' ? String(raw) : `'${sqlQuote(String(raw))}'`;
                 return `只允许 UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1; 依正文明确变化更新对应字段。`;
@@ -1793,8 +1802,16 @@
             return '禁止。';
         }
         if (group.kind === 'array') {
-            if (kind === 'update') return '每轮按最新剧情整体替换本表内容。';
-            return '禁止（数组表不支持单行增删，整体替换）。';
+            // 数组表与插件按行 DSL 对齐：每行一个数组元素，支持按行增删改；
+            // 不再写“整体替换”（插件没有整表替换指令，且与禁止增删自相矛盾）
+            const col = (group.columns && group.columns[0]) || { ident: 'neirong', zh: '内容' };
+            if (kind === 'update') {
+                return `对应数组元素内容变化时更新该行。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = '新内容' WHERE row_id = 1;`;
+            }
+            if (kind === 'insert') {
+                return `数组出现新元素时插入新行（行号自动分配，行序即数组顺序）。\nSQL示例: INSERT INTO ${group.ident} (${col.ident}) VALUES ('新元素');`;
+            }
+            return `数组元素被移除时删除对应行。\nSQL示例: DELETE FROM ${group.ident} WHERE row_id = 1;`;
         }
         const keyIdent = group.columns[0] ? group.columns[0].ident : 'key';
         // 示例优先取卡内真实初始数据（与 MVU 提示词示例用具体值一致），无初始行时退回占位符
@@ -1812,8 +1829,8 @@
         const keyValue = (sampleRow && sampleRow[1] !== undefined && String(sampleRow[1]) !== '')
             ? `'${sqlQuote(sampleRow[1])}'`
             : "'条目名'";
-        // 示例列排除内部溢出列（_扩展数据）：AI 不应直接修改该列
-        const exampleCols = group.columns.filter(c => c.zh !== '_扩展数据');
+        // 示例列排除内部溢出列（_扩展数据）与下划线只读字段：AI 不应直接修改
+        const exampleCols = group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
         const allIdents = exampleCols.map(c => c.ident);
         const firstNonKey = allIdents[1] || '字段';
         if (kind === 'update') {
@@ -2853,6 +2870,13 @@
             `        if(m&&typeof m.replaceMvuData==='function')return await m.replaceMvuData({stat_data:next,display_data:all.display_data||{},delta_data:all.delta_data||{},initialized_lorebooks:all.initialized_lorebooks||{}},opts);`,
             `        return false;`,
             `      }catch(e){console.warn('['+BRIDGE_NAME+'] updateVariablesWith 异常:',e);return false;}`,
+            `    };}catch(e){}`,
+            `    try{if(typeof gw.replaceVariables!=='function')gw.replaceVariables=async function(variables,opts){`,
+            `      try{`,
+            `        var m=window.Mvu||mvuFake;`,
+            `        if(m&&typeof m.replaceMvuData==='function')return await m.replaceMvuData(variables,opts);`,
+            `        return false;`,
+            `      }catch(e){console.warn('['+BRIDGE_NAME+'] replaceVariables 异常:',e);return false;}`,
             `    };}catch(e){}`,
             `  }`,
             `}`,
@@ -4461,7 +4485,14 @@ ${DB_INIT_SNIPPET}
     function cachedTemplateForCurrentCard() {
         try {
             const holder = (typeof window !== 'undefined' ? window : globalThis);
-            if (holder && holder.__mvu2shujukuTemplateCache) return holder.__mvu2shujukuTemplateCache;
+            // 缓存必须按卡归属：直接复用可能把上一张转换卡的模板套到当前卡上
+            // （如切卡后重锚/写库误用旧模板，污染当前聊天的表格结构）。
+            const ch = currentCharacter();
+            const cacheKey = ch ? String(ch.name || '') + '|' + String(ch.avatar || '') : '';
+            if (holder && holder.__mvu2shujukuTemplateCache &&
+                holder.__mvu2shujukuTemplateCacheFor === cacheKey && cacheKey !== '') {
+                return holder.__mvu2shujukuTemplateCache;
+            }
         } catch (e) {}
         try {
             const ch = currentCharacter();
@@ -4473,7 +4504,10 @@ ${DB_INIT_SNIPPET}
                 const parsed = JSON.parse(mvu2shujukuDecodeB64(entry.content));
                 try {
                     const holder = (typeof window !== 'undefined' ? window : globalThis);
-                    if (holder) holder.__mvu2shujukuTemplateCache = parsed;
+                    if (holder) {
+                        holder.__mvu2shujukuTemplateCache = parsed;
+                        holder.__mvu2shujukuTemplateCacheFor = String(ch.name || '') + '|' + String(ch.avatar || '');
+                    }
                 } catch (e2) {}
                 return parsed;
             }
@@ -4876,6 +4910,7 @@ ${DB_INIT_SNIPPET}
         try {
             const holder = (typeof window !== 'undefined' ? window : globalThis);
             if (holder) holder.__mvu2shujukuTemplateCache = JSON.parse(mvu2shujukuDecodeB64(entry.content));
+            if (holder) holder.__mvu2shujukuTemplateCacheFor = String(character.name || '') + '|' + String(character.avatar || '');
         } catch (e) {}
         // 对齐参考卡：每个聊天只在“缺表”时初始化一次（下方 ensureInit），
         // 已有表格的聊天绝不重初始化，避免切聊天时误重置别的聊天。
@@ -5054,7 +5089,12 @@ ${DB_INIT_SNIPPET}
                 if (!window.__mvu2shujukuAnchorIntervalStarted) {
                     window.__mvu2shujukuAnchorIntervalStarted = true;
                     hostWindow.setInterval(() => {
-                        try { reAnchorCheckpointIfNeeded(); } catch (e) {}
+                        try {
+                            // 廉价门控：非转换卡（activeLayout 未缓存）时零开销直接返回，
+                            // 不做任何 currentCharacter/聊天扫描；只有转换卡才进入重锚评估。
+                            if (!activeLayout) return;
+                            reAnchorCheckpointIfNeeded();
+                        } catch (e) {}
                     }, 3000);
                 }
                 autoInitState.inited = true;
@@ -5910,6 +5950,8 @@ ${DB_INIT_SNIPPET}
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
+        let writeChatKey = '';
+        try { writeChatKey = autoInitChatId(); } catch (e) {}
         statWriteOverlayGen += 1;
         pendingStatWrite = next;
         if (statWriteTimer) hostWindow.clearTimeout(statWriteTimer);
@@ -5919,6 +5961,14 @@ ${DB_INIT_SNIPPET}
             if (target === null || target === undefined) return;
             const gen = statWriteOverlayGen;
             try {
+                // 归属校验：150ms 合并窗口内若已切换聊天/角色，丢弃本次待写，
+                // 避免把上一张卡/上一个聊天的数据写进当前会话。
+                let nowChatKey = '';
+                try { nowChatKey = autoInitChatId(); } catch (e) {}
+                if (writeChatKey !== nowChatKey) {
+                    dbgWarn(' Mvu 合并写库被跳过：聊天已切换（' + writeChatKey + ' → ' + nowChatKey + '），丢弃待写快照。');
+                    return;
+                }
                 const api = getAcuApi();
                 if (api && activeLayout) {
                     // 写库前保证 full checkpoint 存在：无锚点写入会产生无锚点 artifacts，
@@ -6224,6 +6274,10 @@ ${DB_INIT_SNIPPET}
         } catch (e) {}
     }
     function emitMvuEvent(name, a, b) {
+        // 广播前先把 shim/getAllVariables 同步到当前所有 iframe：
+        // 即使新 iframe 恰好在 2s 复查和 MutationObserver 之间创建，
+        // 前端在事件回调里读 window.Mvu/getAllVariables 也一定能拿到。
+        if (activeLayout) { try { applyWindowMvuShim(); } catch (e) {} }
         const targets = [];
         const add = (t) => { try { if (t && typeof t.dispatchEvent === 'function' && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
         add(window);
@@ -6492,6 +6546,7 @@ ${DB_INIT_SNIPPET}
     }
 
     let windowMvuShimTimer = null;
+    let windowMvuIframeObserver = null;
     let windowMvuFake = null;
     const originalMvuMap = new Map();
     const originalGetVariablesMap = new Map();
@@ -6651,8 +6706,12 @@ ${DB_INIT_SNIPPET}
                     if (!originalGetAllVariablesMap.has(w)) originalGetAllVariablesMap.set(w, w.getAllVariables);
                     w.getAllVariables = window.getAllVariables;
                 }
-                // 与 MVU/TH 生态一致：提供裸全局 getVariables / updateVariablesWith
-                // （游戏逻辑脚本常直接调用，如 人妻公寓 的 updateVariablesWith(t => …)）。
+                // 与 MVU/TH 生态一致：接管裸全局 getVariables / updateVariablesWith /
+                // replaceVariables（游戏逻辑脚本常直接调用，如 人妻公寓 的
+                // updateVariablesWith(t => …)）。必须是“接管式”而不是“缺省才补”：
+                // 若宿主（旧酒馆助手 TH）已定义这些全局，卡脚本直接调用会走 TH 自己的
+                // 变量存储，读写不到数据库，前端自然读不到数据/两边不同步。
+                // 与 window.Mvu 一致：转换卡激活时无条件接管（保存原值，切卡还原），
                 // 数据库模型下所有 type 都返回当前 stat_data；写入走 Mvu.replaceMvuData。
                 const makeGetVariables = () => {
                     try {
@@ -6660,26 +6719,33 @@ ${DB_INIT_SNIPPET}
                         return all.stat_data || {};
                     } catch (e) { return {}; }
                 };
-                if (typeof w.getVariables !== 'function') {
-                    if (!originalGetVariablesMap.has(w)) originalGetVariablesMap.set(w, w.getVariables);
-                    w.getVariables = function () { return makeGetVariables(); };
+                if (!originalGetVariablesMap.has(w)) {
+                    originalGetVariablesMap.set(w, {
+                        get: typeof w.getVariables === 'function' ? w.getVariables : undefined,
+                        upd: typeof w.updateVariablesWith === 'function' ? w.updateVariablesWith : undefined,
+                        rep: typeof w.replaceVariables === 'function' ? w.replaceVariables : undefined,
+                    });
                 }
-                if (typeof w.updateVariablesWith !== 'function') {
-                    w.updateVariablesWith = async function (updater, opts) {
-                        try {
-                            if (typeof updater !== 'function') return false;
-                            const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                            const next = JSON.parse(JSON.stringify(all.stat_data || {}));
-                            updater(next);
-                            return windowMvuFake.replaceMvuData({ stat_data: next, display_data: all.display_data || {}, delta_data: all.delta_data || {}, initialized_lorebooks: all.initialized_lorebooks || {} }, opts);
-                        } catch (e) {
-                            dbgWarn(' updateVariablesWith 异常:', e);
-                            return false;
-                        }
-                    };
-                    if (!originalGetVariablesMap.has(w)) originalGetVariablesMap.set(w, { get: typeof w.getVariables === 'function' ? w.getVariables : undefined, upd: undefined });
-                } else if (!originalGetVariablesMap.has(w)) {
-                    originalGetVariablesMap.set(w, { get: typeof w.getVariables === 'function' ? w.getVariables : undefined, upd: w.updateVariablesWith });
+                w.getVariables = function () { return makeGetVariables(); };
+                w.updateVariablesWith = async function (updater, opts) {
+                    try {
+                        if (typeof updater !== 'function') return false;
+                        const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                        const next = JSON.parse(JSON.stringify(all.stat_data || {}));
+                        updater(next);
+                        return windowMvuFake.replaceMvuData({ stat_data: next, display_data: all.display_data || {}, delta_data: all.delta_data || {}, initialized_lorebooks: all.initialized_lorebooks || {} }, opts);
+                    } catch (e) {
+                        dbgWarn(' updateVariablesWith 异常:', e);
+                        return false;
+                    }
+                };
+                w.replaceVariables = async function (variables, opts) {
+                    try {
+                        return await windowMvuFake.replaceMvuData(variables, opts);
+                    } catch (e) {
+                        dbgWarn(' replaceVariables 异常:', e);
+                        return false;
+                    }
                 }
                 // 前端状态栏在消息 iframe 里用 eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, ...) 监听刷新。
                 // 若 iframe 没有 TH 注入的 eventOn，就补一个绑定到 CustomEvent 的兜底，
@@ -6707,6 +6773,10 @@ ${DB_INIT_SNIPPET}
             hostWindow.clearInterval(windowMvuShimTimer);
             windowMvuShimTimer = null;
         }
+        if (windowMvuIframeObserver) {
+            try { windowMvuIframeObserver.disconnect(); } catch (e) {}
+            windowMvuIframeObserver = null;
+        }
         for (const [w, orig] of originalMvuMap) {
             try { if (w.Mvu === windowMvuFake) w.Mvu = orig; } catch (e) {}
         }
@@ -6721,6 +6791,8 @@ ${DB_INIT_SNIPPET}
                 else if (typeof w.getVariables === 'function') delete w.getVariables;
                 if (rec.upd !== undefined) w.updateVariablesWith = rec.upd;
                 else if (typeof w.updateVariablesWith === 'function') delete w.updateVariablesWith;
+                if (rec.rep !== undefined) w.replaceVariables = rec.rep;
+                else if (typeof w.replaceVariables === 'function') delete w.replaceVariables;
             } catch (e) {}
         }
         originalGetVariablesMap.clear();
@@ -6731,6 +6803,31 @@ ${DB_INIT_SNIPPET}
             // 真 MVU 可能异步 import 后重新挂载 window.Mvu；周期复查接管（2s），并监听其初始化事件立即接管
             windowMvuShimTimer = hostWindow.setInterval(() => { try { applyWindowMvuShim(); } catch (e) {} }, 2000);
             try { if (typeof hostWindow.eventOn === 'function') hostWindow.eventOn('global_Mvu_initialized', () => { try { applyWindowMvuShim(); } catch (e) {} }); } catch (e) {}
+        }
+        if (!windowMvuIframeObserver) {
+            // 新消息楼层 iframe 是渲染时才创建的，仅靠 2s 复查会在“前端 iframe 加载瞬间
+            // 同步读 window.Mvu/getAllVariables”时漏掉，导致前端报 undefined/读不到数据。
+            // 监听 iframe 新增：一出现新 iframe 就立即把 shim/getAllVariables/事件兜底同步过去。
+            try {
+                const doc = hostDocument;
+                const MO = (typeof MutationObserver !== 'undefined' ? MutationObserver : (hostWindow && hostWindow.MutationObserver)) || null;
+                if (doc && MO && doc.body) {
+                    windowMvuIframeObserver = new MO((muts) => {
+                        let hasIframe = false;
+                        for (const m of muts || []) {
+                            const nodes = (m && m.addedNodes) || [];
+                            for (const n of nodes) {
+                                if (!n || !n.tagName) continue;
+                                if (n.tagName === 'IFRAME') { hasIframe = true; break; }
+                                try { if (n.querySelectorAll && n.querySelectorAll('iframe').length) { hasIframe = true; break; } } catch (e) {}
+                            }
+                            if (hasIframe) break;
+                        }
+                        if (hasIframe) { try { applyWindowMvuShim(); } catch (e) {} }
+                    });
+                    windowMvuIframeObserver.observe(doc.body, { childList: true, subtree: true });
+                }
+            } catch (e) {}
         }
         dbg(' 扩展侧已安装完整 Mvu shim（接管式）');
     }
@@ -6775,7 +6872,9 @@ ${DB_INIT_SNIPPET}
         if (!core || typeof core.convert !== 'function') {
             throw new Error('转换核心未加载（MVU2SHUJUKU_CORE 不可用）');
         }
-        const mode = settings.mode === 'native' ? 'native' : settings.mode === 'sqlite' ? 'sqlite' : 'both';
+        // AI 实际输出 insertRow DSL 还是 SQL 由 SP·数据库 插件自身的填表模式决定，
+        // 模板本身对三种模式产出完全一致（测试断言过），因此转换统一按双模式输出。
+        const mode = 'both';
         const opts = {
             mode,
             asPng: settings.asPng === 'auto' ? sourceIsPng : settings.asPng === 'png',
@@ -6940,7 +7039,7 @@ ${DB_INIT_SNIPPET}
         dbg(' applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
         if (!merged.added.length) { toast('没有可并入的表（全部重名或无效）', 'error'); return; }
         const settings = getSettings();
-        const mode = settings.mode === 'native' ? 'native' : settings.mode === 'sqlite' ? 'sqlite' : 'both';
+        const mode = 'both';
         const opts = {
             mode,
             template: merged.template,
@@ -7199,10 +7298,8 @@ ${DB_INIT_SNIPPET}
             '        </div>',
             '      </div>',
             '      <div class="mvu2shujuku-row mvu2shujuku-mode-group">',
-            '        <span class="mvu2shujuku-label" title="native：AI 输出 insertRow/updateRow/deleteRow DSL；sqlite：AI 输出 SQL；双模式跟随插件当前设置">填表模式</span>',
-            '        <label><input type="radio" name="mvu2shujuku-mode" value="both" ' + (settings.mode === 'both' ? 'checked' : '') + ' /> 双模式（推荐）</label>',
-            '        <label><input type="radio" name="mvu2shujuku-mode" value="native" ' + (settings.mode === 'native' ? 'checked' : '') + ' /> native（insertRow DSL）</label>',
-            '        <label><input type="radio" name="mvu2shujuku-mode" value="sqlite" ' + (settings.mode === 'sqlite' ? 'checked' : '') + ' /> sqlite（SQL）</label>',
+            '        <span class="mvu2shujuku-label" title="模板同时写入 DDL 与 SQL 示例；AI 实际输出 insertRow DSL 还是 SQL，由 SP·数据库 插件自身的填表模式决定，转换器无需选择">填表模式</span>',
+            '        <span class="mvu2shujuku-hint">双模式（跟随插件当前设置）</span>',
             '      </div>',
             '      <div class="mvu2shujuku-row">',
             '        <label class="mvu2shujuku-label" for="mvu2shujuku-shim">MVU 兼容层</label>',
@@ -7363,16 +7460,6 @@ ${DB_INIT_SNIPPET}
         bind('#mvu2shujuku-merge-apply', () => applyMergeTables(panel));
         bind('#mvu2shujuku-save-card', async () => {
             await saveCardToSillyTavern();
-        });
-        const modeInputs = panel.querySelectorAll('input[name="mvu2shujuku-mode"]');
-        modeInputs.forEach((el) => {
-            if (el.dataset.bound !== 'true') {
-                el.dataset.bound = 'true';
-                el.addEventListener('change', () => {
-                    getSettings().mode = panel.querySelector('input[name="mvu2shujuku-mode"]:checked').value;
-                    saveSettings();
-                });
-            }
         });
         const shimSel = panel.querySelector('#mvu2shujuku-shim');
         if (shimSel && shimSel.dataset.bound !== 'true') {
@@ -7535,9 +7622,13 @@ ${DB_INIT_SNIPPET}
             '(function (root) {',
             coreSource,
             pinyinInline ? '\n' + pinyinInline : '',
+            // jsonrepair 源码内联必须在核心 IIFE 内：核心的 getJsonrepairSource()
+            // 在浏览器端读 root.__MVU2SHUJUKU_JSONREPAIR_SRC__，而扩展脚本以
+            // <script type="module"> 加载，顶层没有全局 root；放在 IIFE 外会
+            // 直接 ReferenceError 导致整个扩展加载失败。
+            jsonrepairInline ? '\n' + jsonrepairInline : '',
             '})(typeof globalThis !== "undefined" ? globalThis : this);',
             yamlLibsInline ? '\n' + yamlLibsInline : '',
-            jsonrepairInline ? '\n' + jsonrepairInline : '',
             '',
             extensionIndexUi(),
         ].join('\n');
