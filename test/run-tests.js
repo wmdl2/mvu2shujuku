@@ -729,6 +729,42 @@ test('单例对象列写入：子字段变更整对象写回（jsonCell）', asy
     assert.strictEqual(after.系统._管理考核['上次生成期'], 3, '回读应一致');
 });
 
+test('桥 JSONPatch：标准 <UpdateVariable><JSONPatch> 支持 replace/delta/insert/remove/move', () => {
+    // 从生成的卡内桥提取纯函数（parseUpdateCommands/applyCommandsToStat）做隔离验证
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'JSONPatch桥卡',
+            description: '',
+            first_mes: '你好',
+            character_book: { entries: [{ comment: '[InitVar]', content: '台词: ["a","b"]' }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const bridge = core.convert(card, { mode: 'both' }).bridgeScript;
+    const start = bridge.indexOf('function parseCommandValue2');
+    const end = bridge.indexOf('function applyPendingUpdateBlocks');
+    assert.ok(start >= 0 && end > start, '桥应包含更新块解析函数');
+    const seg = bridge.slice(start, end);
+    const stubs = 'function noteDisplay(d,p,o,n){}\n';
+    const fn = new Function(stubs + seg + '; return {parseUpdateCommands,applyCommandsToStat};')();
+    const { parseUpdateCommands, applyCommandsToStat } = fn;
+    const stat = { 系统: { 背包: { 道具A: { 数量: 1 } } }, 台词: ['a', 'b'] };
+    const patch = [
+        { op: 'replace', path: '/系统/背包/道具A/数量', value: 5 },
+        { op: 'delta', path: '/系统/背包/道具A/数量', value: -2 },
+        { op: 'insert', path: '/系统/背包/道具B', value: { 数量: 2 } },
+        { op: 'remove', path: '/系统/背包/道具A' },
+        { op: 'move', from: '/台词/0', to: '/台词/1' },
+    ];
+    const cmds = parseUpdateCommands('<UpdateVariable><Analysis>x</Analysis><JSONPatch>' + JSON.stringify(patch) + '</JSONPatch></UpdateVariable>');
+    assert.strictEqual(cmds.length, 5, '应解析出 5 条命令（含内嵌 JSONPatch 的标准写法）');
+    applyCommandsToStat(stat, cmds, {});
+    assert.strictEqual(stat.系统.背包['道具A'], undefined, 'remove 应删除道具A');
+    assert.deepStrictEqual(stat.系统.背包['道具B'], { 数量: 2 }, 'insert 应插入道具B');
+    assert.deepStrictEqual(stat.台词, ['b', 'a'], 'move 应从 0 移到 1');
+});
+
 test('[mvu_plot] 剧情条目全部保留，内部 MVU 宏改写为数据库引用', () => {
     const card = {
         spec: 'chara_card_v3',

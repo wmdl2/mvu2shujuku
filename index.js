@@ -1824,13 +1824,19 @@
         }
         // JSON 表整组由脚本/前端管理：完全不展示列定义与约束；其余表隐藏内部列（_扩展数据）
         const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据');
+        const hasReadonlyCols = aiCols.some(c => String(c.zh).startsWith('_'));
         if (aiCols.length) {
+            if (hasReadonlyCols) {
+                // MVU 规范：下划线开头字段（如 _xxx）是脚本维护的只读状态，AI 禁止更新
+                L.push('下划线开头字段（如 _xxx）为脚本/系统维护的只读状态：AI 只能读取、严禁更新，更新会被回滚。');
+            }
             L.push('【列定义】');
             // 对齐默认模板：列定义只列中文名 + 标识符；字段说明与约束放【强制约束】
             aiCols.forEach((c, i) => L.push(`- 列${i + 1}: ${c.zh} ${c.ident}`));
             L.push('【强制约束】');
             for (const c of aiCols) {
                 const parts = [];
+                if (String(c.zh).startsWith('_')) parts.push('只读，禁止更新');
                 if (c.range) parts.push(`数值范围 ${c.range[0]}~${c.range[1]}`);
                 if (c.enum) parts.push(`可选值：${c.enum.join(' / ')}`);
                 if (c.format) parts.push(`格式要求：${String(c.format).replace(/\n/g, ' ')}`);
@@ -3418,14 +3424,20 @@
             `  var m;`,
             `  while((m=blockRe.exec(String(text||'')))){`,
             `    var inner=m[0].replace(/<[^>]+>/g,'').replace(/\\\`\\\`\\\`[^\\\`]*\\\`\\\`\\\`/g,'').trim();`,
-            `    if(m[1].toLowerCase().indexOf('json')===0){`,
+            `    var isJsonBlock=m[1].toLowerCase().indexOf('json')===0;`,
+            `    // 标准写法 <UpdateVariable><Analysis>…</Analysis><JSONPatch>…</JSONPatch></UpdateVariable>：`,
+            `    // 外层是 updatevariable 时，若内部含 json_patch 子块，则整块按 JSONPatch 解析`,
+            `    var sub=m[0].match(/<(json_?patch)>[\\s\\S]*?(?:\\/\\1>)/i);`,
+            `    if(sub){inner=sub[0].replace(/<[^>]+>/g,'').trim();isJsonBlock=true;}`,
+            `    if(isJsonBlock){`,
             `      try{`,
             `        var patch=JSON.parse(inner);`,
             `        if(Array.isArray(patch)){`,
             `          for(var pi=0;pi<patch.length;pi++){`,
             `            var op=patch[pi]||{};`,
             `            if(!op.path&&!op.to)continue;`,
-            `            cmds.push({type:op.op==='delta'?'add':op.op||'set',path:String(op.path||op.to||'').replace(/^\\//,'').replace(/\\//g,'.'),value:op.value,from:op.from});`,
+            `            var jt=op.op==='delta'?'add':(op.op==='remove'?'delete':op.op||'set');`,
+            `            cmds.push({type:jt,path:String(op.path||op.to||'').replace(/^\\//,'').replace(/\\//g,'.'),value:op.value,from:op.from});`,
             `          }`,
             `        }`,
             `      }catch(e){}`,
@@ -3471,6 +3483,18 @@
             `    var cmd=cmds[ci];`,
             `    if(!cmd.path)continue;`,
             `    var parts=String(cmd.path).split('.').filter(function(p){return p!=='';});`,
+            `    if(cmd.type==='move'){`,
+            `      var mf=String(cmd.from||'').replace(/^\\//,'').replace(/\\//g,'.').split('.').filter(function(p){return p!=='';});`,
+            `      var mv;`,
+            `      var mc=stat;var mok=true;`,
+            `      for(var mi2=0;mi2<mf.length-1;mi2++){mc=mc?mc[mf[mi2]]:null;if(!mc){mok=false;break;}}`,
+            `      if(mok&&mc){var mkey=mf[mf.length-1];if(Array.isArray(mc)&&/^\\d+$/.test(String(mkey))){mv=mc[Number(mkey)];mc.splice(Number(mkey),1);}else{mv=mc[mkey];try{delete mc[mkey];}catch(e){}}}`,
+            `      var mparts=String(cmd.path).split('.').filter(function(p){return p!=='';});`,
+            `      var mt=stat;var mok2=true;`,
+            `      for(var mj=0;mj<mparts.length-1;mj++){if(mt[mparts[mj]]===undefined)mt[mparts[mj]]={};mt=mt[mparts[mj]];if(!mt||typeof mt!=='object'){mok2=false;break;}}`,
+            `      if(mok2&&mv!==undefined){mt[mparts[mparts.length-1]]=mv;noteDisplay(display,cmd.path,'(移动)',mv,cmd.reason);}`,
+            `      continue;`,
+            `    }`,
             `    if(cmd.type==='delete'){`,
             `      var oldDel=null;`,
             `      if(parts.length===1){oldDel=stat[parts[0]];try{delete stat[parts[0]];}catch(e){}}`,
@@ -3489,7 +3513,8 @@
             `      var ok2=true;`,
             `      for(var d2=0;d2<parts.length-1;d2++){container=container?container[parts[d2]]:null;if(!container){ok2=false;break;}}`,
             `      if(!ok2)continue;`,
-            `      var key=cmd.keyOrIndex;`,
+            `      // JSONPatch insert 的键在 path 最后一段；_.insert 风格才用 keyOrIndex`,
+            `      var key=cmd.keyOrIndex!==undefined?cmd.keyOrIndex:parts[parts.length-1];`,
             `      if(key==='-'||key===null){`,
             `        if(Array.isArray(container))container.push(cmd.value);`,
             `        else if(container&&typeof container==='object')container[String(Date.now())]=cmd.value;`,
@@ -6306,14 +6331,20 @@ ${DB_INIT_SNIPPET}
         const blockRe = /<(updatevariable|json_?patch)>[\s\S]*?(?:\/\1>)/gi;
         let m;
         while ((m = blockRe.exec(String(text || '')))) {
-            const inner = m[0].replace(/<[^>]+>/g, '').replace(/\x60\x60\x60[^\x60]*\x60\x60\x60/g, '').trim();
-            if (m[1].toLowerCase().indexOf('json') === 0) {
+            let inner = m[0].replace(/<[^>]+>/g, '').replace(/\x60\x60\x60[^\x60]*\x60\x60\x60/g, '').trim();
+            let isJsonBlock = m[1].toLowerCase().indexOf('json') === 0;
+            // 标准写法 <UpdateVariable><Analysis>…</Analysis><JSONPatch>…</JSONPatch></UpdateVariable>：
+            // 外层是 updatevariable 时，若内部含 json_patch 子块，则整块按 JSONPatch 解析
+            const sub = m[0].match(/<(json_?patch)>[\s\S]*?(?:\/\1>)/i);
+            if (sub) { inner = sub[0].replace(/<[^>]+>/g, '').trim(); isJsonBlock = true; }
+            if (isJsonBlock) {
                 try {
                     const patch = JSON.parse(inner);
                     if (Array.isArray(patch)) {
                         for (const op of patch) {
                             if (!op || (!op.path && !op.to)) continue;
-                            cmds.push({ type: op.op === 'delta' ? 'add' : op.op || 'set', path: String(op.path || op.to || '').replace(/^\//, '').replace(/\//g, '.'), value: op.value, from: op.from });
+                            const jt = op.op === 'delta' ? 'add' : (op.op === 'remove' ? 'delete' : op.op || 'set');
+                            cmds.push({ type: jt, path: String(op.path || op.to || '').replace(/^\//, '').replace(/\//g, '.'), value: op.value, from: op.from });
                         }
                     }
                 } catch (e) {}
@@ -6367,6 +6398,22 @@ ${DB_INIT_SNIPPET}
         for (const cmd of cmds) {
             if (!cmd.path) continue;
             const parts = String(cmd.path).split('.').filter((p) => p !== '');
+            if (cmd.type === 'move') {
+                const mf = String(cmd.from || '').replace(/^\//, '').replace(/\//g, '.').split('.').filter((p) => p !== '');
+                let mv;
+                let mc = stat, mok = true;
+                for (let i = 0; i < mf.length - 1; i++) { mc = mc ? mc[mf[i]] : null; if (!mc) { mok = false; break; } }
+                if (mok && mc) {
+                    const mkey = mf[mf.length - 1];
+                    if (Array.isArray(mc) && /^\d+$/.test(String(mkey))) { mv = mc[Number(mkey)]; mc.splice(Number(mkey), 1); }
+                    else { mv = mc[mkey]; try { delete mc[mkey]; } catch (e) {} }
+                }
+                if (mv !== undefined) {
+                    setPathArr(stat, parts, mv);
+                    note(cmd.path, '(移动)', mv, cmd.reason);
+                }
+                continue;
+            }
             if (cmd.type === 'delete') {
                 let oldDel = null;
                 let cur = stat, ok = true;
@@ -6380,7 +6427,8 @@ ${DB_INIT_SNIPPET}
                 let container = stat, ok2 = true;
                 for (let d2 = 0; d2 < parts.length - 1; d2++) { container = container ? container[parts[d2]] : null; if (!container) { ok2 = false; break; } }
                 if (!ok2) continue;
-                const key = cmd.keyOrIndex;
+                // JSONPatch insert 的键在 path 最后一段；_.insert 风格才用 keyOrIndex
+                const key = cmd.keyOrIndex !== undefined ? cmd.keyOrIndex : parts[parts.length - 1];
                 if (key === '-' || key === null) {
                     if (Array.isArray(container)) container.push(cmd.value);
                     else if (container && typeof container === 'object') container[String(Date.now())] = cmd.value;
@@ -6407,15 +6455,32 @@ ${DB_INIT_SNIPPET}
                 if (ok3 && tgt && typeof tgt === 'object') { Object.keys(cmd.value).forEach((kk) => { tgt[kk] = cmd.value[kk]; }); note(cmd.path, '(变更)', cmd.value, cmd.reason); }
                 continue;
             }
-            if (cmd.type === 'add' && Array.isArray(cmd.value)) {
-                let tgt2 = stat, ok4 = true;
-                for (let d4 = 0; d4 < parts.length - 1; d4++) { tgt2 = tgt2 ? tgt2[parts[d4]] : null; if (!tgt2) { ok4 = false; break; } }
-                if (ok4 && tgt2 && typeof tgt2 === 'object') {
-                    const curV = tgt2[parts[parts.length - 1]];
-                    const arr = Array.isArray(curV) ? curV.slice() : [];
-                    cmd.value.forEach((vv) => arr.push(vv));
-                    setPathArr(tgt2, parts, arr);
-                    note(cmd.path, curV, arr, cmd.reason);
+            if (cmd.type === 'add') {
+                // delta：数值相加 / 日期加毫秒 / 数组追加 / 否则整体替换（与 MVU 语义一致）
+                const oldV = (() => { let c = stat; for (const p of parts) { c = c ? c[p] : undefined; } return c; })();
+                const base = Array.isArray(oldV) && oldV.length ? oldV[0] : oldV;
+                const delta = parseFloat(cmd.value);
+                let dateVal = null;
+                if (typeof base === 'string') { const dtest = new Date(base); if (!isNaN(dtest.getTime()) && isNaN(Number(base))) dateVal = dtest; }
+                if (dateVal && !isNaN(delta)) {
+                    const nd = new Date(dateVal.getTime() + delta);
+                    setPathArr(stat, parts, nd.toISOString());
+                    note(cmd.path, base, nd.toISOString(), cmd.reason);
+                } else {
+                    const num = parseFloat(base);
+                    if (!isNaN(num) && !isNaN(delta)) {
+                        const nv2 = parseFloat((num + delta).toPrecision(12));
+                        setPathArr(stat, parts, nv2);
+                        note(cmd.path, base, nv2, cmd.reason);
+                    } else if (Array.isArray(oldV)) {
+                        const arr = oldV.slice();
+                        if (Array.isArray(cmd.value)) cmd.value.forEach((vv) => arr.push(vv)); else arr.push(cmd.value);
+                        setPathArr(stat, parts, arr);
+                        note(cmd.path, '(数组追加)', cmd.value, cmd.reason);
+                    } else {
+                        setPathArr(stat, parts, cmd.value);
+                        note(cmd.path, base, cmd.value, cmd.reason);
+                    }
                 }
                 continue;
             }
@@ -9419,14 +9484,20 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         const blockRe = /<(updatevariable|json_?patch)>[\s\S]*?(?:\/\1>)/gi;
         let m;
         while ((m = blockRe.exec(String(text || '')))) {
-            const inner = m[0].replace(/<[^>]+>/g, '').replace(/\x60\x60\x60[^\x60]*\x60\x60\x60/g, '').trim();
-            if (m[1].toLowerCase().indexOf('json') === 0) {
+            let inner = m[0].replace(/<[^>]+>/g, '').replace(/\x60\x60\x60[^\x60]*\x60\x60\x60/g, '').trim();
+            let isJsonBlock = m[1].toLowerCase().indexOf('json') === 0;
+            // 标准写法 <UpdateVariable><Analysis>…</Analysis><JSONPatch>…</JSONPatch></UpdateVariable>：
+            // 外层是 updatevariable 时，若内部含 json_patch 子块，则整块按 JSONPatch 解析
+            const sub = m[0].match(/<(json_?patch)>[\s\S]*?(?:\/\1>)/i);
+            if (sub) { inner = sub[0].replace(/<[^>]+>/g, '').trim(); isJsonBlock = true; }
+            if (isJsonBlock) {
                 try {
                     const patch = JSON.parse(inner);
                     if (Array.isArray(patch)) {
                         for (const op of patch) {
                             if (!op || (!op.path && !op.to)) continue;
-                            cmds.push({ type: op.op === 'delta' ? 'add' : op.op || 'set', path: String(op.path || op.to || '').replace(/^\//, '').replace(/\//g, '.'), value: op.value, from: op.from });
+                            const jt = op.op === 'delta' ? 'add' : (op.op === 'remove' ? 'delete' : op.op || 'set');
+                            cmds.push({ type: jt, path: String(op.path || op.to || '').replace(/^\//, '').replace(/\//g, '.'), value: op.value, from: op.from });
                         }
                     }
                 } catch (e) {}
@@ -9480,6 +9551,22 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         for (const cmd of cmds) {
             if (!cmd.path) continue;
             const parts = String(cmd.path).split('.').filter((p) => p !== '');
+            if (cmd.type === 'move') {
+                const mf = String(cmd.from || '').replace(/^\//, '').replace(/\//g, '.').split('.').filter((p) => p !== '');
+                let mv;
+                let mc = stat, mok = true;
+                for (let i = 0; i < mf.length - 1; i++) { mc = mc ? mc[mf[i]] : null; if (!mc) { mok = false; break; } }
+                if (mok && mc) {
+                    const mkey = mf[mf.length - 1];
+                    if (Array.isArray(mc) && /^\d+$/.test(String(mkey))) { mv = mc[Number(mkey)]; mc.splice(Number(mkey), 1); }
+                    else { mv = mc[mkey]; try { delete mc[mkey]; } catch (e) {} }
+                }
+                if (mv !== undefined) {
+                    setPathArr(stat, parts, mv);
+                    note(cmd.path, '(移动)', mv, cmd.reason);
+                }
+                continue;
+            }
             if (cmd.type === 'delete') {
                 let oldDel = null;
                 let cur = stat, ok = true;
@@ -9493,7 +9580,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 let container = stat, ok2 = true;
                 for (let d2 = 0; d2 < parts.length - 1; d2++) { container = container ? container[parts[d2]] : null; if (!container) { ok2 = false; break; } }
                 if (!ok2) continue;
-                const key = cmd.keyOrIndex;
+                // JSONPatch insert 的键在 path 最后一段；_.insert 风格才用 keyOrIndex
+                const key = cmd.keyOrIndex !== undefined ? cmd.keyOrIndex : parts[parts.length - 1];
                 if (key === '-' || key === null) {
                     if (Array.isArray(container)) container.push(cmd.value);
                     else if (container && typeof container === 'object') container[String(Date.now())] = cmd.value;
@@ -9520,15 +9608,32 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (ok3 && tgt && typeof tgt === 'object') { Object.keys(cmd.value).forEach((kk) => { tgt[kk] = cmd.value[kk]; }); note(cmd.path, '(变更)', cmd.value, cmd.reason); }
                 continue;
             }
-            if (cmd.type === 'add' && Array.isArray(cmd.value)) {
-                let tgt2 = stat, ok4 = true;
-                for (let d4 = 0; d4 < parts.length - 1; d4++) { tgt2 = tgt2 ? tgt2[parts[d4]] : null; if (!tgt2) { ok4 = false; break; } }
-                if (ok4 && tgt2 && typeof tgt2 === 'object') {
-                    const curV = tgt2[parts[parts.length - 1]];
-                    const arr = Array.isArray(curV) ? curV.slice() : [];
-                    cmd.value.forEach((vv) => arr.push(vv));
-                    setPathArr(tgt2, parts, arr);
-                    note(cmd.path, curV, arr, cmd.reason);
+            if (cmd.type === 'add') {
+                // delta：数值相加 / 日期加毫秒 / 数组追加 / 否则整体替换（与 MVU 语义一致）
+                const oldV = (() => { let c = stat; for (const p of parts) { c = c ? c[p] : undefined; } return c; })();
+                const base = Array.isArray(oldV) && oldV.length ? oldV[0] : oldV;
+                const delta = parseFloat(cmd.value);
+                let dateVal = null;
+                if (typeof base === 'string') { const dtest = new Date(base); if (!isNaN(dtest.getTime()) && isNaN(Number(base))) dateVal = dtest; }
+                if (dateVal && !isNaN(delta)) {
+                    const nd = new Date(dateVal.getTime() + delta);
+                    setPathArr(stat, parts, nd.toISOString());
+                    note(cmd.path, base, nd.toISOString(), cmd.reason);
+                } else {
+                    const num = parseFloat(base);
+                    if (!isNaN(num) && !isNaN(delta)) {
+                        const nv2 = parseFloat((num + delta).toPrecision(12));
+                        setPathArr(stat, parts, nv2);
+                        note(cmd.path, base, nv2, cmd.reason);
+                    } else if (Array.isArray(oldV)) {
+                        const arr = oldV.slice();
+                        if (Array.isArray(cmd.value)) cmd.value.forEach((vv) => arr.push(vv)); else arr.push(cmd.value);
+                        setPathArr(stat, parts, arr);
+                        note(cmd.path, '(数组追加)', cmd.value, cmd.reason);
+                    } else {
+                        setPathArr(stat, parts, cmd.value);
+                        note(cmd.path, base, cmd.value, cmd.reason);
+                    }
                 }
                 continue;
             }
