@@ -2687,6 +2687,7 @@
             `        var tplCached2=null;`,
             `        try{tplCached2=JSON.parse(mvu2shujukuDecodeB64(TEMPLATE_B64));}catch(e){tplCached2=null;}`,
             `        if(tplCached2&&!hasFullCheckpoint()&&!mvu2shujukuInitSessionHung){`,
+            `          console.log('['+BRIDGE_NAME+'][流程] 写库前锚点状态：hasCheckpoint=false（桥内判定）');`,
             `          var anchoredOK=false;`,
             `          if(mvu2shujukuTablesSafeToAnchor(API,tplCached2)&&typeof API.initGameSession==='function'){`,
             `            console.log('['+BRIDGE_NAME+'] 写库前：聊天缺少 full checkpoint，重建锚点…');`,
@@ -4317,7 +4318,9 @@ ${DB_INIT_SNIPPET}
     // - 表无额外行（仅模板行被改动，如开局捏人写入）→ 重置+重放本次写入无损，也可重建
     // - 表有额外行（真实积累数据）→ importTableAsJson 锚定当前状态；失败则放弃本次写入，绝不重置已有数据
     async function ensureCheckpointBeforeWrite(api, tplCached) {
-        if (hasFullShujukuCheckpoint()) return true;
+        const hasCp = hasFullShujukuCheckpoint();
+        console.log('[mvu2shujuku][debug][流程] 写库前锚点状态：hasCheckpoint=' + hasCp);
+        if (hasCp) return true;
         await anchorCheckpointIfMissing(api, tplCached, '写库前');
         if (hasFullShujukuCheckpoint()) return true;
         // 插件 initGameSession 可能“完成”却不建 V2 checkpoint：改用 importTableAsJson 提交当前状态强制建锚。
