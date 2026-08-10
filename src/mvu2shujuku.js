@@ -5208,6 +5208,29 @@ ${DB_INIT_SNIPPET}
                             console.warn('[mvu2shujuku][debug] importTableAsJson 快照兜底异常:', e);
                         }
                     }
+                    // 诊断：写入后立即检查聊天 checkpoint 里是否包含刚写入的数据。
+                    // 若 checkpoint 仍是初始快照（不含用户注入值），重进聊天时插件会从 checkpoint
+                    // 恢复成初始数据——这就是“重新进入后数据没了”的根因。
+                    try {
+                        const ctx = getContextSafe();
+                        const chatArr = Array.isArray(ctx.chat) ? ctx.chat : [];
+                        for (let mi = 0; mi < chatArr.length && mi < 3; mi++) {
+                            const msg = chatArr[mi];
+                            if (!msg || typeof msg !== 'object') continue;
+                            const iso = msg.TavernDB_ACU_IsolatedData;
+                            if (!iso) continue;
+                            let containsUserData = false;
+                            try {
+                                const s = JSON.stringify(iso);
+                                // 检查主角表首行是否有注入值（姓名等与模板不同的内容）
+                                const sd = window.getAllVariables ? (window.getAllVariables().stat_data || {}) : {};
+                                const heroName = sd.主角 && sd.主角.姓名;
+                                containsUserData = heroName && heroName !== '未知' && s.indexOf(String(heroName)) !== -1;
+                            } catch (e) {}
+                            console.log('[mvu2shujuku][debug][checkpoint] 消息' + mi + ' 有 IsolatedData | 长度=' + String(iso).length + ' | 含主角姓名=' + containsUserData);
+                            break;
+                        }
+                    } catch (e) {}
                     if (!hasFullShujukuCheckpoint()) {
                         console.warn('[mvu2shujuku][debug][流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
                     }
