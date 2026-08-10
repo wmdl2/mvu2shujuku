@@ -1206,7 +1206,9 @@
                     const tableName = makeGroupTableName(groupName);
                     const keyCol = '名称';
                     const isArray = Array.isArray(raw);
-                    const cols = [{ zh: keyCol, path: [groupName], value: '', desc: '', type: 'TEXT', ident: toIdent(keyCol, new Set(['row_id']), 'column') }];
+                    // 数组表的值列用「内容」（数组项本身），不叫「名称」；行表才用「名称」作业务键
+                    const valueZh = isArray ? '内容' : keyCol;
+                    const cols = [{ zh: valueZh, path: [groupName, valueZh], value: '', desc: isArray ? '条目内容' : '', type: 'TEXT', ident: toIdent(valueZh, new Set(['row_id']), 'column') }];
                     const rows = isArray
                         ? raw.map((item, i) => [i + 1, item === null || item === undefined ? '' : String(item)])
                         : [];
@@ -4910,12 +4912,19 @@ ${DB_INIT_SNIPPET}
             const header = sheet.content[0];
             const value = sd[L.group];
             const declared = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
+            // 子表路径（如 世界.动向 / 主角.气运）不是本表的溢出字段，绝不能写进本表 _扩展数据
+            const childGroupKeys = new Set();
+            for (const L2 of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                if (L2 === L) continue;
+                const wp = (L2.writePaths || [])[0];
+                if (Array.isArray(wp) && wp.length >= 2 && wp[0] === L.group) childGroupKeys.add(wp[1]);
+            }
             const mergeOverflow = (row, obj) => {
                 const ovIdx = header.indexOf('_扩展数据');
                 if (ovIdx === -1) return;
                 const overflow = {};
                 for (const k of Object.keys(obj)) {
-                    if (!declared.includes(k) && k !== L.keyCol) overflow[k] = obj[k];
+                    if (!declared.includes(k) && k !== L.keyCol && !childGroupKeys.has(k)) overflow[k] = obj[k];
                 }
                 if (!Object.keys(overflow).length) return;
                 let cur = {};
@@ -7016,12 +7025,19 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const header = sheet.content[0];
             const value = sd[L.group];
             const declared = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
+            // 子表路径（如 世界.动向 / 主角.气运）不是本表的溢出字段，绝不能写进本表 _扩展数据
+            const childGroupKeys = new Set();
+            for (const L2 of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                if (L2 === L) continue;
+                const wp = (L2.writePaths || [])[0];
+                if (Array.isArray(wp) && wp.length >= 2 && wp[0] === L.group) childGroupKeys.add(wp[1]);
+            }
             const mergeOverflow = (row, obj) => {
                 const ovIdx = header.indexOf('_扩展数据');
                 if (ovIdx === -1) return;
                 const overflow = {};
                 for (const k of Object.keys(obj)) {
-                    if (!declared.includes(k) && k !== L.keyCol) overflow[k] = obj[k];
+                    if (!declared.includes(k) && k !== L.keyCol && !childGroupKeys.has(k)) overflow[k] = obj[k];
                 }
                 if (!Object.keys(overflow).length) return;
                 let cur = {};
