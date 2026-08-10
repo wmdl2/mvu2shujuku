@@ -2237,15 +2237,6 @@
             }
         };
         collect(prevStat || {}, nextStat || {}, '');
-        try {
-            const dump = {};
-            for (const op of ops.slice(0, 10)) {
-                if (!op || !op.entry || !op.entry.layout) continue;
-                const f = sheetOf(op.entry.layout.table);
-                dump[op.np] = { kind: op.entry.kind, overflow: !!op.overflow, json: !!op.json, contentLen: f ? f.sheet.content.length : -1 };
-            }
-            console.log('[mvu2shujuku][debug][写库] ops=' + ops.length + ' → ' + JSON.stringify(dump));
-        } catch (e) {}
 
         // 单例/整组JSON表若缺初始行（插件可能只保留表头+seedRows，未物化到 content），先按模板补行，
         // 避免 updateCell: Row index 1 out of bounds 导致写入落空
@@ -2272,12 +2263,7 @@
                 const SE = seedNeeded[tableName];
                 const SE0 = SE.layout || SE;
                 const found2 = sheetOf(SE0.table);
-                // 诊断：插件 export 可能把 seedRows 合并显示成“有行”，但运行期未物化，导致 updateCell row 1 out of bounds
-                console.log('[mvu2shujuku][debug][写库] 补行前「' + SE0.table + '」contentLen=' + (found2 && found2.sheet && found2.sheet.content ? found2.sheet.content.length : -1) +
-                    ' seedRows=' + (found2 && Array.isArray(found2.sheet.seedRows) ? found2.sheet.seedRows.length : 0));
-                // 只要写入涉及单例/JSON 表，就尝试物化初始行：行已存在时插件会以 UNIQUE 拒绝（静默），
-                // 仅当行确实缺失时才真正补入——避免“显示有行但运行期没行”的 out of bounds。
-                if (!found2 || !Array.isArray(found2.sheet.content) || !found2.sheet.content.length) continue;
+                if (!found2 || !Array.isArray(found2.sheet.content) || found2.sheet.content.length > 1) continue;
                 let sObj = null;
                 if (tplSrc && typeof tplSrc === 'object') {
                     for (const k in tplSrc) {
@@ -2296,8 +2282,7 @@
                     await Promise.resolve(api.insertRow(SE0.table, sObj));
                     console.log('[mvu2shujuku][debug] 已为表「' + SE0.table + '」补初始行（原表仅表头）。');
                 } catch (e) {
-                    // UNIQUE 冲突等说明行已存在（可能只是 seedRows 未物化），记录但不阻塞
-                    console.log('[mvu2shujuku][debug] 补初始行跳过（行已存在或冲突）: ' + (e && e.message ? e.message : e));
+                    console.warn('[mvu2shujuku][debug] 补初始行失败:', e);
                 }
             }
             try { tables = api.exportTableAsJson() || {}; } catch (e) {}
@@ -4806,6 +4791,47 @@ ${DB_INIT_SNIPPET}
     let statWriteFlushResolve = null;
     let statWriteFlushPromise = null;
     let statWriteOverlayGen = 0;
+    const materializedChats = new Set();
+
+    // 每个聊天首次写库前，一次性为所有单例/JSON 表物化模板初始行。
+    // 背景：插件 export 可能把 seedRows 合并显示成“有行”，但运行期未物化，导致 updateCell row 1 out of bounds。
+    // 这里只在每个聊天执行一次（行已存在时 UNIQUE 冲突静默），避免每次写入都重复尝试的激进行为。
+    async function ensureSingletonRowsMaterialized(api, tplCached, layoutEntries) {
+        try {
+            let chatKey = '';
+            try { chatKey = String(getContextSafe().chatId || ''); } catch (e) {}
+            if (materializedChats.has(chatKey)) return;
+            materializedChats.add(chatKey);
+            for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                if (L.kind !== 'singleton' && L.kind !== 'json') continue;
+                try {
+                    const obj = {};
+                    if (tplCached) {
+                        for (const k in tplCached) {
+                            if (k.indexOf('sheet_') === 0 && tplCached[k] && tplCached[k].name === L.table &&
+                                Array.isArray(tplCached[k].content) && tplCached[k].content[1]) {
+                                const hdr = tplCached[k].content[0] || [];
+                                const row = tplCached[k].content[1];
+                                for (let i = 1; i < hdr.length; i++) {
+                                    obj[hdr[i]] = (row[i] !== undefined && row[i] !== null) ? row[i] : '';
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if (L.kind === 'json') {
+                        if (!obj[L.keyCol || '名称']) obj[L.keyCol || '名称'] = L.keyValue || 'row1';
+                        if (obj['内容'] === undefined) obj['内容'] = '{}';
+                    }
+                    await Promise.resolve(api.insertRow(L.table, obj));
+                    console.log('[mvu2shujuku][debug] 已物化单例/JSON表初始行：' + L.table);
+                } catch (e) {
+                    // 行已存在（UNIQUE 冲突等）→ 已物化，无需处理
+                    console.log('[mvu2shujuku][debug] 单例/JSON表初始行已存在，跳过物化：' + L.table);
+                }
+            }
+        } catch (e) {}
+    }
 
     // 把目标 stat_data 还原成完整表格 JSON：以当前导出为基座，覆盖目标值。
     // 供 importTableAsJson 走插件自己的提交管线——插件自己管理 V2 checkpoint，
@@ -4959,6 +4985,8 @@ ${DB_INIT_SNIPPET}
                         pendingStatWrite = null;
                         return;
                     }
+                    // 每聊天首次写库前物化单例/JSON 表的初始行（export 显示有行≠运行期已物化）
+                    await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     const prev = all.stat_data || {};
                     // 差异写入（裸 updateCell/insertRow）——与参考卡一致：开局 initGameSession 单独建锚后，
