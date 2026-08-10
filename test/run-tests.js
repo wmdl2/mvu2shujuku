@@ -1614,6 +1614,89 @@ test('SQL 示例不应包含内部溢出列 _扩展数据', () => {
     assert.ok(sheet.sourceData.insertNode.includes('INSERT INTO'), 'INSERT 示例仍应存在');
 });
 
+test('数组表提示词按行增删改，不再“整体替换/禁止增删”', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '数组卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{ comment: '[InitVar]', content: '背包: []\n系统: { _数据版本: 7 }' }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const sheet = Object.values(r.template).find(s => s && s.name === '背包表');
+    assert.ok(sheet, '应生成背包表');
+    assert.ok(sheet.sourceData.note.includes('数组表'), 'note 应说明数组表');
+    assert.ok(sheet.sourceData.note.includes('INSERT'), 'note 应说明 INSERT');
+    assert.ok(sheet.sourceData.note.includes('DELETE'), 'note 应说明 DELETE');
+    assert.ok(sheet.sourceData.note.includes('UPDATE'), 'note 应说明 UPDATE');
+    assert.ok(!sheet.sourceData.note.includes('整体替换'), 'note 不应再有整体替换');
+    assert.ok(sheet.sourceData.updateNode.includes('UPDATE beibaobiao SET neirong'), 'updateNode 应为按行 UPDATE');
+    assert.ok(sheet.sourceData.insertNode.includes('INSERT INTO beibaobiao (neirong)'), 'insertNode 应为 INSERT 新行');
+    assert.ok(sheet.sourceData.deleteNode.includes('DELETE FROM beibaobiao'), 'deleteNode 应为 DELETE 行');
+    assert.ok(!sheet.sourceData.insertNode.includes('禁止'), '数组表 insert 不应禁止');
+    assert.ok(!sheet.sourceData.deleteNode.includes('禁止'), '数组表 delete 不应禁止');
+    assert.ok(sheet.sourceData.initNode.includes('INSERT'), 'initNode 应指引 insertNode');
+});
+
+test('全只读单例不生成 UPDATE 示例，note/init/update 自洽', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '只读卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{ comment: '[InitVar]', content: '系统:\n  _数据版本: 7\n  _坏结局: ""' }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const sheet = Object.values(r.template).find(s => s && s.name === '系统表');
+    assert.ok(sheet, '应生成系统表');
+    assert.ok(sheet.sourceData.note.includes('AI 无需填表'), 'note 应声明无需填表');
+    assert.ok(!sheet.sourceData.note.includes('只允许按需 UPDATE'), 'note 不应教 AI UPDATE');
+    assert.ok(!sheet.sourceData.note.includes('只在正文明确造成状态变化时更新对应字段'), '全只读表不应出现填表动作提示');
+    assert.ok(!sheet.sourceData.updateNode.includes('UPDATE'), 'updateNode 不应给出 UPDATE 示例');
+    assert.ok(sheet.sourceData.updateNode.includes('不应修改'), 'updateNode 应声明不可修改');
+    assert.ok(!sheet.sourceData.initNode.includes('UPDATE'), 'initNode 不应出现 UPDATE');
+});
+
+test('行表 SQL 示例排除下划线只读字段', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '混合卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{
+                    comment: '[InitVar]',
+                    content: JSON.stringify({
+                        主角: {
+                            姓名: '斯维姆',
+                            气运: { 阿笔: { 名称: '阿笔', 类型: '被动', _剩余次数: 3 } },
+                        },
+                    }),
+                }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const sheet = Object.values(r.template).find(s => s && s.name === '气运表');
+    assert.ok(sheet, '应生成气运表');
+    assert.ok(sheet.content[0].includes('_剩余次数'), '表头应有 _剩余次数 列');
+    assert.ok(!sheet.sourceData.insertNode.includes('_剩余次数'), 'INSERT 示例不应包含 _剩余次数');
+    assert.ok(!sheet.sourceData.updateNode.includes('_剩余次数'), 'UPDATE 示例不应包含 _剩余次数');
+    assert.ok(sheet.sourceData.insertNode.includes('INSERT INTO'), 'INSERT 示例仍应存在');
+});
+
 test('seedRows 兜底：content 仅表头时用 seedRows 还原初始行（首楼被删/重置场景）', () => {
     const layout = [
         { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前时间', 'text', '', '', '', '']], writePaths: [], mirrors: [] },
@@ -2585,6 +2668,234 @@ test('写库不受锚点形态门控（移除运行时锚点重建机制）', as
         await waitBridgeFlush(600);
         assert.strictEqual(initCalls, 0, '任意 checkpoint 形态都不应触发 initGameSession 重建（运行时最小化）');
     }
+});
+
+test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 Mvu/getAllVariables 并建表', async () => {
+    const vm2 = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    // 与真实运行一致：卡内布局是 buildLayoutJson 序列化后的数组列
+    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
+        kind: e.kind,
+        group: e.group,
+        table: e.table,
+        keyCol: e.keyCol || '',
+        keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => (e.kind === 'singleton'
+            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
+            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
+        writePaths: e.writePaths || [],
+        mirrors: e.mirrors || [],
+    }));
+    const layout = toLayout(r.schema);
+    // 与 build-extension.js 相同的内联方式组装扩展 index.js
+    const srcDir = path.join(__dirname, '..', 'src');
+    const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
+    const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
+    const yamlLibsData = fs.readFileSync(path.join(srcDir, 'vendor', 'mvu-yaml-libs.js'), 'utf8');
+    const jsonrepairData = fs.readFileSync(path.join(srcDir, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+    const pinyinInline = pinyinData
+        .replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ')
+        .replace(/;\s*$/, ';');
+    const yamlLibsInline = [
+        '(function () {',
+        '  var module = { exports: {} };',
+        '  var exports = module.exports;',
+        yamlLibsData,
+        '  var target = typeof globalThis !== "undefined" ? globalThis : this;',
+        '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;',
+        '})();',
+        '',
+    ].join('\n');
+    const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+    const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+
+    const nonConverted = { name: '普通卡', avatar: 'a.png', extensions: {} };
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const converted = {
+        name: '转换卡',
+        avatar: 'b.png',
+        extensions: { mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(layout) } },
+        character_book: {
+            entries: [{
+                keys: ['__ACU_TEMPLATE_DATA__'],
+                content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
+            }],
+        },
+    };
+    let initialized = false;
+    let initCalls = 0;
+    let lastInitTemplateData = null;
+    const fakeApi = {
+        getTemplatePresetNames: () => [],
+        exportTableAsJson: () => (initialized ? tables : {}),
+        initGameSession: async (arg1, opts) => {
+            initCalls += 1;
+            initialized = true;
+            lastInitTemplateData = (opts && opts.templateData) || null;
+            return { success: true, runtimeReady: true };
+        },
+        importTemplateFromData: async () => ({ success: true }),
+        insertRow: async () => 1,
+        updateCell: async () => true,
+        deleteRow: async () => true,
+        registerTableUpdateCallback: () => true,
+    };
+    const handlers = {};
+    const context = {
+        chatId: 'c1',
+        name: '测试',
+        chat: [],
+        characters: [nonConverted],
+        characterId: 0,
+        extensionSettings: {},
+        eventSource: {
+            on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); },
+            emit: () => {},
+        },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed',
+            MESSAGE_RECEIVED: 'message_received',
+            MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated',
+            MESSAGE_EDITED: 'edited',
+            MESSAGE_SENT: 'sent',
+            MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {},
+        saveChatConditional: async () => {},
+        saveChat: async () => {},
+        getRequestHeaders: () => ({}),
+        setChatMessages: () => {},
+    };
+    const fakeEl = () => {
+        const el = {
+            dataset: {},
+            style: {},
+            children: [],
+            _listeners: {},
+            _value: '',
+            addEventListener: (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); },
+            removeEventListener: () => {},
+            dispatchEvent: () => true,
+            appendChild: (c) => { el.children.push(c); return c; },
+            removeChild: () => {},
+            querySelector: () => fakeEl(),
+            querySelectorAll: () => [],
+            click: () => {},
+            focus: () => {},
+            blur: () => {},
+            contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(el, 'innerHTML', { get: () => el._html || '', set: (v) => { el._html = v; } });
+        Object.defineProperty(el, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(el, 'value', { get: () => el._value, set: (v) => { el._value = v; } });
+        Object.defineProperty(el, 'checked', { get: () => !!el._checked, set: (v) => { el._checked = v; } });
+        Object.defineProperty(el, 'disabled', { get: () => !!el._disabled, set: (v) => { el._disabled = v; } });
+        return el;
+    };
+    const doc = {
+        querySelector: () => fakeEl(),
+        getElementById: () => fakeEl(),
+        createElement: () => fakeEl(),
+        createTextNode: () => fakeEl(),
+        addEventListener: () => {},
+        body: fakeEl(),
+    };
+    const win = {
+        top: null,
+        parent: null,
+        document: doc,
+        console,
+        setTimeout: (fn, ms) => setTimeout(fn, ms),
+        clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms),
+        clearInterval: (t) => clearInterval(t),
+        CustomEvent: function () {},
+        addEventListener: () => {},
+        dispatchEvent: () => true,
+        TextDecoder,
+        atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context },
+        AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {},
+        toastr: undefined,
+    };
+    win.top = win;
+    win.parent = win;
+    win.window = win;
+    win.globalThis = win;
+    vm2.createContext(win);
+    vm2.runInContext(extIndex, win);
+
+    // 阶段1：非转换卡——等待开局自动建表定时器执行，必须零接管、零建表
+    await new Promise(res => setTimeout(res, 2200));
+    assert.strictEqual(initCalls, 0, '非转换卡不应触发任何建表');
+    assert.strictEqual(win.Mvu, undefined, '非转换卡不应接管 window.Mvu');
+    assert.strictEqual(win.getAllVariables, undefined, '非转换卡不应定义 getAllVariables');
+    assert.strictEqual(win.getVariables, undefined, '非转换卡不应接管 getVariables');
+    assert.strictEqual(win.updateVariablesWith, undefined, '非转换卡不应接管 updateVariablesWith');
+    assert.strictEqual(win.replaceVariables, undefined, '非转换卡不应接管 replaceVariables');
+
+    // 阶段2：切到带独有标记的转换卡——触发 CHAT_CHANGED 后应接管并建表
+    context.characters[0] = converted;
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 2500));
+    assert.ok(initCalls >= 1, '转换卡应触发建表（实际 ' + initCalls + ' 次）');
+    assert.ok(win.Mvu && typeof win.Mvu.getMvuData === 'function', '转换卡应接管 window.Mvu');
+    assert.strictEqual(typeof win.getAllVariables, 'function', '转换卡应定义 getAllVariables');
+    assert.strictEqual(typeof win.getVariables, 'function', '转换卡应接管 getVariables');
+    assert.strictEqual(typeof win.updateVariablesWith, 'function', '转换卡应接管 updateVariablesWith');
+    assert.strictEqual(typeof win.replaceVariables, 'function', '转换卡应接管 replaceVariables');
+
+    // 阶段3：切到另一张带不同模板的转换卡（仓库卡），验证模板缓存按卡归属，
+    // 重锚/写库不会串用上一张转换卡（B）的模板缓存
+    const cardC = core.convert({
+        spec: 'chara_card_v3',
+        data: {
+            name: '仓库卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{ comment: '[InitVar]', content: '仓库:\n  物品: { 数量: 1 }' }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    }, { mode: 'both' });
+    const convertedC = {
+        name: '仓库卡',
+        avatar: 'c.png',
+        extensions: { mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(cardC.schema)) } },
+        character_book: {
+            entries: [{
+                keys: ['__ACU_TEMPLATE_DATA__'],
+                content: Buffer.from(JSON.stringify(cardC.template)).toString('base64'),
+            }],
+        },
+    };
+    context.characters[0] = convertedC;
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    // 等待周期重锚（3s 间隔 + 2.5s 节流）用当前卡 C 的模板重建
+    await new Promise(res => setTimeout(res, 4500));
+    const namesC = Object.keys(lastInitTemplateData || {})
+        .filter(k => k.indexOf('sheet_') === 0)
+        .map(k => lastInitTemplateData[k].name);
+    assert.ok(namesC.includes('仓库表'), '重锚应使用当前卡 C 的模板，实际：' + namesC.join('、'));
+    assert.ok(!namesC.includes('主角表'), '重锚不得串用上一张卡（B）的模板缓存');
+
+    // 阶段4：切回普通卡——所有接管必须撤销，且不再有任何建表/写入
+    const initCallsBefore = initCalls;
+    context.characters[0] = nonConverted;
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 1800));
+    assert.strictEqual(initCalls, initCallsBefore, '切回普通卡后不应再触发建表');
+    assert.strictEqual(win.Mvu, undefined, '切回普通卡后应撤销 window.Mvu');
+    assert.strictEqual(win.getAllVariables, undefined, '切回普通卡后应撤销 getAllVariables');
+    assert.strictEqual(win.getVariables, undefined, '切回普通卡后应撤销 getVariables');
+    assert.strictEqual(win.updateVariablesWith, undefined, '切回普通卡后应撤销 updateVariablesWith');
+    assert.strictEqual(win.replaceVariables, undefined, '切回普通卡后应撤销 replaceVariables');
 });
 
 runTests();
