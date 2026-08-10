@@ -5216,8 +5216,6 @@ ${DB_INIT_SNIPPET}
                         pendingStatWrite = null;
                         return;
                     }
-                    // 每聊天首次写库前物化单例/JSON 表的初始行（export 显示有行≠运行期已物化）
-                    await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     const prev = all.stat_data || {};
                     // 写入主路径：开局（表格仍是模板初始状态、无真实数据）时，把注入后的
@@ -5267,7 +5265,10 @@ ${DB_INIT_SNIPPET}
                         console.warn('[mvu2shujuku][debug] 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
                     }
                     if (!usedSnapshot) {
-                        // 差异写入（裸 updateCell/insertRow）——作为 importTableAsJson 失败时的降级路径
+                        // 差异写入（裸 updateCell/insertRow）——作为 initGameSession/importTableAsJson
+                        // 都失败时的降级路径。此时才需要物化垫底行（确保 content 有 row_id=1 可写）、
+                        // 主动 saveChat 落盘、以及清理多余的垫底行。
+                        await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                         n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
                         if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
                         // 降级路径依赖酒馆 saveChat 落盘（importTableAsJson 成功时插件已自己持久化，无需额外保存）
@@ -5316,8 +5317,11 @@ ${DB_INIT_SNIPPET}
                     if (!hasFullShujukuCheckpoint()) {
                         console.warn('[mvu2shujuku][debug][流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
                     }
-                    // 单例/JSON 表去重：插件 seedRow（row_id=1）物化后，删除我们补行产生的多余行
-                    await cleanupSingletonDuplicates(api, activeLayout);
+                    // 单例/JSON 表去重：仅在降级裸写路径物化过垫底行时需要清理；
+                    // initGameSession/importTableAsJson 成功后表格本身是干净的，无需清理。
+                    if (!usedSnapshot) {
+                        await cleanupSingletonDuplicates(api, activeLayout);
+                    }
                     dispatchVariableUpdateEnded({ stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} }, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
                 } else {
                     console.warn('[mvu2shujuku][debug] Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
