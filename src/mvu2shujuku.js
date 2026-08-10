@@ -2515,9 +2515,28 @@
         async function runDirectOps() {
             for (const d of directOps) {
                 try {
-                    if (d.kind === 'json') await Promise.resolve(api.updateCell(d.layout.table, 1, '内容', d.value));
-                    else if (d.kind === 'overflow') await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', d.value));
-                    else if (d.kind === 'overflow-insert') await Promise.resolve(api.insertRow(d.layout.table, d.rowObj));
+                    const sqlLit = (v) => {
+                        const s = String(v === undefined || v === null ? '' : v);
+                        return "'" + s.replace(/'/g, "''") + "'";
+                    };
+                    if (d.kind === 'json') {
+                        // 优先 SQL 定位 row_id（JS 视图可能显示有行但运行期未物化，updateCell 会越界）
+                        const rid = d.sheet && d.sheet.content && d.sheet.content[1] ? d.sheet.content[1][0] : undefined;
+                        if (rid !== undefined && typeof api.executeSqlBatch === 'function') {
+                            await Promise.resolve(api.executeSqlBatch('UPDATE ' + d.layout.table + ' SET 内容 = ' + sqlLit(d.value) + ' WHERE row_id = ' + Number(rid) + ';', {}));
+                            continue;
+                        }
+                        await Promise.resolve(api.updateCell(d.layout.table, 1, '内容', d.value));
+                    } else if (d.kind === 'overflow') {
+                        const rid = d.sheet && d.sheet.content && d.sheet.content[d.rowIndex] ? d.sheet.content[d.rowIndex][0] : undefined;
+                        if (rid !== undefined && typeof api.executeSqlBatch === 'function') {
+                            await Promise.resolve(api.executeSqlBatch('UPDATE ' + d.layout.table + ' SET _扩展数据 = ' + sqlLit(d.value) + ' WHERE row_id = ' + Number(rid) + ';', {}));
+                            continue;
+                        }
+                        await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', d.value));
+                    } else if (d.kind === 'overflow-insert') {
+                        await Promise.resolve(api.insertRow(d.layout.table, d.rowObj));
+                    }
                 } catch (e) {
                     console.warn('[mvu2shujuku][debug] 整组JSON/溢出列写入失败:', e);
                 }
@@ -4435,28 +4454,9 @@ ${DB_INIT_SNIPPET}
             const holder = (typeof window !== 'undefined' ? window : globalThis);
             if (holder) holder.__mvu2shujukuTemplateCache = JSON.parse(mvu2shujukuDecodeB64(entry.content));
         } catch (e) {}
-        // 锚点检查：表可能已存在但聊天缺 full checkpoint（开场白切换/首楼
-        // 重写会丢锚点），此时继续写库会留下无锚点 artifacts，触发插件 V2 boundary_after_data_mismatch；
-        // 用卡内模板重建 initGameSession 把锚点补上（全新聊天由下方 ensureInit 建立，不重复）；
-        // 每次进入聊天都会复查，最多重试 3 次，避免 initGameSession 挂起时风暴。
-        if (autoInitState.anchorChat !== key) {
-            autoInitState.anchorChat = key;
-            autoInitState.anchorTries = 0;
-        }
-        if (autoInitState.anchorTries < 3) {
-            try {
-                const tplCached = cachedTemplateForCurrentCard();
-                const hadCheckpoint = hasFullShujukuCheckpoint();
-                console.log('[mvu2shujuku][debug][流程] 开局锚点检查：chat=' + key + ' hasCheckpoint=' + hadCheckpoint + ' tries=' + autoInitState.anchorTries + ' hung=' + mvu2shujukuInitSessionHung);
-                if (tplCached && !hadCheckpoint) {
-                    autoInitState.anchorTries += 1;
-                    await anchorCheckpointIfMissing(api, tplCached, '开局');
-                }
-            } catch (e) {
-                autoInitState.anchorTries += 1;
-                console.warn('[mvu2shujuku][debug] 数据库锚点重建异常:', e);
-            }
-        }
+        // 对齐参考卡：每个聊天只在“缺表”时初始化一次（下方 ensureInit），
+        // 已有表格的聊天绝不重初始化，避免切聊天时误重置别的聊天。
+        // 聊天内锚点丢失/写库前缺锚点由写库前检查兜底（ensureCheckpointBeforeWrite）。
         if (autoInitState.done === key) return;
         autoInitState.running = true;
         // 看门狗：即使插件 API 的 Promise 意外不返回，也强制复位 running，避免后续自动建表被永久跳过
@@ -4806,6 +4806,13 @@ ${DB_INIT_SNIPPET}
             materializedChats.add(chatKey);
             for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
                 if (L.kind !== 'singleton' && L.kind !== 'json') continue;
+                // 仅当 export 确实没有任何行时才物化：有行说明 row_id=1 已存在（写入走 SQL 定位 row_id=1），
+                // 此时补行会产生 row_id=2 垫脚行，写入若落在它上面会被去重删掉导致数据丢失。
+                try {
+                    const cur = api.exportTableAsJson() || {};
+                    const curSheet = (() => { for (const k in cur) { if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name === L.table) return cur[k]; } return null; })();
+                    if (curSheet && Array.isArray(curSheet.content) && curSheet.content.length > 1) continue;
+                } catch (e) {}
                 try {
                     const obj = {};
                     if (tplCached) {
