@@ -676,6 +676,44 @@ test('initvar 注释行不产生变量组，顶层标量原样保留', () => {
     assert.ok(!sheetNames.includes('_管理考核表'), '混合结构对象不应拆子表');
 });
 
+test('initvar 使用与 MVU 源码同款 YAML 库：merge keys / 块标量 / 混合键', () => {
+    const content = [
+        '基础: &base',
+        '  a: 1',
+        '派生:',
+        '  <<: *base',
+        '  b: 2',
+        '系统:',
+        '  _管理考核: { 上次生成期: -1, 事件ID: "" }',
+        '描述: >',
+        '  多行块标量',
+        '  拼接成一行',
+    ].join('\n');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'YAML库卡',
+            description: '',
+            first_mes: '你好',
+            character_book: { entries: [{ comment: '[InitVar]', content }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const t = r.template;
+    const byName = (n) => Object.keys(t).find(k => t[k].name === n);
+    const base = t[byName('基础表')];
+    // 基础: {a:1} 是单例表，a 展平为列，值为数字 1
+    assert.strictEqual(base.content[1][base.content[0].indexOf('a')], 1, 'YAML 数字应解析');
+    // merge key 产生的 派生 组也应存在（真 YAML 库特性）：<<: *base 合并进 a
+    const derived = t[byName('派生表')];
+    assert.ok(derived && derived.content[1][derived.content[0].indexOf('b')] === 2, 'merge key 应把锚点字段合并进派生组');
+    // 系统 只有单个对象字段 → 行表；中英混合键 事件ID 成为列
+    const sys = t[byName('系统表')];
+    assert.ok(sys.content[0].includes('事件ID'), '中英混合键 事件ID 应成为列');
+    assert.strictEqual(sys.content[1][sys.content[0].indexOf('上次生成期')], -1, '行内对象解析正确');
+});
+
 test('单例对象列写入：子字段变更整对象写回（jsonCell）', async () => {
     const content = [
         '系统:',

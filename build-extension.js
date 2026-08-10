@@ -11,12 +11,14 @@ const path = require('path');
 const ROOT = __dirname;
 const CORE_SRC = path.join(__dirname, 'src', 'mvu2shujuku.js');
 const PINYIN_SRC = path.join(__dirname, 'src', 'pinyin-data.js');
+const YAML_LIBS_SRC = path.join(__dirname, 'src', 'vendor', 'mvu-yaml-libs.js');
 const OUT_DIR = process.argv[2]
     ? path.resolve(process.argv[2])
     : ROOT;
 
 const coreSource = fs.readFileSync(CORE_SRC, 'utf8');
 const pinyinData = fs.readFileSync(PINYIN_SRC, 'utf8');
+const yamlLibsData = fs.readFileSync(YAML_LIBS_SRC, 'utf8');
 const core = require(CORE_SRC);
 
 // 浏览器端没有 require：把拼音字典内联成 root.__MVU2SHUJUKU_PINYIN__
@@ -24,7 +26,20 @@ const pinyinInline = pinyinData
     .replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ')
     .replace(/;\s*$/, ';');
 
-const files = core.assembleExtension({ coreSource, pinyinInline });
+// 与 MVU 源码同款的解析库（yaml/json5/jsonrepair）：bundle 是 CJS，
+// 浏览器端包一层 module 捕获导出后挂到 root.__MVU2SHUJUKU_YAML_LIBS__。
+const yamlLibsInline = [
+    '(function () {',
+    '  var module = { exports: {} };',
+    '  var exports = module.exports;',
+    yamlLibsData,
+    '  var target = typeof globalThis !== "undefined" ? globalThis : this;',
+    '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;',
+    '})();',
+    '',
+].join('\n');
+
+const files = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline });
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 // 只写扩展运行文件；README 以仓库根目录的手写文档为准
