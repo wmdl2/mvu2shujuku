@@ -4134,6 +4134,8 @@
             '#mvu2shujuku-settings .menu_button[style*="display:none"] { display: none !important; }',
             '#mvu2shujuku-settings .mvu2shujuku-label { display: block; margin-bottom: 4px; font-weight: 600; }',
             '#mvu2shujuku-settings .mvu2shujuku-mode-group label { margin-right: 12px; }',
+            '#mvu2shujuku-settings .mvu2shujuku-source-group label { margin-right: 12px; cursor: pointer; }',
+            '#mvu2shujuku-settings .menu_button:disabled { opacity: 0.4; cursor: not-allowed; }',
             '#mvu2shujuku-settings .mvu2shujuku-help {',
             '  font-size: 12px; opacity: 0.8;',
             '  margin: 4px 0 10px; padding: 6px 8px;',
@@ -5620,12 +5622,24 @@ ${DB_INIT_SNIPPET}
             '  <div class="inline-drawer-content">',
             '    <div class="mvu2shujuku-card">',
             '      <div class="mvu2shujuku-row">',
-            '        <label class="mvu2shujuku-label" for="mvu2shujuku-char-select">选择角色卡</label>',
-            '        <input id="mvu2shujuku-char-search" type="text" placeholder="搜索角色…" title="输入角色名过滤下拉列表" />',
-            '        <select id="mvu2shujuku-char-select" title="从酒馆角色列表选择要转换的角色卡"></select>',
-            '        <button id="mvu2shujuku-pick-file" class="menu_button" title="从磁盘选择 .json / .png 角色卡文件">选择文件…</button>',
-            '        <input id="mvu2shujuku-file" type="file" accept=".json,.png,application/json,image/png" hidden />',
-            '        <span id="mvu2shujuku-file-name" class="mvu2shujuku-hint"></span>',
+            '        <span class="mvu2shujuku-label">输入来源（二选一）</span>',
+            '        <label><input type="radio" name="mvu2shujuku-source" value="character" checked /> 酒馆角色卡</label>',
+            '        <label><input type="radio" name="mvu2shujuku-source" value="file" /> 本地文件</label>',
+            '      </div>',
+            '      <div id="mvu2shujuku-char-area" class="mvu2shujuku-source-area">',
+            '        <div class="mvu2shujuku-row">',
+            '          <label class="mvu2shujuku-label" for="mvu2shujuku-char-select">选择角色卡</label>',
+            '          <input id="mvu2shujuku-char-search" type="text" placeholder="搜索角色…" title="输入角色名过滤下拉列表" />',
+            '          <select id="mvu2shujuku-char-select" title="从酒馆角色列表选择要转换的角色卡"></select>',
+            '        </div>',
+            '      </div>',
+            '      <div id="mvu2shujuku-file-area" class="mvu2shujuku-source-area" style="display:none">',
+            '        <div class="mvu2shujuku-row">',
+            '          <label class="mvu2shujuku-label">选择本地文件</label>',
+            '          <button id="mvu2shujuku-pick-file" class="menu_button" title="从磁盘选择 .json / .png 角色卡文件">选择文件…</button>',
+            '          <input id="mvu2shujuku-file" type="file" accept=".json,.png,application/json,image/png" hidden />',
+            '          <span id="mvu2shujuku-file-name" class="mvu2shujuku-hint"></span>',
+            '        </div>',
             '      </div>',
             '      <div class="mvu2shujuku-row mvu2shujuku-mode-group">',
             '        <span class="mvu2shujuku-label" title="native：AI 输出 insertRow/updateRow/deleteRow DSL；sqlite：AI 输出 SQL；双模式跟随插件当前设置">填表模式</span>',
@@ -5664,7 +5678,7 @@ ${DB_INIT_SNIPPET}
             '      </div>',
             '      <div class="mvu2shujuku-row">',
             '        <button id="mvu2shujuku-convert-current" class="menu_button">转换所选角色卡</button>',
-            '        <button id="mvu2shujuku-convert-file" class="menu_button">转换所选文件</button>',
+            '        <button id="mvu2shujuku-convert-file" class="menu_button" disabled title="先在上方选择“本地文件”来源">转换所选文件</button>',
             '        <button id="mvu2shujuku-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2shujuku-result"></div>',
@@ -5706,6 +5720,27 @@ ${DB_INIT_SNIPPET}
             searchBox.dataset.bound = 'true';
             searchBox.addEventListener('input', () => populateCharacterSelect(panel, context));
         }
+        // 输入来源二选一：切换时只显示对应来源区域，并启用对应的转换按钮
+        const applySource = (value) => {
+            const isChar = value === 'character';
+            const charArea = panel.querySelector('#mvu2shujuku-char-area');
+            const fileArea = panel.querySelector('#mvu2shujuku-file-area');
+            const btnCurrent = panel.querySelector('#mvu2shujuku-convert-current');
+            const btnFile = panel.querySelector('#mvu2shujuku-convert-file');
+            if (charArea) charArea.style.display = isChar ? '' : 'none';
+            if (fileArea) fileArea.style.display = isChar ? 'none' : '';
+            if (btnCurrent) btnCurrent.disabled = !isChar;
+            if (btnFile) btnFile.disabled = isChar;
+        };
+        const sourceRadios = panel.querySelectorAll('input[name="mvu2shujuku-source"]');
+        sourceRadios.forEach((radio) => {
+            if (radio.dataset.bound !== 'true') {
+                radio.dataset.bound = 'true';
+                radio.addEventListener('change', () => { if (radio.checked) applySource(radio.value); });
+            }
+        });
+        const checkedSource = panel.querySelector('input[name="mvu2shujuku-source"]:checked');
+        applySource(checkedSource ? checkedSource.value : 'character');
         bind('#mvu2shujuku-convert-current', async () => {
             const ch = selectedCharacter(panel);
             if (!ch) { toast('请先在角色卡下拉栏中选择角色', 'error'); return; }
