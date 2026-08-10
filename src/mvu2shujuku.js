@@ -3665,6 +3665,123 @@
         };
     }
 
+    // ================================================================
+    // 开场白用户数据 → stat_data 直接落库（通用注入）
+    // MVU 原版里，捏人开场白把用户填写的数据注入变量；转换后也应把用户
+    // 填写的数据直接写进数据库表格，而不是只放进 /sys 消息等 AI 首轮填表。
+    // 转换器在前端提交逻辑（Mvu.replaceMvuData 之前）注入一段通用同步代码：
+    //   - 从脚本中已有的 stat_data.<组>.<字段> 引用推断“主数据组”（出现次数最多）；
+    //   - 用通用英文键词表把 characterData 的字段映射到 stat_data 路径；
+    //   - 只写入 schema 中真实存在的列，绝不凭空加列/污染其他结构。
+    // 参考卡（sqlite 版）是作者重写前端实现同样效果；这里用通用规则覆盖所有卡。
+    // ================================================================
+    const OPENING_FIELD_MAP = {
+        name: ['姓名', '名字', '道号', '角色名'],
+        gender: ['性别'],
+        race: ['种族'],
+        appearance: ['容貌', '外貌', '长相', '外观'],
+        identity: ['出身', '身份', '来历'],
+        realm: ['境界', '修为境界'],
+        spiritRoot: ['灵根'],
+        technique: ['功法', '功法名'],
+        fortune: ['气运'],
+        age: ['年龄'],
+        personality: ['性格', '性情'],
+        clothing: ['衣着', '服装', '服饰'],
+        backstory: ['背景', '渊源', '过往'],
+        abilities: ['神通', '能力'],
+        height: ['身高'],
+    };
+    function injectOpeningUserDataSync(scriptText, schema, report) {
+        const t = String(scriptText || '');
+        // 前端必须收集了用户数据（characterData 对象）且走 Mvu 提交，否则无从注入
+        const charDefRe = /(?:const|let|var)\s+(characterData)\s*=\s*\{/;
+        const m = charDefRe.exec(t);
+        if (!m) return { script: t, injected: false, count: 0, group: '' };
+        // 定位到 characterData 定义之后的提交调用：确认按钮 handler 里才有完整作用域
+        // （脚本前面 initMvuDefaults 等也可能调用 replaceMvuData，但那里没有 characterData）
+        const replaceRe = /Mvu\.replaceMvuData\(/g;
+        let rm = null;
+        let cand;
+        while ((cand = replaceRe.exec(t))) {
+            if (cand.index > m.index) { rm = cand; break; }
+        }
+        if (!rm) return { script: t, injected: false, count: 0, group: '' };
+
+        // 主数据组：脚本中 stat_data.<组>.<字段> 出现次数最多的组（如 主角）
+        const groupCount = {};
+        const groupRe = /stat_data\s*\.\s*([\u4e00-\u9fff]+)\s*\./g;
+        let gm;
+        while ((gm = groupRe.exec(t))) {
+            const g = gm[1];
+            groupCount[g] = (groupCount[g] || 0) + 1;
+        }
+        let group = '';
+        let best = 0;
+        for (const g in groupCount) {
+            if (groupCount[g] > best) { best = groupCount[g]; group = g; }
+        }
+        if (!group) {
+            // 没有 stat_data.组. 引用时，退回 schema 里第一个单例组（通常即主角/主数据组）
+            const sg = (Array.isArray(schema) ? schema : []).find(x => x.kind === 'singleton');
+            group = sg ? sg.name : '';
+        }
+        if (!group) return { script: t, injected: false, count: 0, group: '' };
+
+        // 该组的真实列名（中文）
+        const gSchema = (Array.isArray(schema) ? schema : []).find(x => x.name === group);
+        const colNames = new Set((gSchema && Array.isArray(gSchema.columns) ? gSchema.columns : []).map(c => c.zh));
+        // 组内是否有 _扩展数据 兜底列：模板未声明的用户字段写入该列（JSON 存储、读取时还原 stat_data）
+        const hasOverflowCol = (gSchema && Array.isArray(gSchema.columns) ? gSchema.columns : [])
+            .some(c => c.zh === '_扩展数据');
+        // 该组下的子表路径（如 主角.功法 / 主角.气运）：stat_data 里是对象/子表，
+        // 用户填的纯文本不能直接覆盖成字符串，否则破坏形状（参考卡是专门拆行进子表的卡特定逻辑）
+        const childGroupNames = new Set(
+            (Array.isArray(schema) ? schema : [])
+                .filter(x => x.parentGroup === group)
+                .map(x => x.name)
+        );
+
+        // characterData 键 → stat_data 列：词表首命中；优先写真实列，
+        // 模板没有该列但有 _扩展数据 兜底列时也写入（读取时还原为 stat_data.<组>.<字段>）
+        const pairs = [];
+        for (const key in OPENING_FIELD_MAP) {
+            const zh = OPENING_FIELD_MAP[key].find(z => colNames.has(z));
+            if (zh) {
+                pairs.push([key, zh, false]);
+            } else if (!childGroupNames.has(OPENING_FIELD_MAP[key][0]) && hasOverflowCol && OPENING_FIELD_MAP[key].length) {
+                // 无真实列：用词表首个中文名写入 _扩展数据（写入时自动进兜底列，读取时还原）
+                pairs.push([key, OPENING_FIELD_MAP[key][0], true]);
+            }
+        }
+        if (!pairs.length) return { script: t, injected: false, count: 0, group };
+
+        const lines = pairs.map(([k, zh, viaOverflow]) =>
+            `      if (characterData[${JSON.stringify(k)}] !== undefined && characterData[${JSON.stringify(k)}] !== null && String(characterData[${JSON.stringify(k)}]).trim() !== '') { try { var __sd = data.stat_data; var __p = ${JSON.stringify([group, zh])}; for (var __i = 0; __i < __p.length - 1; __i++) { if (!__sd[__p[__i]] || typeof __sd[__p[__i]] !== 'object') __sd[__p[__i]] = {}; __sd = __sd[__p[__i]]; } __sd[__p[__p.length - 1]] = characterData[${JSON.stringify(k)}]; } catch (e) {} }`
+        ).join('\n');
+        const overflowNote = pairs.some(p => p[2])
+            ? '；其中无对应列的字段（' + pairs.filter(p => p[2]).map(p => p[0] + '→' + p[1]).join('、') + '）经「_扩展数据」兜底列写入，读取时还原'
+            : '';
+
+        const snippet =
+            '\n' +
+            '      // [mvu2shujuku] 开场白用户数据 → stat_data 直接落库（转换器注入，对应 MVU 原版的开场白注入语义）\n' +
+            '      try {\n' +
+            '        if (typeof characterData === "object" && characterData && data && data.stat_data) {\n' +
+            lines +
+            '\n' +
+            '        }\n' +
+            '      } catch (e) { console.warn("[mvu2shujuku] 开场白用户数据同步失败:", e); }\n' +
+            '      ';
+
+        // 插入到第一个 Mvu.replaceMvuData( 调用之前（同一作用域内 data/characterData 均可用）
+        const injected = t.slice(0, rm.index) + snippet + t.slice(rm.index);
+        if (report) {
+            report.auto(`开场白前端已注入「用户填写数据直接落库」：组「${group}」，同步字段 ${pairs.map(p => p[0] + '→' + p[1]).join('、')}${overflowNote}（对应 MVU 原版开场白注入语义，不再等 AI 首轮填表）。`);
+        }
+        return { script: injected, injected: true, count: pairs.length, group };
+    }
+
     /**
      * 转换角色卡。
      * opts: {
@@ -3853,8 +3970,21 @@
                 const copy = deepClone(r);
                 copy.replaceString = guarded.text;
                 if (!copy.replaceString && r.replaceString) copy.replaceString = r.replaceString;
+                // 开场白用户数据直接落库：捏人前端提交时把用户填写的数据同步进 stat_data
+                const inj = injectOpeningUserDataSync(copy.replaceString, schema, report);
+                if (inj.injected) copy.replaceString = inj.script;
                 keptRegexes.push(copy);
                 continue;
+            }
+            // 非整页注入的前端同样尝试注入开场白用户数据同步
+            if (/characterData\s*=\s*\{/.test(String(r.replaceString || ''))) {
+                const inj = injectOpeningUserDataSync(r.replaceString || '', schema, report);
+                if (inj.injected) {
+                    const copy = deepClone(r);
+                    copy.replaceString = inj.script;
+                    keptRegexes.push(copy);
+                    continue;
+                }
             }
             // 状态栏刷新事件保持原样：数据桥每次写入都会广播 mag_variable_update_ended（与 MVU 原版一致），
             // 前端原有 eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, ...) 监听即可活体刷新，无需改写
@@ -3887,6 +4017,20 @@
         if (!data.extensions) data.extensions = {};
         if (!data.extensions.tavern_helper) data.extensions.tavern_helper = {};
         data.extensions.tavern_helper = th;
+
+        // 5.1 开场白/额外问候语里的 HTML 前端（捏人页面）同样注入用户数据同步。
+        // 只对含 <script> 且存在 characterData + Mvu.replaceMvuData 的 HTML 生效，纯文本开场白不动。
+        if (typeof data.first_mes === 'string' && /<script/i.test(data.first_mes)) {
+            const inj = injectOpeningUserDataSync(data.first_mes, schema, report);
+            if (inj.injected) data.first_mes = inj.script;
+        }
+        if (Array.isArray(data.alternate_greetings)) {
+            data.alternate_greetings = data.alternate_greetings.map((g, gi) => {
+                if (typeof g !== 'string' || !/<script/i.test(g)) return g;
+                const inj = injectOpeningUserDataSync(g, schema, report);
+                return inj.injected ? inj.script : g;
+            });
+        }
 
         // 6. 转换标记
         if (!data.extensions) data.extensions = {};
