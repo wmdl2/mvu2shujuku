@@ -5691,7 +5691,7 @@ ${DB_INIT_SNIPPET}
             '      </div>',
             '      <div class="mvu2shujuku-row">',
             '        <button id="mvu2shujuku-convert-current" class="menu_button">转换所选角色卡</button>',
-            '        <button id="mvu2shujuku-convert-file" class="menu_button" disabled title="先在上方选择“本地文件”来源">转换所选文件</button>',
+            '        <button id="mvu2shujuku-convert-file" class="menu_button" disabled title="从磁盘选择 .json / .png 角色卡文件">转换所选文件</button>',
             '        <button id="mvu2shujuku-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2shujuku-result"></div>',
@@ -5743,8 +5743,8 @@ ${DB_INIT_SNIPPET}
             if (charArea) charArea.style.display = isChar ? '' : 'none';
             if (fileArea) fileArea.style.display = isChar ? 'none' : '';
             // 二选一：只显示当前来源对应的转换按钮
-            if (btnCurrent) btnCurrent.style.display = isChar ? '' : 'none';
-            if (btnFile) btnFile.style.display = isChar ? 'none' : '';
+            if (btnCurrent) { btnCurrent.style.display = isChar ? '' : 'none'; btnCurrent.disabled = !isChar; }
+            if (btnFile) { btnFile.style.display = isChar ? 'none' : ''; btnFile.disabled = isChar; }
         };
         const sourceRadios = panel.querySelectorAll('input[name="mvu2shujuku-source"]');
         sourceRadios.forEach((radio) => {
@@ -7578,7 +7578,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             '      </div>',
             '      <div class="mvu2shujuku-row">',
             '        <button id="mvu2shujuku-convert-current" class="menu_button">转换所选角色卡</button>',
-            '        <button id="mvu2shujuku-convert-file" class="menu_button" disabled title="先在上方选择“本地文件”来源">转换所选文件</button>',
+            '        <button id="mvu2shujuku-convert-file" class="menu_button" disabled title="从磁盘选择 .json / .png 角色卡文件">转换所选文件</button>',
             '        <button id="mvu2shujuku-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2shujuku-result"></div>',
@@ -7630,8 +7630,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             if (charArea) charArea.style.display = isChar ? '' : 'none';
             if (fileArea) fileArea.style.display = isChar ? 'none' : '';
             // 二选一：只显示当前来源对应的转换按钮
-            if (btnCurrent) btnCurrent.style.display = isChar ? '' : 'none';
-            if (btnFile) btnFile.style.display = isChar ? 'none' : '';
+            if (btnCurrent) { btnCurrent.style.display = isChar ? '' : 'none'; btnCurrent.disabled = !isChar; }
+            if (btnFile) { btnFile.style.display = isChar ? 'none' : ''; btnFile.disabled = isChar; }
         };
         const sourceRadios = panel.querySelectorAll('input[name="mvu2shujuku-source"]');
         sourceRadios.forEach((radio) => {
