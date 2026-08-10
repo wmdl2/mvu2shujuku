@@ -4949,13 +4949,34 @@ ${DB_INIT_SNIPPET}
                         if (!obj[L.keyCol || '名称']) obj[L.keyCol || '名称'] = L.keyValue || 'row1';
                         if (obj['内容'] === undefined) obj['内容'] = '{}';
                     }
-                    await Promise.resolve(api.insertRow(L.table, obj));
-                    console.log('[mvu2shujuku][debug] 已物化单例/JSON表初始行：' + L.table);
+                    const inserted = await Promise.resolve(api.insertRow(L.table, obj));
+                    // 插件 insertRow 失败时返回 -1 / false / null，不抛异常；必须检查返回值，
+                    // 否则会误报「已物化」而表里其实没有初始行（单例表初始化丢失的根因之一）。
+                    if (inserted === -1 || inserted === false || inserted === null || inserted === undefined) {
+                        console.warn('[mvu2shujuku][debug] 物化单例/JSON表初始行失败（insertRow 返回 ' + String(inserted) + '）：' + L.table);
+                    } else {
+                        console.log('[mvu2shujuku][debug] 已物化单例/JSON表初始行：' + L.table + '（新行索引=' + inserted + '）');
+                    }
                 } catch (e) {
                     // 行已存在（UNIQUE 冲突等）→ 已物化，无需处理
-                    console.log('[mvu2shujuku][debug] 单例/JSON表初始行已存在，跳过物化：' + L.table);
+                    console.log('[mvu2shujuku][debug] 单例/JSON表初始行已存在，跳过物化：' + L.table + '（' + (e && e.message ? e.message : e) + '）');
                 }
             }
+            // 诊断：物化后输出单例/JSON 表的行数，便于确认初始行是否真的落表
+            try {
+                const allT = api.exportTableAsJson() || {};
+                for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                    if (L.kind !== 'singleton' && L.kind !== 'json') continue;
+                    for (const k in allT) {
+                        if (k.indexOf('sheet_') === 0 && allT[k] && allT[k].name === L.table) {
+                            const c = Array.isArray(allT[k].content) ? allT[k].content.length - 1 : 0;
+                            const s = Array.isArray(allT[k].seedRows) ? allT[k].seedRows.length : 0;
+                            console.log('[mvu2shujuku][debug] 物化后单例表「' + L.table + '」content 行数=' + c + '，seedRows=' + s);
+                            break;
+                        }
+                    }
+                }
+            } catch (e) {}
         } catch (e) {}
     }
 
@@ -5467,6 +5488,8 @@ ${DB_INIT_SNIPPET}
     let windowMvuShimTimer = null;
     let windowMvuFake = null;
     const originalMvuMap = new Map();
+    // iframe/子窗口上我们同步的 getAllVariables 原值（恢复时还原，避免污染其他卡）
+    const originalGetAllVariablesMap = new Map();
     function applyWindowMvuShim() {
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.writeStatDiffToDb !== 'function') return;
@@ -5594,6 +5617,12 @@ ${DB_INIT_SNIPPET}
                     }
                 }
                 w.Mvu = windowMvuFake;
+                // 前端状态栏直接调 window.getAllVariables()：把扩展侧读取函数同步到
+                // 消息 iframe/子窗口，否则 iframe 里没有该函数，前端永远读不到数据。
+                if (typeof window.getAllVariables === 'function' && w.getAllVariables !== window.getAllVariables) {
+                    if (!originalGetAllVariablesMap.has(w)) originalGetAllVariablesMap.set(w, w.getAllVariables);
+                    w.getAllVariables = window.getAllVariables;
+                }
             } catch (e) {}
         }
     }
@@ -5607,6 +5636,10 @@ ${DB_INIT_SNIPPET}
             try { if (w.Mvu === windowMvuFake) w.Mvu = orig; } catch (e) {}
         }
         originalMvuMap.clear();
+        for (const [w, orig] of originalGetAllVariablesMap) {
+            try { if (w.getAllVariables === window.getAllVariables) w.getAllVariables = orig; } catch (e) {}
+        }
+        originalGetAllVariablesMap.clear();
     }
     function installWindowMvuShim() {
         applyWindowMvuShim();
@@ -7157,13 +7190,34 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         if (!obj[L.keyCol || '名称']) obj[L.keyCol || '名称'] = L.keyValue || 'row1';
                         if (obj['内容'] === undefined) obj['内容'] = '{}';
                     }
-                    await Promise.resolve(api.insertRow(L.table, obj));
-                    console.log('[mvu2shujuku][debug] 已物化单例/JSON表初始行：' + L.table);
+                    const inserted = await Promise.resolve(api.insertRow(L.table, obj));
+                    // 插件 insertRow 失败时返回 -1 / false / null，不抛异常；必须检查返回值，
+                    // 否则会误报「已物化」而表里其实没有初始行（单例表初始化丢失的根因之一）。
+                    if (inserted === -1 || inserted === false || inserted === null || inserted === undefined) {
+                        console.warn('[mvu2shujuku][debug] 物化单例/JSON表初始行失败（insertRow 返回 ' + String(inserted) + '）：' + L.table);
+                    } else {
+                        console.log('[mvu2shujuku][debug] 已物化单例/JSON表初始行：' + L.table + '（新行索引=' + inserted + '）');
+                    }
                 } catch (e) {
                     // 行已存在（UNIQUE 冲突等）→ 已物化，无需处理
-                    console.log('[mvu2shujuku][debug] 单例/JSON表初始行已存在，跳过物化：' + L.table);
+                    console.log('[mvu2shujuku][debug] 单例/JSON表初始行已存在，跳过物化：' + L.table + '（' + (e && e.message ? e.message : e) + '）');
                 }
             }
+            // 诊断：物化后输出单例/JSON 表的行数，便于确认初始行是否真的落表
+            try {
+                const allT = api.exportTableAsJson() || {};
+                for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                    if (L.kind !== 'singleton' && L.kind !== 'json') continue;
+                    for (const k in allT) {
+                        if (k.indexOf('sheet_') === 0 && allT[k] && allT[k].name === L.table) {
+                            const c = Array.isArray(allT[k].content) ? allT[k].content.length - 1 : 0;
+                            const s = Array.isArray(allT[k].seedRows) ? allT[k].seedRows.length : 0;
+                            console.log('[mvu2shujuku][debug] 物化后单例表「' + L.table + '」content 行数=' + c + '，seedRows=' + s);
+                            break;
+                        }
+                    }
+                }
+            } catch (e) {}
         } catch (e) {}
     }
 
@@ -7675,6 +7729,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     let windowMvuShimTimer = null;
     let windowMvuFake = null;
     const originalMvuMap = new Map();
+    // iframe/子窗口上我们同步的 getAllVariables 原值（恢复时还原，避免污染其他卡）
+    const originalGetAllVariablesMap = new Map();
     function applyWindowMvuShim() {
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.writeStatDiffToDb !== 'function') return;
@@ -7802,6 +7858,12 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     }
                 }
                 w.Mvu = windowMvuFake;
+                // 前端状态栏直接调 window.getAllVariables()：把扩展侧读取函数同步到
+                // 消息 iframe/子窗口，否则 iframe 里没有该函数，前端永远读不到数据。
+                if (typeof window.getAllVariables === 'function' && w.getAllVariables !== window.getAllVariables) {
+                    if (!originalGetAllVariablesMap.has(w)) originalGetAllVariablesMap.set(w, w.getAllVariables);
+                    w.getAllVariables = window.getAllVariables;
+                }
             } catch (e) {}
         }
     }
@@ -7815,6 +7877,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             try { if (w.Mvu === windowMvuFake) w.Mvu = orig; } catch (e) {}
         }
         originalMvuMap.clear();
+        for (const [w, orig] of originalGetAllVariablesMap) {
+            try { if (w.getAllVariables === window.getAllVariables) w.getAllVariables = orig; } catch (e) {}
+        }
+        originalGetAllVariablesMap.clear();
     }
     function installWindowMvuShim() {
         applyWindowMvuShim();
