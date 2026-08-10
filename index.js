@@ -3246,12 +3246,13 @@
             `        var v=msg[k];`,
             `        if(typeof v==='string'){try{v=JSON.parse(v);}catch(e){continue;}}`,
             `        if(!v||typeof v!=='object')continue;`,
-            `        if(v.storageFrame&&v.storageFrame.checkpoint)return true;`,
+            `        // 与插件 hasAnyV2Checkpoint_ACU 一致：V2 帧（version=2 + logEntries）且 checkpoint.kind === 'full'`,
+            `        if(v.storageFrame&&v.storageFrame.version===2&&Array.isArray(v.storageFrame.logEntries)&&v.storageFrame.checkpoint&&v.storageFrame.checkpoint.kind==='full')return true;`,
             `        var ckeys=Object.keys(v);`,
             `        for(var cki=0;cki<ckeys.length;cki++){`,
             `          var child=v[ckeys[cki]];`,
             `          if(typeof child==='string'){try{child=JSON.parse(child);}catch(e){continue;}}`,
-            `          if(child&&typeof child==='object'&&child.storageFrame&&child.storageFrame.checkpoint)return true;`,
+            `          if(child&&typeof child==='object'&&child.storageFrame&&child.storageFrame.version===2&&Array.isArray(child.storageFrame.logEntries)&&child.storageFrame.checkpoint&&child.storageFrame.checkpoint.kind==='full')return true;`,
             `        }`,
             `      }`,
             `    }`,
@@ -4197,7 +4198,15 @@ ${DB_INIT_SNIPPET}
                     let v = msg[k];
                     if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { continue; } }
                     if (!v || typeof v !== 'object') continue;
-                    const hasCheckpoint = (o) => !!o && typeof o === 'object' && o.storageFrame && o.storageFrame.checkpoint;
+                    // 与插件 hasAnyV2Checkpoint_ACU 一致：必须是 V2 帧（version=2 + logEntries）且 checkpoint.kind === 'full'。
+                    // initGameSession 可能留下“模板派生”的非 full checkpoint，不能算已锚定。
+                    const hasCheckpoint = (o) => {
+                        if (!o || typeof o !== 'object') return false;
+                        const frame = o.storageFrame;
+                        if (!frame || typeof frame !== 'object') return false;
+                        if (frame.version !== 2 || !Array.isArray(frame.logEntries)) return false;
+                        return !!(frame.checkpoint && frame.checkpoint.kind === 'full');
+                    };
                     if (hasCheckpoint(v)) return true;
                     for (const ck of Object.keys(v)) {
                         let child = v[ck];
@@ -5733,8 +5742,9 @@ ${DB_INIT_SNIPPET}
             const btnFile = panel.querySelector('#mvu2shujuku-convert-file');
             if (charArea) charArea.style.display = isChar ? '' : 'none';
             if (fileArea) fileArea.style.display = isChar ? 'none' : '';
-            if (btnCurrent) btnCurrent.disabled = !isChar;
-            if (btnFile) btnFile.disabled = isChar;
+            // 二选一：只显示当前来源对应的转换按钮
+            if (btnCurrent) btnCurrent.style.display = isChar ? '' : 'none';
+            if (btnFile) btnFile.style.display = isChar ? 'none' : '';
         };
         const sourceRadios = panel.querySelectorAll('input[name="mvu2shujuku-source"]');
         sourceRadios.forEach((radio) => {
@@ -6075,7 +6085,15 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     let v = msg[k];
                     if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { continue; } }
                     if (!v || typeof v !== 'object') continue;
-                    const hasCheckpoint = (o) => !!o && typeof o === 'object' && o.storageFrame && o.storageFrame.checkpoint;
+                    // 与插件 hasAnyV2Checkpoint_ACU 一致：必须是 V2 帧（version=2 + logEntries）且 checkpoint.kind === 'full'。
+                    // initGameSession 可能留下“模板派生”的非 full checkpoint，不能算已锚定。
+                    const hasCheckpoint = (o) => {
+                        if (!o || typeof o !== 'object') return false;
+                        const frame = o.storageFrame;
+                        if (!frame || typeof frame !== 'object') return false;
+                        if (frame.version !== 2 || !Array.isArray(frame.logEntries)) return false;
+                        return !!(frame.checkpoint && frame.checkpoint.kind === 'full');
+                    };
                     if (hasCheckpoint(v)) return true;
                     for (const ck of Object.keys(v)) {
                         let child = v[ck];
@@ -7611,8 +7629,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const btnFile = panel.querySelector('#mvu2shujuku-convert-file');
             if (charArea) charArea.style.display = isChar ? '' : 'none';
             if (fileArea) fileArea.style.display = isChar ? 'none' : '';
-            if (btnCurrent) btnCurrent.disabled = !isChar;
-            if (btnFile) btnFile.disabled = isChar;
+            // 二选一：只显示当前来源对应的转换按钮
+            if (btnCurrent) btnCurrent.style.display = isChar ? '' : 'none';
+            if (btnFile) btnFile.style.display = isChar ? 'none' : '';
         };
         const sourceRadios = panel.querySelectorAll('input[name="mvu2shujuku-source"]');
         sourceRadios.forEach((radio) => {
