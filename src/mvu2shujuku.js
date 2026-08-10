@@ -4927,6 +4927,24 @@ ${DB_INIT_SNIPPET}
             for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
                 if (L.kind !== 'singleton' && L.kind !== 'json') continue;
                 try {
+                    // 表里已有数据行（row_id=1 已存在）就不重复物化：
+                    // 初始化默认行由 initGameSession 建表时写入，这里只兜底“建表后仍空表”的情况，
+                    // 避免每次写库前插入 row_id=2 再清理的多余循环（也会让注入数据误落垫脚行）。
+                    let hasDataRow = false;
+                    try {
+                        const allT = api.exportTableAsJson() || {};
+                        for (const k in allT) {
+                            if (k.indexOf('sheet_') === 0 && allT[k] && allT[k].name === L.table &&
+                                Array.isArray(allT[k].content) && allT[k].content.length > 1) {
+                                hasDataRow = true;
+                                break;
+                            }
+                        }
+                    } catch (e) {}
+                    if (hasDataRow) {
+                        console.log('[mvu2shujuku][debug] 单例/JSON表已有数据行，跳过物化：' + L.table);
+                        continue;
+                    }
                     const obj = {};
                     if (tplCached) {
                         for (const k in tplCached) {
@@ -5618,6 +5636,23 @@ ${DB_INIT_SNIPPET}
                 if (typeof window.getAllVariables === 'function' && w.getAllVariables !== window.getAllVariables) {
                     if (!originalGetAllVariablesMap.has(w)) originalGetAllVariablesMap.set(w, w.getAllVariables);
                     w.getAllVariables = window.getAllVariables;
+                }
+                // 前端状态栏在消息 iframe 里用 eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, ...) 监听刷新。
+                // 若 iframe 没有 TH 注入的 eventOn，就补一个绑定到 CustomEvent 的兜底，
+                // 这样 emitMvuEvent 的 dispatchEvent 一定能触发前端刷新（不会因事件源不一致而收不到）。
+                if (typeof w.addEventListener === 'function' && typeof w.eventOn !== 'function') {
+                    w.eventOn = (evName, handler) => {
+                        const wrapped = (e) => {
+                            try {
+                                const d = e && e.detail;
+                                if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
+                                else handler(d);
+                            } catch (err) {}
+                        };
+                        w.addEventListener(evName, wrapped);
+                        return { stop: () => { try { w.removeEventListener(evName, wrapped); } catch (e2) {} } };
+                    };
+                    w.eventOff = (evName, handler) => { try { w.removeEventListener(evName, handler); } catch (e2) {} };
                 }
             } catch (e) {}
         }
