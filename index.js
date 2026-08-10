@@ -5198,19 +5198,49 @@ ${DB_INIT_SNIPPET}
                     await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     const prev = all.stat_data || {};
-                    // 差异写入（裸 updateCell/insertRow）——与参考卡一致：开局 initGameSession 单独建锚后，
-                    // 裸写延续锚点；实测 importTableAsJson 提交反而会丢 checkpoint。
-                    const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
-                    if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
-                    else if (typeof api.importTableAsJson === 'function') {
-                        // 差异为空可能是表结构/行缺失导致无操作可写：用完整快照兜底
-                        try {
-                            const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
-                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
-                            if (ok) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异为空，已用 importTableAsJson 快照兜底');
-                        } catch (e) {
-                            console.warn('[mvu2shujuku][debug] importTableAsJson 快照兜底异常:', e);
+                    // 写入主路径：用插件自己的持久化通道（importTableAsJson 完整快照提交）。
+                    // 插件会走 runTableUpdateCommit → persistTablesToChatMessage，把完整表格状态
+                    // 写入聊天消息的 V2 checkpoint 并保存——刷新/重进时从 checkpoint 恢复，数据不丢。
+                    // 早期曾因 importTableAsJson 丢 checkpoint 而改用裸 updateCell/insertRow，
+                    // 但裸写只更新运行时、依赖酒馆 saveChat 落盘，反而被环境（如 cocktail-plus）
+                    // 拦截导致刷新后数据消失。现恢复插件自身持久化为主路径。
+                    let n = 0;
+                    let usedSnapshot = false;
+                    try {
+                        const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
+                        const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
+                        if (ok) {
+                            usedSnapshot = true;
+                            console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
+                        } else {
+                            console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交失败，回退差异写入');
                         }
+                    } catch (e) {
+                        console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
+                    }
+                    if (!usedSnapshot) {
+                        // 差异写入（裸 updateCell/insertRow）——作为 importTableAsJson 失败时的降级路径
+                        n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
+                        if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                        // 降级路径依赖酒馆 saveChat 落盘（importTableAsJson 成功时插件已自己持久化，无需额外保存）
+                        try {
+                            const ctx3 = getContextSafe();
+                            const saveFn3 = (typeof ctx3.saveChatConditional === 'function' && ctx3.saveChatConditional.bind(ctx3)) ||
+                                (typeof ctx3.saveChat === 'function' && ctx3.saveChat.bind(ctx3)) ||
+                                (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
+                                (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
+                            if (saveFn3) {
+                                for (let attempt = 0; attempt < 2; attempt++) {
+                                    try {
+                                        await Promise.resolve(saveFn3());
+                                        console.log('[mvu2shujuku][debug][保存] 差异写入后已主动保存聊天（attempt=' + (attempt + 1) + '）');
+                                        break;
+                                    } catch (saveErr) {
+                                        console.warn('[mvu2shujuku][debug][保存] 主动保存聊天失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                                    }
+                                }
+                            }
+                        } catch (e) {}
                     }
                     // 诊断：写入后立即检查聊天 checkpoint 里是否包含刚写入的数据。
                     // 若 checkpoint 仍是初始快照（不含用户注入值），重进聊天时插件会从 checkpoint
@@ -7509,19 +7539,49 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     const prev = all.stat_data || {};
-                    // 差异写入（裸 updateCell/insertRow）——与参考卡一致：开局 initGameSession 单独建锚后，
-                    // 裸写延续锚点；实测 importTableAsJson 提交反而会丢 checkpoint。
-                    const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
-                    if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
-                    else if (typeof api.importTableAsJson === 'function') {
-                        // 差异为空可能是表结构/行缺失导致无操作可写：用完整快照兜底
-                        try {
-                            const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
-                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
-                            if (ok) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异为空，已用 importTableAsJson 快照兜底');
-                        } catch (e) {
-                            console.warn('[mvu2shujuku][debug] importTableAsJson 快照兜底异常:', e);
+                    // 写入主路径：用插件自己的持久化通道（importTableAsJson 完整快照提交）。
+                    // 插件会走 runTableUpdateCommit → persistTablesToChatMessage，把完整表格状态
+                    // 写入聊天消息的 V2 checkpoint 并保存——刷新/重进时从 checkpoint 恢复，数据不丢。
+                    // 早期曾因 importTableAsJson 丢 checkpoint 而改用裸 updateCell/insertRow，
+                    // 但裸写只更新运行时、依赖酒馆 saveChat 落盘，反而被环境（如 cocktail-plus）
+                    // 拦截导致刷新后数据消失。现恢复插件自身持久化为主路径。
+                    let n = 0;
+                    let usedSnapshot = false;
+                    try {
+                        const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
+                        const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
+                        if (ok) {
+                            usedSnapshot = true;
+                            console.log('[mvu2shujuku][debug] Mvu 写入完成（importTableAsJson 快照提交，插件自身持久化）');
+                        } else {
+                            console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交失败，回退差异写入');
                         }
+                    } catch (e) {
+                        console.warn('[mvu2shujuku][debug] importTableAsJson 快照提交异常，回退差异写入:', e && e.message ? e.message : e);
+                    }
+                    if (!usedSnapshot) {
+                        // 差异写入（裸 updateCell/insertRow）——作为 importTableAsJson 失败时的降级路径
+                        n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
+                        if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                        // 降级路径依赖酒馆 saveChat 落盘（importTableAsJson 成功时插件已自己持久化，无需额外保存）
+                        try {
+                            const ctx3 = getContextSafe();
+                            const saveFn3 = (typeof ctx3.saveChatConditional === 'function' && ctx3.saveChatConditional.bind(ctx3)) ||
+                                (typeof ctx3.saveChat === 'function' && ctx3.saveChat.bind(ctx3)) ||
+                                (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
+                                (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
+                            if (saveFn3) {
+                                for (let attempt = 0; attempt < 2; attempt++) {
+                                    try {
+                                        await Promise.resolve(saveFn3());
+                                        console.log('[mvu2shujuku][debug][保存] 差异写入后已主动保存聊天（attempt=' + (attempt + 1) + '）');
+                                        break;
+                                    } catch (saveErr) {
+                                        console.warn('[mvu2shujuku][debug][保存] 主动保存聊天失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                                    }
+                                }
+                            }
+                        } catch (e) {}
                     }
                     // 诊断：写入后立即检查聊天 checkpoint 里是否包含刚写入的数据。
                     // 若 checkpoint 仍是初始快照（不含用户注入值），重进聊天时插件会从 checkpoint
