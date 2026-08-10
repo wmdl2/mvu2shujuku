@@ -4465,20 +4465,19 @@ ${DB_INIT_SNIPPET}
                 reAnchorSkipLog[k] = true;
                 console.log('[mvu2shujuku][debug][重锚] 跳过（' + reason + '，chat=' + key + '）');
             };
-            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
-            const api = getAcuApi();
-            if (!api) { logSkip('未找到数据库 API'); return; }
+            // 廉价门控先跑：非转换卡 / 不在开局阶段时直接返回，避免周期自检的开销
             const ch = currentCharacter();
             if (!isConvertedMvuCard(ch)) { logSkip('非转换卡'); return; }
-            const tplCached = cachedTemplateForCurrentCard();
-            if (!tplCached) { logSkip('无模板缓存'); return; }
-            // 只处理开局阶段：楼层数少、数据尚未积累，重锚不会覆盖真实进度；
-            // 正常对话中丢失锚点由写库前 ensureCheckpointBeforeWrite 按原逻辑处理。
             try {
                 const ctx = getContextSafe();
                 const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
                 if (chat.length > 4) { logSkip('聊天楼层过多（' + chat.length + '）'); return; }
             } catch (e) { logSkip('读取聊天上下文失败'); return; }
+            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
+            const api = getAcuApi();
+            if (!api) { logSkip('未找到数据库 API'); return; }
+            const tplCached = cachedTemplateForCurrentCard();
+            if (!tplCached) { logSkip('无模板缓存'); return; }
             // 表格里必须已有真实数据才值得重锚（空表说明是普通建表流程，交给 autoInit）
             const cur = api.exportTableAsJson() || {};
             let hasRows = false;
@@ -4502,6 +4501,26 @@ ${DB_INIT_SNIPPET}
             const ok = !(initResult && initResult.success === false);
             console.log('[mvu2shujuku][debug][重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
                 ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint());
+            // 重锚成功必须落盘：首楼替换后 chat 已被插件/酒馆重新保存过（不带 checkpoint），
+            // 仅改内存会在下一次保存或刷新时再次丢失。
+            if (ok || hasFullShujukuCheckpoint()) {
+                try {
+                    const ctx2 = getContextSafe();
+                    const saveFn2 = (typeof ctx2.saveChatConditional === 'function' && ctx2.saveChatConditional.bind(ctx2)) ||
+                        (typeof ctx2.saveChat === 'function' && ctx2.saveChat.bind(ctx2)) ||
+                        (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
+                        (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
+                    if (saveFn2) {
+                        await Promise.race([
+                            Promise.resolve(saveFn2()),
+                            new Promise(res => hostWindow.setTimeout(res, 6000)),
+                        ]);
+                        console.log('[mvu2shujuku][debug][重锚] 重建后已等待酒馆保存完成。');
+                    }
+                } catch (e) {
+                    console.warn('[mvu2shujuku][debug][重锚] 重建后保存异常:', e && e.message ? e.message : e);
+                }
+            }
         } catch (e) {
             console.warn('[mvu2shujuku][debug][重锚] 异常:', e && e.message ? e.message : e);
         }
@@ -4797,6 +4816,7 @@ ${DB_INIT_SNIPPET}
                     hostWindow.setTimeout(autoInitDatabase, 600);
                     // 复刻 MVU：AI 回复后追加状态栏占位符，前端注入正则才能命中每条消息
                     ensureWindowStatusPlaceholder();
+                    scheduleReAnchorCheckpoint();
                 });
                 // 开场白切换/首楼换 swipe 会丢掉插件的 full checkpoint：必须立即重建锚点，
                 // 否则捏人 UI 的写库会产生无锚点 artifacts，触发插件 V2 boundary_after_data_mismatch。
@@ -4809,12 +4829,28 @@ ${DB_INIT_SNIPPET}
                         });
                     }
                 }
+                // 首楼删除/新增（道渊等卡的开场流程会替换 greeting 楼层）也会带走 checkpoint；
+                // 这些事件不一定会触发 MESSAGE_UPDATED，单独挂钩作为补充。
+                for (const evName of [et.MESSAGE_SENT, et.MESSAGE_DELETED]) {
+                    if (evName && typeof evName === 'string') {
+                        es.on(evName, () => scheduleReAnchorCheckpoint());
+                    }
+                }
                 if (et.GENERATION_ENDED) {
                     es.on(et.GENERATION_ENDED, () => {
                         ensureWindowStatusPlaceholder();
                         hostWindow.setTimeout(autoInitDatabase, 100);
                         scheduleReAnchorCheckpoint();
                     });
+                }
+                // 周期自检兜底：部分卡的开场流程在事件序列之外替换首楼（如道渊替换为 System），
+                // 单靠事件可能错过窗口。开局阶段每 3 秒评估一次，重锚函数内部有廉价门控，
+                // 非转换卡/非开局阶段/有锚点时几乎零开销直接返回。
+                if (!window.__mvu2shujukuAnchorIntervalStarted) {
+                    window.__mvu2shujukuAnchorIntervalStarted = true;
+                    hostWindow.setInterval(() => {
+                        try { reAnchorCheckpointIfNeeded(); } catch (e) {}
+                    }, 3000);
                 }
                 autoInitState.inited = true;
             }
@@ -7289,20 +7325,19 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 reAnchorSkipLog[k] = true;
                 console.log('[mvu2shujuku][debug][重锚] 跳过（' + reason + '，chat=' + key + '）');
             };
-            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
-            const api = getAcuApi();
-            if (!api) { logSkip('未找到数据库 API'); return; }
+            // 廉价门控先跑：非转换卡 / 不在开局阶段时直接返回，避免周期自检的开销
             const ch = currentCharacter();
             if (!isConvertedMvuCard(ch)) { logSkip('非转换卡'); return; }
-            const tplCached = cachedTemplateForCurrentCard();
-            if (!tplCached) { logSkip('无模板缓存'); return; }
-            // 只处理开局阶段：楼层数少、数据尚未积累，重锚不会覆盖真实进度；
-            // 正常对话中丢失锚点由写库前 ensureCheckpointBeforeWrite 按原逻辑处理。
             try {
                 const ctx = getContextSafe();
                 const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
                 if (chat.length > 4) { logSkip('聊天楼层过多（' + chat.length + '）'); return; }
             } catch (e) { logSkip('读取聊天上下文失败'); return; }
+            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
+            const api = getAcuApi();
+            if (!api) { logSkip('未找到数据库 API'); return; }
+            const tplCached = cachedTemplateForCurrentCard();
+            if (!tplCached) { logSkip('无模板缓存'); return; }
             // 表格里必须已有真实数据才值得重锚（空表说明是普通建表流程，交给 autoInit）
             const cur = api.exportTableAsJson() || {};
             let hasRows = false;
@@ -7326,6 +7361,26 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const ok = !(initResult && initResult.success === false);
             console.log('[mvu2shujuku][debug][重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
                 ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint());
+            // 重锚成功必须落盘：首楼替换后 chat 已被插件/酒馆重新保存过（不带 checkpoint），
+            // 仅改内存会在下一次保存或刷新时再次丢失。
+            if (ok || hasFullShujukuCheckpoint()) {
+                try {
+                    const ctx2 = getContextSafe();
+                    const saveFn2 = (typeof ctx2.saveChatConditional === 'function' && ctx2.saveChatConditional.bind(ctx2)) ||
+                        (typeof ctx2.saveChat === 'function' && ctx2.saveChat.bind(ctx2)) ||
+                        (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
+                        (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
+                    if (saveFn2) {
+                        await Promise.race([
+                            Promise.resolve(saveFn2()),
+                            new Promise(res => hostWindow.setTimeout(res, 6000)),
+                        ]);
+                        console.log('[mvu2shujuku][debug][重锚] 重建后已等待酒馆保存完成。');
+                    }
+                } catch (e) {
+                    console.warn('[mvu2shujuku][debug][重锚] 重建后保存异常:', e && e.message ? e.message : e);
+                }
+            }
         } catch (e) {
             console.warn('[mvu2shujuku][debug][重锚] 异常:', e && e.message ? e.message : e);
         }
@@ -7621,6 +7676,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     hostWindow.setTimeout(autoInitDatabase, 600);
                     // 复刻 MVU：AI 回复后追加状态栏占位符，前端注入正则才能命中每条消息
                     ensureWindowStatusPlaceholder();
+                    scheduleReAnchorCheckpoint();
                 });
                 // 开场白切换/首楼换 swipe 会丢掉插件的 full checkpoint：必须立即重建锚点，
                 // 否则捏人 UI 的写库会产生无锚点 artifacts，触发插件 V2 boundary_after_data_mismatch。
@@ -7633,12 +7689,28 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         });
                     }
                 }
+                // 首楼删除/新增（道渊等卡的开场流程会替换 greeting 楼层）也会带走 checkpoint；
+                // 这些事件不一定会触发 MESSAGE_UPDATED，单独挂钩作为补充。
+                for (const evName of [et.MESSAGE_SENT, et.MESSAGE_DELETED]) {
+                    if (evName && typeof evName === 'string') {
+                        es.on(evName, () => scheduleReAnchorCheckpoint());
+                    }
+                }
                 if (et.GENERATION_ENDED) {
                     es.on(et.GENERATION_ENDED, () => {
                         ensureWindowStatusPlaceholder();
                         hostWindow.setTimeout(autoInitDatabase, 100);
                         scheduleReAnchorCheckpoint();
                     });
+                }
+                // 周期自检兜底：部分卡的开场流程在事件序列之外替换首楼（如道渊替换为 System），
+                // 单靠事件可能错过窗口。开局阶段每 3 秒评估一次，重锚函数内部有廉价门控，
+                // 非转换卡/非开局阶段/有锚点时几乎零开销直接返回。
+                if (!window.__mvu2shujukuAnchorIntervalStarted) {
+                    window.__mvu2shujukuAnchorIntervalStarted = true;
+                    hostWindow.setInterval(() => {
+                        try { reAnchorCheckpointIfNeeded(); } catch (e) {}
+                    }, 3000);
                 }
                 autoInitState.inited = true;
             }
