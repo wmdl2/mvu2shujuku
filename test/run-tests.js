@@ -628,6 +628,107 @@ test('表种类推导矩阵：单例/行表/数组/混合均符合预期', () =>
     }
 });
 
+test('initvar 注释行不产生变量组，顶层标量原样保留', () => {
+    // YAML 子集：开头 # 注释行、顶层标量、嵌套对象混排（人妻公寓式写法）
+    const content = [
+        '# 初始值:第四态休眠拍板（注释绝不能当变量组）',
+        '# 动态创建：首批入住由脚本写入',
+        '户: {}',
+        '现金: 500',
+        '胜任度: 80',
+        '风闻: 0',
+        '玩家资源:',
+        '  精力: { 当前值: 8, 训练经验: 0, 永久上限加成: 0 }',
+        '  体力: { 当前值: 5, 训练经验: 0, 永久上限加成: 0 }',
+        '系统:',
+        '  _数据版本: 7',
+        '  _管理考核: { 上次生成期: -1, 活跃任务: [], 母亲圆场: { 危险轮次起期: -1, 事件ID: "" } }',
+    ].join('\n');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '解析压力卡',
+            description: '',
+            first_mes: '你好',
+            character_book: { entries: [{ comment: '[InitVar]变量初始化', content }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const t = r.template;
+    const sheetNames = Object.keys(t).filter(k => k.startsWith('sheet_')).map(k => t[k].name);
+    // 1) # 注释行不得成为表
+    assert.ok(!sheetNames.some(n => n.startsWith('#')), '注释行不应生成表，实际：' + sheetNames.join('、'));
+    // 2) 顶层标量保留为 JSON 表（内容列）
+    const cash = t[Object.keys(t).find(k => t[k].name === '现金表')];
+    assert.strictEqual(cash.content[1][cash.content[0].indexOf('内容')], '500', '现金初始值应保留');
+    const competence = t[Object.keys(t).find(k => t[k].name === '胜任度表')];
+    assert.strictEqual(competence.content[1][competence.content[0].indexOf('内容')], '80', '胜任度初始值应保留');
+    // 3) 行内对象（含中英混合键 事件ID）解析成对象，不是坏字符串
+    const sys = t[Object.keys(t).find(k => t[k].name === '系统表')];
+    const hdr = sys.content[0];
+    const mgmtIdx = hdr.indexOf('_管理考核');
+    assert.ok(mgmtIdx >= 0, '系统表应有 _管理考核 对象列');
+    const mgmt = JSON.parse(sys.content[1][mgmtIdx]);
+    assert.strictEqual(mgmt['上次生成期'], -1, '_管理考核.上次生成期 应为 -1');
+    assert.ok('事件ID' in mgmt['母亲圆场'], '中英混合键 事件ID 应被正确解析');
+    // 4) 混合结构对象不拆垃圾子表（不应出现 _管理考核表）
+    assert.ok(!sheetNames.includes('_管理考核表'), '混合结构对象不应拆子表');
+});
+
+test('单例对象列写入：子字段变更整对象写回（jsonCell）', async () => {
+    const content = [
+        '系统:',
+        '  _数据版本: 7',
+        '  _管理考核: { 上次生成期: -1, 活跃任务: [], 母亲圆场: { 危险轮次起期: -1, 事件ID: "" } }',
+    ].join('\n');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '对象列写入卡',
+            description: '',
+            first_mes: '你好',
+            character_book: { entries: [{ comment: '[InitVar]', content }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const t = r.template;
+    const layout = JSON.parse(r.card.data.extensions.mvu2shujuku.layout);
+    const tables = JSON.parse(JSON.stringify(t));
+    const api = {
+        exportTableAsJson: () => tables,
+        updateCell: async (table, rowIndex, col, value) => {
+            for (const k in tables) {
+                if (tables[k].name === table) {
+                    if (!tables[k].content[rowIndex]) tables[k].content[rowIndex] = [];
+                    const ci = tables[k].content[0].indexOf(col);
+                    if (ci === -1) throw new Error('列不存在 ' + col);
+                    tables[k].content[rowIndex][ci] = value;
+                    return true;
+                }
+            }
+            return false;
+        },
+        insertRow: async (tn, o) => { const s = Object.values(tables).find(x => x.name === tn); s.content.push([]); return s.content.length - 1; },
+        deleteRow: async (tn, idx) => { const s = Object.values(tables).find(x => x.name === tn); s.content.splice(idx, 1); return true; },
+        executeSqlBatch: async () => false,
+    };
+    const prev = core.statDataFromTables(layout, tables).stat_data;
+    const next = JSON.parse(JSON.stringify(prev));
+    next.系统._管理考核['上次生成期'] = 3;
+    next.系统._管理考核['活跃任务'] = ['考核A'];
+    const n = await core.writeStatDiffToDb(api, layout, prev, next);
+    assert.ok(n > 0, '对象列变更应产生写入');
+    const sys = Object.values(tables).find(x => x.name === '系统表');
+    const ci = sys.content[0].indexOf('_管理考核');
+    const stored = JSON.parse(sys.content[1][ci]);
+    assert.strictEqual(stored['上次生成期'], 3, '对象列应整对象写回');
+    assert.deepStrictEqual(stored['活跃任务'], ['考核A'], '对象列数组字段应写回');
+    const after = core.statDataFromTables(layout, tables).stat_data;
+    assert.strictEqual(after.系统._管理考核['上次生成期'], 3, '回读应一致');
+});
+
 test('[mvu_plot] 剧情条目全部保留，内部 MVU 宏改写为数据库引用', () => {
     const card = {
         spec: 'chara_card_v3',
