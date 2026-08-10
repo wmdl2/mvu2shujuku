@@ -4443,6 +4443,7 @@ ${DB_INIT_SNIPPET}
     let anchorRetryTimer = null;
     let lastAnchorChat = '';
     let lastAnchorAttempt = 0;
+    const reAnchorSkipLog = {};
     async function reAnchorCheckpointIfNeeded() {
         const now = Date.now();
         if (now - lastAnchorAttempt < 2500) return;
@@ -4454,20 +4455,26 @@ ${DB_INIT_SNIPPET}
                 // 切聊天后先重置节流窗口，给新聊天的事件序列留出时间
                 lastAnchorAttempt = now;
             }
-            if (hasFullShujukuCheckpoint()) return;
+            const logSkip = (reason) => {
+                const k = key + '|' + reason;
+                if (reAnchorSkipLog[k]) return;
+                reAnchorSkipLog[k] = true;
+                console.log('[mvu2shujuku][debug][重锚] 跳过（' + reason + '，chat=' + key + '）');
+            };
+            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
             const api = getAcuApi();
-            if (!api) return;
+            if (!api) { logSkip('未找到数据库 API'); return; }
             const ch = currentCharacter();
-            if (!isConvertedMvuCard(ch)) return;
+            if (!isConvertedMvuCard(ch)) { logSkip('非转换卡'); return; }
             const tplCached = cachedTemplateForCurrentCard();
-            if (!tplCached) return;
+            if (!tplCached) { logSkip('无模板缓存'); return; }
             // 只处理开局阶段：楼层数少、数据尚未积累，重锚不会覆盖真实进度；
             // 正常对话中丢失锚点由写库前 ensureCheckpointBeforeWrite 按原逻辑处理。
             try {
                 const ctx = getContextSafe();
                 const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-                if (chat.length > 4) return;
-            } catch (e) { return; }
+                if (chat.length > 4) { logSkip('聊天楼层过多（' + chat.length + '）'); return; }
+            } catch (e) { logSkip('读取聊天上下文失败'); return; }
             // 表格里必须已有真实数据才值得重锚（空表说明是普通建表流程，交给 autoInit）
             const cur = api.exportTableAsJson() || {};
             let hasRows = false;
@@ -4477,7 +4484,7 @@ ${DB_INIT_SNIPPET}
                 if (s && Array.isArray(s.content) && s.content.length > 1) { hasRows = true; break; }
                 if (s && Array.isArray(s.seedRows) && s.seedRows.length) { hasRows = true; break; }
             }
-            if (!hasRows) return;
+            if (!hasRows) { logSkip('表格无数据行'); return; }
             console.log('[mvu2shujuku][debug][重锚] 开局首楼被替换/删除导致 full checkpoint 丢失（chat=' + key + '），用当前运行时数据重建锚点…');
             // 用当前运行时数据合并回模板：保留 sourceData/规则，行数据为现有值（不丢用户注入）
             const reTpl = mergeSnapshotIntoTemplate(tplCached, cur);
