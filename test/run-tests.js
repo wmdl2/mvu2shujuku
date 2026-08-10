@@ -860,7 +860,7 @@ function bridgeSandbox(r, opts = {}) {
     const addCheckpoint = () => {
         // 模拟插件提交成功后真的建立 full checkpoint
         chat.push({ message_id: chat.length, is_user: false, mes: '模拟消息',
-            TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { ts: Date.now() } } } }) });
+            TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: Date.now() } } } }) });
     };
     const fakeApi = {
         exportTableAsJson: () => tables,
@@ -1247,7 +1247,7 @@ test('性能回归：桥的 重建/写入 按批次只导出一次全表快照�
         exportTableAsJson: () => { exportCount += 1; return tables; },
         importTemplateFromData: async () => ({ success: true }),
         initGameSession: async () => {
-            chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { ts: 1 } } } }) });
+            chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) });
             return { success: true, runtimeReady: true };
         },
         registerTableUpdateCallback: () => {},
@@ -1337,7 +1337,7 @@ test('单例/整组JSON表仅表头时自动补初始行（updateCell 不再 Row
         getTableTemplate: () => r.template,
         importTemplateFromData: async () => ({ success: true }),
         initGameSession: async () => {
-            chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { ts: 1 } } } }) });
+            chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) });
             return { success: true, runtimeReady: true };
         },
         registerTableUpdateCallback: () => {},
@@ -2229,7 +2229,7 @@ test('聊天缺 full checkpoint 时自动重建数据库锚点；已有锚点则
     // 已有锚点：不应再次调用 initGameSession 补锚
     const s2 = makeSandbox([
         { message_id: 0, is_user: false, mes: '你好',
-          TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { ts: 1 } } } }) },
+          TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) },
     ]);
     await waitBridgeFlush(500);
     assert.strictEqual(s2.initCalls(), 0, '已存在 full checkpoint 时不应重复重建锚点');
@@ -2300,7 +2300,7 @@ test('写库前锚点：仅模板行改动（无额外行）时重置重建并�
             importTemplateFromData: async () => ({ success: true }),
             initGameSession: async () => {
                 counters.init += 1;
-                chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { ts: 1 } } } }) });
+                chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) });
                 return { success: true, runtimeReady: true };
             },
             importTableAsJson: async () => false,
@@ -2355,6 +2355,54 @@ test('写库前锚点：仅模板行改动（无额外行）时重置重建并�
     const zj2 = Object.values(s2.tables).find(s => s && s.name === '主角表');
     const nameIdx = zj2.content[0].indexOf('姓名');
     assert.notStrictEqual(zj2.content[1][nameIdx], '不应写入', '无锚点且有额外行时应放弃写入');
+});
+
+test('锚点检测与插件一致：只有 V2 full checkpoint 才算已锚定（模板派生/旧格式不算）', async () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const vm2 = require('vm');
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const cases = [
+        // 非 full：模板派生 checkpoint（initGameSession 留下的形态）——不应算已锚定
+        [{ message_id: 0, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'template_only_root', ts: 1 } } } }) }],
+        // 缺 version/logEntries：旧格式——不应算已锚定
+        [{ message_id: 0, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { kind: 'full', ts: 1 } } } }) }],
+        // 真正的 V2 full checkpoint——应算已锚定
+        [{ message_id: 0, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) }],
+    ];
+    const expected = [false, false, true];
+    for (let ci = 0; ci < cases.length; ci++) {
+        const chat = cases[ci];
+        let initCalls = 0;
+        const win = {
+            top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
+            CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+            TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+            getContext: () => ({ chatId: 'c1', name: '测试', chat, eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+        };
+        win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+        win.AutoCardUpdaterAPI = {
+            exportTableAsJson: () => tables,
+            importTemplateFromData: async () => ({ success: true }),
+            initGameSession: async () => { initCalls += 1; return { success: true, runtimeReady: true }; },
+            registerTableUpdateCallback: () => {},
+            updateCell: async () => true,
+            insertRow: async () => 1,
+            deleteRow: async () => true,
+        };
+        vm2.createContext(win);
+        vm2.runInContext(r.bridgeScript, win);
+        const mvu = win.Mvu.getMvuData();
+        if (!mvu.stat_data.主角) mvu.stat_data.主角 = {};
+        mvu.stat_data.主角.姓名 = '测试' + ci;
+        await win.Mvu.replaceMvuData(mvu);
+        await waitBridgeFlush(600);
+        if (expected[ci]) {
+            assert.strictEqual(initCalls, 0, '真正的 V2 full checkpoint 存在时不应重建锚点');
+        } else {
+            assert.ok(initCalls >= 1, '非 full/旧格式 checkpoint 不应算已锚定，应触发锚点重建');
+        }
+    }
 });
 
 runTests();
