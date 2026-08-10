@@ -249,7 +249,8 @@ test('writeStatDiffToDb：stat_data 差异写回数据库（单例更新/行表�
         },
         deleteRow: async (tn, ri) => {
             const s = Object.values(tables).find(x => x.name === tn);
-            s.content.splice(ri + 1, 1);
+            // 插件真实语义：rowIndex 是 content 数组索引（0=表头，1=第一数据行）
+            s.content.splice(ri, 1);
             return true;
         },
     };
