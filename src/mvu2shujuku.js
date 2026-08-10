@@ -4938,30 +4938,12 @@ ${DB_INIT_SNIPPET}
             for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
                 if (L.kind !== 'singleton' && L.kind !== 'json') continue;
                 try {
-                    // 物化判定：content 里是否已有 row_id=1 的可写行。
-                    // 有 → 直接跳过（不插不删，注入数据写 row_id=1，无第二行可误伤）；
-                    // 无 → 补一行。空 content 时插件 insertRow 会分配 row_id=1（基于 content 最大 id+1，
-                    // seedRows 不参与 content 的 id 分配），正好是我们要的身份行，之后无需清理。
-                    // 注意：不能只看 exportTableAsJson 的 content 长度判断“有没有行”——
-                    // SQLite 视图可能把 seedRows 合并显示，必须检查 content 里确实有 row_id=1 的数据行。
-                    let hasRow1 = false;
-                    try {
-                        const allT = api.exportTableAsJson() || {};
-                        for (const k in allT) {
-                            if (k.indexOf('sheet_') === 0 && allT[k] && allT[k].name === L.table &&
-                                Array.isArray(allT[k].content)) {
-                                for (let ri = 1; ri < allT[k].content.length; ri++) {
-                                    const r = allT[k].content[ri];
-                                    if (r && String(r[0]) === '1') { hasRow1 = true; break; }
-                                }
-                                break;
-                            }
-                        }
-                    } catch (e) {}
-                    if (hasRow1) {
-                        console.log('[mvu2shujuku][debug] 单例/JSON表已有 row_id=1，跳过物化：' + L.table);
-                        continue;
-                    }
+                    // 注意：不能用 exportTableAsJson 的 content 判断“已有 row_id=1”来跳过物化——
+                    // 插件的 export 是含 seedRows 的合并视图（显示有行≠SQLite 运行时已物化），
+                    // 误判会跳过 insertRow，导致后续 updateCell row 1 out of bounds（单例表全空）。
+                    // 这里无条件尝试物化：content 空时插件 insertRow 分配 row_id=1（正好是身份行）；
+                    // content 已有 row_id=1 时会分配 row_id=2（垫脚行），由 cleanupSingletonDuplicates
+                    // 用 content 数组索引（deleteRow 的 rowIndex 语义）删掉，row_id=1 保留。
                     const obj = {};
                     if (tplCached) {
                         for (const k in tplCached) {
