@@ -2220,4 +2220,43 @@ test('聊天缺 full checkpoint 时自动重建数据库锚点；已有锚点则
     assert.strictEqual(s2.initCalls(), 0, '已存在 full checkpoint 时不应重复重建锚点');
 });
 
+test('桥启动即提供 eventOn 兜底，且 VARIABLE_UPDATE_ENDED 按 (after, before) 传参', async () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const vm2 = require('vm');
+    const tables = JSON.parse(JSON.stringify(r.template));
+    class FakeCustomEvent {
+        constructor(type, init) { this.type = type; this.detail = init && init.detail; }
+    }
+    const listeners = {};
+    const win = {
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
+        CustomEvent: FakeCustomEvent,
+        addEventListener(name, fn) { (listeners[name] = listeners[name] || []).push(fn); },
+        removeEventListener(name, fn) { listeners[name] = (listeners[name] || []).filter(f => f !== fn); },
+        dispatchEvent(ev) { (listeners[ev.type] || []).slice().forEach(fn => { try { fn(ev); } catch (e) {} }); return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({ chatId: 'c1', chat: [], eventSource: { on() {}, emit() {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async () => ({ success: true }),
+        initGameSession: async () => ({ success: true, runtimeReady: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async () => true,
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    vm2.createContext(win);
+    vm2.runInContext(r.bridgeScript, win);
+    assert.strictEqual(typeof win.eventOn, 'function', '桥启动后 window.eventOn 应可用');
+    const got = [];
+    win.eventOn('mag_variable_update_ended', (a, b) => { got.push([a, b]); });
+    win.dispatchEvent(new FakeCustomEvent('mag_variable_update_ended', { detail: { after: { stat_data: { x: 1 } }, before: { stat_data: { x: 0 } } } }));
+    assert.strictEqual(got.length, 1, '监听应被触发');
+    assert.strictEqual(got[0][0].stat_data.x, 1, 'after 应按位置传参');
+    assert.strictEqual(got[0][1].stat_data.x, 0, 'before 应按位置传参');
+});
+
 runTests();
