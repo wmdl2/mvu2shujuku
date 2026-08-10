@@ -5925,7 +5925,9 @@ ${DB_INIT_SNIPPET}
         bindAutoInit(context);
         hostWindow.setTimeout(autoInitDatabase, 1500);
         activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
-        console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') + '）');
+        console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') +
+            ' | 预写锚点=' + (typeof ensureCheckpointBeforeWrite === 'function' ? '已启用' : '缺失') +
+            ' | 校验锚点=' + (typeof hasFullShujukuCheckpoint === 'function' ? '已启用' : '缺失') + '）');
     }
 
     try {
@@ -7801,7 +7803,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         bindAutoInit(context);
         hostWindow.setTimeout(autoInitDatabase, 1500);
         activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
-        console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') + '）');
+        console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') +
+            ' | 预写锚点=' + (typeof ensureCheckpointBeforeWrite === 'function' ? '已启用' : '缺失') +
+            ' | 校验锚点=' + (typeof hasFullShujukuCheckpoint === 'function' ? '已启用' : '缺失') + '）');
     }
 
     try {
