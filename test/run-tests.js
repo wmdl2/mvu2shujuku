@@ -2670,6 +2670,39 @@ test('写库不受锚点形态门控（移除运行时锚点重建机制）', as
     }
 });
 
+test('外部 import 脚本默认安装 MVU 兼容层（自动检测兜底）', () => {
+    const mkCard = (scriptContent) => ({
+        spec: 'chara_card_v3',
+        data: {
+            name: '外部脚本卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{ comment: '[InitVar]', content: '系统: { 当前时间: "12:00" }' }],
+            },
+            extensions: {
+                regex_scripts: [],
+                tavern_helper: {
+                    scripts: [{ name: '游戏逻辑', enabled: true, content: scriptContent }],
+                },
+            },
+        },
+    });
+    // 卡内只有一行外部 import、没有任何可见的 Mvu. 调用：静态扫描看不到，必须默认装兼容层
+    const external = core.convert(mkCard("import 'https://example.com/game.js';"), { mode: 'both' });
+    assert.ok(
+        external.files.find(f => f.kind === 'bridge').data.includes('installMvuShim();'),
+        '外部 import 卡应默认安装桥内 MVU 兼容层'
+    );
+    assert.ok(external.report.toMarkdown().includes('外部 import'), '报告应注明外部 import 兜底');
+    // 卡内既无 Mvu. 调用也无外部 import：自动检测应保持不安装
+    const internal = core.convert(mkCard('function tick(){ return 1; }'), { mode: 'both' });
+    assert.ok(
+        !internal.files.find(f => f.kind === 'bridge').data.includes('installMvuShim();'),
+        '无 MVU/外部 import 的卡不应安装兼容层'
+    );
+});
+
 test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 Mvu/getAllVariables 并建表', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
