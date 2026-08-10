@@ -4278,9 +4278,10 @@ ${DB_INIT_SNIPPET}
             console.log('[mvu2shujuku][debug][锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')) + ' | 锚点=' + anchored);
             return anchored;
         }
-        // 仅开局阶段允许重置重建：表数据只是模板行被改动（没有额外新增行，例如开局捏人写入），
-        // 重置+重放本次写入是无损的（前端 replaceMvuData 带完整快照）；进入正常对话后绝不重置。
-        if (isOpeningPhase() && !mvu2shujukuHasExtraRows(api, tplCached) && !mvu2shujukuInitSessionHung && typeof api.initGameSession === 'function') {
+        // 仅“写库前”允许重置重建：表数据只是模板行被改动（没有额外新增行，例如开局捏人写入），
+        // 且此刻有待重放写入（前端 replaceMvuData 带完整快照），重置+重放无损。
+        // 开局锚点路径没有待重放写入，绝不能重置已有数据（会清掉捏人结果）。
+        if (reason === '写库前' && isOpeningPhase() && !mvu2shujukuHasExtraRows(api, tplCached) && !mvu2shujukuInitSessionHung && typeof api.initGameSession === 'function') {
             console.log('[mvu2shujuku][debug][锚点] ' + reason + '：表无额外行（仅模板行被改动），重置重建锚点并重放本次写入…');
             try {
                 const r2 = await mvu2shujukuWithTimeout(
@@ -4942,26 +4943,19 @@ ${DB_INIT_SNIPPET}
                     }
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     const prev = all.stat_data || {};
-                    // 走插件自己的提交管线：构建完整表格快照 → importTableAsJson。
-                    // 插件自己管理 V2 checkpoint（裸 updateCell 会破坏锚点触发 mismatch）。
-                    let wrote = false;
-                    if (typeof api.importTableAsJson === 'function') {
+                    // 差异写入（裸 updateCell/insertRow）——与参考卡一致：开局 initGameSession 单独建锚后，
+                    // 裸写延续锚点；实测 importTableAsJson 提交反而会丢 checkpoint。
+                    const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
+                    if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
+                    else if (typeof api.importTableAsJson === 'function') {
+                        // 差异为空可能是表结构/行缺失导致无操作可写：用完整快照兜底
                         try {
                             const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
-                            if (ok) {
-                                console.log('[mvu2shujuku][debug] Mvu 合并写入完成：已通过 importTableAsJson 提交表格快照');
-                                wrote = true;
-                            } else {
-                                console.warn('[mvu2shujuku][debug] importTableAsJson 提交失败，回退差异写入');
-                            }
+                            if (ok) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异为空，已用 importTableAsJson 快照兜底');
                         } catch (e) {
-                            console.warn('[mvu2shujuku][debug] importTableAsJson 提交异常，回退差异写入:', e);
+                            console.warn('[mvu2shujuku][debug] importTableAsJson 快照兜底异常:', e);
                         }
-                    }
-                    if (!wrote) {
-                        const n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
-                        if (n > 0) console.log('[mvu2shujuku][debug] Mvu 合并写入完成：差异 ' + n + ' 条');
                     }
                     if (!hasFullShujukuCheckpoint()) {
                         console.warn('[mvu2shujuku][debug][流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
