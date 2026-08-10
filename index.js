@@ -4447,6 +4447,7 @@ ${DB_INIT_SNIPPET}
     let anchorRetryTimer = null;
     let lastAnchorChat = '';
     let lastAnchorAttempt = 0;
+    let lastAnchorStateLog = 0;
     const reAnchorSkipLog = {};
     async function reAnchorCheckpointIfNeeded() {
         const now = Date.now();
@@ -4467,15 +4468,41 @@ ${DB_INIT_SNIPPET}
             };
             // 廉价门控先跑：非转换卡 / 不在开局阶段时直接返回，避免周期自检的开销
             const ch = currentCharacter();
-            if (!isConvertedMvuCard(ch)) { logSkip('非转换卡'); return; }
+            // 角色列表懒加载对象可能缺 extensions，activeLayout 只在转换卡完整读取后设置，
+            // 两者任一成立即可视为转换卡。
+            const isConverted = isConvertedMvuCard(ch) || (Array.isArray(activeLayout) && activeLayout.length > 0);
+            if (!isConverted) { logSkip('非转换卡'); return; }
+            let chat = [];
             try {
                 const ctx = getContextSafe();
-                const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-                if (chat.length > 4) { logSkip('聊天楼层过多（' + chat.length + '）'); return; }
+                chat = Array.isArray(ctx.chat) ? ctx.chat : [];
             } catch (e) { logSkip('读取聊天上下文失败'); return; }
-            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
+            if (chat.length > 4) { logSkip('聊天楼层过多（' + chat.length + '）'); return; }
             const api = getAcuApi();
             if (!api) { logSkip('未找到数据库 API'); return; }
+            // 状态摘要（开局阶段节流 ~10s 一条）：定位首楼替换/checkpoint 丢失的精确时机，
+            // 以及当时运行时表格里有没有数据。
+            if (now - lastAnchorStateLog >= 10000) {
+                lastAnchorStateLog = now;
+                try {
+                    const cur = api.exportTableAsJson() || {};
+                    let rowCount = 0;
+                    for (const k in cur) {
+                        if (k.indexOf('sheet_') !== 0) continue;
+                        const s = cur[k];
+                        if (s && Array.isArray(s.content)) rowCount += Math.max(0, s.content.length - 1);
+                    }
+                    let msg0info = 'msg0.isolated=无';
+                    try {
+                        const c0 = chat[0];
+                        const iso0 = c0 && c0.TavernDB_ACU_IsolatedData;
+                        if (iso0) msg0info = 'msg0.isolatedLen=' + String(JSON.stringify(iso0) || '').length;
+                    } catch (e2) {}
+                    console.log('[mvu2shujuku][debug][锚点自检] chatLen=' + chat.length + ' | hasCp=' + hasFullShujukuCheckpoint() +
+                        ' | ' + msg0info + ' | exportRows=' + rowCount + '（chat=' + key + '）');
+                } catch (e3) {}
+            }
+            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
             const tplCached = cachedTemplateForCurrentCard();
             if (!tplCached) { logSkip('无模板缓存'); return; }
             // 表格里必须已有真实数据才值得重锚（空表说明是普通建表流程，交给 autoInit）
@@ -4511,11 +4538,15 @@ ${DB_INIT_SNIPPET}
                         (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
                         (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
                     if (saveFn2) {
-                        await Promise.race([
-                            Promise.resolve(saveFn2()),
-                            new Promise(res => hostWindow.setTimeout(res, 6000)),
-                        ]);
-                        console.log('[mvu2shujuku][debug][重锚] 重建后已等待酒馆保存完成。');
+                        for (let attempt = 0; attempt < 2; attempt++) {
+                            try {
+                                await Promise.resolve(saveFn2());
+                                console.log('[mvu2shujuku][debug][重锚] 重建后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
+                                break;
+                            } catch (saveErr) {
+                                console.warn('[mvu2shujuku][debug][重锚] 重建后保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                            }
+                        }
                     }
                 } catch (e) {
                     console.warn('[mvu2shujuku][debug][重锚] 重建后保存异常:', e && e.message ? e.message : e);
@@ -5710,7 +5741,7 @@ ${DB_INIT_SNIPPET}
                             initializedViaGameSession.add(chatKeyNow);
                             // 插件内部走的是酒馆 saveChat 防抖，可能晚于本流程落盘；
                             // 首楼随后可能被开场流程替换/删除，checkpoint 必须在替换前落盘。
-                            // 这里等待酒馆保存完成（最多 6 秒，失败只告警不阻塞）。
+                            // 这里等待酒馆保存真正完成（saveChatConditional 自带超时，失败只告警不阻塞）。
                             try {
                                 const ctx2 = getContextSafe();
                                 const saveFn2 = (typeof ctx2.saveChatConditional === 'function' && ctx2.saveChatConditional.bind(ctx2)) ||
@@ -5718,11 +5749,15 @@ ${DB_INIT_SNIPPET}
                                     (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
                                     (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
                                 if (saveFn2) {
-                                    await Promise.race([
-                                        Promise.resolve(saveFn2()),
-                                        new Promise(res => hostWindow.setTimeout(res, 6000)),
-                                    ]);
-                                    console.log('[mvu2shujuku][debug][保存] 首写快照提交后已等待酒馆保存完成。');
+                                    for (let attempt = 0; attempt < 2; attempt++) {
+                                        try {
+                                            await Promise.resolve(saveFn2());
+                                            console.log('[mvu2shujuku][debug][保存] 首写快照提交后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
+                                            break;
+                                        } catch (saveErr) {
+                                            console.warn('[mvu2shujuku][debug][保存] 首写后等待酒馆保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                                        }
+                                    }
                                 }
                             } catch (e) {
                                 console.warn('[mvu2shujuku][debug][保存] 首写后等待酒馆保存异常（不影响内存数据）:', e && e.message ? e.message : e);
@@ -7307,6 +7342,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     let anchorRetryTimer = null;
     let lastAnchorChat = '';
     let lastAnchorAttempt = 0;
+    let lastAnchorStateLog = 0;
     const reAnchorSkipLog = {};
     async function reAnchorCheckpointIfNeeded() {
         const now = Date.now();
@@ -7327,15 +7363,41 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             };
             // 廉价门控先跑：非转换卡 / 不在开局阶段时直接返回，避免周期自检的开销
             const ch = currentCharacter();
-            if (!isConvertedMvuCard(ch)) { logSkip('非转换卡'); return; }
+            // 角色列表懒加载对象可能缺 extensions，activeLayout 只在转换卡完整读取后设置，
+            // 两者任一成立即可视为转换卡。
+            const isConverted = isConvertedMvuCard(ch) || (Array.isArray(activeLayout) && activeLayout.length > 0);
+            if (!isConverted) { logSkip('非转换卡'); return; }
+            let chat = [];
             try {
                 const ctx = getContextSafe();
-                const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-                if (chat.length > 4) { logSkip('聊天楼层过多（' + chat.length + '）'); return; }
+                chat = Array.isArray(ctx.chat) ? ctx.chat : [];
             } catch (e) { logSkip('读取聊天上下文失败'); return; }
-            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
+            if (chat.length > 4) { logSkip('聊天楼层过多（' + chat.length + '）'); return; }
             const api = getAcuApi();
             if (!api) { logSkip('未找到数据库 API'); return; }
+            // 状态摘要（开局阶段节流 ~10s 一条）：定位首楼替换/checkpoint 丢失的精确时机，
+            // 以及当时运行时表格里有没有数据。
+            if (now - lastAnchorStateLog >= 10000) {
+                lastAnchorStateLog = now;
+                try {
+                    const cur = api.exportTableAsJson() || {};
+                    let rowCount = 0;
+                    for (const k in cur) {
+                        if (k.indexOf('sheet_') !== 0) continue;
+                        const s = cur[k];
+                        if (s && Array.isArray(s.content)) rowCount += Math.max(0, s.content.length - 1);
+                    }
+                    let msg0info = 'msg0.isolated=无';
+                    try {
+                        const c0 = chat[0];
+                        const iso0 = c0 && c0.TavernDB_ACU_IsolatedData;
+                        if (iso0) msg0info = 'msg0.isolatedLen=' + String(JSON.stringify(iso0) || '').length;
+                    } catch (e2) {}
+                    console.log('[mvu2shujuku][debug][锚点自检] chatLen=' + chat.length + ' | hasCp=' + hasFullShujukuCheckpoint() +
+                        ' | ' + msg0info + ' | exportRows=' + rowCount + '（chat=' + key + '）');
+                } catch (e3) {}
+            }
+            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
             const tplCached = cachedTemplateForCurrentCard();
             if (!tplCached) { logSkip('无模板缓存'); return; }
             // 表格里必须已有真实数据才值得重锚（空表说明是普通建表流程，交给 autoInit）
@@ -7371,11 +7433,15 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
                         (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
                     if (saveFn2) {
-                        await Promise.race([
-                            Promise.resolve(saveFn2()),
-                            new Promise(res => hostWindow.setTimeout(res, 6000)),
-                        ]);
-                        console.log('[mvu2shujuku][debug][重锚] 重建后已等待酒馆保存完成。');
+                        for (let attempt = 0; attempt < 2; attempt++) {
+                            try {
+                                await Promise.resolve(saveFn2());
+                                console.log('[mvu2shujuku][debug][重锚] 重建后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
+                                break;
+                            } catch (saveErr) {
+                                console.warn('[mvu2shujuku][debug][重锚] 重建后保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                            }
+                        }
                     }
                 } catch (e) {
                     console.warn('[mvu2shujuku][debug][重锚] 重建后保存异常:', e && e.message ? e.message : e);
@@ -8570,7 +8636,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             initializedViaGameSession.add(chatKeyNow);
                             // 插件内部走的是酒馆 saveChat 防抖，可能晚于本流程落盘；
                             // 首楼随后可能被开场流程替换/删除，checkpoint 必须在替换前落盘。
-                            // 这里等待酒馆保存完成（最多 6 秒，失败只告警不阻塞）。
+                            // 这里等待酒馆保存真正完成（saveChatConditional 自带超时，失败只告警不阻塞）。
                             try {
                                 const ctx2 = getContextSafe();
                                 const saveFn2 = (typeof ctx2.saveChatConditional === 'function' && ctx2.saveChatConditional.bind(ctx2)) ||
@@ -8578,11 +8644,15 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                     (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
                                     (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
                                 if (saveFn2) {
-                                    await Promise.race([
-                                        Promise.resolve(saveFn2()),
-                                        new Promise(res => hostWindow.setTimeout(res, 6000)),
-                                    ]);
-                                    console.log('[mvu2shujuku][debug][保存] 首写快照提交后已等待酒馆保存完成。');
+                                    for (let attempt = 0; attempt < 2; attempt++) {
+                                        try {
+                                            await Promise.resolve(saveFn2());
+                                            console.log('[mvu2shujuku][debug][保存] 首写快照提交后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
+                                            break;
+                                        } catch (saveErr) {
+                                            console.warn('[mvu2shujuku][debug][保存] 首写后等待酒馆保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
+                                        }
+                                    }
                                 }
                             } catch (e) {
                                 console.warn('[mvu2shujuku][debug][保存] 首写后等待酒馆保存异常（不影响内存数据）:', e && e.message ? e.message : e);
