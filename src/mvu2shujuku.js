@@ -5236,6 +5236,15 @@ ${DB_INIT_SNIPPET}
                         const isFirstWrite = !initializedViaGameSession.has(chatKeyNow);
                         const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
                         const mergedTemplate = mergeSnapshotIntoTemplate(tplCached, snap);
+                        // 诊断：确认注入数据是否真的进了合并模板（主角表 content 第一行）
+                        try {
+                            const heroName = target.主角 && target.主角.姓名;
+                            const mtProt = mergedTemplate && mergedTemplate.sheet_zhujiaobiao;
+                            const mtRow = mtProt && Array.isArray(mtProt.content) ? mtProt.content[1] : null;
+                            console.log('[mvu2shujuku][debug][注入合并] 首次写库=' + isFirstWrite + ' | target.主角.姓名=' + heroName +
+                                ' | 合并模板主角表 content 行数=' + (mtProt && Array.isArray(mtProt.content) ? mtProt.content.length : 'N/A') +
+                                ' | content[1]=' + (mtRow ? JSON.stringify(mtRow).slice(0, 160) : '无'));
+                        } catch (e) {}
                         if (isFirstWrite && mergedTemplate && typeof api.initGameSession === 'function') {
                             const initResult = await Promise.resolve(api.initGameSession({}, {
                                 injectTemplate: true,
@@ -5248,6 +5257,19 @@ ${DB_INIT_SNIPPET}
                             } else {
                                 usedSnapshot = true;
                                 console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）');
+                                // 诊断：initGameSession 后立即检查表格是否真的带上了注入数据
+                                try {
+                                    const afterAll = api.exportTableAsJson() || {};
+                                    for (const k in afterAll) {
+                                        if (k.indexOf('sheet_') === 0 && afterAll[k] && afterAll[k].name === '主角表' &&
+                                            Array.isArray(afterAll[k].content)) {
+                                            const row1 = afterAll[k].content[1] || [];
+                                            console.log('[mvu2shujuku][debug][注入合并] initGameSession 后主角表 content 行数=' + (afterAll[k].content.length - 1) +
+                                                ' | row1=' + JSON.stringify(row1).slice(0, 160) + ' | seedRows=' + (Array.isArray(afterAll[k].seedRows) ? afterAll[k].seedRows.length : 0));
+                                            break;
+                                        }
+                                    }
+                                } catch (e) {}
                             }
                         }
                         if (!usedSnapshot && typeof api.importTableAsJson === 'function') {
