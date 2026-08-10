@@ -237,7 +237,8 @@
         let s = stripJsonComments(value).trim();
         s = s.replace(/,\s*([}\]])/g, '$1'); // 去尾逗号
         s = s.replace(/'/g, '"'); // 单引号 → 双引号（initvar 中极少含转义单引号）
-        s = s.replace(/([{,]\s*)([A-Za-z_$][\w$]*|[\u4e00-\u9fff]+)\s*:/g, '$1"$2":'); // 无引号键
+        // 无引号键：支持纯中文、纯英文、以及中英混合键（如 事件ID / 母亲撞见次数）
+        s = s.replace(/([{,]\s*)([\u4e00-\u9fffA-Za-z_$][\u4e00-\u9fff\w$]*)\s*:/g, '$1"$2":');
         return s;
     }
 
@@ -274,6 +275,14 @@
             }
             if (cur.trim()) items.push(parseScalar(cur));
             return items;
+        }
+        if (t.startsWith('{') && t.endsWith('}')) {
+            // 行内对象 { 当前值: 8, 训练经验: 0 }（YAML/JSON5 混合写法）：
+            // 尝试按 JSON5 解析成对象，失败则退回原字符串（避免把嵌套状态存成坏文本）
+            try {
+                const obj = parseInitVar(t);
+                if (obj && typeof obj === 'object' && !Array.isArray(obj)) return obj;
+            } catch (e) { /* fallthrough */ }
         }
         if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
         if (t === 'true') return true;
@@ -316,6 +325,10 @@
             try {
                 return JSON.parse(json5Lite(trimmed));
             } catch (e) { /* fallthrough */ }
+            // 以 { / [ 开头就是内联 JSON/JSON5：解析失败时返回原字符串（由调用方
+            // 决定保留为字符串或兜底），绝不能回落成 YAML 树解析——
+            // 那会把 "{ 上次生成期" 整段当成键名，产生 {"{ 上次生成期": "-1, ..."} 这类坏结构。
+            return trimmed;
         }
         return parseYamlTree(text);
     }
@@ -338,9 +351,8 @@
 
         for (const raw of lines) {
             const line = raw.replace(/\t/g, '    ');
-            if (!line.trim() || /^\s*[#/]/.test(line.trim()) && !/^#/.test(line.trim())) {
-                if (!line.trim() || line.trim().startsWith('#')) continue;
-            }
+            // 空行与 # 注释行直接跳过（注释绝不能当成变量组）
+            if (!line.trim() || line.trim().startsWith('#')) continue;
             const m = line.match(/^(\s*)(-)?\s*(.*)$/);
             const indent = m[1].length;
             const isDash = m[2] === '-';
@@ -1084,6 +1096,7 @@
             // 对象：判断是固定子对象还是条目字典
             const values = Object.values(v);
             const allLeaf = values.length > 0 && values.every(x => isLeaf(x));
+            const allObject = values.length > 0 && values.every(x => isPlainObject(x));
             if (allLeaf) {
                 // 固定子对象 → 展平：key+子键
                 for (const subKey of Object.keys(v)) {
@@ -1100,13 +1113,19 @@
                         ident: toIdent(flatZh, usedIdents, 'column'),
                     });
                 }
-            } else {
-                // 条目字典或空对象 → 记为子行表
+            } else if (values.length === 0 || allObject) {
+                // 条目字典（如 道侣.{林若悠:{...}}）与空字典（如 主角.储物袋 / 系统._摄像头布设，
+                // 初始为空、运行期由脚本/AI 按条目填充）→ 子行表，每个条目一行
                 if (opts.childTables) {
                     opts.childTables.push({ key, value: v, path });
                 } else {
                     report.warn(`发现嵌套对象「${key}」，需拆分为子行表（当前未启用子表提取）`, 'schema');
                 }
+            } else {
+                // 混合结构对象（标量字段 + 嵌套对象，如 系统._管理考核）：不是条目字典，
+                // 拆子表会破坏结构；整对象存 JSON 列，读取时原样还原，脚本可整体读写。
+                const jcol = jsonColumnFromObject(key, v, path, usedIdents);
+                if (jcol) cols.push(jcol);
             }
         }
         return cols;
@@ -1224,26 +1243,65 @@
                     const tableName = makeGroupTableName(groupName);
                     const keyCol = '名称';
                     const isArray = Array.isArray(raw);
-                    // 数组表的值列用「内容」（数组项本身），不叫「名称」；行表才用「名称」作业务键
-                    const valueZh = isArray ? '内容' : keyCol;
-                    const cols = [{ zh: valueZh, path: [groupName, valueZh], value: '', desc: isArray ? '条目内容' : '', type: 'TEXT', ident: toIdent(valueZh, new Set(['row_id']), 'column') }];
-                    const rows = isArray
-                        ? raw.map((item, i) => [i + 1, item === null || item === undefined ? '' : String(item)])
-                        : [];
-                    if (isArray && raw.length && typeof raw[0] === 'object') {
-                        report.warn(`顶层变量「${groupName}」为对象数组，已按字符串列转换，请人工核对`, 'schema');
+                    if (isArray) {
+                        // 数组表的值列用「内容」（数组项本身）
+                        const valueZh = '内容';
+                        const cols = [{ zh: valueZh, path: [groupName, valueZh], value: '', desc: '条目内容', type: 'TEXT', ident: toIdent(valueZh, new Set(['row_id']), 'column') }];
+                        const rows = raw.map((item, i) => [i + 1, item === null || item === undefined ? '' : String(item)]);
+                        if (raw.length && typeof raw[0] === 'object') {
+                            report.warn(`顶层变量「${groupName}」为对象数组，已按字符串列转换，请人工核对`, 'schema');
+                        }
+                        groups.push({
+                            name: groupName,
+                            tableName,
+                            ident: toIdent(tableName, usedTableIdents, 'table'),
+                            kind: 'array',
+                            keyCol,
+                            keyValue: '',
+                            columns: cols,
+                            rows,
+                            childTables: [],
+                            source: 'top-level-array',
+                        });
+                        seenTables.add(tableName);
+                        continue;
                     }
+                    // 顶层标量（现金: 500 / 胜任度: 80 等）：值不能丢。
+                    // 按整组 JSON 表存（单行 内容 列），读取时原样还原为标量；AI 只允许按需 UPDATE。
+                    const usedScalar = new Set(['row_id']);
+                    const scalarColumns = [
+                        {
+                            zh: keyCol,
+                            path: [groupName, keyCol],
+                            value: groupName,
+                            desc: '唯一标识',
+                            type: 'TEXT',
+                            ident: toIdent(keyCol, usedScalar, 'column'),
+                        },
+                        {
+                            zh: '内容',
+                            path: [groupName, '内容'],
+                            value: '',
+                            desc: '顶层标量（JSON 存储，读取时原样还原；内部数据，AI 不应直接修改）',
+                            type: 'TEXT',
+                            ident: toIdent('内容', usedScalar, 'column'),
+                            isObject: true,
+                        },
+                    ];
+                    let scalarInit;
+                    try { scalarInit = JSON.stringify(raw); } catch (e) { scalarInit = String(raw); }
                     groups.push({
                         name: groupName,
                         tableName,
                         ident: toIdent(tableName, usedTableIdents, 'table'),
-                        kind: isArray ? 'array' : 'rows',
+                        kind: 'json',
                         keyCol,
-                        keyValue: '',
-                        columns: cols,
-                        rows,
+                        keyValue: groupName,
+                        columns: scalarColumns,
+                        rows: [[1, groupName, scalarInit]],
                         childTables: [],
-                        source: 'top-level-array',
+                        source: 'top-level-scalar',
+                        reminders: ruleReminders[groupName] || [],
                     });
                     seenTables.add(tableName);
                     continue;
@@ -2251,6 +2309,13 @@
                             ops.push({ np, entry, value: nv, overflow: true, mergeKey: entry.kind === 'rows' ? rel[1] : rel[0], rowKey: entry.kind === 'rows' ? rel[0] : undefined });
                             continue;
                         }
+                        // 声明为对象列（JSON 存储，如 系统._管理考核）：路径正好落在对象列上时，
+                        // 整对象一次性写入，不再向下递归到子字段（子字段没有独立列）。
+                        const colDef = entry.layout.cols.find(c => c[0] === fld);
+                        if (colDef && rel.length === fIdx + 1 && /object|json/i.test(String(colDef[1] || ''))) {
+                            ops.push({ np, entry, value: nv, prev: pv, jsonCell: true, col: fld });
+                            continue;
+                        }
                     }
                 }
                 if (nv && typeof nv === 'object' && !Array.isArray(nv)) {
@@ -2427,6 +2492,14 @@
             const colZh = parts[parts.length - 1];
             const colIdx = header.indexOf(colZh);
             if (colIdx === -1) continue;
+            if (op.jsonCell) {
+                // 对象列：整对象 JSON 序列化后写入（脚本对 系统._管理考核 这类嵌套状态整体读写）
+                const jNew = JSON.stringify(op.value === undefined || op.value === null ? {} : op.value);
+                const cur = sheet.content[rowIndex] ? sheet.content[rowIndex][colIdx] : undefined;
+                if (sameValue(cur, jNew)) continue;
+                resolved.push({ kind: 'cell', key: found.key, sheet, header, layout: L, rowIndex, colIdx, colZh, value: jNew, newRowArr, newRowObj });
+                continue;
+            }
             if (!newRowArr) {
                 const cur = sheet.content[rowIndex] ? sheet.content[rowIndex][colIdx] : undefined;
                 if (sameValue(cur, op.value)) continue;
@@ -2904,6 +2977,11 @@
             `            ops.push({np:np,entry:entry,value:nv,overflow:true,mergeKey:entry.kind==='rows'?rel[1]:rel[0],rowKey:entry.kind==='rows'?rel[0]:undefined});`,
             `            continue;`,
             `          }`,
+            `          var colDef0=entry.layout.cols.find(function(c){return c[0]===fld;});`,
+            `          if(colDef0&&rel.length===fIdx+1&&/object|json/i.test(String(colDef0[1]||''))){`,
+            `            ops.push({np:np,entry:entry,value:nv,prev:pv,jsonCell:true,col:fld});`,
+            `            continue;`,
+            `          }`,
             `        }`,
             `      }`,
             `      if(nv&&typeof nv==='object'&&!Array.isArray(nv)){`,
@@ -3030,6 +3108,13 @@
             `    var colZh=parts[parts.length-1];`,
             `    var colIdx=header.indexOf(colZh);`,
             `    if(colIdx===-1)continue;`,
+            `    if(op.jsonCell){`,
+            `      var jcNew=JSON.stringify(op.value===undefined||op.value===null?{}:op.value);`,
+            `      var jcCur=sheet.content[rowIndex]?sheet.content[rowIndex][colIdx]:undefined;`,
+            `      if(String(jcCur)===String(jcNew))continue;`,
+            `      try{await Promise.resolve(API.updateCell(L.table,rowIndex,colZh,jcNew));}catch(e){console.warn('['+BRIDGE_NAME+'] 对象列写入失败:',e);}`,
+            `      continue;`,
+            `    }`,
             `    var curCell=sheet.content[rowIndex]?sheet.content[rowIndex][colIdx]:undefined;`,
             `    if(String(curCell)===String(op.value))continue;`,
             `    try{await Promise.resolve(API.updateCell(L.table,rowIndex,colZh,op.value));}catch(e){console.warn('['+BRIDGE_NAME+'] updateCell 失败:',e);}`,
@@ -3840,7 +3925,11 @@
                 const codeblock = content.match(/^\s*```[^\n]*\n?([\s\S]*?)\n?\s*```\s*$/);
                 if (codeblock) content = codeblock[1];
                 const parsed = parseInitVar(content);
-                initvar = deepMerge(initvar, parsed);
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    initvar = deepMerge(initvar, parsed);
+                } else {
+                    report.warn(`[InitVar] 条目解析结果不是对象（可能是 JSON5 解析失败），已跳过该条目`, 'schema');
+                }
             }
             report.note(`已解析 ${initEntries.length} 个 [initvar] 条目（合并）：顶层组 ${Object.keys(initvar).join('、') || '（空）'}。`);
         } else {
@@ -3852,7 +3941,9 @@
                 while ((m = blockRe.exec(String(g || '')))) {
                     greetingBlockCount++;
                     const parsed = parseInitVar(m[1]);
-                    initvar = deepMerge(initvar, parsed);
+                    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                        initvar = deepMerge(initvar, parsed);
+                    }
                 }
             }
             if (greetingBlockCount) {
