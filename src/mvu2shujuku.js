@@ -4474,6 +4474,15 @@ ${DB_INIT_SNIPPET}
                     const full = await fetchFullCharacter(character, true);
                     if (full && isConvertedMvuCard(full)) {
                         character = full;
+                    } else if (full === null) {
+                        // 获取完整卡失败（接口返回异常对象/网络问题），不能判定为非转换卡：
+                        // 保留运行时状态并重试，避免把本转换器产物误判成普通卡而跳过建表。
+                        console.log('[mvu2shujuku][debug] 开局自动建表：获取完整卡失败，稍后重试（chat=' + key0 + '）');
+                        if (autoInitNoEntryRetries < 8) {
+                            autoInitNoEntryRetries += 1;
+                            hostWindow.setTimeout(autoInitDatabase, 3000);
+                        }
+                        return;
                     }
                 }
                 if (!isConvertedMvuCard(character)) {
@@ -4509,6 +4518,15 @@ ${DB_INIT_SNIPPET}
                 }
             } catch (e) {
                 console.warn('[mvu2shujuku][debug] /api/characters/get 异常：' + (e && e.message ? e.message : e) + '（chat=' + key0 + '）');
+            }
+            // 完整卡获取失败（含接口返回异常对象）且当前对象无世界书时，稍后重试，
+            // 避免“新聊天没有初始化数据/表格为空”的误判。
+            if (!(character && character.character_book && Array.isArray(character.character_book.entries) && character.character_book.entries.length) &&
+                autoInitNoEntryRetries < 8) {
+                console.log('[mvu2shujuku][debug] 开局自动建表：完整卡获取失败，稍后重试（chat=' + key0 + '）');
+                autoInitNoEntryRetries += 1;
+                hostWindow.setTimeout(autoInitDatabase, 3000);
+                return;
             }
         }
         const fullCb = character && character.character_book;
@@ -4869,9 +4887,15 @@ ${DB_INIT_SNIPPET}
                 const target = (full && full.data && full.data.character_book) ? full.data : full;
                 console.log('[mvu2shujuku] 完整卡对象 keys:', Object.keys(full || {}).join(','), '| character_book.entries=', target && target.character_book ? target.character_book.entries.length : 'N/A');
                 if (target && target.character_book && Array.isArray(target.character_book.entries) && target.character_book.entries.length) return target;
+                // 接口返回了异常对象（如 {mode,baseHash,nextHash,ops} 哈希差异、空对象等），
+                // 不能当作“完整卡”，否则会把本转换器产物误判为非转换卡而跳过建表。
+                // 返回 null 让调用方区分“获取失败（可重试）”与“确实非转换卡”。
+                console.warn('[mvu2shujuku] /api/characters/get 响应缺少角色卡结构（keys=' + Object.keys(full || {}).join(',') + '），本次视为获取失败，稍后可重试。');
+                return null;
             }
         } catch (e) {}
-        return character;
+        // 请求失败也返回 null：调用方需要明确“没拿到完整卡”，不能把它当非转换卡处理
+        return null;
     }
 
     function readFileAsBytes(file) {
@@ -5666,6 +5690,12 @@ ${DB_INIT_SNIPPET}
                 // 不能只凭当前对象判断是否本转换器产物。
                 const full = await fetchFullCharacter(ch, true);
                 if (full && isConvertedMvuCard(full)) ch = full;
+                else if (full === null) {
+                    // 获取完整卡失败（宿主扩展可能劫持了 fetch 返回 diff 对象）：
+                    // 不能据此撤销运行时，保留现状等 autoInitDatabase 重试。
+                    console.log('[mvu2shujuku][debug] 同步运行时：获取完整卡失败，暂不撤销（等自动建表重试）');
+                    return;
+                }
             } catch (e) {}
         }
         if (isConvertedMvuCard(ch)) {
@@ -6216,6 +6246,10 @@ ${DB_INIT_SNIPPET}
             toast('正在转换…');
             try {
                 const full = await fetchFullCharacter(ch);
+                if (!full) {
+                    toast('获取角色卡完整数据失败（接口可能被其他扩展改写），请重试', 'error');
+                    return;
+                }
                 console.log('[mvu2shujuku] 待转换对象：name=', full && full.name, '| keys=', Object.keys(full || {}).join(','), '| character_book.entries=', full && full.character_book ? full.character_book.entries.length : 'N/A');
                 await doConvert(full, false);
             } catch (e) {
