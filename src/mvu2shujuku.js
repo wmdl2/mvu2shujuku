@@ -4833,6 +4833,41 @@ ${DB_INIT_SNIPPET}
         } catch (e) {}
     }
 
+    // 单例/JSON 表只允许一行（row_id=1）。我们补行用的是新 row_id（插件 insertRow 自动分配），
+    // 若插件随后把自己的 seedRow（row_id=1）也物化，就会出现两行——这里删掉多余行，保留 row_id=1。
+    async function cleanupSingletonDuplicates(api, layoutEntries) {
+        try {
+            const tables = api.exportTableAsJson() || {};
+            const sheetOf = (name) => {
+                for (const k in tables) {
+                    if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return tables[k];
+                }
+                return null;
+            };
+            for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                if (L.kind !== 'singleton' && L.kind !== 'json') continue;
+                const sheet = sheetOf(L.table);
+                if (!sheet || !Array.isArray(sheet.content)) continue;
+                const idRows = [];
+                for (let ri = 1; ri < sheet.content.length; ri++) {
+                    const r = sheet.content[ri];
+                    if (r && r[0] !== undefined && r[0] !== null && r[0] !== '') idRows.push({ ri, id: String(r[0]) });
+                }
+                if (idRows.length <= 1) continue;
+                if (!idRows.some(x => x.id === '1')) continue; // 没有 row_id=1 就不删（我们补的行可能是唯一真行）
+                for (const x of idRows) {
+                    if (x.id === '1') continue;
+                    try {
+                        await Promise.resolve(api.deleteRow(L.table, x.ri - 1));
+                        console.log('[mvu2shujuku][debug] 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
+                    } catch (e) {
+                        console.warn('[mvu2shujuku][debug] 清理单例表多余行失败:', e);
+                    }
+                }
+            }
+        } catch (e) {}
+    }
+
     // 把目标 stat_data 还原成完整表格 JSON：以当前导出为基座，覆盖目标值。
     // 供 importTableAsJson 走插件自己的提交管线——插件自己管理 V2 checkpoint，
     // 避免裸 updateCell 破坏锚点（实测裸写会触发 boundary_after_data_mismatch）。
@@ -5006,6 +5041,8 @@ ${DB_INIT_SNIPPET}
                     if (!hasFullShujukuCheckpoint()) {
                         console.warn('[mvu2shujuku][debug][流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
                     }
+                    // 单例/JSON 表去重：插件 seedRow（row_id=1）物化后，删除我们补行产生的多余行
+                    await cleanupSingletonDuplicates(api, activeLayout);
                     dispatchVariableUpdateEnded({ stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} }, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
                 } else {
                     console.warn('[mvu2shujuku][debug] Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
