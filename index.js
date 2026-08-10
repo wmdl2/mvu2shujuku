@@ -4448,6 +4448,7 @@ ${DB_INIT_SNIPPET}
     let lastAnchorChat = '';
     let lastAnchorAttempt = 0;
     let lastAnchorStateLog = 0;
+    let reAnchorAttempts = 0;
     const reAnchorSkipLog = {};
     async function reAnchorCheckpointIfNeeded() {
         const now = Date.now();
@@ -4459,6 +4460,7 @@ ${DB_INIT_SNIPPET}
                 lastAnchorChat = key;
                 // 切聊天后先重置节流窗口，给新聊天的事件序列留出时间
                 lastAnchorAttempt = now;
+                reAnchorAttempts = 0;
             }
             const logSkip = (reason) => {
                 const k = key + '|' + reason;
@@ -4502,7 +4504,27 @@ ${DB_INIT_SNIPPET}
                         ' | ' + msg0info + ' | exportRows=' + rowCount + '（chat=' + key + '）');
                 } catch (e3) {}
             }
-            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
+            // 缓存的开场 stat（写入路径在 initGameSession 后缓存，含用户注入数据）
+            const holder = (typeof window !== 'undefined' ? window : globalThis);
+            const opening = (holder && holder.__mvu2shujukuOpeningStat) || null;
+            const statForCheck = (opening && opening.chat === key && opening.stat) ? opening.stat : null;
+            const hasCp = hasFullShujukuCheckpoint();
+            if (hasCp) {
+                // 有 checkpoint 但仍要校验数据：开局阶段若 checkpoint 缺注入值
+                // （initGameSession 被开场流程并发回滚、或持久化的是默认模板），
+                // 需要重建干净锚点；校验通过才跳过。
+                if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
+                    console.log('[mvu2shujuku][debug][重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
+                } else {
+                    logSkip('聊天仍有 full checkpoint'); return;
+                }
+            }
+            // 防循环：同一聊天内重锚失败超过 20 次（约 1 分钟）就停止，避免反复重型 initGameSession
+            reAnchorAttempts += 1;
+            if (reAnchorAttempts > 20) {
+                logSkip('重锚失败次数过多（20），已停止自动重试');
+                return;
+            }
             const tplCached = cachedTemplateForCurrentCard();
             if (!tplCached) { logSkip('无模板缓存'); return; }
             // 表格里必须已有真实数据才值得重锚（空表说明是普通建表流程，交给 autoInit）
@@ -4514,10 +4536,13 @@ ${DB_INIT_SNIPPET}
                 if (s && Array.isArray(s.content) && s.content.length > 1) { hasRows = true; break; }
                 if (s && Array.isArray(s.seedRows) && s.seedRows.length) { hasRows = true; break; }
             }
-            if (!hasRows) { logSkip('表格无数据行'); return; }
-            console.log('[mvu2shujuku][debug][重锚] 开局首楼被替换/删除导致 full checkpoint 丢失（chat=' + key + '），用当前运行时数据重建锚点…');
-            // 用当前运行时数据合并回模板：保留 sourceData/规则，行数据为现有值（不丢用户注入）
-            const reTpl = mergeSnapshotIntoTemplate(tplCached, cur);
+            if (!hasRows && !statForCheck) { logSkip('表格无数据行'); return; }
+            console.log('[mvu2shujuku][debug][重锚] full checkpoint 缺失或缺少注入数据（chat=' + key + '，尝试 #' + reAnchorAttempts + '），重建锚点…');
+            // 重建模板：优先用缓存的开场 stat（精确含用户注入值，不依赖运行时状态），
+            // 否则退回用当前运行时数据合并回模板（保留 sourceData/规则）。
+            const reTpl = statForCheck
+                ? applyTargetToTemplate(tplCached, activeLayout, statForCheck)
+                : mergeSnapshotIntoTemplate(tplCached, cur);
             if (!reTpl) return;
             const initResult = await Promise.resolve(api.initGameSession({}, {
                 injectTemplate: true,
@@ -4527,8 +4552,9 @@ ${DB_INIT_SNIPPET}
             }));
             const ok = !(initResult && initResult.success === false);
             console.log('[mvu2shujuku][debug][重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
-                ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint());
-            // 重锚成功必须落盘：首楼替换后 chat 已被插件/酒馆重新保存过（不带 checkpoint），
+                ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint() +
+                ' | checkpoint含注入数据=' + (statForCheck ? checkpointHasStatData(activeLayout, statForCheck) : 'N/A'));
+            // 重锚成功必须落盘：首楼替换后 chat 已被插件/酒馆重新保存过（不带 checkpoint 或带旧默认值），
             // 仅改内存会在下一次保存或刷新时再次丢失。
             if (ok || hasFullShujukuCheckpoint()) {
                 try {
@@ -5636,6 +5662,85 @@ ${DB_INIT_SNIPPET}
         return false;
     }
 
+    // 读取聊天中 full checkpoint 的数据（跨所有消息与隔离标签）。
+    // 只认 storageFrame.version=2 + checkpoint.kind=full 的帧；读不到返回 null。
+    function readFullCheckpointData() {
+        try {
+            const ctx = getContextSafe();
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            for (const msg of chat) {
+                if (!msg || typeof msg !== 'object') continue;
+                const iso = msg.TavernDB_ACU_IsolatedData;
+                if (!iso || typeof iso !== 'object') continue;
+                for (const k of Object.keys(iso)) {
+                    const tag = iso[k];
+                    if (!tag || typeof tag !== 'object') continue;
+                    const sf = tag.storageFrame;
+                    if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
+                    const cp = sf.checkpoint;
+                    if (cp && cp.kind === 'full' && cp.data && typeof cp.data === 'object') return cp.data;
+                }
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    // 用目标 stat_data 的非默认值作为 needle，检查 full checkpoint 数据里是否真的包含注入值。
+    // 这是持久化层的校验：只读聊天里的 checkpoint，不依赖运行时 exportTableAsJson。
+    // 返回 true = checkpoint 已含注入值（或没有可校验的注入值）；false = checkpoint 缺失/默认值。
+    function checkpointHasStatData(layoutEntries, statData) {
+        try {
+            const sd = statData || {};
+            const checks = [];
+            const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+            for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                const wp = (L.writePaths || [])[0];
+                let v = undefined;
+                if (Array.isArray(wp) && wp.length) {
+                    let cur = sd;
+                    for (const p of wp) {
+                        if (cur === null || cur === undefined || typeof cur !== 'object') { v = undefined; break; }
+                        cur = cur[p];
+                        v = cur;
+                    }
+                } else {
+                    v = sd[L.group];
+                }
+                if (!isObj(v)) continue;
+                if (L.kind === 'rows') {
+                    const keys = Object.keys(v).filter(k => isObj(v[k]));
+                    if (keys.length) checks.push({ table: L.table, needles: keys.map(k => String(k)) });
+                } else if (L.kind === 'singleton') {
+                    const cols = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
+                    const needles = [];
+                    for (const c of cols) {
+                        const cv = v[c];
+                        if (cv !== undefined && cv !== null && cv !== '') needles.push(String(cv));
+                    }
+                    if (needles.length) checks.push({ table: L.table, needles });
+                }
+            }
+            if (!checks.length) return true;
+            const cpData = readFullCheckpointData();
+            if (!cpData) return false;
+            for (const chk of checks) {
+                let sheet = null;
+                for (const k in cpData) {
+                    if (k.indexOf('sheet_') === 0 && cpData[k] && cpData[k].name === chk.table) { sheet = cpData[k]; break; }
+                }
+                if (!sheet || !Array.isArray(sheet.content)) return false;
+                let found = false;
+                for (let r = 1; r < sheet.content.length; r++) {
+                    const row = sheet.content[r];
+                    if (!Array.isArray(row)) continue;
+                    if (chk.needles.some(n => n && row.some(cell => String(cell == null ? '' : cell) === n))) { found = true; break; }
+                }
+                if (!found) return false;
+            }
+            return true;
+        } catch (e) { return false; }
+    }
+
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
@@ -5715,20 +5820,50 @@ ${DB_INIT_SNIPPET}
                                     message: initResult.message || '',
                                 }) : 'undefined';
                                 console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）| initResult=' + initInfo.slice(0, 300));
-                                // 对齐参考卡：initGameSession 后运行时可能异步物化，短轮询确认注入数据落表；
-                                // 确认不了则回退 importTableAsJson 快照提交（用合并模板，保证数据不丢）。
+                                // initGameSession 成功即已写入干净 full checkpoint（logEntries=0，与参考卡一致），
+                                // 持久化完成，标记为成功。**绝不能**再走 importTableAsJson(persist) 兜底——
+                                // 它会追加一条 data_replace logEntry 弄脏链，刷新回放失败导致数据回默认（实测根因）。
+                                usedSnapshot = true;
+                                // 运行时物化：插件 initGameSession 后运行时可能延迟重建，先短轮询；
+                                // 等不到就用运行时专用通道（persist:false）物化——只改内存，不写任何 logEntry。
                                 const injected = await verifyTemplateInjected(api, activeLayout, target, 1800);
                                 if (injected) {
-                                    usedSnapshot = true;
+                                    console.log('[mvu2shujuku][debug][注入合并] initGameSession 后已在运行时表格确认注入数据。');
                                 } else {
-                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后未在运行时表格中确认注入数据，回退 importTableAsJson 快照提交。');
+                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后运行时未确认注入数据，使用运行时专用通道物化（persist:false，不写 logEntry）…');
+                                    try {
+                                        const rtOk = await Promise.resolve(api.importTableAsJson(JSON.stringify(mergedTemplate), { persist: false, mode: 'restore' }));
+                                        console.log('[mvu2shujuku][debug] 运行时物化（persist:false）=' + (rtOk ? '成功' : '失败'));
+                                        const injected2 = await verifyTemplateInjected(api, activeLayout, target, 1000);
+                                        console.log('[mvu2shujuku][debug][注入合并] 物化后确认注入数据=' + injected2);
+                                    } catch (e) {
+                                        console.warn('[mvu2shujuku][debug] 运行时物化异常（不影响已写入的 checkpoint）:', e && e.message ? e.message : e);
+                                    }
+                                }
+                                // 持久化层校验：full checkpoint 里必须真的含注入数据（而不是默认值）。
+                                // 若开场流程并发替换聊天数组导致插件提交被取消（回滚回旧锚点），
+                                // checkpoint 会退回默认值——此时缓存本次 stat，等聊天稳定后由重锚重建干净 checkpoint。
+                                try {
+                                    const holder = (typeof window !== 'undefined' ? window : globalThis);
+                                    if (holder) holder.__mvu2shujukuOpeningStat = { chat: chatKeyNow, stat: target, at: Date.now() };
+                                    const cpOk = checkpointHasStatData(activeLayout, target);
+                                    if (!cpOk) {
+                                        console.warn('[mvu2shujuku][debug][注入合并] full checkpoint 中未确认注入数据（可能被开场流程回滚），安排重锚重建干净 checkpoint。');
+                                        scheduleReAnchorCheckpoint();
+                                    } else {
+                                        console.log('[mvu2shujuku][debug][注入合并] full checkpoint 已包含注入数据（持久化校验通过）。');
+                                    }
+                                } catch (e2) {
+                                    console.warn('[mvu2shujuku][debug][注入合并] checkpoint 数据校验异常:', e2 && e2.message ? e2.message : e2);
                                 }
                             }
                         }
                         if (!usedSnapshot && typeof api.importTableAsJson === 'function') {
-                            // 非开局/initGameSession 失败/运行时未确认：回退完整快照提交。
+                            // 仅 initGameSession 不可用/失败时才会走到这里：
                             // 用合并后的模板（含注入数据）而不是 exportTableAsJson 快照——
                             // 开局时 export 可能为空，空快照会把注入数据覆盖成空表。
+                            // 注意：无现有锚点时该提交不会写 checkpoint（插件语义），
+                            // 仅作运行时物化与最后手段，失败后仍有差异写入兜底。
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(mergedTemplate || snap), {}));
                             if (ok) {
                                 usedSnapshot = true;
@@ -7343,6 +7478,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     let lastAnchorChat = '';
     let lastAnchorAttempt = 0;
     let lastAnchorStateLog = 0;
+    let reAnchorAttempts = 0;
     const reAnchorSkipLog = {};
     async function reAnchorCheckpointIfNeeded() {
         const now = Date.now();
@@ -7354,6 +7490,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 lastAnchorChat = key;
                 // 切聊天后先重置节流窗口，给新聊天的事件序列留出时间
                 lastAnchorAttempt = now;
+                reAnchorAttempts = 0;
             }
             const logSkip = (reason) => {
                 const k = key + '|' + reason;
@@ -7397,7 +7534,27 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         ' | ' + msg0info + ' | exportRows=' + rowCount + '（chat=' + key + '）');
                 } catch (e3) {}
             }
-            if (hasFullShujukuCheckpoint()) { logSkip('聊天仍有 full checkpoint'); return; }
+            // 缓存的开场 stat（写入路径在 initGameSession 后缓存，含用户注入数据）
+            const holder = (typeof window !== 'undefined' ? window : globalThis);
+            const opening = (holder && holder.__mvu2shujukuOpeningStat) || null;
+            const statForCheck = (opening && opening.chat === key && opening.stat) ? opening.stat : null;
+            const hasCp = hasFullShujukuCheckpoint();
+            if (hasCp) {
+                // 有 checkpoint 但仍要校验数据：开局阶段若 checkpoint 缺注入值
+                // （initGameSession 被开场流程并发回滚、或持久化的是默认模板），
+                // 需要重建干净锚点；校验通过才跳过。
+                if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
+                    console.log('[mvu2shujuku][debug][重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
+                } else {
+                    logSkip('聊天仍有 full checkpoint'); return;
+                }
+            }
+            // 防循环：同一聊天内重锚失败超过 20 次（约 1 分钟）就停止，避免反复重型 initGameSession
+            reAnchorAttempts += 1;
+            if (reAnchorAttempts > 20) {
+                logSkip('重锚失败次数过多（20），已停止自动重试');
+                return;
+            }
             const tplCached = cachedTemplateForCurrentCard();
             if (!tplCached) { logSkip('无模板缓存'); return; }
             // 表格里必须已有真实数据才值得重锚（空表说明是普通建表流程，交给 autoInit）
@@ -7409,10 +7566,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (s && Array.isArray(s.content) && s.content.length > 1) { hasRows = true; break; }
                 if (s && Array.isArray(s.seedRows) && s.seedRows.length) { hasRows = true; break; }
             }
-            if (!hasRows) { logSkip('表格无数据行'); return; }
-            console.log('[mvu2shujuku][debug][重锚] 开局首楼被替换/删除导致 full checkpoint 丢失（chat=' + key + '），用当前运行时数据重建锚点…');
-            // 用当前运行时数据合并回模板：保留 sourceData/规则，行数据为现有值（不丢用户注入）
-            const reTpl = mergeSnapshotIntoTemplate(tplCached, cur);
+            if (!hasRows && !statForCheck) { logSkip('表格无数据行'); return; }
+            console.log('[mvu2shujuku][debug][重锚] full checkpoint 缺失或缺少注入数据（chat=' + key + '，尝试 #' + reAnchorAttempts + '），重建锚点…');
+            // 重建模板：优先用缓存的开场 stat（精确含用户注入值，不依赖运行时状态），
+            // 否则退回用当前运行时数据合并回模板（保留 sourceData/规则）。
+            const reTpl = statForCheck
+                ? applyTargetToTemplate(tplCached, activeLayout, statForCheck)
+                : mergeSnapshotIntoTemplate(tplCached, cur);
             if (!reTpl) return;
             const initResult = await Promise.resolve(api.initGameSession({}, {
                 injectTemplate: true,
@@ -7422,8 +7582,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             }));
             const ok = !(initResult && initResult.success === false);
             console.log('[mvu2shujuku][debug][重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
-                ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint());
-            // 重锚成功必须落盘：首楼替换后 chat 已被插件/酒馆重新保存过（不带 checkpoint），
+                ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint() +
+                ' | checkpoint含注入数据=' + (statForCheck ? checkpointHasStatData(activeLayout, statForCheck) : 'N/A'));
+            // 重锚成功必须落盘：首楼替换后 chat 已被插件/酒馆重新保存过（不带 checkpoint 或带旧默认值），
             // 仅改内存会在下一次保存或刷新时再次丢失。
             if (ok || hasFullShujukuCheckpoint()) {
                 try {
@@ -8531,6 +8692,85 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         return false;
     }
 
+    // 读取聊天中 full checkpoint 的数据（跨所有消息与隔离标签）。
+    // 只认 storageFrame.version=2 + checkpoint.kind=full 的帧；读不到返回 null。
+    function readFullCheckpointData() {
+        try {
+            const ctx = getContextSafe();
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            for (const msg of chat) {
+                if (!msg || typeof msg !== 'object') continue;
+                const iso = msg.TavernDB_ACU_IsolatedData;
+                if (!iso || typeof iso !== 'object') continue;
+                for (const k of Object.keys(iso)) {
+                    const tag = iso[k];
+                    if (!tag || typeof tag !== 'object') continue;
+                    const sf = tag.storageFrame;
+                    if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
+                    const cp = sf.checkpoint;
+                    if (cp && cp.kind === 'full' && cp.data && typeof cp.data === 'object') return cp.data;
+                }
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    // 用目标 stat_data 的非默认值作为 needle，检查 full checkpoint 数据里是否真的包含注入值。
+    // 这是持久化层的校验：只读聊天里的 checkpoint，不依赖运行时 exportTableAsJson。
+    // 返回 true = checkpoint 已含注入值（或没有可校验的注入值）；false = checkpoint 缺失/默认值。
+    function checkpointHasStatData(layoutEntries, statData) {
+        try {
+            const sd = statData || {};
+            const checks = [];
+            const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+            for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+                const wp = (L.writePaths || [])[0];
+                let v = undefined;
+                if (Array.isArray(wp) && wp.length) {
+                    let cur = sd;
+                    for (const p of wp) {
+                        if (cur === null || cur === undefined || typeof cur !== 'object') { v = undefined; break; }
+                        cur = cur[p];
+                        v = cur;
+                    }
+                } else {
+                    v = sd[L.group];
+                }
+                if (!isObj(v)) continue;
+                if (L.kind === 'rows') {
+                    const keys = Object.keys(v).filter(k => isObj(v[k]));
+                    if (keys.length) checks.push({ table: L.table, needles: keys.map(k => String(k)) });
+                } else if (L.kind === 'singleton') {
+                    const cols = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
+                    const needles = [];
+                    for (const c of cols) {
+                        const cv = v[c];
+                        if (cv !== undefined && cv !== null && cv !== '') needles.push(String(cv));
+                    }
+                    if (needles.length) checks.push({ table: L.table, needles });
+                }
+            }
+            if (!checks.length) return true;
+            const cpData = readFullCheckpointData();
+            if (!cpData) return false;
+            for (const chk of checks) {
+                let sheet = null;
+                for (const k in cpData) {
+                    if (k.indexOf('sheet_') === 0 && cpData[k] && cpData[k].name === chk.table) { sheet = cpData[k]; break; }
+                }
+                if (!sheet || !Array.isArray(sheet.content)) return false;
+                let found = false;
+                for (let r = 1; r < sheet.content.length; r++) {
+                    const row = sheet.content[r];
+                    if (!Array.isArray(row)) continue;
+                    if (chk.needles.some(n => n && row.some(cell => String(cell == null ? '' : cell) === n))) { found = true; break; }
+                }
+                if (!found) return false;
+            }
+            return true;
+        } catch (e) { return false; }
+    }
+
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
@@ -8610,20 +8850,50 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                     message: initResult.message || '',
                                 }) : 'undefined';
                                 console.log('[mvu2shujuku][debug] Mvu 写入完成（initGameSession 合并注入数据建表，插件建立完整初始化状态）| initResult=' + initInfo.slice(0, 300));
-                                // 对齐参考卡：initGameSession 后运行时可能异步物化，短轮询确认注入数据落表；
-                                // 确认不了则回退 importTableAsJson 快照提交（用合并模板，保证数据不丢）。
+                                // initGameSession 成功即已写入干净 full checkpoint（logEntries=0，与参考卡一致），
+                                // 持久化完成，标记为成功。**绝不能**再走 importTableAsJson(persist) 兜底——
+                                // 它会追加一条 data_replace logEntry 弄脏链，刷新回放失败导致数据回默认（实测根因）。
+                                usedSnapshot = true;
+                                // 运行时物化：插件 initGameSession 后运行时可能延迟重建，先短轮询；
+                                // 等不到就用运行时专用通道（persist:false）物化——只改内存，不写任何 logEntry。
                                 const injected = await verifyTemplateInjected(api, activeLayout, target, 1800);
                                 if (injected) {
-                                    usedSnapshot = true;
+                                    console.log('[mvu2shujuku][debug][注入合并] initGameSession 后已在运行时表格确认注入数据。');
                                 } else {
-                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后未在运行时表格中确认注入数据，回退 importTableAsJson 快照提交。');
+                                    console.warn('[mvu2shujuku][debug][注入合并] initGameSession 后运行时未确认注入数据，使用运行时专用通道物化（persist:false，不写 logEntry）…');
+                                    try {
+                                        const rtOk = await Promise.resolve(api.importTableAsJson(JSON.stringify(mergedTemplate), { persist: false, mode: 'restore' }));
+                                        console.log('[mvu2shujuku][debug] 运行时物化（persist:false）=' + (rtOk ? '成功' : '失败'));
+                                        const injected2 = await verifyTemplateInjected(api, activeLayout, target, 1000);
+                                        console.log('[mvu2shujuku][debug][注入合并] 物化后确认注入数据=' + injected2);
+                                    } catch (e) {
+                                        console.warn('[mvu2shujuku][debug] 运行时物化异常（不影响已写入的 checkpoint）:', e && e.message ? e.message : e);
+                                    }
+                                }
+                                // 持久化层校验：full checkpoint 里必须真的含注入数据（而不是默认值）。
+                                // 若开场流程并发替换聊天数组导致插件提交被取消（回滚回旧锚点），
+                                // checkpoint 会退回默认值——此时缓存本次 stat，等聊天稳定后由重锚重建干净 checkpoint。
+                                try {
+                                    const holder = (typeof window !== 'undefined' ? window : globalThis);
+                                    if (holder) holder.__mvu2shujukuOpeningStat = { chat: chatKeyNow, stat: target, at: Date.now() };
+                                    const cpOk = checkpointHasStatData(activeLayout, target);
+                                    if (!cpOk) {
+                                        console.warn('[mvu2shujuku][debug][注入合并] full checkpoint 中未确认注入数据（可能被开场流程回滚），安排重锚重建干净 checkpoint。');
+                                        scheduleReAnchorCheckpoint();
+                                    } else {
+                                        console.log('[mvu2shujuku][debug][注入合并] full checkpoint 已包含注入数据（持久化校验通过）。');
+                                    }
+                                } catch (e2) {
+                                    console.warn('[mvu2shujuku][debug][注入合并] checkpoint 数据校验异常:', e2 && e2.message ? e2.message : e2);
                                 }
                             }
                         }
                         if (!usedSnapshot && typeof api.importTableAsJson === 'function') {
-                            // 非开局/initGameSession 失败/运行时未确认：回退完整快照提交。
+                            // 仅 initGameSession 不可用/失败时才会走到这里：
                             // 用合并后的模板（含注入数据）而不是 exportTableAsJson 快照——
                             // 开局时 export 可能为空，空快照会把注入数据覆盖成空表。
+                            // 注意：无现有锚点时该提交不会写 checkpoint（插件语义），
+                            // 仅作运行时物化与最后手段，失败后仍有差异写入兜底。
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(mergedTemplate || snap), {}));
                             if (ok) {
                                 usedSnapshot = true;
