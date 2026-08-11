@@ -272,7 +272,7 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
             first_mes: '你好',
             character_book: {
                 entries: [
-                    { comment: '[InitVar]', content: '户: {}\n系统: { _版本: 1 }' },
+                    { comment: '[InitVar]', content: '户: {}\n现金: 500\n人物: { 张三: { 亲密: 10 } }\n系统: { _版本: 1 }' },
                     {
                         comment: '[mvu_update]变量更新规则',
                         content: [
@@ -286,6 +286,11 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
                             '    type: string',
                             '    check:',
                             '      - 丈夫在场时更新',
+                            '  人物.角色名.亲密:',
+                            '    type: number',
+                            '    range: 0~100',
+                            '    check:',
+                            '      - 与NPC互动时更新，单次 ±(2~5)',
                         ].join('\n'),
                     },
                 ],
@@ -296,8 +301,21 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     const si = core.parseMvuShapes(card);
     assert.ok(si.wildcardFields.has('户.<门牌>.妻.好感值'), '通配路径字段应被识别');
     assert.ok(si.wildcardFields.has('户.<门牌>.夫.当前情绪'), '多个通配路径字段都应被识别');
+    assert.ok(Array.isArray(si.wildcardRules['人物']) && si.wildcardRules['人物'][0].range[0] === 0, '通配规则应按路径首段归组并提取范围');
     const r = core.convert(card, { mode: 'both' });
     assert.ok(r.report.toMarkdown().includes('通配路径规则'), '转换报告应显式警告通配路径规则');
+    const hub = Object.values(r.template).find(s => s && s.name === '户表');
+    assert.ok(hub.sourceData.note.includes('【可写路径与约束】'), 'JSON 表有可写规则时不应一刀切只读');
+    assert.ok(hub.sourceData.note.includes('户.<门牌>.妻.好感值（数值范围 0~100；仅本人在场时更新）'), 'JSON 表 note 应列出可写路径与约束');
+    assert.ok(!hub.sourceData.note.includes('AI 不应直接修改本表'), 'JSON 表有可写规则时不应再标“AI 不应直接修改”');
+    assert.ok(hub.sourceData.ddl.includes('CHECK(json_valid(neirong))'), 'JSON 表内容列应有 json_valid CHECK（SQLite 模式生效）');
+    const cash = Object.values(r.template).find(s => s && s.name === '现金表');
+    assert.ok(cash.sourceData.note.includes('AI 不应直接修改本表'), '无规则的 JSON 表仍应保持只读');
+    const rw = Object.values(r.template).find(s => s && s.name === '人物表');
+    assert.ok(
+        rw.sourceData.note.includes('人物表：人物.角色名.亲密（数值范围 0~100；与NPC互动时更新，单次 ±(2~5)）'),
+        '可写行表的通配规则应作为表格级提示写入 note'
+    );
 });
 
 test('模板 content 单元格归一化：布尔 → 1/0，无非法类型（插件 escapeValue 兼容）', () => {
