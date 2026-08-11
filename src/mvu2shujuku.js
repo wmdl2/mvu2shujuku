@@ -2776,7 +2776,15 @@
                         }
                     }
                 }
-                if (!sObj) { sObj = {}; if (SE.kind === 'json') { sObj[SE0.keyCol] = SE0.keyValue; sObj['内容'] = '{}'; } }
+                if (!sObj) sObj = {};
+                if (SE.kind === 'json') {
+                    // 整组 JSON 表：身份行 + 内容列必须是合法 JSON（模板行可能为空串，
+                    // 插件 SQLite 表带 CHECK json_valid(neirong)，空串/非 JSON 会被拒绝）
+                    if (!sObj[SE0.keyCol]) sObj[SE0.keyCol] = SE0.keyValue || 'row1';
+                    const jv0 = sObj['内容'];
+                    if (jv0 === undefined || jv0 === null || jv0 === '') sObj['内容'] = '{}';
+                    else { try { JSON.parse(jv0); } catch (e) { sObj['内容'] = '{}'; } }
+                }
                 try {
                     await Promise.resolve(api.insertRow(SE0.table, sObj));
                     dbg(' 已为表「' + SE0.table + '」补初始行（原表仅表头）。');
@@ -3606,7 +3614,13 @@
             `    var sSheet0=sheetOfLocal(SE0.table);`,
             `    if(!sSheet0||!Array.isArray(sSheet0.content)||sSheet0.content.length>1)continue;`,
             `    var sObj=templateSheetRow(SE0.table)||null;`,
-            `    if(!sObj){sObj={};if(SE.kind==='json'){sObj[SE0.keyCol]=SE0.keyValue;sObj['内容']='{}';}}`,
+            `    if(!sObj)sObj={};`,
+            `    if(SE.kind==='json'){`,
+            `      if(!sObj[SE0.keyCol])sObj[SE0.keyCol]=SE0.keyValue||'row1';`,
+            `      var jv0=sObj['内容'];`,
+            `      if(jv0===undefined||jv0===null||jv0==='')sObj['内容']='{}';`,
+            `      else{try{JSON.parse(jv0);}catch(e){sObj['内容']='{}';}}`,
+            `    }`,
             `    try{await Promise.resolve(API.insertRow(SE0.table,sObj));console.log('['+BRIDGE_NAME+'] 已为表「'+SE0.table+'」补初始行（原表仅表头）。');}catch(e){console.warn('['+BRIDGE_NAME+'] 补初始行失败:',e);}`,
             `  }`,
             `  for(var oi=0;oi<ops.length;oi++){`,
@@ -5329,6 +5343,8 @@ ${DB_INIT_SNIPPET}
     let reAnchorAttempts = 0;
     // 同一聊天只做一次“重进恢复”（防止每次 CHAT_CHANGED/消息事件都重复物化）
     let lastRuntimeRestoreChat = '';
+    // 物化失败后的冷却：避免 initGameSession 回退路径每 3 秒重复重型重建
+    let lastRuntimeRestoreFailAt = 0;
     const reAnchorSkipLog = {};
     async function reAnchorCheckpointIfNeeded() {
         const now = Date.now();
@@ -5402,10 +5418,15 @@ ${DB_INIT_SNIPPET}
                     try {
                         const cpData = readFullCheckpointData();
                         const api2 = getAcuApi();
-                        if (cpData && api2 && !runtimeSyncedWithCheckpoint(api2, cpData) && lastRuntimeRestoreChat !== key) {
+                        if (cpData && api2 && !runtimeSyncedWithCheckpoint(api2, cpData) &&
+                            lastRuntimeRestoreChat !== key && (Date.now() - lastRuntimeRestoreFailAt > 30000)) {
                             lastRuntimeRestoreChat = key;
                             const rtOk = await materializeRuntimeFromCheckpoint(api2);
                             dbg('[重进恢复] 运行时与 checkpoint 不一致，已按 checkpoint 物化=' + (rtOk ? '成功' : '失败'));
+                            if (!rtOk) {
+                                lastRuntimeRestoreFailAt = Date.now();
+                                lastRuntimeRestoreChat = ''; // 失败允许后续重试（模板/API 就绪后可能成功）
+                            }
                         }
                     } catch (e) {}
                     logSkip('聊天仍有 full checkpoint'); return;
@@ -6103,7 +6124,10 @@ ${DB_INIT_SNIPPET}
                     }
                     if (L.kind === 'json') {
                         if (!obj[L.keyCol || '名称']) obj[L.keyCol || '名称'] = L.keyValue || 'row1';
-                        if (obj['内容'] === undefined) obj['内容'] = '{}';
+                        // 内容列必须是合法 JSON（模板行可能是空串，SQLite CHECK json_valid 会拒绝）
+                        const jv1 = obj['内容'];
+                        if (jv1 === undefined || jv1 === null || jv1 === '') obj['内容'] = '{}';
+                        else { try { JSON.parse(jv1); } catch (e) { obj['内容'] = '{}'; } }
                     }
                     const inserted = await Promise.resolve(api.insertRow(L.table, obj));
                     // 插件 insertRow 失败时返回 -1 / false / null，不抛异常；必须检查返回值，
@@ -6829,12 +6853,50 @@ ${DB_INIT_SNIPPET}
     // 的 baseRevision 会带着原始 key，挂在稳定 key 的 checkpoint 上，刷新回放失败、整链回默认。
     // 返回 true 表示运行时已（重新）用 checkpoint 数据物化。
     async function materializeRuntimeFromCheckpoint(api) {
+        const restoreWith = async (payload, tag) => {
+            try {
+                const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(payload), { persist: false, mode: 'restore' }));
+                dbg(' 运行时按 checkpoint 数据物化（' + tag + '，persist:false）=' + (ok ? '成功' : '失败'));
+                return !!ok;
+            } catch (e) {
+                dbgWarn(' 运行时按 checkpoint 物化异常（' + tag + '）:', e && e.message ? e.message : e);
+                return false;
+            }
+        };
         try {
             const cpData = readFullCheckpointData();
             if (!cpData || typeof api.importTableAsJson !== 'function') return false;
-            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(cpData), { persist: false, mode: 'restore' }));
-            dbg(' 运行时按 checkpoint 数据物化（稳定 key，persist:false）=' + (ok ? '成功' : '失败'));
-            return !!ok;
+            // 插件 importTableAsJson 要求输入含 {mate, sheet_*}：checkpoint.data 是插件自身
+            // 持久化格式（无 mate），直接导入会被拒。先试裸数据（最干净），失败后用
+            // getTableTemplate 提供的 mate 包装 cpData 再试，最终回退 initGameSession 重建
+            // （插件接受无 mate 的模板格式，且会用规范化数据写含 mate 的新 checkpoint，自愈）。
+            if (await restoreWith(cpData, '裸 checkpoint')) return true;
+            let tpl = null;
+            try { tpl = await Promise.resolve(api.getTableTemplate({ scope: 'chat' })) || null; } catch (e) { tpl = null; }
+            const base = (tpl && typeof tpl === 'object' && tpl.mate) ? JSON.parse(JSON.stringify(tpl)) : null;
+            if (base) {
+                for (const k of Object.keys(cpData)) {
+                    if (k.indexOf('sheet_') === 0) base[k] = JSON.parse(JSON.stringify(cpData[k]));
+                }
+                if (await restoreWith(base, '模板 mate 包装')) return true;
+            }
+            dbg(' 运行时物化回退：initGameSession 重建（用 checkpoint 数据）…');
+            const tplCached = cachedTemplateForCurrentCard();
+            let reTpl = null;
+            if (tplCached && typeof tplCached === 'object') {
+                try { reTpl = mergeSnapshotIntoTemplate(tplCached, cpData); } catch (e) { reTpl = null; }
+            }
+            if (!reTpl) reTpl = cpData;
+            const r = await Promise.resolve(api.initGameSession({}, {
+                injectTemplate: true,
+                loadPreset: false,
+                templateData: reTpl,
+                templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板',
+            }));
+            const ok2 = !(r && r.success === false);
+            dbg(' 运行时物化回退：initGameSession 重建结果=' + (ok2 ? '完成' : ((r && r.message) || '失败')) +
+                ' | runtimeReady=' + (r ? r.runtimeReady : 'N/A'));
+            return ok2;
         } catch (e) {
             dbgWarn(' 运行时按 checkpoint 物化异常:', e && e.message ? e.message : e);
             return false;
