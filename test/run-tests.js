@@ -105,6 +105,192 @@ test('从 [mvu_update] 提取结构声明', () => {
     assert.strictEqual(si.objects['玉简']['历史记录'], true);
 });
 
+test('从 [mvu_update] 提取 check 规则与提醒（含引号项、模板键展开）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '规则卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: [
+                            '世界:',
+                            '  当前时间: 未知',
+                            '  当前地点: 未知',
+                            '  遭遇冷却: 15',
+                            '主角:',
+                            '  姓名: 未知',
+                            '  生命: 100',
+                            '  道心: 50',
+                        ].join('\n'),
+                    },
+                    {
+                        comment: '[mvu_update]',
+                        content: [
+                            '变量更新规则:',
+                            '  _强制更新提醒:',
+                            '    - 主角.${生命|精血} — 战斗、受伤时',
+                            '  世界:',
+                            '    遭遇冷却:',
+                            '      type: number',
+                            '      range: 0~15',
+                            '      check:',
+                            '        - 如果当前遭遇冷却大于0，每推进一次剧情就减1（op: delta, value: -1）',
+                            '        - 触发动态遭遇时重置为15',
+                            '    当前地点:',
+                            '      check: "必须按层级描述"',
+                            '  主角:',
+                            '    道心:',
+                            '      type: number',
+                            '      range: 0~100',
+                            '      check:',
+                            '        - "四境：凡心(0~25) 初窥(26~50)"',
+                            '        - 归零则走火入魔',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.deepStrictEqual(
+        si.checks['世界']['遭遇冷却'],
+        ['如果当前遭遇冷却大于0，每推进一次剧情就减1（op: delta, value: -1）', '触发动态遭遇时重置为15'],
+        'bullet check 应完整提取'
+    );
+    assert.deepStrictEqual(si.checks['世界']['当前地点'], ['必须按层级描述'], '单行引号 check 应提取');
+    assert.strictEqual(si.checks['主角']['道心'][0], '四境：凡心(0~25) 初窥(26~50)', '引号包裹的列表项应剥掉引号');
+    assert.ok(si.reminders['主角'].some(r => r.includes('生命/精血')), '提醒中的模板键应展开');
+    // 落到表格 note：check 规则应出现在填表提示词里
+    const r = core.convert(card, { mode: 'both' });
+    const world = Object.values(r.template).find(s => s && s.name === '世界表');
+    assert.ok(world.sourceData.note.includes('遭遇冷却：如果当前遭遇冷却大于0'), 'note 应包含 check 规则');
+    assert.ok(world.sourceData.note.includes('当前地点：必须按层级描述'), 'note 应包含单行引号 check');
+});
+
+test('模板 content 单元格归一化：布尔 → 1/0，无非法类型（插件 escapeValue 兼容）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '布尔卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{
+                    comment: '[InitVar]',
+                    content: [
+                        '玩家资源:',
+                        '  保护准备: false',
+                        '  已启用: true',
+                        '  精力: 8',
+                    ].join('\n'),
+                }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const sheet = Object.values(r.template).find(s => s && s.name === '玩家资源表');
+    assert.ok(sheet, '应生成玩家资源表');
+    for (let ri = 1; ri < sheet.content.length; ri++) {
+        for (let ci = 1; ci < sheet.content[ri].length; ci++) {
+            const v = sheet.content[ri][ci];
+            assert.ok(typeof v === 'string' || typeof v === 'number', `单元格应为 string/number，实际 ${typeof v}`);
+        }
+    }
+    assert.strictEqual(sheet.content[1][sheet.content[0].indexOf('保护准备')], 0, 'false 应归一化为 0');
+    assert.strictEqual(sheet.content[1][sheet.content[0].indexOf('已启用')], 1, 'true 应归一化为 1');
+});
+
+test('zod/TS 替代写法：z.object 结构 + /** check: */ 注释应被解析', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'zod卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: [
+                            '白娅:',
+                            '  依存度: 0',
+                            '  着装: 无',
+                            '世界:',
+                            '  当前时间: 未知',
+                        ].join('\n'),
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则: |-',
+                            '  z.object({',
+                            '    白娅: z.object({',
+                            '      /**',
+                            '       * check:',
+                            '       *   - 根据白娅对{{user}}行为的感知和反应调整 ±(3~6)',
+                            '       *   - 仅在白娅当前察觉到{{user}}的行为时才更新',
+                            '       */',
+                            '      依存度: z.number().min(0).max(100),',
+                            '      着装: z.string().describe("穿着描述"),',
+                            '    }),',
+                            '    世界: z.object({',
+                            '      当前时间: z.string(),',
+                            '    }),',
+                            '  })',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.ok(si.shapes['白娅'].includes('依存度'), 'zod 字段名应并入 shapes');
+    assert.ok(si.shapes['白娅'].includes('着装'), 'zod 字段名应并入 shapes');
+    assert.ok(si.shapes['世界'].includes('当前时间'), 'zod 世界组字段应并入 shapes');
+    assert.deepStrictEqual(
+        si.checks['白娅']['依存度'],
+        ['根据白娅对{{user}}行为的感知和反应调整 ±(3~6)', '仅在白娅当前察觉到{{user}}的行为时才更新'],
+        'zod /** check: */ 注释应提取为规则'
+    );
+    // 落到表格 note
+    const r = core.convert(card, { mode: 'both' });
+    const bya = Object.values(r.template).find(s => s && s.name === '白娅表');
+    assert.ok(bya.sourceData.note.includes('依存度：根据白娅对{{user}}行为的感知和反应调整 ±(3~6)'), 'zod check 应进入填表提示词');
+});
+
+test('SQL 示例优先用默认值，TEXT 无默认才用“列名示例”', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '示例默认卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{
+                    comment: '[InitVar]',
+                    content: [
+                        '道侣:',
+                        '  林若悠: { 亲密: 50 }',
+                        '  林若雪: { 亲密: 50, 修为: 10, 性格: "温柔" }',
+                    ].join('\n'),
+                }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const dl = Object.values(r.template).find(s => s && s.name === '道侣表');
+    assert.ok(dl.sourceData.insertNode.includes("VALUES ('林若悠', 50, 0, '性格示例')"), 'INSERT 应含真实值/默认值/列名示例');
+    assert.ok(dl.sourceData.updateNode.includes('SET qinmi = 50'), 'UPDATE 示例应取真实初始值');
+});
+
 /* ---------------- scanStatusUsage ---------------- */
 console.log('scanStatusUsage');
 test('道渊状态栏字段扫描', () => {
@@ -1630,6 +1816,7 @@ test('数组表提示词按行增删改，不再“整体替换/禁止增删”'
     const r = core.convert(card, { mode: 'both' });
     const sheet = Object.values(r.template).find(s => s && s.name === '背包表');
     assert.ok(sheet, '应生成背包表');
+    assert.ok(sheet.sourceData.note.startsWith('数组表：'), 'note 不应以表名开头（对齐默认模板）');
     assert.ok(sheet.sourceData.note.includes('数组表'), 'note 应说明数组表');
     assert.ok(sheet.sourceData.note.includes('INSERT'), 'note 应说明 INSERT');
     assert.ok(sheet.sourceData.note.includes('DELETE'), 'note 应说明 DELETE');
@@ -1641,6 +1828,7 @@ test('数组表提示词按行增删改，不再“整体替换/禁止增删”'
     assert.ok(!sheet.sourceData.insertNode.includes('禁止'), '数组表 insert 不应禁止');
     assert.ok(!sheet.sourceData.deleteNode.includes('禁止'), '数组表 delete 不应禁止');
     assert.ok(sheet.sourceData.initNode.includes('INSERT'), 'initNode 应指引 insertNode');
+    assert.ok(!sheet.sourceData.initNode.includes('无（开局'), 'initNode 不应出现“无（…）”矛盾表述');
 });
 
 test('全只读单例不生成 UPDATE 示例，note/init/update 自洽', () => {
