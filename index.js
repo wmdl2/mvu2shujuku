@@ -6210,42 +6210,40 @@ ${DB_INIT_SNIPPET}
     function mergeSnapshotIntoTemplate(tplCached, snapshot) {
         try {
             if (!tplCached || typeof tplCached !== 'object' || !snapshot || typeof snapshot !== 'object') return null;
-            const out = JSON.parse(JSON.stringify(tplCached));
-            // 快照的 sheet key 来自插件运行时（可能被规范化成稳定 key），与转换器模板的
-            // 原始 key 不一定相同；先按 key 精确匹配，再按表名兜底，避免合并失败导致
-            // 提交旧模板数据（SQLite 模式实测：快照有值、提交却是旧值）。
+            // 表集合以「模板」为准（切卡/重锚后重建用当前卡的表），
+            // key 优先用「快照（插件稳定 key）」：快照里有同名表就用稳定 key，
+            // 否则退回模板 key（该表尚未进入运行时身份，纯净聊天由插件 rekey 成稳定 key）。
+            // 绝不能把已进入运行时的表再用原始 key 提交（同一规范表名并存两套 key → 回放冲突）。
             const snapByName = {};
             for (const k of Object.keys(snapshot)) {
-                if (k.indexOf('sheet_') === 0 && snapshot[k] && typeof snapshot[k] === 'object' && snapshot[k].name) {
-                    snapByName[String(snapshot[k].name)] = snapshot[k];
-                }
-            }
-            for (const k of Object.keys(out)) {
                 if (k.indexOf('sheet_') !== 0) continue;
-                const tplSheet = out[k];
-                let snapSheet = snapshot[k];
-                if (!snapSheet && tplSheet && tplSheet.name && snapByName[String(tplSheet.name)]) {
-                    snapSheet = snapByName[String(tplSheet.name)];
+                const s = snapshot[k];
+                if (s && typeof s === 'object' && s.name) snapByName[String(s.name)] = { key: k, sheet: s };
+            }
+            const tplByName = {};
+            for (const k of Object.keys(tplCached)) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const s = tplCached[k];
+                if (s && typeof s === 'object' && s.name) tplByName[String(s.name)] = s;
+            }
+            const out = {};
+            for (const k of Object.keys(tplCached)) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const tplSheet = tplCached[k];
+                if (!tplSheet || typeof tplSheet !== 'object') continue;
+                const name = String(tplSheet.name || '');
+                const snapHit = name ? snapByName[name] : null;
+                const stableKey = snapHit ? snapHit.key : k;
+                const dataSheet = snapHit ? snapHit.sheet : tplSheet;
+                const outSheet = JSON.parse(JSON.stringify(dataSheet));
+                if (tplSheet) {
+                    if (tplSheet.sourceData && typeof tplSheet.sourceData === 'object') outSheet.sourceData = JSON.parse(JSON.stringify(tplSheet.sourceData));
+                    if (tplSheet.updateConfig && typeof tplSheet.updateConfig === 'object') outSheet.updateConfig = JSON.parse(JSON.stringify(tplSheet.updateConfig));
+                    if (tplSheet.exportConfig && typeof tplSheet.exportConfig === 'object') outSheet.exportConfig = JSON.parse(JSON.stringify(tplSheet.exportConfig));
+                    if (tplSheet.orderNo !== undefined) outSheet.orderNo = tplSheet.orderNo;
+                    if (tplSheet.uid) outSheet.uid = String(tplSheet.uid);
                 }
-                if (!tplSheet || !snapSheet || typeof tplSheet !== 'object' || typeof snapSheet !== 'object') continue;
-                if (Array.isArray(snapSheet.content) && snapSheet.content.length > 0) {
-                    tplSheet.content = JSON.parse(JSON.stringify(snapSheet.content));
-                }
-                if (Array.isArray(snapSheet.seedRows)) {
-                    // 运行时 seedRows 可能已带 row_id=1 且与 content 首行重复（插件 initGameSession
-                    // 校验会拒绝：'seedRows 第 1 行 row_id「1」重复'）。只保留 row_id 与 content 不冲突的
-                    // 种子行；冲突行由插件从 content 重新生成。
-                    const contentIds = new Set();
-                    if (Array.isArray(snapSheet.content)) {
-                        for (const row of snapSheet.content.slice(1)) {
-                            if (Array.isArray(row) && row[0] !== undefined && row[0] !== null && row[0] !== '') contentIds.add(String(row[0]));
-                        }
-                    }
-                    tplSheet.seedRows = JSON.parse(JSON.stringify(snapSheet.seedRows)).filter((row) => {
-                        if (!Array.isArray(row) || row[0] === undefined || row[0] === null || row[0] === '') return false;
-                        return !contentIds.has(String(row[0]));
-                    });
-                }
+                out[stableKey] = outSheet;
             }
             return out;
         } catch (e) {
@@ -20734,42 +20732,40 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     function mergeSnapshotIntoTemplate(tplCached, snapshot) {
         try {
             if (!tplCached || typeof tplCached !== 'object' || !snapshot || typeof snapshot !== 'object') return null;
-            const out = JSON.parse(JSON.stringify(tplCached));
-            // 快照的 sheet key 来自插件运行时（可能被规范化成稳定 key），与转换器模板的
-            // 原始 key 不一定相同；先按 key 精确匹配，再按表名兜底，避免合并失败导致
-            // 提交旧模板数据（SQLite 模式实测：快照有值、提交却是旧值）。
+            // 表集合以「模板」为准（切卡/重锚后重建用当前卡的表），
+            // key 优先用「快照（插件稳定 key）」：快照里有同名表就用稳定 key，
+            // 否则退回模板 key（该表尚未进入运行时身份，纯净聊天由插件 rekey 成稳定 key）。
+            // 绝不能把已进入运行时的表再用原始 key 提交（同一规范表名并存两套 key → 回放冲突）。
             const snapByName = {};
             for (const k of Object.keys(snapshot)) {
-                if (k.indexOf('sheet_') === 0 && snapshot[k] && typeof snapshot[k] === 'object' && snapshot[k].name) {
-                    snapByName[String(snapshot[k].name)] = snapshot[k];
-                }
-            }
-            for (const k of Object.keys(out)) {
                 if (k.indexOf('sheet_') !== 0) continue;
-                const tplSheet = out[k];
-                let snapSheet = snapshot[k];
-                if (!snapSheet && tplSheet && tplSheet.name && snapByName[String(tplSheet.name)]) {
-                    snapSheet = snapByName[String(tplSheet.name)];
+                const s = snapshot[k];
+                if (s && typeof s === 'object' && s.name) snapByName[String(s.name)] = { key: k, sheet: s };
+            }
+            const tplByName = {};
+            for (const k of Object.keys(tplCached)) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const s = tplCached[k];
+                if (s && typeof s === 'object' && s.name) tplByName[String(s.name)] = s;
+            }
+            const out = {};
+            for (const k of Object.keys(tplCached)) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const tplSheet = tplCached[k];
+                if (!tplSheet || typeof tplSheet !== 'object') continue;
+                const name = String(tplSheet.name || '');
+                const snapHit = name ? snapByName[name] : null;
+                const stableKey = snapHit ? snapHit.key : k;
+                const dataSheet = snapHit ? snapHit.sheet : tplSheet;
+                const outSheet = JSON.parse(JSON.stringify(dataSheet));
+                if (tplSheet) {
+                    if (tplSheet.sourceData && typeof tplSheet.sourceData === 'object') outSheet.sourceData = JSON.parse(JSON.stringify(tplSheet.sourceData));
+                    if (tplSheet.updateConfig && typeof tplSheet.updateConfig === 'object') outSheet.updateConfig = JSON.parse(JSON.stringify(tplSheet.updateConfig));
+                    if (tplSheet.exportConfig && typeof tplSheet.exportConfig === 'object') outSheet.exportConfig = JSON.parse(JSON.stringify(tplSheet.exportConfig));
+                    if (tplSheet.orderNo !== undefined) outSheet.orderNo = tplSheet.orderNo;
+                    if (tplSheet.uid) outSheet.uid = String(tplSheet.uid);
                 }
-                if (!tplSheet || !snapSheet || typeof tplSheet !== 'object' || typeof snapSheet !== 'object') continue;
-                if (Array.isArray(snapSheet.content) && snapSheet.content.length > 0) {
-                    tplSheet.content = JSON.parse(JSON.stringify(snapSheet.content));
-                }
-                if (Array.isArray(snapSheet.seedRows)) {
-                    // 运行时 seedRows 可能已带 row_id=1 且与 content 首行重复（插件 initGameSession
-                    // 校验会拒绝：'seedRows 第 1 行 row_id「1」重复'）。只保留 row_id 与 content 不冲突的
-                    // 种子行；冲突行由插件从 content 重新生成。
-                    const contentIds = new Set();
-                    if (Array.isArray(snapSheet.content)) {
-                        for (const row of snapSheet.content.slice(1)) {
-                            if (Array.isArray(row) && row[0] !== undefined && row[0] !== null && row[0] !== '') contentIds.add(String(row[0]));
-                        }
-                    }
-                    tplSheet.seedRows = JSON.parse(JSON.stringify(snapSheet.seedRows)).filter((row) => {
-                        if (!Array.isArray(row) || row[0] === undefined || row[0] === null || row[0] === '') return false;
-                        return !contentIds.has(String(row[0]));
-                    });
-                }
+                out[stableKey] = outSheet;
             }
             return out;
         } catch (e) {
