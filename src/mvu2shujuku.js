@@ -5210,6 +5210,35 @@ ${DB_INIT_SNIPPET}
         } catch (e) { return false; }
     }
 
+    // 切卡隔离：插件运行时（currentJsonTableData）在聊天切换后是异步 reload 的，
+    // 空窗期内 exportTableAsJson 可能仍返回上一张卡的表格。这里检查运行时表名集合：
+    // 任何既不在当前布局、也不在当前卡模板里的表，都视为跨卡残留（如切到催眠APP后
+    // 运行时还挂着道渊的世界表/主角表）。返回残留表名列表（空 = 无跨卡残留）。
+    function runtimeForeignTableNames(api, layoutEntries) {
+        try {
+            if (!api || typeof api.exportTableAsJson !== 'function') return ['<api未就绪>'];
+            const cur = api.exportTableAsJson() || {};
+            const runtimeNames = new Set();
+            for (const k in cur) {
+                if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) runtimeNames.add(String(cur[k].name));
+            }
+            if (!runtimeNames.size) return [];
+            const expected = new Set((Array.isArray(layoutEntries) ? layoutEntries : []).map(L => String(L.table)));
+            const tpl = cachedTemplateForCurrentCard();
+            const tplNames = new Set();
+            if (tpl && typeof tpl === 'object') {
+                for (const k in tpl) {
+                    if (k.indexOf('sheet_') === 0 && tpl[k] && tpl[k].name) tplNames.add(String(tpl[k].name));
+                }
+            }
+            const foreign = [];
+            for (const n of runtimeNames) {
+                if (!expected.has(n) && !tplNames.has(n)) foreign.push(n);
+            }
+            return foreign;
+        } catch (e) { return ['<校验异常>']; }
+    }
+
     function cachedTemplateForCurrentCard() {
         try {
             const holder = (typeof window !== 'undefined' ? window : globalThis);
@@ -6950,6 +6979,18 @@ ${DB_INIT_SNIPPET}
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
+                    // 切卡隔离：插件运行时（currentJsonTableData）可能在聊天切换后还挂着上一张卡
+                    // 的表格。若此时按旧卡数据写库，diff 识别不了布局外的组 → 回退快照 → 把跨卡
+                    // 数据写进当前聊天 checkpoint（日志表现：target 混入上一张卡的组、checkpoint 膨胀）。
+                    // 检测到跨卡残留表时直接丢弃本次写入（不重试，等插件完成切换后由后续写入接手）。
+                    try {
+                        const foreign = runtimeForeignTableNames(api, activeLayout);
+                        if (foreign.length) {
+                            dbgWarn('[流程] 写库前检测到跨卡残留表：' + foreign.join('、') + '，丢弃本次写入（等待插件完成聊天切换）。');
+                            if (statWriteOverlayGen === gen) pendingStatWrite = null;
+                            return;
+                        }
+                    } catch (e) {}
                     const anchored = await ensureCheckpointBeforeWrite(api, tplCached);
                     if (!anchored) {
                         dbgWarn('[流程] 写库前无法建立 full checkpoint，放弃本次写入，避免产生无锚点 artifacts。');
@@ -7000,7 +7041,16 @@ ${DB_INIT_SNIPPET}
                     const effectiveTarget = (() => {
                         if (!target || typeof target !== 'object') return prev || {};
                         const out = JSON.parse(JSON.stringify(prev || {}));
-                        for (const k of Object.keys(target)) out[k] = target[k];
+                        // 切卡隔离：前端可能缓存上一张卡的 stat_data（target 混入当前布局外的组）。
+                        // 只接受当前布局内的顶层组，布局外的组一律丢弃，避免串卡数据写进当前聊天。
+                        const allowedGroups = new Set((Array.isArray(activeLayout) ? activeLayout : []).map(L => L.group));
+                        for (const k of Object.keys(target)) {
+                            if (k === '$internal') continue;
+                            if (allowedGroups.has(k)) out[k] = target[k];
+                            else if (target[k] !== undefined && target[k] !== null && typeof target[k] === 'object') {
+                                dbg(' [切卡隔离] target 剥离布局外组：' + k);
+                            }
+                        }
                         return out;
                     })();
                     // 写入主路径：开局（表格仍是模板初始状态、无真实数据）时，把注入后的
@@ -7166,6 +7216,16 @@ ${DB_INIT_SNIPPET}
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     return { stat_data: {}, display_data: {} };
                 }
+                // 切卡隔离：插件运行时可能还没从上一张卡切过来（异步 reload 空窗期），
+                // 透传旧卡表格会让前端拿到上一张卡的 stat_data 并写回当前聊天（串卡污染）。
+                // 检测到跨卡残留表时返回空，让前端从零构建，等 autoInit/插件切换完成。
+                try {
+                    const foreign = runtimeForeignTableNames(api, activeLayout);
+                    if (foreign.length) {
+                        dbg(' [切卡隔离] 运行时含跨卡残留表：' + foreign.join('、') + '，读取返回空（等待插件完成聊天切换）。');
+                        return { stat_data: {}, display_data: {} };
+                    }
+                } catch (e) {}
                 return core.statDataFromTables(activeLayout, api.exportTableAsJson());
             } catch (e) {
                 return { stat_data: {}, display_data: {} };
