@@ -303,6 +303,55 @@ test('单例 UPDATE 示例：与行表一致的“规则 + SQL示例:”格式�
     assert.ok(node.includes('示例值仅为格式演示'), '应注明示例值仅为格式演示');
 });
 
+test('相邻顶层组不被跳过 + check 机制词清洗（op/delta/replace/分指令）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '机制词卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: '主角:\n  炼器次数: 0\n世界:\n  遭遇冷却: 15',
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  世界:',
+                            '    遭遇冷却:',
+                            '      type: number',
+                            '      range: 0~15',
+                            '      check:',
+                            '        - 如果当前遭遇冷却大于0，每推进一次剧情/回合就减1（op: delta, value: -1）',
+                            '        - 如果当前回合触发了动态遭遇事件，必须将其重置为15（op: replace, value: 15）',
+                            '  主角:',
+                            '    炼器次数:',
+                            '      check:',
+                            '        - 【防崩警告】更新时必须精确到子字段（如 /主角/炼丹/熟练度），严禁直接对整个对象使用 replace 或 delta！',
+                            '        - 熟练度(0~100)根据炼制结果增加：失败加1~5，成功加20~30。满100时必须分两条指令更新：一条replace阶级提升，另一条replace熟练度为0（勿用delta导致超限）',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    // 相邻组（变量更新规则: 后紧跟 世界:）不能被跳过
+    assert.ok(Array.isArray(si.checks['世界']['遭遇冷却']), '相邻的 世界 组应被识别（check 应挂在 世界 下）');
+    const r = core.convert(card, { mode: 'both' });
+    const byName = (n) => Object.values(r.template).find(s => s && s.name === n);
+    const worldNote = byName('世界表').sourceData.note;
+    assert.ok(worldNote.includes('遭遇冷却：如果当前遭遇冷却大于0，每推进一次剧情/回合就减1'), '括号机制注释应删除、业务规则保留');
+    assert.ok(!worldNote.includes('op:') && !worldNote.includes('（op:'), 'note 不应残留 op 机制词');
+    const heroNote = byName('主角表').sourceData.note;
+    assert.ok(!heroNote.includes('防崩') && !heroNote.includes('replace') && !heroNote.includes('delta') && !heroNote.includes('指令'), '纯机制句与机制词应被清洗');
+    assert.ok(heroNote.includes('满100时阶级提升；熟练度为0'), '“分两条指令”应改写为业务语义');
+});
+
 /* ---------------- scanStatusUsage ---------------- */
 console.log('scanStatusUsage');
 test('道渊状态栏字段扫描', () => {
