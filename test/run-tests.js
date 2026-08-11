@@ -172,6 +172,134 @@ test('从 [mvu_update] 提取 check 规则与提醒（含引号项、模板键�
     assert.ok(world.sourceData.note.includes('当前地点：必须按层级描述'), 'note 应包含单行引号 check');
 });
 
+test('组级 check（道侣/灵宠/人物/玉简等整表规则）不应丢失', () => {
+    const card = requireFixture();
+    const si = core.parseMvuShapes(card);
+    assert.ok(
+        Array.isArray(si.groupChecks['道侣']) && si.groupChecks['道侣'].some(x => x.includes('强制互斥锁')),
+        'parseMvuShapes 应保留组级 check 条目（互斥锁）'
+    );
+    assert.ok(
+        si.groupChecks['道侣'].some(x => x.includes('亲密数值变动需符合逻辑')),
+        '组级 check 中带引号的条目应剥掉引号保留'
+    );
+    const r = core.convert(card, { mode: 'both' });
+    const byName = (n) => Object.values(r.template).find(s => s && s.name === n);
+    const dl = byName('道侣表');
+    assert.ok(dl.sourceData.note.includes('强制互斥锁：道侣与人物列表绝对互斥'), '道侣表 note 应含互斥锁规则');
+    assert.ok(dl.sourceData.note.includes('单次增减幅度限制在 ±(2~10) 之间'), '道侣表 note 应含增减幅度规则');
+    const jade = byName('玉简表');
+    assert.ok(jade.sourceData.note.includes('历史记录严格限制最多保留100条'), '玉简表 note 应含组级规则');
+});
+
+test('format 支持无引号与块标量写法；zod 数值约束提取范围', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '格式卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: '世界:\n  当前时间: 未知\n  当前地点: 未知\n白娅:\n  依存度: 0',
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  世界:',
+                            '    当前时间:',
+                            '      format: YYYY年MM月DD日 星期X HH:MM',
+                            '    当前地点:',
+                            '      format: |-',
+                            '        层级1·层级2',
+                            '        环境描述≥20字',
+                            '  白娅:',
+                            '    依存度:',
+                            '      type: number',
+                            '      check:',
+                            '        - 根据行为调整 ±(3~6)',
+                        ].join('\n'),
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则zod',
+                        content: [
+                            '变量更新规则: |-',
+                            '  z.object({',
+                            '    白娅: z.object({',
+                            '      /**',
+                            '       * check:',
+                            '       *   - 根据白娅对{{user}}行为的感知调整',
+                            '       */',
+                            '      依存度: z.number().min(0).max(100),',
+                            '      着装: z.string().describe("穿着描述"),',
+                            '      称谓: z.enum(["仙子", "道友"]),',
+                            '    }),',
+                            '  })',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.strictEqual(si.formats['世界']['当前时间'], 'YYYY年MM月DD日 星期X HH:MM', '无引号 format 应提取');
+    assert.ok(si.formats['世界']['当前地点'].includes('环境描述≥20字'), '块标量 format 应提取并合并');
+    assert.deepStrictEqual(si.ranges['依存度'], [0, 100], 'zod z.number().min/max 应提取范围');
+    assert.ok(si.numericFields.has('依存度'), 'zod 数值字段应标记为数字');
+    assert.deepStrictEqual(si.enums['称谓'], ['仙子', '道友'], 'zod z.enum 应提取可选值');
+    assert.strictEqual(si.zodDescs['白娅']['着装'], '穿着描述', 'zod .describe 应提取字段说明');
+    const r = core.convert(card, { mode: 'both' });
+    const byName = (n) => Object.values(r.template).find(s => s && s.name === n);
+    const world = byName('世界表');
+    assert.ok(world.sourceData.note.includes('格式要求：YYYY年MM月DD日 星期X HH:MM'), 'note 应含无引号格式');
+    const bya = byName('白娅表');
+    assert.ok(bya.sourceData.note.includes('数值范围 0~100'), 'zod 范围应进入 note');
+    assert.ok(bya.sourceData.ddl.includes('CHECK(yicundu BETWEEN 0 AND 100)'), 'zod 范围应生成 DDL CHECK');
+    assert.ok(bya.sourceData.note.includes('可选值：仙子 / 道友'), 'zod 枚举应进入 note');
+    assert.ok(bya.sourceData.note.includes('着装：穿着描述'), 'zod describe 应进入 note 列说明');
+});
+
+test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而非静默丢弃', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '通配卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '户: {}\n系统: { _版本: 1 }' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  户.<门牌>.妻.好感值:',
+                            '    type: number',
+                            '    range: 0~100',
+                            '    check:',
+                            '      - 仅本人在场时更新',
+                            '  户.<门牌>.夫.当前情绪:',
+                            '    type: string',
+                            '    check:',
+                            '      - 丈夫在场时更新',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.ok(si.wildcardFields.has('户.<门牌>.妻.好感值'), '通配路径字段应被识别');
+    assert.ok(si.wildcardFields.has('户.<门牌>.夫.当前情绪'), '多个通配路径字段都应被识别');
+    const r = core.convert(card, { mode: 'both' });
+    assert.ok(r.report.toMarkdown().includes('通配路径规则'), '转换报告应显式警告通配路径规则');
+});
+
 test('模板 content 单元格归一化：布尔 → 1/0，无非法类型（插件 escapeValue 兼容）', () => {
     const card = {
         spec: 'chara_card_v3',
@@ -3169,6 +3297,13 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     assert.ok(initCalls > initCallsBeforeWrite, '缓存键不匹配时名称兜底应使写库成功（实际 initCalls ' + initCallsBeforeWrite + ' → ' + initCalls + '）');
     assert.ok(JSON.stringify(lastInitTemplateData || {}).includes('缓存兜底'), '名称兜底写入应包含注入值');
     context.chat = [];
+    // 模拟催眠卡日志场景：前端 target 只有 系统（缺 主角）时，写库必须保留已有主角数据
+    const zjKeep = Object.values(tables).find(s => s && s.name === '主角表');
+    zjKeep.content[1][zjKeep.content[0].indexOf('姓名')] = '斯维姆';
+    await win.Mvu.replaceMvuData({ stat_data: { 系统: { 本轮APP操作: '充值点数 +1' } } });
+    await new Promise(res => setTimeout(res, 1000));
+    const zjAfter = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.strictEqual(zjAfter.content[1][zjAfter.content[0].indexOf('姓名')], '斯维姆', '不完整 target（缺主角）不应清空已有数据');
 
     // 阶段3：切到另一张带不同模板的转换卡（仓库卡），验证模板缓存按卡归属，
     // 重锚/写库不会串用上一张转换卡（B）的模板缓存
