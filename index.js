@@ -6819,12 +6819,29 @@ ${DB_INIT_SNIPPET}
                                     const ki = s && s.content && s.content[0] ? s.content[0].indexOf(kc) : -1;
                                     return s && s.content && s.content[1] && ki >= 0 ? String(s.content[1][ki]) : '(无行)';
                                 })() : '(无rows表)';
+                                // 找快照里带 seedRows 的行表（气运等模板种子行场景），打印 snap/merged 的种子键
+                                const seedDiag = (() => {
+                                    try {
+                                        const withSeeds = (Array.isArray(activeLayout) ? activeLayout : []).filter(L => L.kind === 'rows').map(L => {
+                                            const s = Object.values(snap || {}).find(x => x && x.name === L.table);
+                                            const m = Object.values(mergedTemplate || {}).find(x => x && x.name === L.table);
+                                            const kc = L.keyCol;
+                                            const kiS = s && s.content && s.content[0] ? s.content[0].indexOf(kc) : -1;
+                                            const kiM = m && m.content && m.content[0] ? m.content[0].indexOf(kc) : -1;
+                                            const sKeys = (s && Array.isArray(s.seedRows) ? s.seedRows : []).map(r => r && kiS >= 0 ? r[kiS] : undefined).filter(Boolean);
+                                            const mKeys = (m && Array.isArray(m.seedRows) ? m.seedRows : []).map(r => r && kiM >= 0 ? r[kiM] : undefined).filter(Boolean);
+                                            return { table: L.table, sKeys, mKeys };
+                                        }).filter(x => x.sKeys.length || x.mKeys.length);
+                                        return withSeeds.length ? withSeeds.map(x => x.table + ' seed(snap)=' + JSON.stringify(x.sKeys) + ' seed(merged)=' + JSON.stringify(x.mKeys)).join(' | ') : '(无seedRows行表)';
+                                    } catch (e) { return '(诊断异常)'; }
+                                })();
                                 dbg('[快照提交] target.系统.当前MC点=' + JSON.stringify(effectiveTarget.系统 && effectiveTarget.系统.当前MC点) +
                                     ' | 原始snap当前MC点=' + JSON.stringify(snapSys && snapSys.content[1] && snapSys.content[1][snapMcIdx]) +
                                     ' | 提交快照系统表当前MC点=' + JSON.stringify(sysSheet && sysSheet.content[1] && sysSheet.content[1][mcIdx]) +
                                     ' | 系统表行数=' + (sysSheet && sysSheet.content ? sysSheet.content.length : 'N/A') +
                                     ' | snapKeys=' + Object.keys(snap || {}).filter(k => k.indexOf('sheet_') === 0).join(',') +
-                                    ' | rows表=' + (firstRows ? firstRows.table + ' target首键=' + String(rowValOf(effectiveTarget, firstRows)) + ' snap首键=' + snapRow : '(无)'));
+                                    ' | rows表=' + (firstRows ? firstRows.table + ' target首键=' + String(rowValOf(effectiveTarget, firstRows)) + ' snap首键=' + snapRow : '(无)') +
+                                    ' | ' + seedDiag);
                             } catch (e) {}
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
@@ -21288,12 +21305,29 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                     const ki = s && s.content && s.content[0] ? s.content[0].indexOf(kc) : -1;
                                     return s && s.content && s.content[1] && ki >= 0 ? String(s.content[1][ki]) : '(无行)';
                                 })() : '(无rows表)';
+                                // 找快照里带 seedRows 的行表（气运等模板种子行场景），打印 snap/merged 的种子键
+                                const seedDiag = (() => {
+                                    try {
+                                        const withSeeds = (Array.isArray(activeLayout) ? activeLayout : []).filter(L => L.kind === 'rows').map(L => {
+                                            const s = Object.values(snap || {}).find(x => x && x.name === L.table);
+                                            const m = Object.values(mergedTemplate || {}).find(x => x && x.name === L.table);
+                                            const kc = L.keyCol;
+                                            const kiS = s && s.content && s.content[0] ? s.content[0].indexOf(kc) : -1;
+                                            const kiM = m && m.content && m.content[0] ? m.content[0].indexOf(kc) : -1;
+                                            const sKeys = (s && Array.isArray(s.seedRows) ? s.seedRows : []).map(r => r && kiS >= 0 ? r[kiS] : undefined).filter(Boolean);
+                                            const mKeys = (m && Array.isArray(m.seedRows) ? m.seedRows : []).map(r => r && kiM >= 0 ? r[kiM] : undefined).filter(Boolean);
+                                            return { table: L.table, sKeys, mKeys };
+                                        }).filter(x => x.sKeys.length || x.mKeys.length);
+                                        return withSeeds.length ? withSeeds.map(x => x.table + ' seed(snap)=' + JSON.stringify(x.sKeys) + ' seed(merged)=' + JSON.stringify(x.mKeys)).join(' | ') : '(无seedRows行表)';
+                                    } catch (e) { return '(诊断异常)'; }
+                                })();
                                 dbg('[快照提交] target.系统.当前MC点=' + JSON.stringify(effectiveTarget.系统 && effectiveTarget.系统.当前MC点) +
                                     ' | 原始snap当前MC点=' + JSON.stringify(snapSys && snapSys.content[1] && snapSys.content[1][snapMcIdx]) +
                                     ' | 提交快照系统表当前MC点=' + JSON.stringify(sysSheet && sysSheet.content[1] && sysSheet.content[1][mcIdx]) +
                                     ' | 系统表行数=' + (sysSheet && sysSheet.content ? sysSheet.content.length : 'N/A') +
                                     ' | snapKeys=' + Object.keys(snap || {}).filter(k => k.indexOf('sheet_') === 0).join(',') +
-                                    ' | rows表=' + (firstRows ? firstRows.table + ' target首键=' + String(rowValOf(effectiveTarget, firstRows)) + ' snap首键=' + snapRow : '(无)'));
+                                    ' | rows表=' + (firstRows ? firstRows.table + ' target首键=' + String(rowValOf(effectiveTarget, firstRows)) + ' snap首键=' + snapRow : '(无)') +
+                                    ' | ' + seedDiag);
                             } catch (e) {}
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
