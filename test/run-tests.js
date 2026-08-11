@@ -2098,7 +2098,7 @@ test('行表 SQL 示例排除下划线只读字段', () => {
     assert.ok(sheet.sourceData.insertNode.includes('INSERT INTO'), 'INSERT 示例仍应存在');
 });
 
-test('seedRows 兜底：content 仅表头时用 seedRows 还原初始行（首楼被删/重置场景）', () => {
+test('读方向只认 content：seedRows 不作为已存在数据展示（删除后不被补回导致 UI 死而复生）', () => {
     const layout = [
         { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前时间', 'text', '', '', '', '']], writePaths: [], mirrors: [] },
         { kind: 'rows', group: '储物袋', table: '储物袋表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['数量', 'number', '', '', '', '']], writePaths: [['主角', '储物袋']], mirrors: [] },
@@ -2108,11 +2108,16 @@ test('seedRows 兜底：content 仅表头时用 seedRows 还原初始行（首�
         sheet_2: { name: '储物袋表', content: [['row_id', '名称', '数量']], seedRows: [[1, '铁剑', 1]] },
     };
     const out = core.statDataFromTables(layout, tables);
-    assert.strictEqual(out.stat_data.系统.当前时间, '12:00', '单例表 seedRows 应还原');
-    assert.strictEqual(out.stat_data.主角.储物袋['铁剑'].数量, 1, '行表 seedRows 应还原');
-    // 无 seedRows 时保持原行为（空）
-    const out2 = core.statDataFromTables(layout, { sheet_1: { name: '系统表', content: [['row_id', '名称', '当前时间']] }, sheet_2: { name: '储物袋表', content: [['row_id', '名称', '数量']] } });
-    assert.strictEqual(out2.stat_data.系统.当前时间, '', '无 seedRows 时单例为空值');
+    assert.strictEqual(out.stat_data.系统.当前时间, '', 'content 仅表头时不应从 seedRows 还原（seedRows 是模板基底，非真实数据）');
+    assert.deepStrictEqual(out.stat_data.主角.储物袋, {}, '行表 content 无行时不应从 seedRows 还原');
+    // content 有行时正常读取
+    const tables2 = {
+        sheet_1: { name: '系统表', content: [['row_id', '名称', '当前时间'], [1, '系统', '12:00']] },
+        sheet_2: { name: '储物袋表', content: [['row_id', '名称', '数量'], [1, '铁剑', 1]] },
+    };
+    const out2 = core.statDataFromTables(layout, tables2);
+    assert.strictEqual(out2.stat_data.系统.当前时间, '12:00', 'content 有行时单例正常读取');
+    assert.strictEqual(out2.stat_data.主角.储物袋['铁剑'].数量, 1, 'content 有行时行表正常读取');
 });
 
 test('桥复刻 MVU 占位符维护：AI 回复自动追加 <StatusPlaceHolderImpl/>（前端每楼可注入）', () => {
@@ -4294,6 +4299,131 @@ test('条目只在 seedRows（content 无行）时删除：快照须同步清理
     const ki = qySent.content[0].indexOf(keyCol);
     const seedKeys = (qySent.seedRows || []).map(row => row && row[ki]).filter(Boolean);
     assert.ok(!seedKeys.includes('测试气运'), '删除后提交快照的 seedRows 不应再包含被删条目');
+});
+
+test('首写（initGameSession）后强制物化：行表数据必须落到 content（不留在 seedRows）', async () => {
+    const vm2 = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => (e.kind === 'singleton'
+            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
+            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const srcDir = path.join(__dirname, '..', 'src');
+    const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
+    const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
+    const yamlLibsData = fs.readFileSync(path.join(srcDir, 'vendor', 'mvu-yaml-libs.js'), 'utf8');
+    const jsonrepairData = fs.readFileSync(path.join(srcDir, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+    const pinyinInline = pinyinData.replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ').replace(/;\s*$/, ';');
+    const yamlLibsInline = ['(function () {', '  var module = { exports: {} };', '  var exports = module.exports;', yamlLibsData, '  var target = typeof globalThis !== "undefined" ? globalThis : this;', '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;', '})();', ''].join('\n');
+    const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+    const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const persisted = JSON.parse(JSON.stringify(r.template));
+    const converted = {
+        name: '首写卡',
+        avatar: 'fw.png',
+        data: {
+            extensions: {
+                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
+                regex_scripts: [],
+            },
+            character_book: {
+                entries: [{
+                    keys: ['__ACU_TEMPLATE_DATA__'],
+                    content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
+                }],
+            },
+        },
+    };
+    let initCalls = 0;
+    let restoreCalls = 0;
+    const fakeApi = {
+        getTemplatePresetNames: () => [],
+        exportTableAsJson: () => tables,
+        initGameSession: async () => {
+            initCalls += 1;
+            // 与真实插件一致：initGameSession 会建立 full checkpoint
+            context.chat[0].TavernDB_ACU_IsolatedData = JSON.stringify({
+                系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', data: JSON.parse(JSON.stringify(tables)), ts: 1 } } },
+            });
+            return { success: true, runtimeReady: true };
+        },
+        importTemplateFromData: async () => ({ success: true }),
+        importTableAsJson: async (jsonStr, opts) => {
+            if (opts && opts.persist === false) restoreCalls += 1;
+            const parsed = JSON.parse(jsonStr);
+            for (const k of Object.keys(tables)) delete tables[k];
+            Object.assign(tables, parsed);
+            return true;
+        },
+        insertRow: async () => 1,
+        updateCell: async () => true,
+        deleteRow: async () => true,
+        registerTableUpdateCallback: () => true,
+    };
+    const handlers = {};
+    const context = {
+        chatId: 'c-first', name: '测试', chat: [{ message_id: 0, mes: '开场白' }],
+        characters: [converted], characterId: 0,
+        extensionSettings: { mvu2shujuku: { debug: true } },
+        eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received', MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated', MESSAGE_EDITED: 'edited', MESSAGE_SENT: 'sent', MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {}, saveChatConditional: async () => {}, saveChat: async () => {},
+        getRequestHeaders: () => ({}), setChatMessages: () => {},
+    };
+    const fakeEl = () => {
+        const el = {
+            dataset: {}, style: {}, children: [], _listeners: {}, _value: '',
+            addEventListener: (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); },
+            removeEventListener: () => {}, dispatchEvent: () => true,
+            appendChild: (c) => { el.children.push(c); return c; }, removeChild: () => {},
+            querySelector: () => fakeEl(), querySelectorAll: () => [],
+            click: () => {}, focus: () => {}, blur: () => {}, contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(el, 'innerHTML', { get: () => el._html || '', set: (v) => { el._html = v; } });
+        Object.defineProperty(el, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(el, 'value', { get: () => el._value, set: (v) => { el._value = v; } });
+        Object.defineProperty(el, 'checked', { get: () => !!el._checked, set: (v) => { el._checked = v; } });
+        Object.defineProperty(el, 'disabled', { get: () => !!el._disabled, set: (v) => { el._disabled = v; } });
+        return el;
+    };
+    const doc = {
+        querySelector: () => fakeEl(), getElementById: () => fakeEl(), createElement: () => fakeEl(),
+        createTextNode: () => fakeEl(), addEventListener: () => {}, body: fakeEl(),
+    };
+    const win = {
+        top: null, parent: null, document: doc, console,
+        setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t),
+        CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {}, toastr: undefined,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm2.createContext(win);
+    vm2.runInContext(extIndex, win);
+
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 2500));
+    // 开场注入：写入气运（首写 → initGameSession）
+    await win.Mvu.replaceMvuData({ stat_data: { 主角: { 气运: { 测试气运: { 名称: '测试气运', 类型: '被动' } } } } });
+    await new Promise(res => setTimeout(res, 1200));
+    assert.ok(initCalls >= 1, '首写应走 initGameSession');
+    const qy = Object.values(tables).find(s => s && s.name === '气运表');
+    const ki = qy.content[0].indexOf('名称');
+    const contentKeys = qy.content.slice(1).map(r => r && r[ki]).filter(Boolean);
+    assert.ok(contentKeys.includes('测试气运'), '首写后行表数据必须落到 content（不留在 seedRows）');
 });
 
 test('行表初始数据不进模板 content（避免插件 seedRows 反复补回导致删不掉）', () => {

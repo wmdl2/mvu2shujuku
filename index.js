@@ -2495,8 +2495,10 @@
                 else if (L.kind === 'json') { sd[L.group] = {}; }
                 continue;
             }
-            // content 只有表头时，用插件的 seedRows 还原初始行（首楼被删/重置后常见）
-            const sRows = s.content.length > 1 ? s.content : ((Array.isArray(s.seedRows) && s.seedRows.length) ? [s.content[0]].concat(s.seedRows.slice()) : s.content);
+            // 读方向只认 content（真实数据）：seedRows 是插件"模板基底/待物化"行，
+            // 若把它们当已存在数据展示，删除后插件补回 seedRows 时 UI 会"死而复生"。
+            // 真实数据是否进 content 由写路径的物化保证（首写强制物化 + 快照提交）。
+            const sRows = s.content && s.content.length ? s.content : [s.content && s.content[0] || ['row_id']];
             const header = sRows[0] || [];
             const idxs = (L.cols || []).map(c => header.indexOf(c[0]));
             if (L.kind === 'singleton') {
@@ -6797,6 +6799,20 @@ ${DB_INIT_SNIPPET}
                                 // 持久化完成，标记为成功。**绝不能**再走 importTableAsJson(persist) 兜底——
                                 // 它会追加一条 data_replace logEntry 弄脏链，刷新回放失败导致数据回默认（实测根因）。
                                 usedSnapshot = true;
+                                // 强制把行表注入数据物化进 content：initGameSession 可能把模板行变成
+                                // seedRows（插件从模板 scope 派生），而 verifyTemplateInjected 读 stat
+                                // （seedRows 也算“有”）会误判已物化。用快照（稳定 key）做 persist:false
+                                // 运行时恢复，把行表数据真正落进 content，与参考卡结构一致，删除才不会被
+                                // seedRows 补回。此调用只改内存，不写 logEntry/checkpoint。
+                                try {
+                                    const snapForce = buildTableSnapshotFromStat(api, activeLayout, tplCached, effectiveTarget, null);
+                                    if (snapForce && typeof api.importTableAsJson === 'function') {
+                                        const rtOk = await Promise.resolve(api.importTableAsJson(JSON.stringify(snapForce), { persist: false, mode: 'restore' }));
+                                        dbg('[注入合并] 首写后强制物化 content=' + (rtOk ? '成功' : '失败'));
+                                    }
+                                } catch (e) {
+                                    dbgWarn('[注入合并] 首写后强制物化 content 异常:', e && e.message ? e.message : e);
+                                }
                                 // 运行时物化：插件 initGameSession 后运行时可能延迟重建，先短轮询；
                                 // 等不到就用运行时专用通道（persist:false）物化——只改内存，不写任何 logEntry。
                                 const injected = await verifyTemplateInjected(api, activeLayout, effectiveTarget, 1800);
@@ -21287,6 +21303,20 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 // 持久化完成，标记为成功。**绝不能**再走 importTableAsJson(persist) 兜底——
                                 // 它会追加一条 data_replace logEntry 弄脏链，刷新回放失败导致数据回默认（实测根因）。
                                 usedSnapshot = true;
+                                // 强制把行表注入数据物化进 content：initGameSession 可能把模板行变成
+                                // seedRows（插件从模板 scope 派生），而 verifyTemplateInjected 读 stat
+                                // （seedRows 也算“有”）会误判已物化。用快照（稳定 key）做 persist:false
+                                // 运行时恢复，把行表数据真正落进 content，与参考卡结构一致，删除才不会被
+                                // seedRows 补回。此调用只改内存，不写 logEntry/checkpoint。
+                                try {
+                                    const snapForce = buildTableSnapshotFromStat(api, activeLayout, tplCached, effectiveTarget, null);
+                                    if (snapForce && typeof api.importTableAsJson === 'function') {
+                                        const rtOk = await Promise.resolve(api.importTableAsJson(JSON.stringify(snapForce), { persist: false, mode: 'restore' }));
+                                        dbg('[注入合并] 首写后强制物化 content=' + (rtOk ? '成功' : '失败'));
+                                    }
+                                } catch (e) {
+                                    dbgWarn('[注入合并] 首写后强制物化 content 异常:', e && e.message ? e.message : e);
+                                }
                                 // 运行时物化：插件 initGameSession 后运行时可能延迟重建，先短轮询；
                                 // 等不到就用运行时专用通道（persist:false）物化——只改内存，不写任何 logEntry。
                                 const injected = await verifyTemplateInjected(api, activeLayout, effectiveTarget, 1800);
