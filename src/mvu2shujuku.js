@@ -6105,6 +6105,17 @@ ${DB_INIT_SNIPPET}
                 }
                 mergeOverflow(row, item);
             }
+            // 同步删除：stat_data 中已不存在的键，对应行必须从快照移除，
+            // 否则前端删除操作（如删气运/删道侣）写不进快照，提交后仍保留旧行。
+            const wanted = new Set(Object.keys(dict));
+            const removeRows = [];
+            for (const [k, ri] of existing) {
+                if (!wanted.has(k)) removeRows.push(ri);
+            }
+            if (removeRows.length) {
+                removeRows.sort((a, b) => b - a);
+                for (const ri of removeRows) sheet.content.splice(ri, 1);
+            }
         }
         return tables;
     }
