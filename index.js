@@ -58,10 +58,10 @@
         // 插件回放是异步的，刷新/切聊天时运行时表格可能暂时为空，仅凭 exportTableAsJson
         // 判断“缺表”会误触发 initGameSession(默认模板)，把带数据的好 checkpoint 覆盖成默认值。
         'function mvu2shujukuHasFullFrame(o){try{if(!o||typeof o!=="object")return false;var fr=o.storageFrame;if(fr&&typeof fr==="object"&&fr.version===2&&Array.isArray(fr.logEntries)&&fr.checkpoint&&fr.checkpoint.kind==="full")return true;for(var ck in o){var child=o[ck];if(typeof child==="string"){try{child=JSON.parse(child);}catch(e){continue;}}if(child&&typeof child==="object"){var fr2=child.storageFrame;if(fr2&&typeof fr2==="object"&&fr2.version===2&&Array.isArray(fr2.logEntries)&&fr2.checkpoint&&fr2.checkpoint.kind==="full")return true;}}return false;}catch(e){return false;}}',
-        'function mvu2shujukuChatHasFullCheckpoint(){try{var win=(typeof window!=="undefined"?window:(typeof globalThis!=="undefined"?globalThis:null));var ctx=null;var tries=[win];if(win){try{if(win.parent&&win.parent!==win)tries.push(win.parent);}catch(e){}}for(var ti=0;ti<tries.length;ti++){var w=tries[ti];if(!w)continue;try{if(w.SillyTavern&&typeof w.SillyTavern.getContext==="function"){ctx=w.SillyTavern.getContext();break;}}catch(e){}try{if(typeof w.getContext==="function"){ctx=w.getContext();break;}}catch(e){}}var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];for(var mi=0;mi<chat.length;mi++){var msg=chat[mi];if(!msg||typeof msg!=="object")continue;for(var k in msg){if(k.indexOf("TavernDB_ACU_")!==0&&k.indexOf("_acu_")!==0)continue;if(mvu2shujukuHasFullFrame(msg[k]))return true;}}return false;}catch(e){return false;}}',
+        'function mvu2shujukuChatHasFullCheckpoint(){try{var win=(typeof window!=="undefined"?window:(typeof globalThis!=="undefined"?globalThis:null));var ctx=null;var tries=[win];if(win){try{if(win.parent&&win.parent!==win)tries.push(win.parent);}catch(e){}}for(var ti=0;ti<tries.length;ti++){var w=tries[ti];if(!w)continue;try{if(w.SillyTavern&&typeof w.SillyTavern.getContext==="function"){ctx=w.SillyTavern.getContext();break;}}catch(e){}try{if(typeof w.getContext==="function"){ctx=w.getContext();break;}}catch(e){}}var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];for(var mi=0;mi<chat.length;mi++){var msg=chat[mi];if(!msg||typeof msg!=="object")continue;for(var k in msg){if(k.indexOf("TavernDB_ACU_")!==0&&k.indexOf("_acu_")!==0)continue;var v=msg[k];if(typeof v==="string"){try{v=JSON.parse(v);}catch(e){continue;}}if(mvu2shujukuHasFullFrame(v))return true;}}return false;}catch(e){return false;}}',
         'var mvu2shujukuInitSessionHung=false;',
         'function mvu2shujukuWithTimeout(promise,ms,label){var done=false;var tid=null;var timeoutPromise=new Promise(function(resolve){tid=setTimeout(function(){if(!done){done=true;resolve({timeout:true,message:label+" 超时("+(ms/1000)+"s)"});}},ms);});return Promise.race([Promise.resolve(promise).then(function(v){if(!done){done=true;if(tid)clearTimeout(tid);}return v;}),timeoutPromise]);}',
-        'async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);if(mvu2shujukuChatHasFullCheckpoint()){out.status="skip";out.message="聊天已有 full checkpoint，跳过自动建表（以持久化数据为准，运行时物化由插件完成）";return out;}var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){var emptyS=[];try{var all2=api.exportTableAsJson()||{};for(var k2 in all2){if(k2.indexOf("sheet_")!==0)continue;var sh2=all2[k2];if(!sh2||typeof sh2!=="object"||typeof sh2.name!=="string")continue;if(Array.isArray(sh2.content)&&sh2.content.length>1)continue;if(Array.isArray(sh2.seedRows)&&sh2.seedRows.length)continue;var ts=mvu2shujukuSheetByName(tpl,sh2.name);if(!ts||!Array.isArray(ts.content)||ts.content.length!==2)continue;emptyS.push(sh2.name);}}catch(e){}if(emptyS.length){for(var ei=0;ei<emptyS.length;ei++){try{var ts2=mvu2shujukuSheetByName(tpl,emptyS[ei]);var hdr2=ts2.content[0];var row2=ts2.content[1];var obj2={};for(var ci=1;ci<hdr2.length;ci++){obj2[hdr2[ci]]=(row2[ci]!==undefined&&row2[ci]!==null)?row2[ci]:"";}await Promise.resolve(api.insertRow(emptyS[ei],obj2));}catch(e){}}out.status="skip";out.message="已为仅表头的单例/JSON表补初始行："+emptyS.join("、");return out;}out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}var steps=[];var initOk=false;if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试");}else if(r2&&r2.success===false){steps.push("initGameSession: "+(r2.message||"失败"));}else{initOk=true;steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用");}if(!initOk&&typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}',
+        'async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);if(mvu2shujukuChatHasFullCheckpoint()){out.status="skip";out.message="聊天已有 full checkpoint，跳过自动建表（以持久化数据为准，运行时物化由插件完成）";return out;}var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){var all2={};try{all2=api.exportTableAsJson()||{};}catch(e){}var rtCount=0;var rtEmptyAll=true;var rtHasSeed=false;var tplHasRows=false;for(var k2 in all2){if(k2.indexOf("sheet_")!==0)continue;var sh2=all2[k2];if(!sh2||typeof sh2!=="object"||typeof sh2.name!=="string")continue;rtCount++;if(Array.isArray(sh2.content)&&sh2.content.length>1)rtEmptyAll=false;if(Array.isArray(sh2.seedRows)&&sh2.seedRows.length)rtHasSeed=true;}for(var tk in tpl){if(tk.indexOf("sheet_")!==0)continue;var tsx=tpl[tk];if(tsx&&typeof tsx==="object"&&Array.isArray(tsx.content)&&tsx.content.length>1){tplHasRows=true;break;}}/* 根因修复：插件 native 初始化可能已用“仅表头”模板建表（content 无行、无 checkpoint）。此时跳过 initGameSession 会让 checkpoint 停在无行状态，刷新后 v2-replay 无法恢复任何行（插件 loadFromData 的 hasRealDataRows 门禁 + 有 checkpoint 后 seedRows 不再物化）。只要运行时全表仅表头且带有模板 seedRows（插件 native 初始化签名），就继续走 initGameSession 用完整模板原子建锚+补行（无损：无真实数据行）。*/var headerOnlyFresh=rtCount>0&&rtEmptyAll&&rtHasSeed&&tplHasRows;if(!headerOnlyFresh){var emptyS=[];try{for(var k3 in all2){if(k3.indexOf("sheet_")!==0)continue;var sh3=all2[k3];if(!sh3||typeof sh3!=="object"||typeof sh3.name!=="string")continue;if(Array.isArray(sh3.content)&&sh3.content.length>1)continue;if(Array.isArray(sh3.seedRows)&&sh3.seedRows.length)continue;var ts3=mvu2shujukuSheetByName(tpl,sh3.name);if(!ts3||!Array.isArray(ts3.content)||ts3.content.length!==2)continue;emptyS.push(sh3.name);}}catch(e){}if(emptyS.length){for(var ei=0;ei<emptyS.length;ei++){try{var ts2=mvu2shujukuSheetByName(tpl,emptyS[ei]);var hdr2=ts2.content[0];var row2=ts2.content[1];var obj2={};for(var ci=1;ci<hdr2.length;ci++){obj2[hdr2[ci]]=(row2[ci]!==undefined&&row2[ci]!==null)?row2[ci]:"";}await Promise.resolve(api.insertRow(emptyS[ei],obj2));}catch(e){}}out.status="skip";out.message="已为仅表头的单例/JSON表补初始行："+emptyS.join("、");return out;}out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}}var steps=[];var initOk=false;if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试");}else if(r2&&r2.success===false){steps.push("initGameSession: "+(r2.message||"失败"));}else{initOk=true;steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用");}if(!initOk&&typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}',
     ].join('\n');
 
     /* ================================================================
@@ -5388,6 +5388,11 @@ ${DB_INIT_SNIPPET}
     let lastRuntimeRestoreChat = '';
     // 物化失败后的冷却：避免 initGameSession 回退路径每 3 秒重复重型重建
     let lastRuntimeRestoreFailAt = 0;
+    // 长聊天重进恢复去重：同一聊天只做一次（reAnchor 只覆盖开局阶段）
+    let reentryCheckedChat = '';
+    // 自本次聊天加载以来是否发生过写库：发生过就不再按 checkpoint 物化（避免用陈旧 checkpoint
+    // 覆盖比持久化更新的运行时状态；写库路径自己会以 checkpoint 为基线）
+    let anyWriteSinceLoad = false;
     const reAnchorSkipLog = {};
     async function reAnchorCheckpointIfNeeded() {
         const now = Date.now();
@@ -5448,11 +5453,33 @@ ${DB_INIT_SNIPPET}
             const opening = (holder && holder.__mvu2shujukuOpeningStat) || null;
             const statForCheck = (opening && opening.chat === key && opening.stat) ? opening.stat : null;
             const hasCp = hasFullShujukuCheckpoint();
+            // 重进诊断：checkpoint 全表仅表头（content 无真实数据行）时，插件原生 v2-replay
+            // 无法恢复任何行——SqlTableService.loadFromData 的 hasRealDataRows 门禁要求至少
+            // 一张表 content 有行；且 checkpoint 存在后 shouldUseInitialSeedRows 关闭，seedRows
+            // 不再物化。此时重建“带行”锚点（运行时也无真实行时无损：没有可丢的数据）。
+            let cpHeaderOnly = false;
+            let cpRuntimeHasRows = false;
             if (hasCp) {
+                let cpNow = null;
+                try { cpNow = readFullCheckpointData(); } catch (e) {}
+                cpHeaderOnly = !!(cpNow && !checkpointHasRealRows(cpNow));
+                try {
+                    const curRt = api.exportTableAsJson() || {};
+                    for (const kRt in curRt) {
+                        if (kRt.indexOf('sheet_') !== 0) continue;
+                        const sRt = curRt[kRt];
+                        if (sRt && typeof sRt === 'object' && Array.isArray(sRt.content) && sRt.content.length > 1) { cpRuntimeHasRows = true; break; }
+                    }
+                } catch (e) {}
                 // 有 checkpoint 但仍要校验数据：开局阶段若 checkpoint 缺注入值
                 // （initGameSession 被开场流程并发回滚、或持久化的是默认模板），
                 // 需要重建干净锚点；校验通过才跳过。
-                if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
+                if (cpHeaderOnly && !cpRuntimeHasRows) {
+                    dbg('[重进诊断] full checkpoint 无真实数据行（全表仅表头）且运行时也无行，重建带行锚点…');
+                } else if (cpHeaderOnly) {
+                    dbg('[重进诊断] checkpoint 无真实数据行但运行时已有行（checkpoint 落后于运行时），不重置；由下次写库提交为 data_replace 自动补齐。');
+                    logSkip('聊天仍有 full checkpoint'); return;
+                } else if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
                     dbg('[重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
                 } else {
                     // checkpoint 存在：SQLite 模式重进时插件可能没把 checkpoint 恢复进运行时
@@ -5464,6 +5491,7 @@ ${DB_INIT_SNIPPET}
                         if (cpData && api2 && !runtimeSyncedWithCheckpoint(api2, cpData) &&
                             lastRuntimeRestoreChat !== key && (Date.now() - lastRuntimeRestoreFailAt > 30000)) {
                             lastRuntimeRestoreChat = key;
+                            logReentryDiagnostics(api2, cpData);
                             const rtOk = await materializeRuntimeFromCheckpoint(api2);
                             dbg('[重进恢复] 运行时与 checkpoint 不一致，已按 checkpoint 物化=' + (rtOk ? '成功' : '失败'));
                             if (!rtOk) {
@@ -5492,7 +5520,7 @@ ${DB_INIT_SNIPPET}
                 if (s && Array.isArray(s.content) && s.content.length > 1) { hasRows = true; break; }
                 if (s && Array.isArray(s.seedRows) && s.seedRows.length) { hasRows = true; break; }
             }
-            if (!hasRows && !statForCheck) { logSkip('表格无数据行'); return; }
+            if (!hasRows && !statForCheck && !cpHeaderOnly) { logSkip('表格无数据行'); return; }
             dbg('[重锚] full checkpoint 缺失或缺少注入数据（chat=' + key + '，尝试 #' + reAnchorAttempts + '），重建锚点…');
             // 重建模板：优先用缓存的开场 stat（精确含用户注入值，不依赖运行时状态），
             // 否则退回用当前运行时数据合并回模板（保留 sourceData/规则）。
@@ -5873,7 +5901,10 @@ ${DB_INIT_SNIPPET}
             if (!autoInitState.inited) {
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
+                    anyWriteSinceLoad = false;
                     hostWindow.setTimeout(autoInitDatabase, 600);
+                    // 长聊天重进恢复：刷新后插件 v2-replay 未恢复运行时（checkpoint 有行、运行时空）时物化一次
+                    hostWindow.setTimeout(() => { checkReentryRestoreAfterLoad(); }, 600);
                     // 首楼替换/删除可能带走挂在首楼上的 checkpoint：稍后检测并重锚
                     scheduleReAnchorCheckpoint();
                     // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
@@ -6142,15 +6173,24 @@ ${DB_INIT_SNIPPET}
             try { chatKey = String(getContextSafe().chatId || ''); } catch (e) {}
             if (materializedChats.has(chatKey)) return;
             materializedChats.add(chatKey);
+            // 幂等化（对齐参考卡）：initGameSession 已用完整模板把单例/JSON 表的初始行物化进
+            // content。这里只在表确实没有任何 content 行时才补一行；绝不无条件 insertRow——
+            // 那会在已有 row_id=1 的表里再插 row_id=2（垫脚行），而 cleanupSingletonDuplicates
+            // 的 deleteRow 在 SQLite 模式会因 JS 视图与运行时索引不一致而失败（实测 系统表/任务表 两行）。
+            let curAll = {};
+            try { curAll = api.exportTableAsJson() || {}; } catch (e) {}
+            const sheetByName = {};
+            for (const k in curAll) {
+                if (k.indexOf('sheet_') === 0 && curAll[k] && typeof curAll[k].name === 'string') sheetByName[String(curAll[k].name)] = curAll[k];
+            }
             for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
                 if (L.kind !== 'singleton' && L.kind !== 'json') continue;
                 try {
-                    // 注意：不能用 exportTableAsJson 的 content 判断“已有 row_id=1”来跳过物化——
-                    // 插件的 export 是含 seedRows 的合并视图（显示有行≠SQLite 运行时已物化），
-                    // 误判会跳过 insertRow，导致后续 updateCell row 1 out of bounds（单例表全空）。
-                    // 这里无条件尝试物化：content 空时插件 insertRow 分配 row_id=1（正好是身份行）；
-                    // content 已有 row_id=1 时会分配 row_id=2（垫脚行），由 cleanupSingletonDuplicates
-                    // 用 content 数组索引（deleteRow 的 rowIndex 语义）删掉，row_id=1 保留。
+                    const existing = sheetByName[L.table];
+                    if (existing && Array.isArray(existing.content) && existing.content.length > 1) {
+                        dbg(' 单例/JSON表「' + L.table + '」已有 content 行，跳过物化（幂等，不制造重复行）。');
+                        continue;
+                    }
                     const obj = {};
                     if (tplCached) {
                         for (const k in tplCached) {
@@ -6228,11 +6268,31 @@ ${DB_INIT_SNIPPET}
                 for (const x of idRows) {
                     if (x.id === '1') continue;
                     try {
-                        // 插件 deleteRow 的 rowIndex 是 content 数组索引（0=表头，1=第一数据行）。
-                        // x.ri 正是 content 数组索引，直接传 x.ri；传 x.ri-1 会把表头当目标，
-                        // 实际误删 row_id=1 的注入数据行（日志却按 x.id 打印成“已清理 row_id=2”）。
-                        await Promise.resolve(api.deleteRow(L.table, x.ri));
-                        dbg(' 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
+                        // 删除前按 row_id 重新定位当前 content 索引（插件 deleteRow 的 rowIndex
+                        // 是 content 数组索引，0=表头），避免 JS 快照与 SQLite 运行时在并发
+                        // 物化/回放下索引漂移导致误删或“affected 0 rows”。
+                        const nowAll = api.exportTableAsJson() || {};
+                        let curSheet = null;
+                        for (const k in nowAll) {
+                            if (k.indexOf('sheet_') === 0 && nowAll[k] && nowAll[k].name === L.table) { curSheet = nowAll[k]; break; }
+                        }
+                        let ri = -1;
+                        if (curSheet && Array.isArray(curSheet.content)) {
+                            for (let i = 1; i < curSheet.content.length; i++) {
+                                const r = curSheet.content[i];
+                                if (r && String(r[0]) === x.id) { ri = i; break; }
+                            }
+                        }
+                        if (ri === -1) { dbg(' 单例表多余行已不在当前视图（row_id=' + x.id + '），跳过。'); continue; }
+                        const del = await Promise.resolve(api.deleteRow(L.table, ri));
+                        // 插件 deleteRow 可能返回 false / {success:false} 表示 SQLite 未命中；
+                        // 只有确认命中才算清理成功，避免“已清理”日志掩盖残留。
+                        const delFailed = del === false || del === null || (del && typeof del === 'object' && del.success === false);
+                        if (delFailed) {
+                            dbgWarn(' 清理单例表多余行未命中：' + L.table + '（row_id=' + x.id + '）');
+                        } else {
+                            dbg(' 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
+                        }
                     } catch (e) {
                         dbgWarn(' 清理单例表多余行失败:', e);
                     }
@@ -6835,6 +6895,91 @@ ${DB_INIT_SNIPPET}
         } catch (e) { return false; }
     }
 
+    // checkpoint 数据里是否存在“真实数据行”（任一 sheet content 含表头以外的行）。
+    // 与插件 SqlTableService.loadFromData 的 hasRealDataRows 门禁同义：v2-replay 后插件
+    // 只有在该条件下才会把 mergedData 完整 hydrate 进 SQLite 运行时；否则走
+    // _buildInitialRuntimeTableData_ACU，而该路径在“聊天已有 table data（checkpoint 存在）”
+    // 时不会再物化 seedRows（shouldUseInitialSeedRows 关闭）→ 运行时保持全空。
+    function checkpointHasRealRows(cpData) {
+        try {
+            if (!cpData || typeof cpData !== 'object') return false;
+            for (const k in cpData) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const s = cpData[k];
+                if (s && typeof s === 'object' && Array.isArray(s.content) && s.content.length > 1) return true;
+            }
+            return false;
+        } catch (e) { return false; }
+    }
+
+    function runtimeHasRealRows(api) {
+        try {
+            const cur = api.exportTableAsJson() || {};
+            for (const k in cur) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const s = cur[k];
+                if (s && typeof s === 'object' && Array.isArray(s.content) && s.content.length > 1) return true;
+            }
+            return false;
+        } catch (e) { return false; }
+    }
+
+    // 刷新/重进后的完整状态诊断（v2-replay 恢复失败的定位用）：
+    // 输出 checkpoint 与运行时逐表行数、mate、logEntries、判定结论。
+    function logReentryDiagnostics(api, cpData) {
+        try {
+            const ctx = getContextSafe();
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            const sheetSummary = (data) => {
+                const out = [];
+                for (const k in (data || {})) {
+                    if (k.indexOf('sheet_') !== 0) continue;
+                    const s = data[k];
+                    if (!s || typeof s !== 'object') continue;
+                    out.push(k + ':' + (s.name || '?') + ':content=' + (Array.isArray(s.content) ? s.content.length - 1 : -1) + ':seed=' + (Array.isArray(s.seedRows) ? s.seedRows.length : -1));
+                }
+                return out.join(' | ');
+            };
+            let frameInfo = '无';
+            for (let mi = 0; mi < chat.length; mi++) {
+                const msg = chat[mi];
+                if (!msg || typeof msg !== 'object') continue;
+                let iso = msg.TavernDB_ACU_IsolatedData;
+                if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
+                if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
+                for (const tagKey of Object.keys(iso)) {
+                    const tag = iso[tagKey];
+                    if (!tag || typeof tag !== 'object' || Array.isArray(tag)) continue;
+                    const sf = tag.storageFrame;
+                    if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
+                    const cp = sf.checkpoint;
+                    let dataReplaces = 0;
+                    for (const en of sf.logEntries) {
+                        if (en && Array.isArray(en.operations)) {
+                            for (const op of en.operations) if (op && op.kind === 'data_replace') dataReplaces++;
+                        }
+                    }
+                    const cpSheets = cp && cp.data ? Object.keys(cp.data).filter(k => k.indexOf('sheet_') === 0).length : -1;
+                    const cpHasMate = !!(cp && cp.data && cp.data.mate && typeof cp.data.mate === 'object');
+                    frameInfo = 'msgIndex=' + mi + ' | tag=' + tagKey + ' | checkpoint.kind=' + (cp && cp.kind) +
+                        ' | reason=' + (cp && cp.reason) + ' | sheets=' + cpSheets + ' | hasMate=' + cpHasMate +
+                        ' | logEntries=' + sf.logEntries.length + ' | data_replace=' + dataReplaces;
+                    break;
+                }
+                if (frameInfo !== '无') break;
+            }
+            const rtCur = api.exportTableAsJson() || {};
+            dbg('[重进诊断] ' + frameInfo);
+            dbg('[重进诊断] checkpoint sheets: ' + sheetSummary(cpData));
+            dbg('[重进诊断] runtime(exportTableAsJson) sheets: ' + sheetSummary(rtCur));
+            dbg('[重进诊断] 判定：checkpointHasRealRows=' + checkpointHasRealRows(cpData) +
+                ' | runtimeHasRealRows=' + runtimeHasRealRows(api) +
+                ' | 插件原生恢复前提（checkpoint content 有行）=' + (checkpointHasRealRows(cpData) ? '满足' : '不满足——v2-replay 恢复后仍会全空'));
+        } catch (e) {
+            dbgWarn('[重进诊断] 输出失败:', e && e.message ? e.message : e);
+        }
+    }
+
     // 用目标 stat_data 的非默认值作为 needle，检查 full checkpoint 数据里是否真的包含注入值。
     // 这是持久化层的校验：只读聊天里的 checkpoint，不依赖运行时 exportTableAsJson。
     // 返回 true = checkpoint 已含注入值（或没有可校验的注入值）；false = checkpoint 缺失/默认值。
@@ -6947,6 +7092,45 @@ ${DB_INIT_SNIPPET}
         }
     }
 
+    // 刷新/重进后的兜底恢复（任意聊天长度）：开局阶段由 reAnchorCheckpointIfNeeded 处理，
+    // 长聊天在此校验“插件是否已把 checkpoint 恢复进运行时”。只在有 full checkpoint 且
+    // 运行时不一致时动作，每聊天一次；cp 无真实行时只输出诊断（下一次写库会提交 data_replace 自动补齐）。
+    async function checkReentryRestoreAfterLoad() {
+        try {
+            const key = autoInitChatId();
+            if (!key || key === reentryCheckedChat) return;
+            const api = getAcuApi();
+            if (!api || !hasFullShujukuCheckpoint()) { reentryCheckedChat = key; return; }
+            // 先等插件异步回放窗口结束（CHAT_CHANGED 后插件 loadFromData 可能还没完成）
+            await new Promise(res => hostWindow.setTimeout(res, 2500));
+            if (!key || key !== autoInitChatId()) return; // 等待期间已切聊天
+            const cpData = readFullCheckpointData();
+            if (!cpData) { reentryCheckedChat = key; return; }
+            if (runtimeSyncedWithCheckpoint(api, cpData)) { reentryCheckedChat = key; return; }
+            lastRuntimeRestoreChat = key;
+            if (anyWriteSinceLoad) {
+                // 已发生过写库：运行时可能已领先 checkpoint，不再按 checkpoint 物化，
+                // 只输出诊断（写库路径已自行以 checkpoint 为基线）。
+                logReentryDiagnostics(api, cpData);
+                reentryCheckedChat = key;
+                return;
+            }
+            if (checkpointHasRealRows(cpData)) {
+                logReentryDiagnostics(api, cpData);
+                dbg('[重进恢复] 长聊天：运行时与 checkpoint 不一致（checkpoint 含真实行），按 checkpoint 物化…');
+                const rtOk = await materializeRuntimeFromCheckpoint(api);
+                dbg('[重进恢复] 长聊天：物化=' + (rtOk ? '成功' : '失败'));
+                if (!rtOk) { lastRuntimeRestoreChat = ''; lastRuntimeRestoreFailAt = Date.now(); }
+            } else {
+                logReentryDiagnostics(api, cpData);
+                dbg('[重进诊断] 长聊天：checkpoint 无真实数据行，插件原生恢复无法带出任何行；若运行时已有行则由写库提交为 data_replace 自动补齐，无需重置。');
+            }
+            reentryCheckedChat = key;
+        } catch (e) {
+            dbgWarn('[重进恢复] 长聊天异常:', e && e.message ? e.message : e);
+        }
+    }
+
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
@@ -6971,6 +7155,7 @@ ${DB_INIT_SNIPPET}
                 }
                 const api = getAcuApi();
                 if (api && activeLayout) {
+                    anyWriteSinceLoad = true;
                     // 写库前保证 full checkpoint 存在：无锚点写入会产生无锚点 artifacts，
                     // 触发插件 V2 boundary_after_data_mismatch。锚点无法建立则放弃本次写入。
                     const tplCached = cachedTemplateForCurrentCard();
@@ -7350,7 +7535,10 @@ ${DB_INIT_SNIPPET}
         const api = getAcuApi();
         if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
         try {
-            api.registerTableUpdateCallback(() => dispatchVariableUpdateEnded());
+            api.registerTableUpdateCallback(() => {
+                anyWriteSinceLoad = true;
+                dispatchVariableUpdateEnded();
+            });
             return true;
         } catch (e) { return false; }
     }
@@ -19598,10 +19786,10 @@ function mvu2shujukuMissingTableNames(api,names){var all={};try{all=api.exportTa
 function mvu2shujukuExpectedColumns(tpl){var map={};if(!tpl||typeof tpl!=="object")return map;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object"||typeof s.name!=="string")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var cols=[];for(var i=1;i<hdr.length;i++){if(cols.indexOf(hdr[i])===-1)cols.push(hdr[i]);}map[s.name]=cols;}return map;}
 function mvu2shujukuMissingColumns(api,expected){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=all[k];}var mismatch=[];for(var name in expected){var sheet=have[name];if(!sheet)continue;var hdr=Array.isArray(sheet.content)&&Array.isArray(sheet.content[0])?sheet.content[0]:[];var exp=expected[name];for(var i=0;i<exp.length;i++){if(hdr.indexOf(exp[i])===-1){mismatch.push(name+"(缺列:"+exp[i]+")");break;}}}return mismatch;}
 function mvu2shujukuHasFullFrame(o){try{if(!o||typeof o!=="object")return false;var fr=o.storageFrame;if(fr&&typeof fr==="object"&&fr.version===2&&Array.isArray(fr.logEntries)&&fr.checkpoint&&fr.checkpoint.kind==="full")return true;for(var ck in o){var child=o[ck];if(typeof child==="string"){try{child=JSON.parse(child);}catch(e){continue;}}if(child&&typeof child==="object"){var fr2=child.storageFrame;if(fr2&&typeof fr2==="object"&&fr2.version===2&&Array.isArray(fr2.logEntries)&&fr2.checkpoint&&fr2.checkpoint.kind==="full")return true;}}return false;}catch(e){return false;}}
-function mvu2shujukuChatHasFullCheckpoint(){try{var win=(typeof window!=="undefined"?window:(typeof globalThis!=="undefined"?globalThis:null));var ctx=null;var tries=[win];if(win){try{if(win.parent&&win.parent!==win)tries.push(win.parent);}catch(e){}}for(var ti=0;ti<tries.length;ti++){var w=tries[ti];if(!w)continue;try{if(w.SillyTavern&&typeof w.SillyTavern.getContext==="function"){ctx=w.SillyTavern.getContext();break;}}catch(e){}try{if(typeof w.getContext==="function"){ctx=w.getContext();break;}}catch(e){}}var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];for(var mi=0;mi<chat.length;mi++){var msg=chat[mi];if(!msg||typeof msg!=="object")continue;for(var k in msg){if(k.indexOf("TavernDB_ACU_")!==0&&k.indexOf("_acu_")!==0)continue;if(mvu2shujukuHasFullFrame(msg[k]))return true;}}return false;}catch(e){return false;}}
+function mvu2shujukuChatHasFullCheckpoint(){try{var win=(typeof window!=="undefined"?window:(typeof globalThis!=="undefined"?globalThis:null));var ctx=null;var tries=[win];if(win){try{if(win.parent&&win.parent!==win)tries.push(win.parent);}catch(e){}}for(var ti=0;ti<tries.length;ti++){var w=tries[ti];if(!w)continue;try{if(w.SillyTavern&&typeof w.SillyTavern.getContext==="function"){ctx=w.SillyTavern.getContext();break;}}catch(e){}try{if(typeof w.getContext==="function"){ctx=w.getContext();break;}}catch(e){}}var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];for(var mi=0;mi<chat.length;mi++){var msg=chat[mi];if(!msg||typeof msg!=="object")continue;for(var k in msg){if(k.indexOf("TavernDB_ACU_")!==0&&k.indexOf("_acu_")!==0)continue;var v=msg[k];if(typeof v==="string"){try{v=JSON.parse(v);}catch(e){continue;}}if(mvu2shujukuHasFullFrame(v))return true;}}return false;}catch(e){return false;}}
 var mvu2shujukuInitSessionHung=false;
 function mvu2shujukuWithTimeout(promise,ms,label){var done=false;var tid=null;var timeoutPromise=new Promise(function(resolve){tid=setTimeout(function(){if(!done){done=true;resolve({timeout:true,message:label+" 超时("+(ms/1000)+"s)"});}},ms);});return Promise.race([Promise.resolve(promise).then(function(v){if(!done){done=true;if(tid)clearTimeout(tid);}return v;}),timeoutPromise]);}
-async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);if(mvu2shujukuChatHasFullCheckpoint()){out.status="skip";out.message="聊天已有 full checkpoint，跳过自动建表（以持久化数据为准，运行时物化由插件完成）";return out;}var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){var emptyS=[];try{var all2=api.exportTableAsJson()||{};for(var k2 in all2){if(k2.indexOf("sheet_")!==0)continue;var sh2=all2[k2];if(!sh2||typeof sh2!=="object"||typeof sh2.name!=="string")continue;if(Array.isArray(sh2.content)&&sh2.content.length>1)continue;if(Array.isArray(sh2.seedRows)&&sh2.seedRows.length)continue;var ts=mvu2shujukuSheetByName(tpl,sh2.name);if(!ts||!Array.isArray(ts.content)||ts.content.length!==2)continue;emptyS.push(sh2.name);}}catch(e){}if(emptyS.length){for(var ei=0;ei<emptyS.length;ei++){try{var ts2=mvu2shujukuSheetByName(tpl,emptyS[ei]);var hdr2=ts2.content[0];var row2=ts2.content[1];var obj2={};for(var ci=1;ci<hdr2.length;ci++){obj2[hdr2[ci]]=(row2[ci]!==undefined&&row2[ci]!==null)?row2[ci]:"";}await Promise.resolve(api.insertRow(emptyS[ei],obj2));}catch(e){}}out.status="skip";out.message="已为仅表头的单例/JSON表补初始行："+emptyS.join("、");return out;}out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}var steps=[];var initOk=false;if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试");}else if(r2&&r2.success===false){steps.push("initGameSession: "+(r2.message||"失败"));}else{initOk=true;steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用");}if(!initOk&&typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}
+async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);if(mvu2shujukuChatHasFullCheckpoint()){out.status="skip";out.message="聊天已有 full checkpoint，跳过自动建表（以持久化数据为准，运行时物化由插件完成）";return out;}var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){var all2={};try{all2=api.exportTableAsJson()||{};}catch(e){}var rtCount=0;var rtEmptyAll=true;var rtHasSeed=false;var tplHasRows=false;for(var k2 in all2){if(k2.indexOf("sheet_")!==0)continue;var sh2=all2[k2];if(!sh2||typeof sh2!=="object"||typeof sh2.name!=="string")continue;rtCount++;if(Array.isArray(sh2.content)&&sh2.content.length>1)rtEmptyAll=false;if(Array.isArray(sh2.seedRows)&&sh2.seedRows.length)rtHasSeed=true;}for(var tk in tpl){if(tk.indexOf("sheet_")!==0)continue;var tsx=tpl[tk];if(tsx&&typeof tsx==="object"&&Array.isArray(tsx.content)&&tsx.content.length>1){tplHasRows=true;break;}}/* 根因修复：插件 native 初始化可能已用“仅表头”模板建表（content 无行、无 checkpoint）。此时跳过 initGameSession 会让 checkpoint 停在无行状态，刷新后 v2-replay 无法恢复任何行（插件 loadFromData 的 hasRealDataRows 门禁 + 有 checkpoint 后 seedRows 不再物化）。只要运行时全表仅表头且带有模板 seedRows（插件 native 初始化签名），就继续走 initGameSession 用完整模板原子建锚+补行（无损：无真实数据行）。*/var headerOnlyFresh=rtCount>0&&rtEmptyAll&&rtHasSeed&&tplHasRows;if(!headerOnlyFresh){var emptyS=[];try{for(var k3 in all2){if(k3.indexOf("sheet_")!==0)continue;var sh3=all2[k3];if(!sh3||typeof sh3!=="object"||typeof sh3.name!=="string")continue;if(Array.isArray(sh3.content)&&sh3.content.length>1)continue;if(Array.isArray(sh3.seedRows)&&sh3.seedRows.length)continue;var ts3=mvu2shujukuSheetByName(tpl,sh3.name);if(!ts3||!Array.isArray(ts3.content)||ts3.content.length!==2)continue;emptyS.push(sh3.name);}}catch(e){}if(emptyS.length){for(var ei=0;ei<emptyS.length;ei++){try{var ts2=mvu2shujukuSheetByName(tpl,emptyS[ei]);var hdr2=ts2.content[0];var row2=ts2.content[1];var obj2={};for(var ci=1;ci<hdr2.length;ci++){obj2[hdr2[ci]]=(row2[ci]!==undefined&&row2[ci]!==null)?row2[ci]:"";}await Promise.resolve(api.insertRow(emptyS[ei],obj2));}catch(e){}}out.status="skip";out.message="已为仅表头的单例/JSON表补初始行："+emptyS.join("、");return out;}out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}}var steps=[];var initOk=false;if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试");}else if(r2&&r2.success===false){steps.push("initGameSession: "+(r2.message||"失败"));}else{initOk=true;steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用");}if(!initOk&&typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}
 
     const DB_TEMPLATE_KEY = '__ACU_TEMPLATE_DATA__';
     const autoInitState = { running: false, done: '', inited: false, retries: 0, anchorChat: '', anchorTries: 0, apiRetries: 0 };
@@ -19868,6 +20056,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     let lastRuntimeRestoreChat = '';
     // 物化失败后的冷却：避免 initGameSession 回退路径每 3 秒重复重型重建
     let lastRuntimeRestoreFailAt = 0;
+    // 长聊天重进恢复去重：同一聊天只做一次（reAnchor 只覆盖开局阶段）
+    let reentryCheckedChat = '';
+    // 自本次聊天加载以来是否发生过写库：发生过就不再按 checkpoint 物化（避免用陈旧 checkpoint
+    // 覆盖比持久化更新的运行时状态；写库路径自己会以 checkpoint 为基线）
+    let anyWriteSinceLoad = false;
     const reAnchorSkipLog = {};
     async function reAnchorCheckpointIfNeeded() {
         const now = Date.now();
@@ -19928,11 +20121,33 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const opening = (holder && holder.__mvu2shujukuOpeningStat) || null;
             const statForCheck = (opening && opening.chat === key && opening.stat) ? opening.stat : null;
             const hasCp = hasFullShujukuCheckpoint();
+            // 重进诊断：checkpoint 全表仅表头（content 无真实数据行）时，插件原生 v2-replay
+            // 无法恢复任何行——SqlTableService.loadFromData 的 hasRealDataRows 门禁要求至少
+            // 一张表 content 有行；且 checkpoint 存在后 shouldUseInitialSeedRows 关闭，seedRows
+            // 不再物化。此时重建“带行”锚点（运行时也无真实行时无损：没有可丢的数据）。
+            let cpHeaderOnly = false;
+            let cpRuntimeHasRows = false;
             if (hasCp) {
+                let cpNow = null;
+                try { cpNow = readFullCheckpointData(); } catch (e) {}
+                cpHeaderOnly = !!(cpNow && !checkpointHasRealRows(cpNow));
+                try {
+                    const curRt = api.exportTableAsJson() || {};
+                    for (const kRt in curRt) {
+                        if (kRt.indexOf('sheet_') !== 0) continue;
+                        const sRt = curRt[kRt];
+                        if (sRt && typeof sRt === 'object' && Array.isArray(sRt.content) && sRt.content.length > 1) { cpRuntimeHasRows = true; break; }
+                    }
+                } catch (e) {}
                 // 有 checkpoint 但仍要校验数据：开局阶段若 checkpoint 缺注入值
                 // （initGameSession 被开场流程并发回滚、或持久化的是默认模板），
                 // 需要重建干净锚点；校验通过才跳过。
-                if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
+                if (cpHeaderOnly && !cpRuntimeHasRows) {
+                    dbg('[重进诊断] full checkpoint 无真实数据行（全表仅表头）且运行时也无行，重建带行锚点…');
+                } else if (cpHeaderOnly) {
+                    dbg('[重进诊断] checkpoint 无真实数据行但运行时已有行（checkpoint 落后于运行时），不重置；由下次写库提交为 data_replace 自动补齐。');
+                    logSkip('聊天仍有 full checkpoint'); return;
+                } else if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
                     dbg('[重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
                 } else {
                     // checkpoint 存在：SQLite 模式重进时插件可能没把 checkpoint 恢复进运行时
@@ -19944,6 +20159,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         if (cpData && api2 && !runtimeSyncedWithCheckpoint(api2, cpData) &&
                             lastRuntimeRestoreChat !== key && (Date.now() - lastRuntimeRestoreFailAt > 30000)) {
                             lastRuntimeRestoreChat = key;
+                            logReentryDiagnostics(api2, cpData);
                             const rtOk = await materializeRuntimeFromCheckpoint(api2);
                             dbg('[重进恢复] 运行时与 checkpoint 不一致，已按 checkpoint 物化=' + (rtOk ? '成功' : '失败'));
                             if (!rtOk) {
@@ -19972,7 +20188,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (s && Array.isArray(s.content) && s.content.length > 1) { hasRows = true; break; }
                 if (s && Array.isArray(s.seedRows) && s.seedRows.length) { hasRows = true; break; }
             }
-            if (!hasRows && !statForCheck) { logSkip('表格无数据行'); return; }
+            if (!hasRows && !statForCheck && !cpHeaderOnly) { logSkip('表格无数据行'); return; }
             dbg('[重锚] full checkpoint 缺失或缺少注入数据（chat=' + key + '，尝试 #' + reAnchorAttempts + '），重建锚点…');
             // 重建模板：优先用缓存的开场 stat（精确含用户注入值，不依赖运行时状态），
             // 否则退回用当前运行时数据合并回模板（保留 sourceData/规则）。
@@ -20353,7 +20569,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             if (!autoInitState.inited) {
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
+                    anyWriteSinceLoad = false;
                     hostWindow.setTimeout(autoInitDatabase, 600);
+                    // 长聊天重进恢复：刷新后插件 v2-replay 未恢复运行时（checkpoint 有行、运行时空）时物化一次
+                    hostWindow.setTimeout(() => { checkReentryRestoreAfterLoad(); }, 600);
                     // 首楼替换/删除可能带走挂在首楼上的 checkpoint：稍后检测并重锚
                     scheduleReAnchorCheckpoint();
                     // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
@@ -20622,15 +20841,24 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             try { chatKey = String(getContextSafe().chatId || ''); } catch (e) {}
             if (materializedChats.has(chatKey)) return;
             materializedChats.add(chatKey);
+            // 幂等化（对齐参考卡）：initGameSession 已用完整模板把单例/JSON 表的初始行物化进
+            // content。这里只在表确实没有任何 content 行时才补一行；绝不无条件 insertRow——
+            // 那会在已有 row_id=1 的表里再插 row_id=2（垫脚行），而 cleanupSingletonDuplicates
+            // 的 deleteRow 在 SQLite 模式会因 JS 视图与运行时索引不一致而失败（实测 系统表/任务表 两行）。
+            let curAll = {};
+            try { curAll = api.exportTableAsJson() || {}; } catch (e) {}
+            const sheetByName = {};
+            for (const k in curAll) {
+                if (k.indexOf('sheet_') === 0 && curAll[k] && typeof curAll[k].name === 'string') sheetByName[String(curAll[k].name)] = curAll[k];
+            }
             for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
                 if (L.kind !== 'singleton' && L.kind !== 'json') continue;
                 try {
-                    // 注意：不能用 exportTableAsJson 的 content 判断“已有 row_id=1”来跳过物化——
-                    // 插件的 export 是含 seedRows 的合并视图（显示有行≠SQLite 运行时已物化），
-                    // 误判会跳过 insertRow，导致后续 updateCell row 1 out of bounds（单例表全空）。
-                    // 这里无条件尝试物化：content 空时插件 insertRow 分配 row_id=1（正好是身份行）；
-                    // content 已有 row_id=1 时会分配 row_id=2（垫脚行），由 cleanupSingletonDuplicates
-                    // 用 content 数组索引（deleteRow 的 rowIndex 语义）删掉，row_id=1 保留。
+                    const existing = sheetByName[L.table];
+                    if (existing && Array.isArray(existing.content) && existing.content.length > 1) {
+                        dbg(' 单例/JSON表「' + L.table + '」已有 content 行，跳过物化（幂等，不制造重复行）。');
+                        continue;
+                    }
                     const obj = {};
                     if (tplCached) {
                         for (const k in tplCached) {
@@ -20708,11 +20936,31 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 for (const x of idRows) {
                     if (x.id === '1') continue;
                     try {
-                        // 插件 deleteRow 的 rowIndex 是 content 数组索引（0=表头，1=第一数据行）。
-                        // x.ri 正是 content 数组索引，直接传 x.ri；传 x.ri-1 会把表头当目标，
-                        // 实际误删 row_id=1 的注入数据行（日志却按 x.id 打印成“已清理 row_id=2”）。
-                        await Promise.resolve(api.deleteRow(L.table, x.ri));
-                        dbg(' 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
+                        // 删除前按 row_id 重新定位当前 content 索引（插件 deleteRow 的 rowIndex
+                        // 是 content 数组索引，0=表头），避免 JS 快照与 SQLite 运行时在并发
+                        // 物化/回放下索引漂移导致误删或“affected 0 rows”。
+                        const nowAll = api.exportTableAsJson() || {};
+                        let curSheet = null;
+                        for (const k in nowAll) {
+                            if (k.indexOf('sheet_') === 0 && nowAll[k] && nowAll[k].name === L.table) { curSheet = nowAll[k]; break; }
+                        }
+                        let ri = -1;
+                        if (curSheet && Array.isArray(curSheet.content)) {
+                            for (let i = 1; i < curSheet.content.length; i++) {
+                                const r = curSheet.content[i];
+                                if (r && String(r[0]) === x.id) { ri = i; break; }
+                            }
+                        }
+                        if (ri === -1) { dbg(' 单例表多余行已不在当前视图（row_id=' + x.id + '），跳过。'); continue; }
+                        const del = await Promise.resolve(api.deleteRow(L.table, ri));
+                        // 插件 deleteRow 可能返回 false / {success:false} 表示 SQLite 未命中；
+                        // 只有确认命中才算清理成功，避免“已清理”日志掩盖残留。
+                        const delFailed = del === false || del === null || (del && typeof del === 'object' && del.success === false);
+                        if (delFailed) {
+                            dbgWarn(' 清理单例表多余行未命中：' + L.table + '（row_id=' + x.id + '）');
+                        } else {
+                            dbg(' 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
+                        }
                     } catch (e) {
                         dbgWarn(' 清理单例表多余行失败:', e);
                     }
@@ -21315,6 +21563,91 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         } catch (e) { return false; }
     }
 
+    // checkpoint 数据里是否存在“真实数据行”（任一 sheet content 含表头以外的行）。
+    // 与插件 SqlTableService.loadFromData 的 hasRealDataRows 门禁同义：v2-replay 后插件
+    // 只有在该条件下才会把 mergedData 完整 hydrate 进 SQLite 运行时；否则走
+    // _buildInitialRuntimeTableData_ACU，而该路径在“聊天已有 table data（checkpoint 存在）”
+    // 时不会再物化 seedRows（shouldUseInitialSeedRows 关闭）→ 运行时保持全空。
+    function checkpointHasRealRows(cpData) {
+        try {
+            if (!cpData || typeof cpData !== 'object') return false;
+            for (const k in cpData) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const s = cpData[k];
+                if (s && typeof s === 'object' && Array.isArray(s.content) && s.content.length > 1) return true;
+            }
+            return false;
+        } catch (e) { return false; }
+    }
+
+    function runtimeHasRealRows(api) {
+        try {
+            const cur = api.exportTableAsJson() || {};
+            for (const k in cur) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const s = cur[k];
+                if (s && typeof s === 'object' && Array.isArray(s.content) && s.content.length > 1) return true;
+            }
+            return false;
+        } catch (e) { return false; }
+    }
+
+    // 刷新/重进后的完整状态诊断（v2-replay 恢复失败的定位用）：
+    // 输出 checkpoint 与运行时逐表行数、mate、logEntries、判定结论。
+    function logReentryDiagnostics(api, cpData) {
+        try {
+            const ctx = getContextSafe();
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            const sheetSummary = (data) => {
+                const out = [];
+                for (const k in (data || {})) {
+                    if (k.indexOf('sheet_') !== 0) continue;
+                    const s = data[k];
+                    if (!s || typeof s !== 'object') continue;
+                    out.push(k + ':' + (s.name || '?') + ':content=' + (Array.isArray(s.content) ? s.content.length - 1 : -1) + ':seed=' + (Array.isArray(s.seedRows) ? s.seedRows.length : -1));
+                }
+                return out.join(' | ');
+            };
+            let frameInfo = '无';
+            for (let mi = 0; mi < chat.length; mi++) {
+                const msg = chat[mi];
+                if (!msg || typeof msg !== 'object') continue;
+                let iso = msg.TavernDB_ACU_IsolatedData;
+                if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
+                if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
+                for (const tagKey of Object.keys(iso)) {
+                    const tag = iso[tagKey];
+                    if (!tag || typeof tag !== 'object' || Array.isArray(tag)) continue;
+                    const sf = tag.storageFrame;
+                    if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
+                    const cp = sf.checkpoint;
+                    let dataReplaces = 0;
+                    for (const en of sf.logEntries) {
+                        if (en && Array.isArray(en.operations)) {
+                            for (const op of en.operations) if (op && op.kind === 'data_replace') dataReplaces++;
+                        }
+                    }
+                    const cpSheets = cp && cp.data ? Object.keys(cp.data).filter(k => k.indexOf('sheet_') === 0).length : -1;
+                    const cpHasMate = !!(cp && cp.data && cp.data.mate && typeof cp.data.mate === 'object');
+                    frameInfo = 'msgIndex=' + mi + ' | tag=' + tagKey + ' | checkpoint.kind=' + (cp && cp.kind) +
+                        ' | reason=' + (cp && cp.reason) + ' | sheets=' + cpSheets + ' | hasMate=' + cpHasMate +
+                        ' | logEntries=' + sf.logEntries.length + ' | data_replace=' + dataReplaces;
+                    break;
+                }
+                if (frameInfo !== '无') break;
+            }
+            const rtCur = api.exportTableAsJson() || {};
+            dbg('[重进诊断] ' + frameInfo);
+            dbg('[重进诊断] checkpoint sheets: ' + sheetSummary(cpData));
+            dbg('[重进诊断] runtime(exportTableAsJson) sheets: ' + sheetSummary(rtCur));
+            dbg('[重进诊断] 判定：checkpointHasRealRows=' + checkpointHasRealRows(cpData) +
+                ' | runtimeHasRealRows=' + runtimeHasRealRows(api) +
+                ' | 插件原生恢复前提（checkpoint content 有行）=' + (checkpointHasRealRows(cpData) ? '满足' : '不满足——v2-replay 恢复后仍会全空'));
+        } catch (e) {
+            dbgWarn('[重进诊断] 输出失败:', e && e.message ? e.message : e);
+        }
+    }
+
     // 用目标 stat_data 的非默认值作为 needle，检查 full checkpoint 数据里是否真的包含注入值。
     // 这是持久化层的校验：只读聊天里的 checkpoint，不依赖运行时 exportTableAsJson。
     // 返回 true = checkpoint 已含注入值（或没有可校验的注入值）；false = checkpoint 缺失/默认值。
@@ -21427,6 +21760,45 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         }
     }
 
+    // 刷新/重进后的兜底恢复（任意聊天长度）：开局阶段由 reAnchorCheckpointIfNeeded 处理，
+    // 长聊天在此校验“插件是否已把 checkpoint 恢复进运行时”。只在有 full checkpoint 且
+    // 运行时不一致时动作，每聊天一次；cp 无真实行时只输出诊断（下一次写库会提交 data_replace 自动补齐）。
+    async function checkReentryRestoreAfterLoad() {
+        try {
+            const key = autoInitChatId();
+            if (!key || key === reentryCheckedChat) return;
+            const api = getAcuApi();
+            if (!api || !hasFullShujukuCheckpoint()) { reentryCheckedChat = key; return; }
+            // 先等插件异步回放窗口结束（CHAT_CHANGED 后插件 loadFromData 可能还没完成）
+            await new Promise(res => hostWindow.setTimeout(res, 2500));
+            if (!key || key !== autoInitChatId()) return; // 等待期间已切聊天
+            const cpData = readFullCheckpointData();
+            if (!cpData) { reentryCheckedChat = key; return; }
+            if (runtimeSyncedWithCheckpoint(api, cpData)) { reentryCheckedChat = key; return; }
+            lastRuntimeRestoreChat = key;
+            if (anyWriteSinceLoad) {
+                // 已发生过写库：运行时可能已领先 checkpoint，不再按 checkpoint 物化，
+                // 只输出诊断（写库路径已自行以 checkpoint 为基线）。
+                logReentryDiagnostics(api, cpData);
+                reentryCheckedChat = key;
+                return;
+            }
+            if (checkpointHasRealRows(cpData)) {
+                logReentryDiagnostics(api, cpData);
+                dbg('[重进恢复] 长聊天：运行时与 checkpoint 不一致（checkpoint 含真实行），按 checkpoint 物化…');
+                const rtOk = await materializeRuntimeFromCheckpoint(api);
+                dbg('[重进恢复] 长聊天：物化=' + (rtOk ? '成功' : '失败'));
+                if (!rtOk) { lastRuntimeRestoreChat = ''; lastRuntimeRestoreFailAt = Date.now(); }
+            } else {
+                logReentryDiagnostics(api, cpData);
+                dbg('[重进诊断] 长聊天：checkpoint 无真实数据行，插件原生恢复无法带出任何行；若运行时已有行则由写库提交为 data_replace 自动补齐，无需重置。');
+            }
+            reentryCheckedChat = key;
+        } catch (e) {
+            dbgWarn('[重进恢复] 长聊天异常:', e && e.message ? e.message : e);
+        }
+    }
+
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
     function scheduleWindowStatOverlay(next) {
@@ -21451,6 +21823,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 }
                 const api = getAcuApi();
                 if (api && activeLayout) {
+                    anyWriteSinceLoad = true;
                     // 写库前保证 full checkpoint 存在：无锚点写入会产生无锚点 artifacts，
                     // 触发插件 V2 boundary_after_data_mismatch。锚点无法建立则放弃本次写入。
                     const tplCached = cachedTemplateForCurrentCard();
@@ -21830,7 +22203,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         const api = getAcuApi();
         if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
         try {
-            api.registerTableUpdateCallback(() => dispatchVariableUpdateEnded());
+            api.registerTableUpdateCallback(() => {
+                anyWriteSinceLoad = true;
+                dispatchVariableUpdateEnded();
+            });
             return true;
         } catch (e) { return false; }
     }
