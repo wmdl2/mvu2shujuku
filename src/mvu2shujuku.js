@@ -1874,8 +1874,8 @@
             // 单例表不重复描述（“全表固定一条记录”等），直接给出开局记录说明；
             // 全只读单例（全部为 _ 字段）不写“只允许 UPDATE”，避免与“AI 无需填表”冲突
             L.push(aiCols.length
-                ? `本表唯一记录已由开局模板插入（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`
-                : `本表唯一记录已由开局模板插入（row_id=1）；全部字段为脚本/系统维护，AI 无需填表。`);
+                ? `本表唯一记录已由开局模板初始化（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`
+                : `本表唯一记录已由开局模板初始化（row_id=1）；全部字段由脚本/系统维护，AI 无需填表。`);
         } else {
             // 与插件默认模板一致：note 不重复表名（插件会在表头显示表名），直接给表类型说明
             L.push(describeGroup(group));
@@ -1928,19 +1928,19 @@
         if (group.kind === 'singleton') {
             const aiCols = (group.columns || []).filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
             return aiCols.length
-                ? `开局模板已包含唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`
-                : `开局模板已包含唯一记录（row_id=1）；全部字段由脚本/系统维护，自动填表阶段不修改本表。`;
+                ? `开局模板已初始化唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`
+                : `开局模板已初始化唯一记录（row_id=1）；全部字段由脚本/系统维护，自动填表阶段不修改本表。`;
         }
         if (group.kind === 'array') {
             return group.rows.length
-                ? `已在模板中初始化 ${group.rows.length} 个元素；后续新增元素按 insertNode 规则 INSERT 新行，移除按 deleteNode 规则 DELETE，修改按 updateNode 规则 UPDATE。`
-                : '开局为空表；剧情出现首个元素时按 insertNode 规则 INSERT 新行。';
+                ? `开局模板已初始化 ${group.rows.length} 个元素；自动填表阶段新增元素按 insertNode 规则 INSERT 新行，移除按 deleteNode 规则 DELETE，修改按 updateNode 规则 UPDATE。`
+                : '开局为空表；剧情出现首个元素时，按 insertNode 规则 INSERT 新行。';
         }
         if (group.rows.length) {
             const names = group.rows.slice(0, 5).map(r => r[1]).filter(Boolean).join('、');
-            return `开局模板已初始化 ${group.rows.length} 条记录${names ? `（${names}${group.rows.length > 5 ? '…' : ''}）` : ''}；开局阶段如有新条目再按 insertNode 规则新增。`;
+            return `开局模板已初始化 ${group.rows.length} 条记录${names ? `（${names}${group.rows.length > 5 ? '…' : ''}）` : ''}；自动填表阶段如有新条目，按 insertNode 规则 INSERT 新记录。`;
         }
-        return '开局不预置记录；正文首次出现应记录的对象时，按 insertNode 规则插入首条记录。';
+        return '开局为空表；正文首次出现应记录的对象时，按 insertNode 规则 INSERT 首条记录。';
     }
 
     // SQL 示例取值：优先真实初始行值 → 其次 DDL 默认值（INTEGER 未给默认按 0，对象列按 '{}'）
@@ -1962,6 +1962,18 @@
         return col && col.zh ? `'${sqlQuote(col.zh)}示例'` : '';
     }
 
+    // UPDATE 示例取值：不能拿当前值/默认值当示例值，否则会读成“把它更新成原值”的指令
+    // （如 SET 当前时间 = '未知'，而当前时间本来就是 '未知'）。TEXT 一律用 '新值' 占位；
+    // INTEGER 给 DDL 默认数字（0 或初始值），配合“示例值仅为格式演示”消歧。
+    function exampleUpdateValue(col) {
+        if (col && col.type === 'INTEGER') {
+            const dv = col.value === undefined || col.value === null ? '' : col.value;
+            const num = dv === '' ? 0 : Number(dv);
+            return String(Number.isFinite(num) ? num : 0);
+        }
+        return "'新值'";
+    }
+
     function buildNodeProse(group, kind) {
         if (group.kind === 'json') {
             if (kind === 'update') return '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
@@ -1974,10 +1986,8 @@
                 const col = (group.columns || []).find(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
                 if (!col) return '本表全部字段均为脚本/系统维护的只读状态，AI 不应修改本表。';
                 const ident = col.ident;
-                const colIdx = group.columns.indexOf(col);
-                const raw = group.rows && group.rows[0] ? group.rows[0][colIdx + 1] : undefined;
-                const val = exampleCellValue(col, raw);
-                return `只允许 UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1; 依正文明确变化更新对应字段。`;
+                const val = exampleUpdateValue(col);
+                return `只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；正文明确造成字段变化时更新对应字段，示例值仅为格式演示。\nSQL示例: UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1;`;
             }
             return '禁止。';
         }
@@ -2010,7 +2020,9 @@
         const allIdents = exampleCols.map(c => c.ident);
         const firstNonKey = allIdents[1] || '字段';
         if (kind === 'update') {
-            return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${sampleValue(2, "'新值'")} WHERE ${keyIdent} = ${keyValue};`;
+            const updCol = exampleCols[1] || exampleCols[0];
+            const updVal = updCol ? exampleUpdateValue(updCol) : "'新值'";
+            return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段（示例值仅为格式演示）。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${updVal} WHERE ${keyIdent} = ${keyValue};`;
         }
         if (kind === 'insert') {
             // 完整列示例：全部列都列出，列数与 VALUES 一一对应
