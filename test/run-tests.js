@@ -3619,6 +3619,19 @@ test('懒加载角色：缓存键用列表对象（带 avatar），开场写入�
     await new Promise(res => setTimeout(res, 1000));
     const zj2 = Object.values(tables).find(s => s && s.name === '主角表');
     assert.strictEqual(zj2.content[1][zj2.content[0].indexOf('姓名')], '真实结构注入', '真实 ST 对象形状下开场写入应落库');
+
+    // 头像不一致但卡名相同（列表对象 vs /api/characters/get 完整对象）：布局归属门禁应按卡名兜底，
+    // getAllVariables 不得返回空、前端写入不得被“布局未就绪”丢弃
+    const origAvatar = context.characters[0].avatar;
+    context.characters[0].avatar = 'other-avatar.png';
+    const gv = win.getAllVariables();
+    assert.strictEqual(gv.stat_data.主角 && gv.stat_data.主角.姓名, '真实结构注入', '头像不一致时读侧仍应按卡名兜底返回数据');
+    context.chat = [{ message_id: 0, mes: '开场白2' }];
+    await win.Mvu.replaceMvuData({ stat_data: { 主角: { 姓名: '头像兜底注入' } } });
+    await new Promise(res => setTimeout(res, 1000));
+    const zj3 = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.strictEqual(zj3.content[1][zj3.content[0].indexOf('姓名')], '头像兜底注入', '头像不一致时写入不应被布局门禁丢弃');
+    context.characters[0].avatar = origAvatar;
 });
 
 test('刷新后运行时表空但 checkpoint 有数据：写库以 checkpoint 为基线，不覆盖持久化数据', async () => {

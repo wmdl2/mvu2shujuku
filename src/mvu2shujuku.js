@@ -4926,6 +4926,20 @@ ${DB_INIT_SNIPPET}
         try { return ch ? String(ch.name || '') + '|' + String(ch.avatar || '') : ''; } catch (e) { return ''; }
     }
 
+    // 布局归属判定：与模板缓存一致，头像可能因列表对象/完整卡对象不一致而不同，
+    // 故在精确匹配失败时按卡名兜底（只认卡名也能避免跨卡误用）。
+    function layoutBelongsToCurrentCard(activeKey) {
+        if (!activeKey) return false;
+        try {
+            const curKey = cardCacheKey(currentCharacter());
+            if (!curKey) return false;
+            if (activeKey === curKey) return true;
+            const activeName = String(activeKey).split('|')[0];
+            const curName = String(curKey).split('|')[0];
+            return !!activeName && activeName === curName;
+        } catch (e) { return false; }
+    }
+
     function cachedTemplateForCurrentCard() {
         try {
             const holder = (typeof window !== 'undefined' ? window : globalThis);
@@ -6452,7 +6466,7 @@ ${DB_INIT_SNIPPET}
                     // 布局归属校验：切卡空窗期 activeLayout 仍是上一张卡的，写库会按错布局落表；
                     // 与模板缓存一起作为“自动建表就绪”门槛，未就绪时延后重试。
                     let layoutOk = false;
-                    try { layoutOk = activeLayoutCardKey !== '' && activeLayoutCardKey === cardCacheKey(currentCharacter()); } catch (e) {}
+                    try { layoutOk = layoutBelongsToCurrentCard(activeLayoutCardKey); } catch (e) {}
                     if (!tplCached || !layoutOk) {
                         // 自动建表可能在途（角色列表懒加载需要先取完整卡再缓存模板/布局）：
                         // 延后重试，避免开局/开场白注入在就绪前被直接丢弃或按旧布局写错。
@@ -6765,9 +6779,7 @@ ${DB_INIT_SNIPPET}
                 // 布局归属校验：切卡空窗期 activeLayout 还是上一张卡的，
                 // 用它读当前表格会得到错形状的 stat_data（前端据此初始化就会写歪）。
                 // 未就绪时返回空，让前端从零构建；autoInit 完成后布局/缓存就绪。
-                let curKey = '';
-                try { curKey = cardCacheKey(currentCharacter()); } catch (e) {}
-                if (!activeLayoutCardKey || activeLayoutCardKey !== curKey) {
+                if (!layoutBelongsToCurrentCard(activeLayoutCardKey)) {
                     return { stat_data: {}, display_data: {} };
                 }
                 const api = getAcuApi();
