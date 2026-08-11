@@ -565,7 +565,9 @@
             if (!/\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment) && !/变量更新规则|变量输出格式/.test(comment) && !/mvu/i.test(comment)) continue;
             allContents.push(content);
             // 顶层组：缩进 ≤2 的中文/含$组名
-            const groupRe = /(?:^|\n)( {0,2})([\u4e00-\u9fff$]{1,12})[ \t]*:[ \t]*\n/g;
+            // 注意：结尾必须用 (?=\n) 前瞻而不是消费 \n——否则紧跟上一组行的组会被跳过
+            // （如 “变量更新规则:\n  世界:” 中 世界: 前面的换行已被上一组匹配吃掉）。
+            const groupRe = /(?:^|\n)( {0,2})([\u4e00-\u9fff$]{1,12})[ \t]*:[ \t]*(?=\n)/g;
             const matches = [];
             let gm;
             while ((gm = groupRe.exec(content))) {
@@ -1907,10 +1909,10 @@
                 const generic = desc === '唯一标识' || desc === '条目名称' || desc === '对象（JSON 存储，读取时还原）';
                 if (desc && !generic) parts.push(desc);
                 if (parts.length) L.push(`- ${c.zh}：${parts.join('；')}`);
-                for (const rule of c.check || []) L.push(`- ${c.zh}：${rule}`);
+                for (const rule of (c.check || []).map(sanitizeCheckRule).filter(Boolean)) L.push(`- ${c.zh}：${rule}`);
             }
             // 子表/动态字典的组级规则（如 世界.动向 的“最多维持2个大事件”）：以表级约束列出
-            for (const rule of (group.groupChecks || [])) L.push(`- ${group.tableName}：${rule}`);
+            for (const rule of (group.groupChecks || []).map(sanitizeCheckRule).filter(Boolean)) L.push(`- ${group.tableName}：${rule}`);
             for (const c of aiCols) {
                 if (c.check && c.check.length > 20) L.push(`- ${c.zh}：…（共 ${c.check.length} 条规则，其余略）`);
             }
@@ -1976,6 +1978,34 @@
             return String(Number.isFinite(num) ? num : 0);
         }
         return "'新值'";
+    }
+
+    // 卡内 check 规则是写给 MVU JSON Patch 机制看的，转换后需要洗掉机制性残留，
+    // 只保留业务规则，避免与数据库填表通道（DSL/SQL）打架：
+    //  1. 括号机制注释（op: delta/replace、勿用delta）整段删除
+    //  2. 纯机制句（【防崩警告】…严禁 replace/delta、严禁对整个对象使用 replace/delta）整句删除
+    //  3. “必须分N条指令更新：一条replaceA，另一条replaceB” → “A；B”（保留业务语义）
+    //  4. “如 /组/字段/子字段” 这类路径写法 → 点分路径（机制句删掉后罕见，兜底处理）
+    function sanitizeCheckRule(line) {
+        let s = String(line || '').trim();
+        if (!s) return s;
+        // 1) 括号机制注释（中文括号与英文括号都处理）
+        s = s.replace(/（[^）]*?(?:op\s*[:：]|delta|replace|指令)[^）]*?）/gi, '')
+             .replace(/\([^)]*?(?:op\s*[:：]|delta|replace)[^)]*?\)/gi, '');
+        // 2) 纯机制句：整句删除
+        if (/^【[^】]*(?:警告|防崩|注意)[^】]*】/.test(s) && /(?:replace|delta|指令|op\s*[:：]|json\s*patch|patch)/i.test(s)) return '';
+        if (/^(?:严禁|不要|避免|请勿|勿)/.test(s) && /(?:replace|delta|指令|op\s*[:：]|json\s*patch|patch)/i.test(s)) return '';
+        // 3) “必须分N条指令更新：一条replaceA，另一条replaceB” → 保留前半句 + “A；B”
+        const dm = s.match(/([\s\S]*?)分\s*(?:\d+|[一二三四五六七八九十两])\s*条指令更新[：:]\s*一条(?:replace\s*)?([^，,。]+?)，另一条(?:replace\s*)?([^，,。]+?)(?:（[^）]*）)?\s*$/);
+        if (dm) {
+            const prefix = String(dm[1] || '').trim().replace(/[，,。;；\s]+$/, '').replace(/必须$/, '');
+            const a = String(dm[2]).trim();
+            const b = String(dm[3]).trim();
+            s = (prefix ? prefix : '') + a + '；' + b;
+        }
+        // 4) “如 /组/字段/子字段” 路径写法 → 点分路径
+        s = s.replace(/(?:如|为|到|写)\s*\/[\u4e00-\u9fff$]+(?:\/[\u4e00-\u9fff$]+)+/g, (m) => m.replace(/\//g, '.'));
+        return s.trim();
     }
 
     function buildNodeProse(group, kind) {
