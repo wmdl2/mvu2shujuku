@@ -6557,6 +6557,15 @@ ${DB_INIT_SNIPPET}
                     try {
                         hasCp = hasFullShujukuCheckpoint();
                         if (hasCp) {
+                            const cpData = readFullCheckpointData();
+                            // 重进/刷新后运行时可能停在模板默认（SQLite 模式插件漏恢复）：
+                            // 写库前先按 checkpoint 物化，保证本次写入基于完整数据而不是默认值。
+                            if (cpData && !runtimeSyncedWithCheckpoint(api, cpData)) {
+                                const rtOk = await materializeRuntimeFromCheckpoint(api);
+                                dbg('[写库前] 运行时与 checkpoint 不一致，已按 checkpoint 物化=' + (rtOk ? '成功' : '失败'));
+                                const all2 = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                                prev = all2.stat_data || {};
+                            }
                             const cur = api.exportTableAsJson() || {};
                             let runtimeRows = 0;
                             for (const k in cur) {
@@ -6565,7 +6574,7 @@ ${DB_INIT_SNIPPET}
                                 }
                             }
                             if (runtimeRows === 0) {
-                                baselineTables = readFullCheckpointData();
+                                baselineTables = cpData;
                                 if (baselineTables) {
                                     try {
                                         const cpAll = window.MVU2SHUJUKU_CORE.statDataFromTables(activeLayout, baselineTables);
