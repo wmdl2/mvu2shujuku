@@ -4835,4 +4835,275 @@ test('无 full checkpoint 但存在 data_replace 日志：以最后一个 data_r
     assert.strictEqual(zjAfter.content[1][zjAfter.content[0].indexOf('姓名')], '斯维姆', '无 full checkpoint 时应以最后一个 data_replace 作为持久化真相恢复运行时');
 });
 
+
+test('开局建表：运行时全表仅表头且带 seedRows（插件 native 初始化签名）时走 initGameSession 完整模板建锚', async () => {
+    const vm = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const tables = JSON.parse(JSON.stringify(r.template));
+    // 模拟插件 native 初始化：content 全表头 + seedRows 从模板行迁移
+    for (const k of Object.keys(tables)) {
+        const s = tables[k];
+        if (!s || !Array.isArray(s.content)) continue;
+        if (s.content.length > 1) {
+            s.seedRows = JSON.parse(JSON.stringify(s.content.slice(1)));
+            s.content = [s.content[0]];
+        }
+    }
+    let initCalls = 0;
+    const win = {
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({ chatId: 'c-seed-init', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'message_received' } }),
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    win.AutoCardUpdaterAPI = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async () => ({ success: true }),
+        initGameSession: async () => { initCalls += 1; return { success: true, runtimeReady: true }; },
+        registerTableUpdateCallback: () => {},
+        updateCell: async () => true,
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    vm.createContext(win);
+    vm.runInContext(r.bridgeScript, win);
+    await waitBridgeFlush(500);
+    assert.ok(initCalls > 0, '全表头+seedRows+无 checkpoint 时应走 initGameSession 完整模板建锚（否则 checkpoint 无行，刷新后 v2-replay 无法恢复）');
+});
+
+test('长聊天（楼层>4）刷新后：checkpoint 有行、运行时仅表头，写库先物化再落值；延时恢复不得用陈旧 checkpoint 覆盖写入', async () => {
+    const vm2 = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => (e.kind === 'singleton'
+            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
+            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const srcDir = path.join(__dirname, '..', 'src');
+    const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
+    const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
+    const yamlLibsData = fs.readFileSync(path.join(srcDir, 'vendor', 'mvu-yaml-libs.js'), 'utf8');
+    const jsonrepairData = fs.readFileSync(path.join(srcDir, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+    const pinyinInline = pinyinData.replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ').replace(/;\s*$/, ';');
+    const yamlLibsInline = ['(function () {', '  var module = { exports: {} };', '  var exports = module.exports;', yamlLibsData, '  var target = typeof globalThis !== "undefined" ? globalThis : this;', '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;', '})();', ''].join('\n');
+    const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+    const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+
+    const persisted = JSON.parse(JSON.stringify(r.template));
+    const zjP = Object.values(persisted).find(s => s && s.name === '主角表');
+    zjP.content[1][zjP.content[0].indexOf('姓名')] = '斯维姆';
+    const tables = JSON.parse(JSON.stringify(r.template));
+    for (const k of Object.keys(tables)) {
+        if (tables[k] && Array.isArray(tables[k].content)) tables[k].content = [tables[k].content[0]];
+    }
+    const checkpointMsg = {
+        message_id: 0,
+        TavernDB_ACU_IsolatedData: JSON.stringify({
+            系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', data: persisted, ts: 1 } } },
+        }),
+    };
+    const chat = [checkpointMsg];
+    for (let i = 1; i < 6; i++) chat.push({ message_id: i, is_user: i % 2 === 1, mes: '楼层' + i });
+    const converted = {
+        name: '长聊卡',
+        avatar: 'l.png',
+        data: {
+            extensions: {
+                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
+                regex_scripts: [],
+            },
+            character_book: {
+                entries: [{
+                    keys: ['__ACU_TEMPLATE_DATA__'],
+                    content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
+                }],
+            },
+        },
+    };
+    let initCalls = 0;
+    let restoreCalls = 0;
+    const fakeApi = applyingApi(tables, {
+        onInit: async () => { initCalls += 1; },
+        onImport: (parsed, opts) => { if (opts && opts.persist === false) restoreCalls += 1; },
+    });
+    const handlers = {};
+    const context = {
+        chatId: 'c-long', name: '测试', chat,
+        characters: [converted], characterId: 0,
+        extensionSettings: { mvu2shujuku: { debug: true } },
+        eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received', MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated', MESSAGE_EDITED: 'edited', MESSAGE_SENT: 'sent', MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {}, saveChatConditional: async () => {}, saveChat: async () => {},
+        getRequestHeaders: () => ({}), setChatMessages: () => {},
+    };
+    const fakeEl = () => {
+        const el = {
+            dataset: {}, style: {}, children: [], _listeners: {}, _value: '',
+            addEventListener: (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); },
+            removeEventListener: () => {}, dispatchEvent: () => true,
+            appendChild: (c) => { el.children.push(c); return c; }, removeChild: () => {},
+            querySelector: () => fakeEl(), querySelectorAll: () => [],
+            click: () => {}, focus: () => {}, blur: () => {}, contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(el, 'innerHTML', { get: () => el._html || '', set: (v) => { el._html = v; } });
+        Object.defineProperty(el, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(el, 'value', { get: () => el._value, set: (v) => { el._value = v; } });
+        Object.defineProperty(el, 'checked', { get: () => !!el._checked, set: (v) => { el._checked = v; } });
+        Object.defineProperty(el, 'disabled', { get: () => !!el._disabled, set: (v) => { el._disabled = v; } });
+        return el;
+    };
+    const doc = {
+        querySelector: () => fakeEl(), getElementById: () => fakeEl(), createElement: () => fakeEl(),
+        createTextNode: () => fakeEl(), addEventListener: () => {}, body: fakeEl(),
+    };
+    const win = {
+        top: null, parent: null, document: doc, console,
+        setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t),
+        CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {}, toastr: undefined,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm2.createContext(win);
+    vm2.runInContext(extIndex, win);
+
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 2500));
+    assert.strictEqual(initCalls, 0, '已有 full checkpoint 的长聊天不应触发 initGameSession');
+    await win.Mvu.replaceMvuData({ stat_data: { 世界: { 当前时间: '测试时间' } } });
+    await new Promise(res => setTimeout(res, 2500)); // 越过延时恢复窗口（CHAT_CHANGED+600ms+2500ms）
+    const zjAfter = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.strictEqual(zjAfter.content[1][zjAfter.content[0].indexOf('姓名')], '斯维姆', '长聊天写库不得把持久化的主角姓名覆盖成默认值');
+    const worldAfter = Object.values(tables).find(s => s && s.name === '世界表');
+    assert.strictEqual(worldAfter.content[1][worldAfter.content[0].indexOf('当前时间')], '测试时间', '本次写入的变化必须保留，延时恢复不得用陈旧 checkpoint 覆盖');
+});
+
+
+test('单例表已有 content 行时写库不再 insertRow 垫脚行：不产生两行（系统表/任务表重复行回归）', async () => {
+    const vm2 = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => (e.kind === 'singleton'
+            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
+            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const srcDir = path.join(__dirname, '..', 'src');
+    const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
+    const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
+    const yamlLibsData = fs.readFileSync(path.join(srcDir, 'vendor', 'mvu-yaml-libs.js'), 'utf8');
+    const jsonrepairData = fs.readFileSync(path.join(srcDir, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+    const pinyinInline = pinyinData.replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ').replace(/;\s*$/, ';');
+    const yamlLibsInline = ['(function () {', '  var module = { exports: {} };', '  var exports = module.exports;', yamlLibsData, '  var target = typeof globalThis !== "undefined" ? globalThis : this;', '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;', '})();', ''].join('\n');
+    const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+    const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+
+    // 运行时 = 完整模板（单例表已有 content 行，模拟 initGameSession 之后）
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const persisted = JSON.parse(JSON.stringify(r.template));
+    const checkpointMsg = {
+        message_id: 0,
+        TavernDB_ACU_IsolatedData: JSON.stringify({
+            系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', data: persisted, ts: 1 } } },
+        }),
+    };
+    const converted = {
+        name: '幂等卡',
+        avatar: 'id.png',
+        data: {
+            extensions: {
+                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
+                regex_scripts: [],
+            },
+            character_book: {
+                entries: [{
+                    keys: ['__ACU_TEMPLATE_DATA__'],
+                    content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
+                }],
+            },
+        },
+    };
+    let insertCalls = 0;
+    const baseApi = applyingApi(tables, {});
+    const fakeApi = Object.assign({}, baseApi, {
+        insertRow: async (tableName, obj) => {
+            insertCalls += 1;
+            return baseApi.insertRow(tableName, obj);
+        },
+    });
+    const handlers = {};
+    const context = {
+        chatId: 'c-idem', name: '测试', chat: [checkpointMsg],
+        characters: [converted], characterId: 0,
+        extensionSettings: { mvu2shujuku: { debug: true } },
+        eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received', MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated', MESSAGE_EDITED: 'edited', MESSAGE_SENT: 'sent', MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {}, saveChatConditional: async () => {}, saveChat: async () => {},
+        getRequestHeaders: () => ({}), setChatMessages: () => {},
+    };
+    const fakeEl = () => {
+        const el = {
+            dataset: {}, style: {}, children: [], _listeners: {}, _value: '',
+            addEventListener: (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); },
+            removeEventListener: () => {}, dispatchEvent: () => true,
+            appendChild: (c) => { el.children.push(c); return c; }, removeChild: () => {},
+            querySelector: () => fakeEl(), querySelectorAll: () => [],
+            click: () => {}, focus: () => {}, blur: () => {}, contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(el, 'innerHTML', { get: () => el._html || '', set: (v) => { el._html = v; } });
+        Object.defineProperty(el, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(el, 'value', { get: () => el._value, set: (v) => { el._value = v; } });
+        Object.defineProperty(el, 'checked', { get: () => !!el._checked, set: (v) => { el._checked = v; } });
+        Object.defineProperty(el, 'disabled', { get: () => !!el._disabled, set: (v) => { el._disabled = v; } });
+        return el;
+    };
+    const doc = {
+        querySelector: () => fakeEl(), getElementById: () => fakeEl(), createElement: () => fakeEl(),
+        createTextNode: () => fakeEl(), addEventListener: () => {}, body: fakeEl(),
+    };
+    const win = {
+        top: null, parent: null, document: doc, console,
+        setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t),
+        CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {}, toastr: undefined,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm2.createContext(win);
+    vm2.runInContext(extIndex, win);
+
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 2500));
+    // 单例表更新：只改 主角表 姓名（表里已有 row_id=1）
+    await win.Mvu.replaceMvuData({ stat_data: { 主角: { 姓名: '幂等写入' } } });
+    await new Promise(res => setTimeout(res, 1200));
+    assert.strictEqual(insertCalls, 0, '单例表已有 content 行时写库不得调用 insertRow（不得制造垫脚行/重复行）');
+    const zj = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.ok(zj && Array.isArray(zj.content), '主角表应存在');
+    assert.strictEqual(zj.content.length, 2, '单例表写库后仍应只有表头+一行（不得再插出第二行）');
+    const hdr = zj.content[0];
+    assert.strictEqual(zj.content[1][hdr.indexOf('姓名')], '幂等写入', '写入应落在 row_id=1 上');
+});
+
 runTests();
