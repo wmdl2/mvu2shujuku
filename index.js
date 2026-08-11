@@ -4400,7 +4400,7 @@
         }
         if (shapeInfo.wildcardFields && shapeInfo.wildcardFields.size) {
             report.warn(
-                `检测到通配路径规则（如 ${[...shapeInfo.wildcardFields].slice(0, 5).join('、')}${shapeInfo.wildcardFields.size > 5 ? ' 等' : ''}）：动态键字段无法逐字段迁移，其 check/范围规则未进入表格提示词，请人工核对。`,
+                `检测到通配路径规则（如 ${[...shapeInfo.wildcardFields].slice(0, 5).join('、')}${shapeInfo.wildcardFields.size > 5 ? ' 等' : ''}）：动态键（门牌/角色名等）无法展开为列，规则已按表级「可写路径与约束」保留进提示词，具体键值以运行时快照为准，请人工核对。`,
                 'schema'
             );
         }
