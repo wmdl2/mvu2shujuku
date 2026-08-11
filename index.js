@@ -2649,6 +2649,26 @@
             }
         };
         collect(prevStat || {}, nextStat || {}, '');
+        // 行表删除检测：stat_data 中已不存在的行键 → 对应表行应删除（补齐 diff 路径的删除方向；
+        // 参考卡前端删除直接走 api.deleteRow，这里把 stat_data 删键翻译成删行）
+        for (const L of entries) {
+            if (L.kind !== 'rows') continue;
+            const wp = (L.writePaths || [])[0] || [L.group];
+            const dictAt = (obj) => {
+                let c = obj;
+                for (const p of wp) { if (c === null || c === undefined || typeof c !== 'object') return undefined; c = c[p]; }
+                return c;
+            };
+            const prevDict = dictAt(prevStat);
+            const nextDict = dictAt(nextStat);
+            if (!prevDict || typeof prevDict !== 'object' || Array.isArray(prevDict)) continue;
+            const nextKeys = (nextDict && typeof nextDict === 'object' && !Array.isArray(nextDict)) ? new Set(Object.keys(nextDict)) : new Set();
+            for (const k of Object.keys(prevDict)) {
+                if (!nextKeys.has(k)) {
+                    ops.push({ np: wp.concat([k]).join('.'), entry: { layout: L, kind: 'rows', prefix: wp }, kind: 'row-delete', rowKey: k });
+                }
+            }
+        }
 
         // 单例/整组JSON表若缺初始行（插件可能只保留表头+seedRows，未物化到 content），先按模板补行，
         // 避免 updateCell: Row index 1 out of bounds 导致写入落空
@@ -2713,6 +2733,25 @@
             if (!found) continue;
             const sheet = found.sheet;
             const header = sheet.content && sheet.content[0] ? sheet.content[0] : [];
+            if (op.kind === 'row-delete' && E.kind === 'rows') {
+                const rowIndex = findRowByColumn(sheet, L.keyCol, op.rowKey);
+                if (rowIndex !== -1) {
+                    resolved.push({ kind: 'row-delete', key: found.key, sheet, header, layout: L, rowIndex });
+                } else {
+                    // 行可能只在 seedRows（未物化）：从当前运行时 seedRows 移除（尽力；插件可能从模板 scope 补回）
+                    const ki = header.indexOf(L.keyCol);
+                    const before = Array.isArray(sheet.seedRows) ? sheet.seedRows.length : 0;
+                    if (Array.isArray(sheet.seedRows) && ki >= 0) {
+                        sheet.seedRows = sheet.seedRows.filter(r => !(Array.isArray(r) && String(r[ki]) === String(op.rowKey)));
+                    }
+                    if (Array.isArray(sheet.seedRows) && sheet.seedRows.length !== before) {
+                        dbg(' 行表「' + L.table + '」seedRows 已移除键「' + op.rowKey + '」（diff 路径）');
+                    } else {
+                        dbg(' 行表「' + L.table + '」键「' + op.rowKey + '」既不在 content 也不在 seedRows，跳过删除。');
+                    }
+                }
+                continue;
+            }
             if (op.json && E.kind === 'json') {
                 const jcIdx = header.indexOf('内容');
                 if (jcIdx === -1) {
@@ -2870,6 +2909,12 @@
                 for (const r of resolved) {
                     const L = r.layout;
                     const tname = L.table;
+                    if (r.kind === 'row-delete') {
+                        const rid = r.sheet.content[r.rowIndex] ? r.sheet.content[r.rowIndex][0] : undefined;
+                        if (rid === undefined || rid === null || rid === '') continue;
+                        statements.push('DELETE FROM ' + tname + ' WHERE row_id = ' + Number(rid) + ';');
+                        continue;
+                    }
                     if (r.kind === 'array') {
                         for (let i = 1; i < r.sheet.content.length; i++) {
                             const rid = r.sheet.content[i] ? r.sheet.content[i][0] : undefined;
@@ -2916,6 +2961,10 @@
         for (const r of resolved) {
             const L = r.layout;
             try {
+                if (r.kind === 'row-delete') {
+                    try { await Promise.resolve(api.deleteRow(L.table, r.rowIndex)); } catch (e) {}
+                    continue;
+                }
                 if (r.kind === 'array') {
                     for (let rr = r.sheet.content.length - 1; rr >= 1; rr--) {
                         // deleteRow 的 rowIndex 是 content 数组索引（0=表头，1=第一数据行），
@@ -5996,9 +6045,13 @@ ${DB_INIT_SNIPPET}
                 for (const k of Object.keys(obj)) {
                     if (!declared.includes(k) && k !== L.keyCol && !childGroupKeys.has(k) && !flattenedContainers.has(k)) overflow[k] = obj[k];
                 }
-                if (!Object.keys(overflow).length) return;
                 let cur = {};
                 try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e2) {}
+                // 同步删除：stat_data 中已不存在的动态字段要从溢出列移除，
+                // 否则前端删除操作（如删 _hypnoos 子树）写不进快照，提交后仍残留旧值。
+                for (const k of Object.keys(cur)) {
+                    if (!Object.prototype.hasOwnProperty.call(overflow, k)) delete cur[k];
+                }
                 Object.assign(cur, overflow);
                 row[ovIdx] = JSON.stringify(cur);
             };
@@ -20482,9 +20535,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 for (const k of Object.keys(obj)) {
                     if (!declared.includes(k) && k !== L.keyCol && !childGroupKeys.has(k) && !flattenedContainers.has(k)) overflow[k] = obj[k];
                 }
-                if (!Object.keys(overflow).length) return;
                 let cur = {};
                 try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e2) {}
+                // 同步删除：stat_data 中已不存在的动态字段要从溢出列移除，
+                // 否则前端删除操作（如删 _hypnoos 子树）写不进快照，提交后仍残留旧值。
+                for (const k of Object.keys(cur)) {
+                    if (!Object.prototype.hasOwnProperty.call(overflow, k)) delete cur[k];
+                }
                 Object.assign(cur, overflow);
                 row[ovIdx] = JSON.stringify(cur);
             };
