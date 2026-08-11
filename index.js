@@ -6994,8 +6994,9 @@ ${DB_INIT_SNIPPET}
                                 const sk = op.sheetKey || '';
                                 const rid = op.rowId !== undefined && op.rowId !== null ? String(op.rowId) : '';
                                 let detail = '';
-                                if (Array.isArray(op.cells)) detail = 'cells=' + op.cells.length + ':[' + String(op.cells[0] ?? '') + '|' + String(op.cells[1] ?? '') + ']';
-                                else if (typeof op.sql === 'string') detail = 'sql=' + op.sql.slice(0, 90).replace(/\n/g, ' ');
+                                if (Array.isArray(op.statements)) detail = 'statements=' + op.statements.map(function (st) { return String(st == null ? '' : st).slice(0, 120).replace(/\n/g, ' '); }).join(' ;; ');
+                                else if (Array.isArray(op.cells)) detail = 'cells=' + op.cells.length + ':[' + String(op.cells[0] ?? '') + '|' + String(op.cells[1] ?? '') + ']';
+                                else if (typeof op.sql === 'string') detail = 'sql=' + op.sql.slice(0, 120).replace(/\n/g, ' ');
                                 else if (op.sheet && op.sheet.content && Array.isArray(op.sheet.content)) detail = 'sheetRows=' + (op.sheet.content.length - 1);
                                 opSummaries.push('msg' + mi + '#e' + ei + '#o' + oi + ':' + kind + ':' + (sk || '-') + ':' + (rid || '-') + ':' + detail);
                             }
@@ -7015,9 +7016,9 @@ ${DB_INIT_SNIPPET}
                     const hdr = s.content[0] || [];
                     const rows = s.content.slice(1, 6).map(r => {
                         if (!Array.isArray(r)) return 'bad-row';
-                        return '[' + String(r[0] ?? '') + '|' + String(r[1] ?? '') + '|' + String(r[2] ?? '') + ']';
+                        return '[' + r.length + 'w|' + String(r[0] ?? '') + '|' + String(r[1] ?? '') + '|' + String(r[2] ?? '') + ']';
                     }).join(',');
-                    rowDumps.push(k + ':' + (s.name || '?') + ':header=' + JSON.stringify(hdr.slice(0, 4)) + ':rows=' + rows);
+                    rowDumps.push(k + ':' + (s.name || '?') + ':hdrW=' + hdr.length + ':rows=' + rows);
                 }
                 dbg('[重进诊断] checkpoint 行详情: ' + (rowDumps.length ? rowDumps.join(' || ') : '无'));
             } catch (eRow) {}
@@ -7093,10 +7094,26 @@ ${DB_INIT_SNIPPET}
     // 的 baseRevision 会带着原始 key，挂在稳定 key 的 checkpoint 上，刷新回放失败、整链回默认。
     // 返回 true 表示运行时已（重新）用 checkpoint 数据物化。
     async function materializeRuntimeFromCheckpoint(api) {
+        const dumpAfterRestore = (tag) => {
+            try {
+                const cur = api.exportTableAsJson() || {};
+                const parts = [];
+                for (const k in cur) {
+                    if (k.indexOf('sheet_') !== 0) continue;
+                    const s = cur[k];
+                    if (!s || typeof s !== 'object') continue;
+                    const c = Array.isArray(s.content) ? s.content.length - 1 : -1;
+                    const widths = Array.isArray(s.content) ? s.content.slice(1, 4).map(function (r) { return Array.isArray(r) ? r.length : -1; }).join(',') : '';
+                    parts.push(k + ':' + (s.name || '?') + ':content=' + c + ':w=' + widths);
+                }
+                dbg(' 物化后（' + tag + '）运行时逐表: ' + parts.join(' | '));
+            } catch (eD) {}
+        };
         const restoreWith = async (payload, tag) => {
             try {
                 const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(payload), { persist: false, mode: 'restore' }));
                 dbg(' 运行时按 checkpoint 数据物化（' + tag + '，persist:false）=' + (ok ? '成功' : '失败'));
+                if (ok) dumpAfterRestore(tag);
                 return !!ok;
             } catch (e) {
                 dbgWarn(' 运行时按 checkpoint 物化异常（' + tag + '）:', e && e.message ? e.message : e);
@@ -21714,8 +21731,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 const sk = op.sheetKey || '';
                                 const rid = op.rowId !== undefined && op.rowId !== null ? String(op.rowId) : '';
                                 let detail = '';
-                                if (Array.isArray(op.cells)) detail = 'cells=' + op.cells.length + ':[' + String(op.cells[0] ?? '') + '|' + String(op.cells[1] ?? '') + ']';
-                                else if (typeof op.sql === 'string') detail = 'sql=' + op.sql.slice(0, 90).replace(/\n/g, ' ');
+                                if (Array.isArray(op.statements)) detail = 'statements=' + op.statements.map(function (st) { return String(st == null ? '' : st).slice(0, 120).replace(/\n/g, ' '); }).join(' ;; ');
+                                else if (Array.isArray(op.cells)) detail = 'cells=' + op.cells.length + ':[' + String(op.cells[0] ?? '') + '|' + String(op.cells[1] ?? '') + ']';
+                                else if (typeof op.sql === 'string') detail = 'sql=' + op.sql.slice(0, 120).replace(/\n/g, ' ');
                                 else if (op.sheet && op.sheet.content && Array.isArray(op.sheet.content)) detail = 'sheetRows=' + (op.sheet.content.length - 1);
                                 opSummaries.push('msg' + mi + '#e' + ei + '#o' + oi + ':' + kind + ':' + (sk || '-') + ':' + (rid || '-') + ':' + detail);
                             }
@@ -21735,9 +21753,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     const hdr = s.content[0] || [];
                     const rows = s.content.slice(1, 6).map(r => {
                         if (!Array.isArray(r)) return 'bad-row';
-                        return '[' + String(r[0] ?? '') + '|' + String(r[1] ?? '') + '|' + String(r[2] ?? '') + ']';
+                        return '[' + r.length + 'w|' + String(r[0] ?? '') + '|' + String(r[1] ?? '') + '|' + String(r[2] ?? '') + ']';
                     }).join(',');
-                    rowDumps.push(k + ':' + (s.name || '?') + ':header=' + JSON.stringify(hdr.slice(0, 4)) + ':rows=' + rows);
+                    rowDumps.push(k + ':' + (s.name || '?') + ':hdrW=' + hdr.length + ':rows=' + rows);
                 }
                 dbg('[重进诊断] checkpoint 行详情: ' + (rowDumps.length ? rowDumps.join(' || ') : '无'));
             } catch (eRow) {}
@@ -21813,10 +21831,26 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     // 的 baseRevision 会带着原始 key，挂在稳定 key 的 checkpoint 上，刷新回放失败、整链回默认。
     // 返回 true 表示运行时已（重新）用 checkpoint 数据物化。
     async function materializeRuntimeFromCheckpoint(api) {
+        const dumpAfterRestore = (tag) => {
+            try {
+                const cur = api.exportTableAsJson() || {};
+                const parts = [];
+                for (const k in cur) {
+                    if (k.indexOf('sheet_') !== 0) continue;
+                    const s = cur[k];
+                    if (!s || typeof s !== 'object') continue;
+                    const c = Array.isArray(s.content) ? s.content.length - 1 : -1;
+                    const widths = Array.isArray(s.content) ? s.content.slice(1, 4).map(function (r) { return Array.isArray(r) ? r.length : -1; }).join(',') : '';
+                    parts.push(k + ':' + (s.name || '?') + ':content=' + c + ':w=' + widths);
+                }
+                dbg(' 物化后（' + tag + '）运行时逐表: ' + parts.join(' | '));
+            } catch (eD) {}
+        };
         const restoreWith = async (payload, tag) => {
             try {
                 const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(payload), { persist: false, mode: 'restore' }));
                 dbg(' 运行时按 checkpoint 数据物化（' + tag + '，persist:false）=' + (ok ? '成功' : '失败'));
+                if (ok) dumpAfterRestore(tag);
                 return !!ok;
             } catch (e) {
                 dbgWarn(' 运行时按 checkpoint 物化异常（' + tag + '）:', e && e.message ? e.message : e);
