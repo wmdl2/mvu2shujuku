@@ -6787,11 +6787,31 @@ ${DB_INIT_SNIPPET}
                                 const snapSys = Object.values(snap || {}).find(s => s && s.name === '系统表');
                                 const snapHdr = (snapSys && snapSys.content && snapSys.content[0]) || [];
                                 const snapMcIdx = snapHdr.indexOf('当前MC点');
+                                // 通用诊断：取布局第一个 rows 表（如 主角表）看 target→snap→merged 的值是否保留
+                                const firstRows = (Array.isArray(activeLayout) ? activeLayout : []).find(L => L.kind === 'rows');
+                                const rowValOf = (obj, L) => {
+                                    try {
+                                        const wp = (L.writePaths || [])[0];
+                                        let cur = obj;
+                                        if (Array.isArray(wp) && wp.length) { for (const p of wp) { cur = cur && cur[p]; } }
+                                        else { cur = obj && obj[L.group]; }
+                                        if (!cur || typeof cur !== 'object') return undefined;
+                                        const keys = Object.keys(cur);
+                                        return keys.length ? String(keys[0]) : '(空)';
+                                    } catch (e) { return undefined; }
+                                };
+                                const snapRow = firstRows ? (() => {
+                                    const s = Object.values(snap || {}).find(x => x && x.name === firstRows.table);
+                                    const kc = firstRows.keyCol;
+                                    const ki = s && s.content && s.content[0] ? s.content[0].indexOf(kc) : -1;
+                                    return s && s.content && s.content[1] && ki >= 0 ? String(s.content[1][ki]) : '(无行)';
+                                })() : '(无rows表)';
                                 dbg('[快照提交] target.系统.当前MC点=' + JSON.stringify(effectiveTarget.系统 && effectiveTarget.系统.当前MC点) +
                                     ' | 原始snap当前MC点=' + JSON.stringify(snapSys && snapSys.content[1] && snapSys.content[1][snapMcIdx]) +
                                     ' | 提交快照系统表当前MC点=' + JSON.stringify(sysSheet && sysSheet.content[1] && sysSheet.content[1][mcIdx]) +
                                     ' | 系统表行数=' + (sysSheet && sysSheet.content ? sysSheet.content.length : 'N/A') +
-                                    ' | snapKeys=' + Object.keys(snap || {}).filter(k => k.indexOf('sheet_') === 0).join(','));
+                                    ' | snapKeys=' + Object.keys(snap || {}).filter(k => k.indexOf('sheet_') === 0).join(',') +
+                                    ' | rows表=' + (firstRows ? firstRows.table + ' target首键=' + String(rowValOf(effectiveTarget, firstRows)) + ' snap首键=' + snapRow : '(无)'));
                             } catch (e) {}
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
