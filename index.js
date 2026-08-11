@@ -2062,14 +2062,15 @@
                 for (const rule of (c.check || []).map(sanitizeCheckRule).filter(Boolean)) L.push(`- ${c.zh}：${rule}`);
             }
             // 子表/动态字典的组级规则（如 世界.动向 的“最多维持2个大事件”）：以表级约束列出
-            for (const rule of (group.groupChecks || []).map(sanitizeCheckRule).filter(Boolean)) L.push(`- ${group.tableName}：${rule}`);
+            // 注意：这些行已位于本表自己的 note 内，不再重复表名前缀（避免“道侣表：性别：…”式噪音）
+            for (const rule of (group.groupChecks || []).map(sanitizeCheckRule).filter(Boolean)) L.push(`- ${rule}`);
             // 通配路径规则（如 人物.角色名.亲密）：动态键无法静态展开，作为表格级提示保留，
             // AI 对照快照中的具体键套用（范围/条件仍可见）
             for (const wr of (group.wildcardRules || [])) {
                 const parts = [];
                 if (wr.range) parts.push(`数值范围 ${wr.range[0]}~${wr.range[1]}`);
                 parts.push(...(wr.checks || []));
-                if (parts.length) L.push(`- ${group.tableName}：${wr.path}（${parts.join('；')}）`);
+                if (parts.length) L.push(`- ${wr.path}（${parts.join('；')}）`);
             }
             for (const c of aiCols) {
                 if (c.check && c.check.length > 20) L.push(`- ${c.zh}：…（共 ${c.check.length} 条规则，其余略）`);
