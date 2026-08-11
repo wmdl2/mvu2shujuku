@@ -552,6 +552,9 @@
         const formats = {};
         const checks = {};
         const reminders = {};
+        const groupChecks = {};
+        const zodDescs = {};
+        const wildcardFields = new Set();
         const numericFields = new Set();
         const allContents = [];
         const allCheckItems = [];
@@ -583,6 +586,18 @@
                     const field = fm[2].trim().replace(/^["']|["']$/g, '');
                     if (!/^[\u4e00-\u9fff$]{1,12}$/.test(field) && !/^\$\{[^}]+\}$/.test(field)) continue;
                     fieldStarts.push({ field, index: fm.index + fm[0].length, inline: fm[3].trim(), at: fm.index });
+                }
+                // 通配路径字段（如 户.<门牌>.妻.好感值 / 人物.角色名.亲密）：字段名含 <…> 或 .，
+                // 不是静态列，无法逐字段迁移；识别出来并在转换报告中显式警告，避免静默丢弃。
+                // 通配路径可出现在 2 空格（顶层，如 人妻公寓 的 户.<门牌>…）或 4 空格（组内）缩进
+                const wildRe = /(?:^|\n)( {0,4})([^\n:]{1,40}?)[ \t]*:[ \t]*([^\n]*)$/gm;
+                let wm;
+                while ((wm = wildRe.exec(section))) {
+                    const k = wm[2].trim().replace(/^["']|["']$/g, '');
+                    if (!k) continue;
+                    if (/<[^>]+>|\./.test(k) && !/^[\u4e00-\u9fff$]{1,12}$/.test(k) && !/^\$\{[^}]+\}$/.test(k)) {
+                        wildcardFields.add(k);
+                    }
                 }
                 for (let fi = 0; fi < fieldStarts.length; fi++) {
                     const { field, index, inline } = fieldStarts[fi];
@@ -641,10 +656,27 @@
                             }
                         }
                     }
-                    const formatM = block.match(/format\s*:\s*["']([\s\S]*?)["']\s*$/m);
-                    if (formatM) {
+                    // format 支持三种写法：块标量（|-）、引号单行、无引号单行
+                    // （官方参考里有无引号写法，如 format: YYYY年MM月DD日 星期X HH:MM）
+                    const formatValue = (() => {
+                        const blk = block.match(/format\s*:\s*[|>]-?\s*\n([\s\S]*?)(?=\n {4}[^ \n-][^\n:]{0,23}?[ \t]*:|\n {2}\S|$)/);
+                        if (blk) {
+                            const lines = String(blk[1]).split('\n');
+                            const ind = lines.filter(l => l.trim()).reduce((min, l) => {
+                                const n = (l.match(/^ */) || [''])[0].length;
+                                return Math.min(min, n);
+                            }, Infinity);
+                            return lines.map(l => l.slice(Math.min(ind, l.length))).join(' ').replace(/\s+/g, ' ').trim();
+                        }
+                        const q = block.match(/format\s*:\s*["']([\s\S]*?)["']\s*$/m);
+                        if (q) return q[1].trim();
+                        const u = block.match(/format\s*:\s*([^\n]+)$/m);
+                        if (u) return u[1].trim();
+                        return '';
+                    })();
+                    if (formatValue) {
                         formats[group] = formats[group] || {};
-                        for (const fn of fieldNames) formats[group][fn] = formatM[1].trim();
+                        for (const fn of fieldNames) formats[group][fn] = formatValue;
                     }
                     // 注意：可选引号必须写成 "?"（零或一个引号）。"\"\"?" 在正则里是“一个或两个引号”，
                     // check 列表以 - 开头没有引号时永远匹配失败，导致所有 check 规则静默丢失（道渊实测）。
@@ -678,7 +710,13 @@
                 }
                 // 组级 type 声明（形如 组名: type: "{...}"）
                 const groupCheckM = section.match(/\n {4}check\s*:\s*\n([\s\S]*?)(?=\n {4}[^ \n-][^\n:]{0,23}?[ \t]*:|\n {2}\S|$)/);
-                if (groupCheckM) allCheckItems.push(...extractListItems(groupCheckM[1]));
+                if (groupCheckM) {
+                    // 组级 check（道侣/灵宠/人物/绝色榜/玉简/机遇 等整表规则）：
+                    // 除提取范围外，条目必须保留为表格级规则，不能只喂给 allCheckItems 后丢弃。
+                    const gItems = extractListItems(groupCheckM[1]).map(stripRuleQuotes);
+                    allCheckItems.push(...gItems);
+                    if (gItems.length) groupChecks[group] = gItems;
+                }
                 let shapeStr = null;
                 if (!/^\s*type\s*:/.test(section)) continue; // 该组没有直接 type 声明（字段由 initvar 提供）
                 const q = section.match(/type\s*:\s*"([\s\S]*?)"\s*$/m);
@@ -742,9 +780,20 @@
                     checks[group] = checks[group] || {};
                     checks[group][f] = g.checks[f];
                 }
+                for (const f of Object.keys(g.ranges || {})) {
+                    const rr = g.ranges[f];
+                    if (Array.isArray(rr) && rr.length === 2) ranges[f] = [rr[0], rr[1]];
+                    numericFields.add(f);
+                }
+                for (const f of Object.keys(g.enums || {})) enums[f] = g.enums[f];
+                for (const f of Object.keys(g.descs || {})) {
+                    // 组名+字段名双键存描述，避免跨组同名字段互相覆盖
+                    zodDescs[group] = zodDescs[group] || {};
+                    zodDescs[group][f] = g.descs[f];
+                }
             }
         }
-        return { shapes, objects, ranges, enums, formats, checks, reminders, numericFields };
+        return { shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, wildcardFields, numericFields };
     }
 
     // 从 YAML 片段提取 “- xxx” 列表项
@@ -754,6 +803,15 @@
         let m;
         while ((m = re.exec(text))) items.push(m[1].trim());
         return items;
+    }
+
+    // 去掉规则条目首尾的引号（如 - "性别：收为道侣时确定"）
+    function stripRuleQuotes(s) {
+        let t = String(s || '').trim();
+        if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+            t = t.slice(1, -1).trim();
+        }
+        return t;
     }
 
     // zod/TS 替代写法（官方文档 3.2 的“替代写法”）：type 直接放 zod 代码，
@@ -833,6 +891,7 @@
                         obj[key] = { checks: checksFromComment(pre || pre2), object: child };
                     }
                 } else {
+                    const leafStart = pos;
                     let depth = 0;
                     while (pos < content.length) {
                         const ch = content[pos];
@@ -841,7 +900,20 @@
                         else if ((ch === ',' || ch === ';') && depth === 0) break;
                         pos++;
                     }
-                    obj[key] = { checks: checksFromComment(pre || pre2), object: null };
+                    // zod/TS 数值约束：z.number().min(0).max(100) → 提取范围，供 DDL CHECK / note
+                    const leafText = content.slice(leafStart, pos);
+                    const minM = leafText.match(/\.min\(\s*(-?[\d.]+)\s*\)/);
+                    const maxM = leafText.match(/\.max\(\s*(-?[\d.]+)\s*\)/);
+                    const enumM = leafText.match(/z\.enum\(\s*\[([\s\S]*?)\]\s*\)/);
+                    const describeM = leafText.match(/\.describe\(\s*["']([\s\S]*?)["']\s*\)/);
+                    obj[key] = {
+                        checks: checksFromComment(pre || pre2),
+                        object: null,
+                        min: minM ? Number(minM[1]) : null,
+                        max: maxM ? Number(maxM[1]) : null,
+                        enum: enumM ? String(enumM[1]).split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean) : null,
+                        desc: describeM ? describeM[1].trim() : '',
+                    };
                 }
             }
             return obj;
@@ -854,13 +926,19 @@
             if (!gv || !gv.object) continue;
             const fields = [];
             const gChecks = {};
+            const gRanges = {};
+            const gEnums = {};
+            const gDescs = {};
             for (const f of Object.keys(gv.object)) {
                 fields.push(f);
                 const fv = gv.object[f];
                 if (fv && fv.checks && fv.checks.length) gChecks[f] = fv.checks;
+                if (fv && fv.min !== null && fv.max !== null) gRanges[f] = [fv.min, fv.max];
+                if (fv && fv.enum && fv.enum.length) gEnums[f] = fv.enum;
+                if (fv && fv.desc) gDescs[f] = fv.desc;
             }
-            if (fields.length || Object.keys(gChecks).length) {
-                out[g] = { fields: [...new Set(fields)], checks: gChecks };
+            if (fields.length || Object.keys(gChecks).length || Object.keys(gRanges).length || Object.keys(gEnums).length || Object.keys(gDescs).length) {
+                out[g] = { fields: [...new Set(fields)], checks: gChecks, ranges: gRanges, enums: gEnums, descs: gDescs };
             }
         }
         return out;
@@ -1559,6 +1637,25 @@
                         ident: toIdent(f, used, 'column'),
                     });
                 }
+                // mvu_update/zod 声明的字段：initvar 里没有也要补成列（与行表行为对齐），
+                // 否则单例表的声明字段（如 zod 卡 白娅.着装/称谓）会静默丢失。
+                const shapeFieldsForSingleton = (shapes[groupName] || []).filter(f => (
+                    f !== keyCol &&
+                    !columns.some(c => c.zh === f) &&
+                    !childTables.some(ct => ct.key === f) &&
+                    !nestedSubKeys.has(f)
+                ));
+                for (const f of shapeFieldsForSingleton) {
+                    columns.push({
+                        zh: f,
+                        path: [groupName, f],
+                        value: '',
+                        desc: '',
+                        type: fieldIsNumeric(f, '') ? 'INTEGER' : 'TEXT',
+                        range: fieldRange(f),
+                        ident: toIdent(f, used, 'column'),
+                    });
+                }
                 // 通用溢出列：运行期脚本/前端可能写入模板未声明的动态字段，统一存 JSON，读取时自动还原
                 if (!columns.some(c => c.zh === '_扩展数据')) {
                     columns.push({
@@ -1717,17 +1814,18 @@
         const ruleChecks = (shapeInfo && shapeInfo.checks) || {};
         const ruleRanges = (shapeInfo && shapeInfo.ranges) || {};
         const ruleNumeric = (shapeInfo && shapeInfo.numericFields) || new Set();
+        const ruleGroupChecks = (shapeInfo && shapeInfo.groupChecks) || {};
+        const ruleZodDescs = (shapeInfo && shapeInfo.zodDescs) || {};
         for (const g of groups) {
             // 整组 JSON 表：内容不透明，不套用 [mvu_update] 按字段名的规则（避免误命中同名列）
             if (g.kind === 'json') continue;
             const gFormats = ruleFormats[g.name] || {};
             const gChecks = ruleChecks[g.name] || {};
-            // 子表/动态字典（如 世界.动向）：规则声明在父组的字段上（checks[父组][字段]），
-            // 以表级约束挂到子表上，让 buildNote 能列出来（如“最多同时维持2个大事件”）。
-            if (g.parentGroup) {
-                const parentChecks = ruleChecks[g.parentGroup] || {};
-                g.groupChecks = parentChecks[g.name] || [];
-            }
+            // 表级规则：
+            //  - 组级 check（道侣/灵宠/人物/绝色榜/玉简/机遇 等整表规则）→ groupChecks[组名]
+            //  - 子表/动态字典（如 世界.动向）：规则声明在父组的字段上（checks[父组][字段]）
+            const parentList = g.parentGroup ? (ruleChecks[g.parentGroup] || {})[g.name] || [] : [];
+            g.groupChecks = [...parentList, ...(ruleGroupChecks[g.name] || [])];
             for (const c of g.columns) {
                 // 内部溢出列：不接受按字段名的规则
                 if (c.zh === '_扩展数据') continue;
@@ -1735,6 +1833,10 @@
                 c.enum = ruleEnums[c.zh] || ruleEnums[last] || null;
                 c.format = gFormats[c.zh] || gFormats[last] || '';
                 c.check = gChecks[c.zh] || gChecks[last] || [];
+                if (!c.desc) {
+                    const zd = (ruleZodDescs[g.name] || {})[c.zh] || (ruleZodDescs[g.name] || {})[last];
+                    if (zd) c.desc = zd;
+                }
                 if (!c.range && (ruleRanges[c.zh] || ruleRanges[last])) c.range = ruleRanges[c.zh] || ruleRanges[last];
                 if (c.type !== 'INTEGER' && (ruleNumeric.has(c.zh) || ruleNumeric.has(last))) c.type = 'INTEGER';
             }
@@ -4229,6 +4331,12 @@
         if (Object.keys(shapeInfo.shapes).length) {
             report.note(`已从 [mvu_update] 结构声明解析列：${Object.keys(shapeInfo.shapes).map(g => `${g}(${shapeInfo.shapes[g].length})`).join('、')}。`);
         }
+        if (shapeInfo.wildcardFields && shapeInfo.wildcardFields.size) {
+            report.warn(
+                `检测到通配路径规则（如 ${[...shapeInfo.wildcardFields].slice(0, 5).join('、')}${shapeInfo.wildcardFields.size > 5 ? ' 等' : ''}）：动态键字段无法逐字段迁移，其 check/范围规则未进入表格提示词，请人工核对。`,
+                'schema'
+            );
+        }
         const schema = buildSchema(initvar, usage, report, shapeInfo);
         const layout = buildLayout(schema);
         const template = opts.template || generateTemplate(schema, { mode, report });
@@ -6283,6 +6391,16 @@ ${DB_INIT_SNIPPET}
                     }
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     const prev = all.stat_data || {};
+                    // 前端/脚本传来的 target 可能不完整：开场读取时布局未就绪，只拿到部分组
+                    // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
+                    // 缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
+                    // 最终 importTableAsJson 还可能存旧 checkpoint，导致“写入未保存”。
+                    const effectiveTarget = (() => {
+                        if (!target || typeof target !== 'object') return prev || {};
+                        const out = JSON.parse(JSON.stringify(prev || {}));
+                        for (const k of Object.keys(target)) out[k] = target[k];
+                        return out;
+                    })();
                     // 写入主路径：开局（表格仍是模板初始状态、无真实数据）时，把注入后的
                     // stat_data 合并进模板，走插件 initGameSession 一次性建表。
                     // 关键：initGameSession 会同时写入 TavernDB_ACU_IsolatedData +
@@ -6299,16 +6417,16 @@ ${DB_INIT_SNIPPET}
                         // 注意不能依赖 mvu2shujukuTablesSafeToAnchor 判断：物化垫脚行会让它误判非初始。
                         const chatKeyNow = autoInitChatId();
                         const isFirstWrite = !initializedViaGameSession.has(chatKeyNow);
-                        const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, target);
+                        const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, effectiveTarget);
                         // 首次写库直接用注入后的 stat_data 覆盖模板行（等价于参考卡 buildOpeningTemplateData）：
                         // 开局时运行时表格常为空，exportTableAsJson 拿不到任何表，快照合并会把用户数据丢掉；
                         // 直接改模板 content 则无论运行时状态如何，注入数据都在传入 initGameSession 的模板里。
                         const mergedTemplate = (isFirstWrite && Array.isArray(activeLayout))
-                            ? applyTargetToTemplate(tplCached, activeLayout, target)
+                            ? applyTargetToTemplate(tplCached, activeLayout, effectiveTarget)
                             : mergeSnapshotIntoTemplate(tplCached, snap);
                         // 诊断：确认注入数据是否真的进了合并模板（主角表 content 第一行）
                         try {
-                            const heroName = target.主角 && target.主角.姓名;
+                            const heroName = effectiveTarget.主角 && effectiveTarget.主角.姓名;
                             const mtProt = mergedTemplate && mergedTemplate.sheet_zhujiaobiao;
                             const mtRow = mtProt && Array.isArray(mtProt.content) ? mtProt.content[1] : null;
                             dbg('[注入合并] 首次写库=' + isFirstWrite + ' | target.主角.姓名=' + heroName +
@@ -6338,7 +6456,7 @@ ${DB_INIT_SNIPPET}
                                 usedSnapshot = true;
                                 // 运行时物化：插件 initGameSession 后运行时可能延迟重建，先短轮询；
                                 // 等不到就用运行时专用通道（persist:false）物化——只改内存，不写任何 logEntry。
-                                const injected = await verifyTemplateInjected(api, activeLayout, target, 1800);
+                                const injected = await verifyTemplateInjected(api, activeLayout, effectiveTarget, 1800);
                                 if (injected) {
                                     dbg('[注入合并] initGameSession 后已在运行时表格确认注入数据。');
                                 } else {
@@ -6348,11 +6466,11 @@ ${DB_INIT_SNIPPET}
                                     // 绝不能用原始 key 的 mergedTemplate 灌运行时（会导致后续编辑的
                                     // baseRevision 用原始 key，刷新回放失败、整链回默认）。
                                     dbgWarn('[注入合并] initGameSession 后运行时未确认注入数据，尝试用 checkpoint 数据物化（稳定 key，persist:false，不写 logEntry）…');
-                                    const cpReady = checkpointHasStatData(activeLayout, target);
+                                    const cpReady = checkpointHasStatData(activeLayout, effectiveTarget);
                                     if (cpReady) {
                                         const rtOk = await materializeRuntimeFromCheckpoint(api);
                                         dbg('[注入合并] checkpoint 物化结果=' + (rtOk ? '成功' : '失败'));
-                                        const injected2 = await verifyTemplateInjected(api, activeLayout, target, 1000);
+                                        const injected2 = await verifyTemplateInjected(api, activeLayout, effectiveTarget, 1000);
                                         dbg('[注入合并] 物化后确认注入数据=' + injected2);
                                     } else {
                                         dbgWarn('[注入合并] checkpoint 尚未含注入数据，本次跳过运行时物化，等重锚后用稳定 key 数据补物化。');
@@ -6363,8 +6481,8 @@ ${DB_INIT_SNIPPET}
                                 // checkpoint 会退回默认值——此时缓存本次 stat，等聊天稳定后由重锚重建干净 checkpoint。
                                 try {
                                     const holder = (typeof window !== 'undefined' ? window : globalThis);
-                                    if (holder) holder.__mvu2shujukuOpeningStat = { chat: chatKeyNow, stat: target, at: Date.now() };
-                                    const cpOk = checkpointHasStatData(activeLayout, target);
+                                    if (holder) holder.__mvu2shujukuOpeningStat = { chat: chatKeyNow, stat: effectiveTarget, at: Date.now() };
+                                    const cpOk = checkpointHasStatData(activeLayout, effectiveTarget);
                                     if (!cpOk) {
                                         dbgWarn('[注入合并] full checkpoint 中未确认注入数据（可能被开场流程回滚），安排重锚重建干净 checkpoint。');
                                         scheduleReAnchorCheckpoint();
@@ -6382,7 +6500,8 @@ ${DB_INIT_SNIPPET}
                             // 开局时 export 可能为空，空快照会把注入数据覆盖成空表。
                             // 注意：无现有锚点时该提交不会写 checkpoint（插件语义），
                             // 仅作运行时物化与最后手段，失败后仍有差异写入兜底。
-                            const fallbackData = readFullCheckpointData() || mergedTemplate || snap;
+                            // 优先用含本次写入的合并结果，避免把旧 checkpoint（不含本次变更）存回去
+                            const fallbackData = mergedTemplate || snap || readFullCheckpointData();
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
                                 usedSnapshot = true;
@@ -6425,7 +6544,7 @@ ${DB_INIT_SNIPPET}
                         // 都失败时的降级路径。此时才需要物化垫底行（确保 content 有 row_id=1 可写）、
                         // 主动 saveChat 落盘、以及清理多余的垫底行。
                         await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
-                        n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, target);
+                        n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget);
                         if (n > 0) dbg(' Mvu 合并写入完成：差异 ' + n + ' 条');
                         // 降级路径依赖酒馆 saveChat 落盘（importTableAsJson 成功时插件已自己持久化，无需额外保存）
                         try {
@@ -6480,11 +6599,11 @@ ${DB_INIT_SNIPPET}
                     }
                     // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
                     // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
-                    const afterMvu = { stat_data: target, display_data: target, delta_data: {}, initialized_lorebooks: {} };
+                    const afterMvu = { stat_data: effectiveTarget, display_data: effectiveTarget, delta_data: {}, initialized_lorebooks: {} };
                     let hadInternal = false;
-                    try { if (target && typeof target === 'object' && target.$internal === undefined) { target.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
+                    try { if (effectiveTarget && typeof effectiveTarget === 'object' && effectiveTarget.$internal === undefined) { effectiveTarget.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
                     dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
-                    try { if (hadInternal) delete target.$internal; } catch (e) {}
+                    try { if (hadInternal) delete effectiveTarget.$internal; } catch (e) {}
                 } else {
                     dbgWarn(' Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
                 }
