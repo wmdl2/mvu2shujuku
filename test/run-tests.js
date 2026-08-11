@@ -313,8 +313,8 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     assert.ok(cash.sourceData.note.includes('AI 不应直接修改本表'), '无规则的 JSON 表仍应保持只读');
     const rw = Object.values(r.template).find(s => s && s.name === '人物表');
     assert.ok(
-        rw.sourceData.note.includes('人物表：人物.角色名.亲密（数值范围 0~100；与NPC互动时更新，单次 ±(2~5)）'),
-        '可写行表的通配规则应作为表格级提示写入 note'
+        rw.sourceData.note.includes('人物.角色名.亲密（数值范围 0~100；与NPC互动时更新，单次 ±(2~5)）'),
+        '可写行表的通配规则应作为表格级提示写入 note（不重复表名前缀）'
     );
 });
 
