@@ -3838,7 +3838,8 @@
                 `  try{`,
                 `    var ctx0=getContext();`,
                 `    var ch0=ctx0&&ctx0.characters?ctx0.characters[ctx0.characterId]:null;`,
-                `    var rx=(ch0&&ch0.extensions&&ch0.extensions.regex_scripts)||[];`,
+                `    var ex0=ch0&&(ch0.extensions||(ch0.data&&ch0.data.extensions))||null;`,
+                `    var rx=(ex0&&ex0.regex_scripts)||[];`,
                 `    for(var i=0;i<rx.length;i++){`,
                 `      var f=String((rx[i]&&rx[i].findRegex)||'');`,
                 `      if(f.indexOf('StatusPlaceHolderImpl')!==-1){statusPlaceholderNeeded=true;break;}`,
@@ -4679,9 +4680,29 @@ ${DB_INIT_SNIPPET}
     // 独有标记：本转换器产出的卡一定有 extensions.mvu2shujuku.converter === 'mvu2shujuku'。
     // SP·数据库 的 __ACU_TEMPLATE_DATA__ 世界书条目是通用模板条目（其他数据库卡也可能带），
     // 不能作为“本转换器产物”的判据；所有运行时行为都以这个独有标记为门槛，确保不碰别的卡。
+    // ST 角色对象结构：extensions 在 data.extensions 下（顶层通常没有 extensions）；
+    // 读取时两种位置都兼容，避免“没核实对象结构”导致标记永远判不中。
+    function charExtensions(ch) {
+        try {
+            if (ch && ch.extensions && typeof ch.extensions === 'object') return ch.extensions;
+            if (ch && ch.data && ch.data.extensions && typeof ch.data.extensions === 'object') return ch.data.extensions;
+        } catch (e) {}
+        return null;
+    }
+
+    // 角色世界书：顶层或 data 下（ST 完整对象的世界书在 data.character_book）
+    function charWorldBook(ch) {
+        try {
+            if (ch && ch.character_book && typeof ch.character_book === 'object') return ch.character_book;
+            if (ch && ch.data && ch.data.character_book && typeof ch.data.character_book === 'object') return ch.data.character_book;
+        } catch (e) {}
+        return null;
+    }
+
     function isConvertedMvuCard(character) {
         try {
-            const mk = character && character.extensions && character.extensions.mvu2shujuku;
+            const ext = charExtensions(character);
+            const mk = ext && ext.mvu2shujuku;
             return !!(mk && mk.converter === 'mvu2shujuku');
         } catch (e) { return false; }
     }
@@ -4722,15 +4743,24 @@ ${DB_INIT_SNIPPET}
     }
 
     // 取当前卡的模板：优先用已缓存，否则从当前角色世界书 __ACU_TEMPLATE_DATA__ 条目解析并缓存。
+    // 缓存归属键：卡名 + 头像。注意 avatar 不能作为唯一判据——列表对象与
+    // /api/characters/get 返回的 full.data（avatar 在顶层、data 里没有）可能不一致，
+    // 因此命中时同时接受 name|avatar 精确匹配与仅卡名匹配（名称兜底）。
+    function cardCacheKey(ch) {
+        try { return ch ? String(ch.name || '') + '|' + String(ch.avatar || '') : ''; } catch (e) { return ''; }
+    }
+
     function cachedTemplateForCurrentCard() {
         try {
             const holder = (typeof window !== 'undefined' ? window : globalThis);
             // 缓存必须按卡归属：直接复用可能把上一张转换卡的模板套到当前卡上
             // （如切卡后重锚/写库误用旧模板，污染当前聊天的表格结构）。
             const ch = currentCharacter();
-            const cacheKey = ch ? String(ch.name || '') + '|' + String(ch.avatar || '') : '';
+            const cacheKey = cardCacheKey(ch);
+            const cacheName = ch ? String(ch.name || '') : '';
             if (holder && holder.__mvu2shujukuTemplateCache &&
-                holder.__mvu2shujukuTemplateCacheFor === cacheKey && cacheKey !== '') {
+                ((holder.__mvu2shujukuTemplateCacheFor === cacheKey && cacheKey !== '') ||
+                 (cacheName !== '' && holder.__mvu2shujukuTemplateCacheForName === cacheName))) {
                 return holder.__mvu2shujukuTemplateCache;
             }
         } catch (e) {}
@@ -4746,7 +4776,8 @@ ${DB_INIT_SNIPPET}
                     const holder = (typeof window !== 'undefined' ? window : globalThis);
                     if (holder) {
                         holder.__mvu2shujukuTemplateCache = parsed;
-                        holder.__mvu2shujukuTemplateCacheFor = String(ch.name || '') + '|' + String(ch.avatar || '');
+                        holder.__mvu2shujukuTemplateCacheFor = cardCacheKey(ch);
+                        holder.__mvu2shujukuTemplateCacheForName = String(ch.name || '');
                     }
                 } catch (e2) {}
                 return parsed;
@@ -5044,13 +5075,15 @@ ${DB_INIT_SNIPPET}
             dbg(' 开局自动建表跳过：当前角色为空（chat=' + key0 + '）');
             return;
         }
-        const charHasExt = !!(character && character.extensions && typeof character.extensions === 'object');
+        // “完整卡”判定：有世界书（顶层或 data 下）才算完整数据；角色列表懒加载对象
+        // 只有 data.extensions{fav,world} 等元数据，不能据此跳过取完整卡。
+        const charHasFullData = !!(character && (character.character_book || (character.data && character.data.character_book)));
         if (!isConvertedMvuCard(character)) {
             // 角色列表懒加载时可能只有元数据、缺 extensions：先尝试取完整卡再判断一次；
             // 仍无独有标记说明不是本转换器产物，直接跳过，不碰任何其他卡。
             // 对象已带 extensions 且无标记 = 完整卡且非转换产物，直接跳过，不再发请求。
             try {
-                if (!charHasExt) {
+                if (!charHasFullData) {
                     const full = await fetchFullCharacter(character, true);
                     if (full && isConvertedMvuCard(full)) {
                         character = full;
@@ -5084,7 +5117,7 @@ ${DB_INIT_SNIPPET}
             }
         }
         let hadWorldbook = true;
-        const cb = character.character_book;
+        const cb = charWorldBook(character);
         if (!(cb && Array.isArray(cb.entries) && cb.entries.length)) {
             hadWorldbook = false;
             dbg(' 角色列表对象缺世界书，尝试 /api/characters/get 取完整卡（chat=' + key0 + '）');
@@ -5101,7 +5134,7 @@ ${DB_INIT_SNIPPET}
             }
             // 完整卡获取失败（含接口返回异常对象）且当前对象无世界书时，稍后重试，
             // 避免“新聊天没有初始化数据/表格为空”的误判。
-            if (!(character && character.character_book && Array.isArray(character.character_book.entries) && character.character_book.entries.length) &&
+            if (!(character && charWorldBook(character) && Array.isArray(charWorldBook(character).entries) && charWorldBook(character).entries.length) &&
                 autoInitNoEntryRetries < 8) {
                 dbg(' 开局自动建表：完整卡获取失败，稍后重试（chat=' + key0 + '）');
                 autoInitNoEntryRetries += 1;
@@ -5109,7 +5142,7 @@ ${DB_INIT_SNIPPET}
                 return;
             }
         }
-        const fullCb = character && character.character_book;
+        const fullCb = charWorldBook(character);
         const entries = fullCb && Array.isArray(fullCb.entries) ? fullCb.entries : [];
         const entry = entries.find(e => Array.isArray(e.keys) && e.keys.indexOf(DB_TEMPLATE_KEY) !== -1);
         if (!entry || !entry.content) {
@@ -5124,7 +5157,8 @@ ${DB_INIT_SNIPPET}
         autoInitNoEntryRetries = 0;
         // 调试：确认当前卡的 tavern_helper 里到底有没有数据桥
         try {
-            const th = character && character.extensions && character.extensions.tavern_helper;
+            const dbgExt = charExtensions(character);
+            const th = dbgExt && dbgExt.tavern_helper;
             const scripts = (th && Array.isArray(th.scripts) ? th.scripts : []).map(s => s.name + '(enabled=' + s.enabled + ')');
             dbg(' 当前卡 tavern_helper.scripts =', JSON.stringify(scripts), '| 桥内容长度=' + (th && Array.isArray(th.scripts) && th.scripts.find(s => /数据桥/.test(String(s.name || ''))) ? String((th.scripts.find(s => /数据桥/.test(String(s.name || ''))).content || '')).length : 0));
         } catch (e) {
@@ -5132,7 +5166,8 @@ ${DB_INIT_SNIPPET}
         }
         // 缓存当前卡布局，供 EJS 数据读取（window.getAllVariables）
         try {
-            const mk = character && character.extensions && character.extensions.mvu2shujuku;
+            const layoutExt = charExtensions(character);
+            const mk = layoutExt && layoutExt.mvu2shujuku;
             if (mk && typeof mk.layout === 'string') {
                 activeLayout = JSON.parse(mk.layout);
                 dbg(' 已缓存当前卡布局，条目数=' + (Array.isArray(activeLayout) ? activeLayout.length : 0));
@@ -5150,7 +5185,13 @@ ${DB_INIT_SNIPPET}
         try {
             const holder = (typeof window !== 'undefined' ? window : globalThis);
             if (holder) holder.__mvu2shujukuTemplateCache = JSON.parse(mvu2shujukuDecodeB64(entry.content));
-            if (holder) holder.__mvu2shujukuTemplateCacheFor = String(character.name || '') + '|' + String(character.avatar || '');
+            // 归属键用“读取时会看到的角色对象”（列表对象）而不是完整卡 data——
+            // full.data 的 avatar 为空，若用它做键，写入时 currentCharacter() 的
+            // name|avatar 永远对不上，模板缓存形同虚设，所有写库都会被“无模板缓存”拦掉。
+            let cacheChar = null;
+            try { cacheChar = currentCharacter(); } catch (e) {}
+            if (holder) holder.__mvu2shujukuTemplateCacheFor = cardCacheKey(cacheChar);
+            if (holder) holder.__mvu2shujukuTemplateCacheForName = cacheChar ? String(cacheChar.name || '') : '';
         } catch (e) {}
         // 对齐参考卡：每个聊天只在“缺表”时初始化一次（下方 ensureInit），
         // 已有表格的聊天绝不重初始化，避免切聊天时误重置别的聊天。
@@ -5205,7 +5246,8 @@ ${DB_INIT_SNIPPET}
         try {
             // 只有本转换器产物的卡才维护状态栏占位符，其他卡即使正则里碰巧含同名串也不处理
             if (!isConvertedMvuCard(character)) return false;
-            const rx = character && character.extensions && character.extensions.regex_scripts;
+            const phExt = charExtensions(character);
+            const rx = phExt && phExt.regex_scripts;
             if (!Array.isArray(rx)) return false;
             return rx.some(r => String(r.findRegex || '').indexOf('StatusPlaceHolderImpl') !== -1);
         } catch (e) { return false; }
@@ -5479,7 +5521,7 @@ ${DB_INIT_SNIPPET}
     // 通过 /api/characters/get 按头像取完整卡数据。
     async function fetchFullCharacter(character) {
         if (!character) return null;
-        const cb = character.character_book;
+        const cb = charWorldBook(character);
         // 非强制时：角色对象已有世界书即视为完整，避免无谓请求
         if (!arguments[1] && cb && Array.isArray(cb.entries) && cb.entries.length) return character;
         dbg('按完整卡校验转换标记' + (arguments[1] ? '（角色列表对象缺 extensions）' : '（缺世界书）') + '，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
@@ -5531,6 +5573,9 @@ ${DB_INIT_SNIPPET}
     let statWriteFlushResolve = null;
     let statWriteFlushPromise = null;
     let statWriteOverlayGen = 0;
+    // 模板缓存未就绪时写库重试次数（仅由 replaceMvuData 外部入口重置，
+    // 避免重试自身把计数清零导致无限循环）
+    let overlayFlushRetries = 0;
     const materializedChats = new Set();
     // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
     // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
@@ -6215,8 +6260,19 @@ ${DB_INIT_SNIPPET}
                     // 触发插件 V2 boundary_after_data_mismatch。锚点无法建立则放弃本次写入。
                     const tplCached = cachedTemplateForCurrentCard();
                     if (!tplCached) {
-                        dbgWarn('[流程] 写库前无模板缓存，放弃本次写入（等待自动建表）。');
-                        pendingStatWrite = null;
+                        // 自动建表可能在途（角色列表懒加载需要先取完整卡再缓存模板）：
+                        // 延后重试，避免开局/开场白注入在缓存就绪前被直接丢弃。
+                        if (overlayFlushRetries < 6) {
+                            overlayFlushRetries += 1;
+                            dbg('[流程] 模板缓存未就绪，延后重试写库（#' + overlayFlushRetries + '）。');
+                            hostWindow.setTimeout(() => {
+                                // 仅当期间没有更新的写入时才重试，避免旧快照覆盖新状态
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                            }, 500);
+                            return;
+                        }
+                        dbgWarn('[流程] 写库前无模板缓存且重试次数用尽，放弃本次写入（等待自动建表）。');
+                        if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
                     const anchored = await ensureCheckpointBeforeWrite(api, tplCached);
@@ -6886,6 +6942,7 @@ ${DB_INIT_SNIPPET}
                         dbgWarn(' Mvu.replaceMvuData 被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空') + '（自动建表尚未缓存布局，或当前卡不是转换产物）');
                         return false;
                     }
+                    overlayFlushRetries = 0;
                     scheduleWindowStatOverlay((data && data.stat_data) || {});
                     return true;
                 } catch (e) {
@@ -7077,10 +7134,10 @@ ${DB_INIT_SNIPPET}
         let ch = null;
         try { ch = currentCharacter(); } catch (e) {}
         if (!ch) return;
-        // 角色对象带 extensions 且无标记 = 完整卡且非转换产物，直接撤销，不用发请求；
-        // 缺 extensions（角色列表懒加载元数据）才强制取完整卡确认。
-        const hasExt = !!(ch && ch.extensions && typeof ch.extensions === 'object');
-        if (!isConvertedMvuCard(ch) && !hasExt) {
+        // 角色对象带完整世界书且无标记 = 完整卡且非转换产物，直接撤销，不用发请求；
+        // 缺完整数据（角色列表懒加载元数据）才强制取完整卡确认。
+        const hasFullData = !!(ch && (ch.character_book || (ch.data && ch.data.character_book)));
+        if (!isConvertedMvuCard(ch) && !hasFullData) {
             try {
                 // 强制取完整卡：角色列表对象可能只有元数据（缺 extensions），
                 // 不能只凭当前对象判断是否本转换器产物。
