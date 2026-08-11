@@ -6653,6 +6653,15 @@ ${DB_INIT_SNIPPET}
                             // 仅作运行时物化与最后手段，失败后仍有差异写入兜底。
                             // 优先用含本次写入的合并结果，避免把旧 checkpoint（不含本次变更）存回去
                             const fallbackData = mergedTemplate || snap || readFullCheckpointData();
+                            try {
+                                const fb = fallbackData || {};
+                                const sysSheet = Object.values(fb).find(s => s && s.name === '系统表');
+                                const hdr = (sysSheet && sysSheet.content && sysSheet.content[0]) || [];
+                                const mcIdx = hdr.indexOf('当前MC点');
+                                dbg('[快照提交] target.系统.当前MC点=' + JSON.stringify(effectiveTarget.系统 && effectiveTarget.系统.当前MC点) +
+                                    ' | 提交快照系统表当前MC点=' + JSON.stringify(sysSheet && sysSheet.content[1] && sysSheet.content[1][mcIdx]) +
+                                    ' | 系统表行数=' + (sysSheet && sysSheet.content ? sysSheet.content.length : 'N/A'));
+                            } catch (e) {}
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
                                 usedSnapshot = true;
@@ -20949,6 +20958,15 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             // 仅作运行时物化与最后手段，失败后仍有差异写入兜底。
                             // 优先用含本次写入的合并结果，避免把旧 checkpoint（不含本次变更）存回去
                             const fallbackData = mergedTemplate || snap || readFullCheckpointData();
+                            try {
+                                const fb = fallbackData || {};
+                                const sysSheet = Object.values(fb).find(s => s && s.name === '系统表');
+                                const hdr = (sysSheet && sysSheet.content && sysSheet.content[0]) || [];
+                                const mcIdx = hdr.indexOf('当前MC点');
+                                dbg('[快照提交] target.系统.当前MC点=' + JSON.stringify(effectiveTarget.系统 && effectiveTarget.系统.当前MC点) +
+                                    ' | 提交快照系统表当前MC点=' + JSON.stringify(sysSheet && sysSheet.content[1] && sysSheet.content[1][mcIdx]) +
+                                    ' | 系统表行数=' + (sysSheet && sysSheet.content ? sysSheet.content.length : 'N/A'));
+                            } catch (e) {}
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
                                 usedSnapshot = true;
