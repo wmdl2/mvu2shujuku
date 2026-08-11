@@ -591,7 +591,11 @@
                     const next = fi + 1 < fieldStarts.length ? fieldStarts[fi + 1].at : section.length;
                     const block = section.slice(index, next);
                     if (field === '_强制更新提醒' || field === '_强制更新') {
-                        reminders[group] = extractListItems(block);
+                        // 展开 ${生命|精血|灵力|神识} 这类模板键，提示词里更易读
+                        const expandKeys = (s) => String(s).replace(/\$\{([^}]+)\}/g, (m, inner) => (
+                            inner.split('|').map(p => p.trim()).filter(Boolean).join('/')
+                        ));
+                        reminders[group] = extractListItems(block).map(expandKeys);
                         continue;
                     }
                     // 展开 ${A|B|C} 多字段模板键
@@ -644,12 +648,26 @@
                         formats[group] = formats[group] || {};
                         for (const fn of fieldNames) formats[group][fn] = formatM[1].trim();
                     }
-                    const checkM = block.match(/check\s*:\s*(""?[\s\S]*?)(?=\n {4}[^\n:]{1,24}?:\s*|\n {2}\S|$)/);
+                    // 注意：可选引号必须写成 "?"（零或一个引号）。"\"\"?" 在正则里是“一个或两个引号”，
+                    // check 列表以 - 开头没有引号时永远匹配失败，导致所有 check 规则静默丢失（道渊实测）。
+                    // 字段行以中文/名字开头，bullet 行在 4 空格后是空格或 -：用 [^ \n-] 挡住 bullet，
+                    // 避免条目里的 ASCII 冒号（如 op: delta）被当成“下一个字段”截断。
+                    const checkM = block.match(/check\s*:\s*("?[\s\S]*?)(?=\n {4}[^ \n-][^\n:]{0,23}?:\s*|\n {2}\S|$)/);
                     if (checkM) {
-                        const items = extractListItems(checkM[1]);
-                        if (items.length) {
+                        let raw = String(checkM[1]).trim();
+                        // 行内引号形式（check: "单行说明"）：去掉首尾引号
+                        if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) raw = raw.slice(1, -1).trim();
+                        // 列表项也可能整体带引号（如 - "四境：凡心(0~25)…"），逐项剥掉
+                        const stripQuotes = (s) => {
+                            let t = String(s).trim();
+                            if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) t = t.slice(1, -1).trim();
+                            return t;
+                        };
+                        const items = extractListItems(raw).map(stripQuotes);
+                        const list = items.length ? items : (raw ? [raw] : []);
+                        if (list.length) {
                             checks[group] = checks[group] || {};
-                            for (const fn of fieldNames) checks[group][fn] = items;
+                            for (const fn of fieldNames) checks[group][fn] = list;
                         }
                     }
                     // 行内枚举值（危机程度: "无/低/中/高/致命"）
@@ -661,7 +679,7 @@
                     }
                 }
                 // 组级 type 声明（形如 组名: type: "{...}"）
-                const groupCheckM = section.match(/\n {4}check\s*:\s*\n([\s\S]*?)(?=\n {4}[^\n:]{1,24}?[ \t]*:|\n {2}\S|$)/);
+                const groupCheckM = section.match(/\n {4}check\s*:\s*\n([\s\S]*?)(?=\n {4}[^ \n-][^\n:]{0,23}?[ \t]*:|\n {2}\S|$)/);
                 if (groupCheckM) allCheckItems.push(...extractListItems(groupCheckM[1]));
                 let shapeStr = null;
                 if (!/^\s*type\s*:/.test(section)) continue; // 该组没有直接 type 声明（字段由 initvar 提供）
@@ -696,12 +714,35 @@
         const rmRe = /_强制更新提醒\s*:\s*\n([\s\S]*?)(?=\n\s{0,2}[\u4e00-\u9fff$]{1,12}:[ \t]*\n|\n\s{4}[\u4e00-\u9fff$]{1,12}:[ \t]*\n|$)/;
         const rmM = allContents.join('\n').match(rmRe);
         if (rmM) {
-            for (const item of extractListItems(rmM[1])) {
+            // 展开 ${生命|精血|灵力|神识} 这类模板键，提示词里更易读
+            const expandKeys = (s) => String(s).replace(/\$\{([^}]+)\}/g, (m, inner) => (
+                inner.split('|').map(p => p.trim()).filter(Boolean).join('/')
+            ));
+            for (const item of extractListItems(rmM[1]).map(expandKeys)) {
                 const prefix = item.match(/^([\u4e00-\u9fff$]{1,12})\./);
                 const target = prefix ? prefix[1] : String(item).split(/[ —:：-]/)[0].trim();
                 if (/^[\u4e00-\u9fff$]{1,12}$/.test(target)) {
                     reminders[target] = reminders[target] || [];
                     if (!reminders[target].includes(item)) reminders[target].push(item);
+                }
+            }
+        }
+        // zod/TS 替代写法：type 直接放 zod 代码 + /** check: … */ 注释（官方文档 3.2 替代写法）。
+        // 与 YAML 标准写法互补：字段名并入 shapes，check 注释并入 checks。
+        for (const content of allContents) {
+            const zod = parseZodStyleRules(content);
+            if (!zod) continue;
+            for (const group of Object.keys(zod)) {
+                const g = zod[group];
+                if (Array.isArray(g.fields) && g.fields.length) {
+                    shapes[group] = shapes[group] || [];
+                    for (const f of g.fields) {
+                        if (!shapes[group].includes(f)) shapes[group].push(f);
+                    }
+                }
+                for (const f of Object.keys(g.checks)) {
+                    checks[group] = checks[group] || {};
+                    checks[group][f] = g.checks[f];
                 }
             }
         }
@@ -715,6 +756,116 @@
         let m;
         while ((m = re.exec(text))) items.push(m[1].trim());
         return items;
+    }
+
+    // zod/TS 替代写法（官方文档 3.2 的“替代写法”）：type 直接放 zod 代码，
+    // check 规则写在 /** */ 注释里（* check: / *   - 条目）。
+    // 只提取 组/字段 名与 check 注释；具体 z 类型不还原（表结构由 initvar 提供）。
+    function parseZodStyleRules(content) {
+        const root = String(content || '').indexOf('z.object({');
+        if (root === -1) return null;
+        const out = {};
+        // 越过 'z.object(' 到达根 '{'
+        let pos = root + 'z.object('.length;
+        const isWs = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r';
+        const skipWs = () => { while (pos < content.length && isWs(content[pos])) pos++; };
+        const skipComment = () => {
+            if (content.startsWith('/**', pos) || content.startsWith('/*', pos)) {
+                const end = content.indexOf('*/', pos + 2);
+                if (end === -1) return '';
+                const c = content.slice(pos, end + 2);
+                pos = end + 2;
+                return c;
+            }
+            if (content.startsWith('//', pos)) {
+                const end = content.indexOf('\n', pos);
+                if (end === -1) return '';
+                const c = content.slice(pos, end);
+                pos = end;
+                return c;
+            }
+            return '';
+        };
+        const readKey = () => {
+            skipWs();
+            let key = '';
+            while (pos < content.length && !isWs(content[pos]) &&
+                content[pos] !== ':' && content[pos] !== '}' && content[pos] !== ',' && content[pos] !== '(') {
+                key += content[pos];
+                pos++;
+            }
+            return key.replace(/^["']|["']$/g, '').trim();
+        };
+        const checksFromComment = (comment) => {
+            const lines = String(comment).split('\n')
+                .map(l => l.replace(/\*\/\s*$/, '').replace(/^\s*\/\*+/, '').replace(/^\s*\*/, '').trim())
+                .filter(Boolean);
+            const items = [];
+            let inCheck = false;
+            for (const l of lines) {
+                if (/^check\s*:/.test(l)) { inCheck = true; continue; }
+                if (!inCheck) continue;
+                const m = l.match(/^-\s+(.+)$/);
+                if (m) items.push(m[1].trim());
+                else if (l) items.push(l);
+            }
+            return items;
+        };
+        const parseObject = () => {
+            const obj = {};
+            while (pos < content.length) {
+                skipWs();
+                const pre = skipComment();
+                skipWs();
+                if (content[pos] === '}') { pos++; break; }
+                if (content[pos] === ',') { pos++; continue; }
+                const key = readKey();
+                skipWs();
+                if (content[pos] !== ':') { pos++; continue; }
+                pos++;
+                skipWs();
+                const pre2 = skipComment();
+                skipWs();
+                if (content.startsWith('z.object({', pos)) {
+                    pos += 'z.object('.length;
+                    skipWs();
+                    if (content[pos] === '{') {
+                        pos++;
+                        const child = parseObject();
+                        obj[key] = { checks: checksFromComment(pre || pre2), object: child };
+                    }
+                } else {
+                    let depth = 0;
+                    while (pos < content.length) {
+                        const ch = content[pos];
+                        if (ch === '(' || ch === '{' || ch === '[') depth++;
+                        else if (ch === ')' || ch === '}' || ch === ']') { if (depth === 0) break; depth--; }
+                        else if ((ch === ',' || ch === ';') && depth === 0) break;
+                        pos++;
+                    }
+                    obj[key] = { checks: checksFromComment(pre || pre2), object: null };
+                }
+            }
+            return obj;
+        };
+        skipWs();
+        if (content[pos] === '{') pos++;
+        const tree = parseObject();
+        for (const g of Object.keys(tree)) {
+            const gv = tree[g];
+            if (!gv || !gv.object) continue;
+            const fields = [];
+            const gChecks = {};
+            for (const f of Object.keys(gv.object)) {
+                fields.push(f);
+                const fv = gv.object[f];
+                if (fv && fv.checks && fv.checks.length) gChecks[f] = fv.checks;
+            }
+            if (fields.length || Object.keys(gChecks).length) {
+                out[g] = { fields: [...new Set(fields)], checks: gChecks };
+            }
+        }
+        return out;
     }
 
     // 解析 "{ [动态键]: { 字段, 字段, 嵌套: { ... } } }" 形状字符串
@@ -1573,6 +1724,12 @@
             if (g.kind === 'json') continue;
             const gFormats = ruleFormats[g.name] || {};
             const gChecks = ruleChecks[g.name] || {};
+            // 子表/动态字典（如 世界.动向）：规则声明在父组的字段上（checks[父组][字段]），
+            // 以表级约束挂到子表上，让 buildNote 能列出来（如“最多同时维持2个大事件”）。
+            if (g.parentGroup) {
+                const parentChecks = ruleChecks[g.parentGroup] || {};
+                g.groupChecks = parentChecks[g.name] || [];
+            }
             for (const c of g.columns) {
                 // 内部溢出列：不接受按字段名的规则
                 if (c.zh === '_扩展数据') continue;
@@ -1710,7 +1867,11 @@
     function buildNote(group) {
         const L = [];
         const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
-        const hasReadonlyCols = (group.columns || []).some(c => String(c.zh).startsWith('_'));
+        // 用户级只读字段（_ 前缀、排除内部溢出列 _扩展数据）；仅这类字段值得在 note 里说明，
+        // 否则“下划线字段已隐藏”还要再解释一遍只读规则反而占提示词、且与隐藏矛盾。
+        const userReadonlyCols = (group.columns || []).filter(c => String(c.zh).startsWith('_') && c.zh !== '_扩展数据');
+        const hasUserReadonly = userReadonlyCols.length > 0;
+        const allReadonly = hasUserReadonly && aiCols.length === 0;
         if (group.kind === 'json') {
             L.push(`整组 JSON 存储表（row_id=1）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除记录。`);
         } else if (group.kind === 'singleton') {
@@ -1720,12 +1881,13 @@
                 ? `本表唯一记录已由开局模板插入（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`
                 : `本表唯一记录已由开局模板插入（row_id=1）；全部字段为脚本/系统维护，AI 无需填表。`);
         } else {
-            L.push(`${group.tableName}。${describeGroup(group)}`);
+            // 与插件默认模板一致：note 不重复表名（插件会在表头显示表名），直接给表类型说明
+            L.push(describeGroup(group));
         }
         // JSON 表整组由脚本/前端管理：完全不展示列定义与约束；其余表隐藏内部列（_扩展数据）
         // 下划线开头字段 = 脚本维护的只读状态：不进填表规则（AI 仍能在数据表里看到值，
         // 但没有更新规则），只在表级用一行说明约束，避免逐列占提示词。
-        if (hasReadonlyCols) {
+        if (hasUserReadonly && !allReadonly) {
             // MVU 规范：下划线开头字段（如 _xxx）是脚本维护的只读状态，AI 禁止更新
             L.push('下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新，更新会被回滚。');
         }
@@ -1747,12 +1909,14 @@
                 if (parts.length) L.push(`- ${c.zh}：${parts.join('；')}`);
                 for (const rule of c.check || []) L.push(`- ${c.zh}：${rule}`);
             }
+            // 子表/动态字典的组级规则（如 世界.动向 的“最多维持2个大事件”）：以表级约束列出
+            for (const rule of (group.groupChecks || [])) L.push(`- ${group.tableName}：${rule}`);
             for (const c of aiCols) {
                 if (c.check && c.check.length > 20) L.push(`- ${c.zh}：…（共 ${c.check.length} 条规则，其余略）`);
             }
             (group.reminders || []).forEach(r => L.push(`- 每次回复必须维护：${r}`));
         }
-        if (hasReadonlyCols && aiCols.length === 0 && group.kind !== 'json') {
+        if (allReadonly && group.kind !== 'json') {
             L.push('本表全部字段均为脚本/系统维护的只读状态：AI 无需填表，仅供读取。');
         }
         if (group.kind !== 'json' && aiCols.length) {
@@ -1774,13 +1938,32 @@
         if (group.kind === 'array') {
             return group.rows.length
                 ? `已在模板中初始化 ${group.rows.length} 个元素；后续新增元素按 insertNode 规则 INSERT 新行，移除按 deleteNode 规则 DELETE，修改按 updateNode 规则 UPDATE。`
-                : '无（开局为空；剧情出现新元素时按 insertNode 规则 INSERT 新行）。';
+                : '开局为空表；剧情出现首个元素时按 insertNode 规则 INSERT 新行。';
         }
         if (group.rows.length) {
             const names = group.rows.slice(0, 5).map(r => r[1]).filter(Boolean).join('、');
             return `开局模板已初始化 ${group.rows.length} 条记录${names ? `（${names}${group.rows.length > 5 ? '…' : ''}）` : ''}；开局阶段如有新条目再按 insertNode 规则新增。`;
         }
-        return '无（开局时由剧情按需插入首条记录）。';
+        return '开局不预置记录；正文首次出现应记录的对象时，按 insertNode 规则插入首条记录。';
+    }
+
+    // SQL 示例取值：优先真实初始行值 → 其次 DDL 默认值（INTEGER 未给默认按 0，对象列按 '{}'）
+    // → 最后“列中文名示例”兜底（主要覆盖无默认值的 TEXT 列）。
+    function exampleCellValue(col, rowValue) {
+        if (rowValue !== undefined && rowValue !== null && String(rowValue) !== '') {
+            const isNum = col && col.type === 'INTEGER' && typeof rowValue === 'number';
+            return isNum ? String(rowValue) : `'${sqlQuote(String(rowValue))}'`;
+        }
+        if (col) {
+            const dv = col.value === undefined || col.value === null ? '' : col.value;
+            if (col.type === 'INTEGER') {
+                const num = dv === '' ? 0 : Number(dv);
+                return String(Number.isFinite(num) ? num : 0);
+            }
+            if (String(dv) !== '') return `'${sqlQuote(String(dv))}'`;
+            if (col.isObject) return "'{}'";
+        }
+        return col && col.zh ? `'${sqlQuote(col.zh)}示例'` : '';
     }
 
     function buildNodeProse(group, kind) {
@@ -1795,12 +1978,9 @@
                 const col = (group.columns || []).find(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
                 if (!col) return '本表全部字段均为脚本/系统维护的只读状态，AI 不应修改本表。';
                 const ident = col.ident;
-                const zh = col.zh;
                 const colIdx = group.columns.indexOf(col);
-                const raw = group.rows && group.rows[0] && group.rows[0][colIdx + 1] !== undefined && group.rows[0][colIdx + 1] !== null && String(group.rows[0][colIdx + 1]) !== ''
-                    ? group.rows[0][colIdx + 1]
-                    : `'${zh}示例'`;
-                const val = typeof raw === 'number' ? String(raw) : `'${sqlQuote(String(raw))}'`;
+                const raw = group.rows && group.rows[0] ? group.rows[0][colIdx + 1] : undefined;
+                const val = exampleCellValue(col, raw);
                 return `只允许 UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1; 依正文明确变化更新对应字段。`;
             }
             return '禁止。';
@@ -1818,17 +1998,13 @@
             return `数组元素被移除时删除对应行。\nSQL示例: DELETE FROM ${group.ident} WHERE row_id = 1;`;
         }
         const keyIdent = group.columns[0] ? group.columns[0].ident : 'key';
-        // 示例优先取卡内真实初始数据（与 MVU 提示词示例用具体值一致），无初始行时退回占位符
+        // 示例优先取卡内真实初始数据；没有初始值则用 DDL 默认值；TEXT 无默认值才退回“列名示例”
         const sampleRow = group.rows && group.rows[0] ? group.rows[0] : null;
         const sampleValue = (idx, fallback) => {
-            if (sampleRow && sampleRow[idx] !== undefined && sampleRow[idx] !== null && String(sampleRow[idx]) !== '') {
-                const col = group.columns[idx - 1];
-                const isNum = col && col.type === 'INTEGER' && typeof sampleRow[idx] === 'number';
-                return isNum ? String(sampleRow[idx]) : `'${sqlQuote(sampleRow[idx])}'`;
-            }
-            // 无初始数据：用“列中文名示例”占位，提示该列应填什么（不凭空造值）
             const col = group.columns[idx - 1];
-            return col && col.zh ? `'${sqlQuote(col.zh)}示例'` : fallback;
+            const rowV = sampleRow ? sampleRow[idx] : undefined;
+            const v = exampleCellValue(col, rowV);
+            return v !== '' ? v : fallback;
         };
         const keyValue = (sampleRow && sampleRow[1] !== undefined && String(sampleRow[1]) !== '')
             ? `'${sqlQuote(sampleRow[1])}'`
@@ -1889,10 +2065,19 @@
             g.extraAllowed = extraAllowed;
             // 归一化行号 1..N（初始值原样保留）
             const content = [['row_id', ...g.columns.map(c => c.zh)]];
+            // 插件 SyncBridge 的 escapeValue 只放行 null/数字，其余值必须能 .replace()：
+            // 布尔（false）会直接 TypeError（实测 val.replace is not a function），
+            // 因此内容单元格统一归一化——布尔 → 1/0，null/undefined → ''，其余转字符串。
+            const normalizeCell = (v) => {
+                if (v === null || v === undefined) return '';
+                if (typeof v === 'boolean') return v ? 1 : 0;
+                if (typeof v === 'number') return v;
+                return String(v);
+            };
             g.rows.forEach((r, ri) => {
                 const row = [ri + 1];
                 for (let ci = 0; ci < g.columns.length; ci++) {
-                    row.push(r[ci + 1]);
+                    row.push(normalizeCell(r[ci + 1]));
                 }
                 content.push(row);
             });
