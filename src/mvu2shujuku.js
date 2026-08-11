@@ -555,6 +555,7 @@
         const groupChecks = {};
         const zodDescs = {};
         const wildcardFields = new Set();
+        const wildcardRules = {};
         const numericFields = new Set();
         const allContents = [];
         const allCheckItems = [];
@@ -591,13 +592,34 @@
                 // 不是静态列，无法逐字段迁移；识别出来并在转换报告中显式警告，避免静默丢弃。
                 // 通配路径可出现在 2 空格（顶层，如 人妻公寓 的 户.<门牌>…）或 4 空格（组内）缩进
                 const wildRe = /(?:^|\n)( {0,4})([^\n:]{1,40}?)[ \t]*:[ \t]*([^\n]*)$/gm;
+                const wildKeys = [];
                 let wm;
                 while ((wm = wildRe.exec(section))) {
                     const k = wm[2].trim().replace(/^["']|["']$/g, '');
                     if (!k) continue;
                     if (/<[^>]+>|\./.test(k) && !/^[\u4e00-\u9fff$]{1,12}$/.test(k) && !/^\$\{[^}]+\}$/.test(k)) {
+                        wildKeys.push({ key: k, at: wm.index, end: wm.index + wm[0].length });
                         wildcardFields.add(k);
                     }
+                }
+                for (let wi = 0; wi < wildKeys.length; wi++) {
+                    const wk0 = wildKeys[wi];
+                    const nextAt = wi + 1 < wildKeys.length ? wildKeys[wi + 1].at : section.length;
+                    const block = section.slice(wk0.end, nextAt);
+                    const group0 = String(wk0.key).split('.')[0].trim();
+                    if (!group0 || !/^[\u4e00-\u9fff$]{1,12}$/.test(group0)) continue;
+                    const rangeM = block.match(/range\s*:\s*([\d.]+)\s*[~-]\s*([\d.]+)/);
+                    const checkM = block.match(/check\s*:\s*("?[\s\S]*?)(?=\n {4}[^ \n-][^\n:]{0,23}?:\s*|\n {2}\S|$)/);
+                    let checks = [];
+                    if (checkM) {
+                        let raw = String(checkM[1]).trim();
+                        if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) raw = raw.slice(1, -1).trim();
+                        checks = extractListItems(raw).map(stripRuleQuotes);
+                    }
+                    const rec = { path: wk0.key, checks };
+                    if (rangeM) rec.range = [Number(rangeM[1]), Number(rangeM[2])];
+                    wildcardRules[group0] = wildcardRules[group0] || [];
+                    wildcardRules[group0].push(rec);
                 }
                 for (let fi = 0; fi < fieldStarts.length; fi++) {
                     const { field, index, inline } = fieldStarts[fi];
@@ -793,7 +815,7 @@
                 }
             }
         }
-        return { shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, wildcardFields, numericFields };
+        return { shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, wildcardFields, wildcardRules, numericFields };
     }
 
     // 从 YAML 片段提取 “- xxx” 列表项
@@ -1816,16 +1838,21 @@
         const ruleNumeric = (shapeInfo && shapeInfo.numericFields) || new Set();
         const ruleGroupChecks = (shapeInfo && shapeInfo.groupChecks) || {};
         const ruleZodDescs = (shapeInfo && shapeInfo.zodDescs) || {};
+        const ruleWildcardRules = (shapeInfo && shapeInfo.wildcardRules) || {};
         for (const g of groups) {
-            // 整组 JSON 表：内容不透明，不套用 [mvu_update] 按字段名的规则（避免误命中同名列）
+            // 通配路径规则（如 户.<门牌>.妻.好感值）与组级 check 都按组归到本表（含 JSON 表），
+            // 供 buildNote/buildNodeProse 决定“AI 可写”还是“AI 不应修改”
+            g.wildcardRules = ruleWildcardRules[g.name] || [];
+            const parentList = g.parentGroup ? (ruleChecks[g.parentGroup] || {})[g.name] || [] : [];
+            g.groupChecks = [...parentList, ...(ruleGroupChecks[g.name] || [])];
+            // 整组 JSON 表：不套用 [mvu_update] 按字段名的规则（避免误命中同名列），
+            // 但组级 check/通配规则已挂上，供“可写判定”使用
             if (g.kind === 'json') continue;
             const gFormats = ruleFormats[g.name] || {};
             const gChecks = ruleChecks[g.name] || {};
             // 表级规则：
             //  - 组级 check（道侣/灵宠/人物/绝色榜/玉简/机遇 等整表规则）→ groupChecks[组名]
             //  - 子表/动态字典（如 世界.动向）：规则声明在父组的字段上（checks[父组][字段]）
-            const parentList = g.parentGroup ? (ruleChecks[g.parentGroup] || {})[g.name] || [] : [];
-            g.groupChecks = [...parentList, ...(ruleGroupChecks[g.name] || [])];
             for (const c of g.columns) {
                 // 内部溢出列：不接受按字段名的规则
                 if (c.zh === '_扩展数据') continue;
@@ -1931,6 +1958,11 @@
                 if (c.isObject && dvs === '') dvs = '{}';
                 def += ` NOT NULL DEFAULT '${sqlQuote(dvs)}'`;
                 if (isKey) def += ' UNIQUE';
+                // 整组 JSON 表的内容列：SQLite 模式下用 json_valid CHECK 保证整列 JSON 合法
+                // （updateCell/insertRow 的 SQL 由 SQLite 执行时会真正校验；native 模式不生效，见报告）
+                if (group.kind === 'json' && c.zh === '内容') {
+                    def += ` CHECK(json_valid(${c.ident}))`;
+                }
                 // 枚举 CHECK：把默认值和越界初始值一并放行，避免初始行/默认值被拒绝
                 if (c.enum && c.enum.length <= 8 && c.enum.every(v => !/['"]/.test(v))) {
                     const allowed = [...c.enum];
@@ -1973,7 +2005,23 @@
         const hasUserReadonly = userReadonlyCols.length > 0;
         const allReadonly = hasUserReadonly && aiCols.length === 0;
         if (group.kind === 'json') {
-            L.push(`整组 JSON 存储表（row_id=1）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除记录。`);
+            const wr = group.wildcardRules || [];
+            const gc = group.groupChecks || [];
+            if (wr.length || gc.length) {
+                // 规则声明了 AI 可写路径（如 户.<门牌>.妻.好感值）：JSON 表不再一刀切只读，
+                // 而是列出可写路径与约束，AI 读取现有 JSON 仅改对应路径后整体写回「内容」列。
+                L.push('整组 JSON 存储表（row_id=1）：本表以 JSON 保存动态结构。AI 可更新「内容」列——读取当前 JSON，只改变目标路径的值，其余字段保持原样，再把整个 JSON 写回；禁止新增/删除记录。');
+                L.push('【可写路径与约束】');
+                for (const r of wr) {
+                    const parts = [];
+                    if (r.range) parts.push(`数值范围 ${r.range[0]}~${r.range[1]}`);
+                    parts.push(...(r.checks || []).map(sanitizeCheckRule).filter(Boolean));
+                    if (parts.length) L.push(`- ${r.path}（${parts.join('；')}）`);
+                }
+                for (const rule of gc.map(sanitizeCheckRule).filter(Boolean)) L.push(`- ${rule}`);
+            } else {
+                L.push(`整组 JSON 存储表（row_id=1）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除记录。`);
+            }
         } else if (group.kind === 'singleton') {
             // 单例表不重复描述（“全表固定一条记录”等），直接给出开局记录说明；
             // 全只读单例（全部为 _ 字段）不写“只允许 UPDATE”，避免与“AI 无需填表”冲突
@@ -2011,6 +2059,14 @@
             }
             // 子表/动态字典的组级规则（如 世界.动向 的“最多维持2个大事件”）：以表级约束列出
             for (const rule of (group.groupChecks || []).map(sanitizeCheckRule).filter(Boolean)) L.push(`- ${group.tableName}：${rule}`);
+            // 通配路径规则（如 人物.角色名.亲密）：动态键无法静态展开，作为表格级提示保留，
+            // AI 对照快照中的具体键套用（范围/条件仍可见）
+            for (const wr of (group.wildcardRules || [])) {
+                const parts = [];
+                if (wr.range) parts.push(`数值范围 ${wr.range[0]}~${wr.range[1]}`);
+                parts.push(...(wr.checks || []));
+                if (parts.length) L.push(`- ${group.tableName}：${wr.path}（${parts.join('；')}）`);
+            }
             for (const c of aiCols) {
                 if (c.check && c.check.length > 20) L.push(`- ${c.zh}：…（共 ${c.check.length} 条规则，其余略）`);
             }
@@ -2027,7 +2083,9 @@
 
     function buildInitNode(group) {
         if (group.kind === 'json') {
-            return `开局模板已初始化整组数据（row_id=1）；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
+            return ((group.wildcardRules || []).length || (group.groupChecks || []).length)
+                ? `开局模板已初始化整组数据（row_id=1）；自动填表阶段仅按 note 中「可写路径与约束」更新「内容」列，其余由脚本/前端维护。`
+                : `开局模板已初始化整组数据（row_id=1）；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
         }
         if (group.kind === 'singleton') {
             const aiCols = (group.columns || []).filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
@@ -2108,7 +2166,11 @@
 
     function buildNodeProse(group, kind) {
         if (group.kind === 'json') {
-            if (kind === 'update') return '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
+            if (kind === 'update') {
+                return ((group.wildcardRules || []).length || (group.groupChecks || []).length)
+                    ? '读取「内容」列当前 JSON，只改变目标路径的值（其余字段保持原样），整体写回；禁止整列清空或凭空重建。'
+                    : '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
+            }
             return '禁止。';
         }
         if (group.kind === 'singleton') {
