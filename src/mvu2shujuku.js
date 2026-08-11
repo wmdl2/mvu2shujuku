@@ -6181,6 +6181,23 @@ ${DB_INIT_SNIPPET}
                 });
             }
         }
+        // 全局 seedRows 去重：插件运行时可能保留与 content 同 row_id 的种子行，
+        // 提交（snap）前统一剔除，避免插件 initGameSession/回放报 row_id 冲突。
+        for (const k of Object.keys(tables)) {
+            if (k.indexOf('sheet_') !== 0) continue;
+            const s = tables[k];
+            if (!s || !Array.isArray(s.seedRows)) continue;
+            const contentIds = new Set();
+            if (Array.isArray(s.content)) {
+                for (const row of s.content.slice(1)) {
+                    if (Array.isArray(row) && row[0] !== undefined && row[0] !== null && row[0] !== '') contentIds.add(String(row[0]));
+                }
+            }
+            s.seedRows = s.seedRows.filter((row) => {
+                if (!Array.isArray(row) || row[0] === undefined || row[0] === null || row[0] === '') return false;
+                return !contentIds.has(String(row[0]));
+            });
+        }
         return tables;
     }
 
@@ -6856,7 +6873,10 @@ ${DB_INIT_SNIPPET}
                             // 注意：无现有锚点时该提交不会写 checkpoint（插件语义），
                             // 仅作运行时物化与最后手段，失败后仍有差异写入兜底。
                             // 优先用含本次写入的合并结果，避免把旧 checkpoint（不含本次变更）存回去
-                            const fallbackData = mergedTemplate || snap || readFullCheckpointData();
+                            // 提交数据一律用快照（插件稳定 key）：mergedTemplate 是转换器原始 key，
+                            // 灌进已有稳定 key 身份的运行时会让同一规范表名并存两套 key，
+                            // 插件回放报「SQLite 物理表名冲突」（实测 AI 填表触发）。
+                            const fallbackData = snap || mergedTemplate || readFullCheckpointData();
                             try {
                                 const fb = fallbackData || {};
                                 const sysSheet = Object.values(fb).find(s => s && s.name === '系统表');

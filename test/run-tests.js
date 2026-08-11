@@ -3889,6 +3889,8 @@ test('运行时 sheet key 与模板不一致（插件稳定 key）：快照合�
     await win.Mvu.replaceMvuData({ stat_data: { 主角: { 姓名: '稳定键注入' } } });
     await new Promise(res => setTimeout(res, 1200));
     assert.ok(lastImport, '写入应走到 importTableAsJson 快照提交');
+    const importKeys = Object.keys(lastImport).filter(k => k.startsWith('sheet_'));
+    assert.ok(importKeys.length > 0 && importKeys.every(k => k.indexOf('sheet_ST_') === 0), '提交 payload 必须使用插件稳定 key（防止同一规范表名并存两套 key 导致回放冲突）');
     const zjSent = Object.values(lastImport).find(s => s && s.name === '主角表');
     assert.strictEqual(zjSent.content[1][zjSent.content[0].indexOf('姓名')], '稳定键注入', '运行时 key 与模板不一致时，快照合并应按表名兜底，写入不得丢值');
     const zjNow = Object.values(tables).find(s => s && s.name === '主角表');
