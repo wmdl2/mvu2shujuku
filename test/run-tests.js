@@ -288,7 +288,19 @@ test('SQL 示例优先用默认值，TEXT 无默认才用“列名示例”', ()
     const r = core.convert(card, { mode: 'both' });
     const dl = Object.values(r.template).find(s => s && s.name === '道侣表');
     assert.ok(dl.sourceData.insertNode.includes("VALUES ('林若悠', 50, 0, '性格示例')"), 'INSERT 应含真实值/默认值/列名示例');
-    assert.ok(dl.sourceData.updateNode.includes('SET qinmi = 50'), 'UPDATE 示例应取真实初始值');
+    assert.ok(dl.sourceData.updateNode.includes('SET qinmi = 0'), 'UPDATE 示例应使用占位值而非当前值');
+    assert.ok(dl.sourceData.updateNode.includes('示例值仅为格式演示'), 'UPDATE 应注明示例值仅为格式演示');
+});
+
+test('单例 UPDATE 示例：与行表一致的“规则 + SQL示例:”格式，TEXT 用“新值”占位', () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const world = Object.values(r.template).find(s => s && s.name === '世界表');
+    const node = world.sourceData.updateNode;
+    assert.ok(node.includes('SQL示例: UPDATE shijiebiao SET dangqianshijian ='), '单例 updateNode 应有 SQL示例: 前缀');
+    assert.ok(node.includes("= '新值'"), 'TEXT 字段 UPDATE 示例应用“新值”占位，而非当前默认值');
+    assert.ok(!node.includes("'未知'"), 'UPDATE 示例不应使用当前默认值（避免读成更新成原值）');
+    assert.ok(node.includes('示例值仅为格式演示'), '应注明示例值仅为格式演示');
 });
 
 /* ---------------- scanStatusUsage ---------------- */
