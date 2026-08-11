@@ -6120,6 +6120,15 @@ ${DB_INIT_SNIPPET}
                 removeRows.sort((a, b) => b - a);
                 for (const ri of removeRows) sheet.content.splice(ri, 1);
             }
+            // seedRows 同步：模板种子行（如道渊的「气运」）可能未物化进 content，
+            // statDataFromTables 在 content 无行时会从 seedRows 还原，因此删除时必须
+            // 把 keyCol 不在 stat_data 中的种子行一并清掉，否则 UI/重进后仍显示该条目。
+            if (Array.isArray(sheet.seedRows)) {
+                sheet.seedRows = sheet.seedRows.filter((row) => {
+                    if (!Array.isArray(row) || row[keyIdx] === undefined || row[keyIdx] === null || row[keyIdx] === '') return false;
+                    return wanted.has(String(row[keyIdx]));
+                });
+            }
         }
         return tables;
     }
@@ -20579,6 +20588,15 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             if (removeRows.length) {
                 removeRows.sort((a, b) => b - a);
                 for (const ri of removeRows) sheet.content.splice(ri, 1);
+            }
+            // seedRows 同步：模板种子行（如道渊的「气运」）可能未物化进 content，
+            // statDataFromTables 在 content 无行时会从 seedRows 还原，因此删除时必须
+            // 把 keyCol 不在 stat_data 中的种子行一并清掉，否则 UI/重进后仍显示该条目。
+            if (Array.isArray(sheet.seedRows)) {
+                sheet.seedRows = sheet.seedRows.filter((row) => {
+                    if (!Array.isArray(row) || row[keyIdx] === undefined || row[keyIdx] === null || row[keyIdx] === '') return false;
+                    return wanted.has(String(row[keyIdx]));
+                });
             }
         }
         return tables;
