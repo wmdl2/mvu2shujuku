@@ -5179,6 +5179,25 @@ ${DB_INIT_SNIPPET}
             const reTpl = statForCheck
                 ? applyTargetToTemplate(tplCached, activeLayout, statForCheck)
                 : mergeSnapshotIntoTemplate(tplCached, cur);
+            // 旧卡模板/运行时 seedRows 可能与 content 的 row_id=1 重复，插件 initGameSession
+            // 会拒绝（'seedRows 第 1 行 row_id「1」重复'）。统一剔除与 content 冲突的 seedRows。
+            try {
+                for (const k of Object.keys(reTpl || {})) {
+                    if (k.indexOf('sheet_') !== 0) continue;
+                    const sheet = reTpl[k];
+                    if (!sheet || !Array.isArray(sheet.seedRows)) continue;
+                    const ids = new Set();
+                    if (Array.isArray(sheet.content)) {
+                        for (const row of sheet.content.slice(1)) {
+                            if (Array.isArray(row) && row[0] !== undefined && row[0] !== null && row[0] !== '') ids.add(String(row[0]));
+                        }
+                    }
+                    sheet.seedRows = sheet.seedRows.filter((row) => {
+                        if (!Array.isArray(row) || row[0] === undefined || row[0] === null || row[0] === '') return false;
+                        return !ids.has(String(row[0]));
+                    });
+                }
+            } catch (e) {}
             if (!reTpl) return;
             const initResult = await Promise.resolve(api.initGameSession({}, {
                 injectTemplate: true,
@@ -6116,7 +6135,21 @@ ${DB_INIT_SNIPPET}
                 if (Array.isArray(snapSheet.content) && snapSheet.content.length > 0) {
                     tplSheet.content = JSON.parse(JSON.stringify(snapSheet.content));
                 }
-                if (Array.isArray(snapSheet.seedRows)) tplSheet.seedRows = JSON.parse(JSON.stringify(snapSheet.seedRows));
+                if (Array.isArray(snapSheet.seedRows)) {
+                    // 运行时 seedRows 可能已带 row_id=1 且与 content 首行重复（插件 initGameSession
+                    // 校验会拒绝：'seedRows 第 1 行 row_id「1」重复'）。只保留 row_id 与 content 不冲突的
+                    // 种子行；冲突行由插件从 content 重新生成。
+                    const contentIds = new Set();
+                    if (Array.isArray(snapSheet.content)) {
+                        for (const row of snapSheet.content.slice(1)) {
+                            if (Array.isArray(row) && row[0] !== undefined && row[0] !== null && row[0] !== '') contentIds.add(String(row[0]));
+                        }
+                    }
+                    tplSheet.seedRows = JSON.parse(JSON.stringify(snapSheet.seedRows)).filter((row) => {
+                        if (!Array.isArray(row) || row[0] === undefined || row[0] === null || row[0] === '') return false;
+                        return !contentIds.has(String(row[0]));
+                    });
+                }
             }
             return out;
         } catch (e) {
