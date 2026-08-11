@@ -5277,6 +5277,7 @@ ${DB_INIT_SNIPPET}
                     dbg(' 开局自动建表跳过：当前卡无本转换器标记 extensions.mvu2shujuku（chat=' + key0 + '），不影响其他卡');
                     // 清掉上一张转换卡残留的运行时状态，确保切到其他卡后不再接管/广播
                     activeLayout = null;
+                    activeLayoutCardKey = '';
                     activePlaceholderNeeded = false;
                     restoreWindowMvuShim();
                     restoreWindowGetAllVariables();
@@ -5285,6 +5286,7 @@ ${DB_INIT_SNIPPET}
             } catch (e) {
                 dbg(' 开局自动建表跳过：读取当前卡标记失败（chat=' + key0 + '）');
                 activeLayout = null;
+                activeLayoutCardKey = '';
                 activePlaceholderNeeded = false;
                 restoreWindowMvuShim();
                 restoreWindowGetAllVariables();
@@ -5345,6 +5347,10 @@ ${DB_INIT_SNIPPET}
             const mk = layoutExt && layoutExt.mvu2shujuku;
             if (mk && typeof mk.layout === 'string') {
                 activeLayout = JSON.parse(mk.layout);
+                // 记录布局归属卡：用“读取时会看到的角色对象”（列表对象，带真实头像）
+                let layoutChar = null;
+                try { layoutChar = currentCharacter(); } catch (e) {}
+                activeLayoutCardKey = cardCacheKey(layoutChar);
                 dbg(' 已缓存当前卡布局，条目数=' + (Array.isArray(activeLayout) ? activeLayout.length : 0));
             }
         } catch (e) {
@@ -5738,6 +5744,9 @@ ${DB_INIT_SNIPPET}
     let lastInput = null;
     const mergeState = { sourceTemplate: null };
     let activeLayout = null;
+    // activeLayout 归属的卡（卡名|头像）：切卡空窗期用旧卡布局读新卡表格会产生错形状数据，
+    // 读路径与写路径都以它为门槛，布局未就绪时返回空/重试
+    let activeLayoutCardKey = '';
     // 当前卡是否依赖 <StatusPlaceHolderImpl/>（前端注入正则）；由扩展本体维护占位符，
     // 不依赖 tavern_helper 桥是否运行
     let activePlaceholderNeeded = false;
@@ -6434,19 +6443,23 @@ ${DB_INIT_SNIPPET}
                     // 写库前保证 full checkpoint 存在：无锚点写入会产生无锚点 artifacts，
                     // 触发插件 V2 boundary_after_data_mismatch。锚点无法建立则放弃本次写入。
                     const tplCached = cachedTemplateForCurrentCard();
-                    if (!tplCached) {
-                        // 自动建表可能在途（角色列表懒加载需要先取完整卡再缓存模板）：
-                        // 延后重试，避免开局/开场白注入在缓存就绪前被直接丢弃。
+                    // 布局归属校验：切卡空窗期 activeLayout 仍是上一张卡的，写库会按错布局落表；
+                    // 与模板缓存一起作为“自动建表就绪”门槛，未就绪时延后重试。
+                    let layoutOk = false;
+                    try { layoutOk = activeLayoutCardKey !== '' && activeLayoutCardKey === cardCacheKey(currentCharacter()); } catch (e) {}
+                    if (!tplCached || !layoutOk) {
+                        // 自动建表可能在途（角色列表懒加载需要先取完整卡再缓存模板/布局）：
+                        // 延后重试，避免开局/开场白注入在就绪前被直接丢弃或按旧布局写错。
                         if (overlayFlushRetries < 6) {
                             overlayFlushRetries += 1;
-                            dbg('[流程] 模板缓存未就绪，延后重试写库（#' + overlayFlushRetries + '）。');
+                            dbg('[流程] 模板缓存/布局未就绪' + (tplCached ? '（布局未匹配）' : '') + '，延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
                                 // 仅当期间没有更新的写入时才重试，避免旧快照覆盖新状态
                                 if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
                             }, 500);
                             return;
                         }
-                        dbgWarn('[流程] 写库前无模板缓存且重试次数用尽，放弃本次写入（等待自动建表）。');
+                        dbgWarn('[流程] 写库前模板缓存/布局未就绪且重试次数用尽，放弃本次写入（等待自动建表）。');
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
@@ -6493,12 +6506,30 @@ ${DB_INIT_SNIPPET}
                             : mergeSnapshotIntoTemplate(tplCached, snap);
                         // 诊断：确认注入数据是否真的进了合并模板（主角表 content 第一行）
                         try {
-                            const heroName = effectiveTarget.主角 && effectiveTarget.主角.姓名;
-                            const mtProt = mergedTemplate && mergedTemplate.sheet_zhujiaobiao;
-                            const mtRow = mtProt && Array.isArray(mtProt.content) ? mtProt.content[1] : null;
-                            dbg('[注入合并] 首次写库=' + isFirstWrite + ' | target.主角.姓名=' + heroName +
-                                ' | 合并模板主角表 content 行数=' + (mtProt && Array.isArray(mtProt.content) ? mtProt.content.length : 'N/A') +
-                                ' | content[1]=' + (mtRow ? JSON.stringify(mtRow).slice(0, 160) : '无'));
+                            // 通用组诊断（不硬编码某个表/组）：打印布局里的组、target/prev 各含哪些组、
+                            // 首个非空写入字段、checkpoint 是否含注入——直接看出“数据进没进表格”。
+                            const diagGroups = (Array.isArray(activeLayout) ? activeLayout : []).map(L => L.group);
+                            const targetGroups = Object.keys(effectiveTarget || {}).filter(g => effectiveTarget[g] && typeof effectiveTarget[g] === 'object');
+                            const prevGroups = Object.keys(prev || {}).filter(g => prev[g] && typeof prev[g] === 'object');
+                            const firstWriteField = (() => {
+                                for (const g of targetGroups) {
+                                    const v = effectiveTarget[g];
+                                    if (!v || typeof v !== 'object') continue;
+                                    for (const k of Object.keys(v)) {
+                                        const vv = v[k];
+                                        if (vv !== undefined && vv !== null && vv !== '') {
+                                            return g + '.' + k + '=' + String(vv).slice(0, 40);
+                                        }
+                                    }
+                                }
+                                return '';
+                            })();
+                            dbg('[注入合并] 首次写库=' + isFirstWrite +
+                                ' | 布局组=' + diagGroups.join('、') +
+                                ' | target含组=' + targetGroups.join('、') +
+                                ' | prev含组=' + prevGroups.join('、') +
+                                ' | 首个非空写入=' + (firstWriteField || '无') +
+                                ' | checkpoint含注入=' + checkpointHasStatData(activeLayout, effectiveTarget));
                         } catch (e) {}
                         if (isFirstWrite && mergedTemplate && typeof api.initGameSession === 'function') {
                             const initResult = await Promise.resolve(api.initGameSession({}, {
@@ -6696,6 +6727,14 @@ ${DB_INIT_SNIPPET}
         }
         window.getAllVariables = function () {
             try {
+                // 布局归属校验：切卡空窗期 activeLayout 还是上一张卡的，
+                // 用它读当前表格会得到错形状的 stat_data（前端据此初始化就会写歪）。
+                // 未就绪时返回空，让前端从零构建；autoInit 完成后布局/缓存就绪。
+                let curKey = '';
+                try { curKey = cardCacheKey(currentCharacter()); } catch (e) {}
+                if (!activeLayoutCardKey || activeLayoutCardKey !== curKey) {
+                    return { stat_data: {}, display_data: {} };
+                }
                 const api = getAcuApi();
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     return { stat_data: {}, display_data: {} };
@@ -7343,6 +7382,7 @@ ${DB_INIT_SNIPPET}
             // 避免这里清空与它竞争，把刚装好的接管撤销掉。
         } else {
             activeLayout = null;
+            activeLayoutCardKey = '';
             activePlaceholderNeeded = false;
             restoreWindowMvuShim();
             restoreWindowGetAllVariables();
@@ -19487,6 +19527,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     dbg(' 开局自动建表跳过：当前卡无本转换器标记 extensions.mvu2shujuku（chat=' + key0 + '），不影响其他卡');
                     // 清掉上一张转换卡残留的运行时状态，确保切到其他卡后不再接管/广播
                     activeLayout = null;
+                    activeLayoutCardKey = '';
                     activePlaceholderNeeded = false;
                     restoreWindowMvuShim();
                     restoreWindowGetAllVariables();
@@ -19495,6 +19536,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             } catch (e) {
                 dbg(' 开局自动建表跳过：读取当前卡标记失败（chat=' + key0 + '）');
                 activeLayout = null;
+                activeLayoutCardKey = '';
                 activePlaceholderNeeded = false;
                 restoreWindowMvuShim();
                 restoreWindowGetAllVariables();
@@ -19555,6 +19597,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const mk = layoutExt && layoutExt.mvu2shujuku;
             if (mk && typeof mk.layout === 'string') {
                 activeLayout = JSON.parse(mk.layout);
+                // 记录布局归属卡：用“读取时会看到的角色对象”（列表对象，带真实头像）
+                let layoutChar = null;
+                try { layoutChar = currentCharacter(); } catch (e) {}
+                activeLayoutCardKey = cardCacheKey(layoutChar);
                 dbg(' 已缓存当前卡布局，条目数=' + (Array.isArray(activeLayout) ? activeLayout.length : 0));
             }
         } catch (e) {
@@ -19948,6 +19994,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     let lastInput = null;
     const mergeState = { sourceTemplate: null };
     let activeLayout = null;
+    // activeLayout 归属的卡（卡名|头像）：切卡空窗期用旧卡布局读新卡表格会产生错形状数据，
+    // 读路径与写路径都以它为门槛，布局未就绪时返回空/重试
+    let activeLayoutCardKey = '';
     // 当前卡是否依赖 <StatusPlaceHolderImpl/>（前端注入正则）；由扩展本体维护占位符，
     // 不依赖 tavern_helper 桥是否运行
     let activePlaceholderNeeded = false;
@@ -20644,19 +20693,23 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     // 写库前保证 full checkpoint 存在：无锚点写入会产生无锚点 artifacts，
                     // 触发插件 V2 boundary_after_data_mismatch。锚点无法建立则放弃本次写入。
                     const tplCached = cachedTemplateForCurrentCard();
-                    if (!tplCached) {
-                        // 自动建表可能在途（角色列表懒加载需要先取完整卡再缓存模板）：
-                        // 延后重试，避免开局/开场白注入在缓存就绪前被直接丢弃。
+                    // 布局归属校验：切卡空窗期 activeLayout 仍是上一张卡的，写库会按错布局落表；
+                    // 与模板缓存一起作为“自动建表就绪”门槛，未就绪时延后重试。
+                    let layoutOk = false;
+                    try { layoutOk = activeLayoutCardKey !== '' && activeLayoutCardKey === cardCacheKey(currentCharacter()); } catch (e) {}
+                    if (!tplCached || !layoutOk) {
+                        // 自动建表可能在途（角色列表懒加载需要先取完整卡再缓存模板/布局）：
+                        // 延后重试，避免开局/开场白注入在就绪前被直接丢弃或按旧布局写错。
                         if (overlayFlushRetries < 6) {
                             overlayFlushRetries += 1;
-                            dbg('[流程] 模板缓存未就绪，延后重试写库（#' + overlayFlushRetries + '）。');
+                            dbg('[流程] 模板缓存/布局未就绪' + (tplCached ? '（布局未匹配）' : '') + '，延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
                                 // 仅当期间没有更新的写入时才重试，避免旧快照覆盖新状态
                                 if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
                             }, 500);
                             return;
                         }
-                        dbgWarn('[流程] 写库前无模板缓存且重试次数用尽，放弃本次写入（等待自动建表）。');
+                        dbgWarn('[流程] 写库前模板缓存/布局未就绪且重试次数用尽，放弃本次写入（等待自动建表）。');
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
@@ -20703,12 +20756,30 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             : mergeSnapshotIntoTemplate(tplCached, snap);
                         // 诊断：确认注入数据是否真的进了合并模板（主角表 content 第一行）
                         try {
-                            const heroName = effectiveTarget.主角 && effectiveTarget.主角.姓名;
-                            const mtProt = mergedTemplate && mergedTemplate.sheet_zhujiaobiao;
-                            const mtRow = mtProt && Array.isArray(mtProt.content) ? mtProt.content[1] : null;
-                            dbg('[注入合并] 首次写库=' + isFirstWrite + ' | target.主角.姓名=' + heroName +
-                                ' | 合并模板主角表 content 行数=' + (mtProt && Array.isArray(mtProt.content) ? mtProt.content.length : 'N/A') +
-                                ' | content[1]=' + (mtRow ? JSON.stringify(mtRow).slice(0, 160) : '无'));
+                            // 通用组诊断（不硬编码某个表/组）：打印布局里的组、target/prev 各含哪些组、
+                            // 首个非空写入字段、checkpoint 是否含注入——直接看出“数据进没进表格”。
+                            const diagGroups = (Array.isArray(activeLayout) ? activeLayout : []).map(L => L.group);
+                            const targetGroups = Object.keys(effectiveTarget || {}).filter(g => effectiveTarget[g] && typeof effectiveTarget[g] === 'object');
+                            const prevGroups = Object.keys(prev || {}).filter(g => prev[g] && typeof prev[g] === 'object');
+                            const firstWriteField = (() => {
+                                for (const g of targetGroups) {
+                                    const v = effectiveTarget[g];
+                                    if (!v || typeof v !== 'object') continue;
+                                    for (const k of Object.keys(v)) {
+                                        const vv = v[k];
+                                        if (vv !== undefined && vv !== null && vv !== '') {
+                                            return g + '.' + k + '=' + String(vv).slice(0, 40);
+                                        }
+                                    }
+                                }
+                                return '';
+                            })();
+                            dbg('[注入合并] 首次写库=' + isFirstWrite +
+                                ' | 布局组=' + diagGroups.join('、') +
+                                ' | target含组=' + targetGroups.join('、') +
+                                ' | prev含组=' + prevGroups.join('、') +
+                                ' | 首个非空写入=' + (firstWriteField || '无') +
+                                ' | checkpoint含注入=' + checkpointHasStatData(activeLayout, effectiveTarget));
                         } catch (e) {}
                         if (isFirstWrite && mergedTemplate && typeof api.initGameSession === 'function') {
                             const initResult = await Promise.resolve(api.initGameSession({}, {
@@ -20906,6 +20977,14 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         }
         window.getAllVariables = function () {
             try {
+                // 布局归属校验：切卡空窗期 activeLayout 还是上一张卡的，
+                // 用它读当前表格会得到错形状的 stat_data（前端据此初始化就会写歪）。
+                // 未就绪时返回空，让前端从零构建；autoInit 完成后布局/缓存就绪。
+                let curKey = '';
+                try { curKey = cardCacheKey(currentCharacter()); } catch (e) {}
+                if (!activeLayoutCardKey || activeLayoutCardKey !== curKey) {
+                    return { stat_data: {}, display_data: {} };
+                }
                 const api = getAcuApi();
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     return { stat_data: {}, display_data: {} };
@@ -21553,6 +21632,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             // 避免这里清空与它竞争，把刚装好的接管撤销掉。
         } else {
             activeLayout = null;
+            activeLayoutCardKey = '';
             activePlaceholderNeeded = false;
             restoreWindowMvuShim();
             restoreWindowGetAllVariables();

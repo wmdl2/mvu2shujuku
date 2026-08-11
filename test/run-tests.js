@@ -3350,6 +3350,10 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     };
     context.characters[0] = convertedC;
     (handlers['chat_changed'] || []).forEach(fn => fn());
+    // 切卡空窗期：布局仍是上一张卡的，读取必须返回空而不是旧卡形状的数据
+    const gapStat = win.getAllVariables ? (win.getAllVariables().stat_data || {}) : {};
+    // 注意：VM 沙箱 realm 的对象原型与测试进程不同，deepStrictEqual 会误判，用 keys 长度断言
+    assert.strictEqual(Object.keys(gapStat).length, 0, '切卡空窗期 getAllVariables 不应返回上一张卡的旧布局数据');
     // 等待周期重锚（3s 间隔 + 2.5s 节流）用当前卡 C 的模板重建
     await new Promise(res => setTimeout(res, 4500));
     const namesC = Object.keys(lastInitTemplateData || {})
