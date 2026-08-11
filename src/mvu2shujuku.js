@@ -6082,10 +6082,22 @@ ${DB_INIT_SNIPPET}
         try {
             if (!tplCached || typeof tplCached !== 'object' || !snapshot || typeof snapshot !== 'object') return null;
             const out = JSON.parse(JSON.stringify(tplCached));
+            // 快照的 sheet key 来自插件运行时（可能被规范化成稳定 key），与转换器模板的
+            // 原始 key 不一定相同；先按 key 精确匹配，再按表名兜底，避免合并失败导致
+            // 提交旧模板数据（SQLite 模式实测：快照有值、提交却是旧值）。
+            const snapByName = {};
+            for (const k of Object.keys(snapshot)) {
+                if (k.indexOf('sheet_') === 0 && snapshot[k] && typeof snapshot[k] === 'object' && snapshot[k].name) {
+                    snapByName[String(snapshot[k].name)] = snapshot[k];
+                }
+            }
             for (const k of Object.keys(out)) {
                 if (k.indexOf('sheet_') !== 0) continue;
                 const tplSheet = out[k];
-                const snapSheet = snapshot[k];
+                let snapSheet = snapshot[k];
+                if (!snapSheet && tplSheet && tplSheet.name && snapByName[String(tplSheet.name)]) {
+                    snapSheet = snapByName[String(tplSheet.name)];
+                }
                 if (!tplSheet || !snapSheet || typeof tplSheet !== 'object' || typeof snapSheet !== 'object') continue;
                 if (Array.isArray(snapSheet.content) && snapSheet.content.length > 0) {
                     tplSheet.content = JSON.parse(JSON.stringify(snapSheet.content));
@@ -6654,9 +6666,14 @@ ${DB_INIT_SNIPPET}
                                 const sysSheet = Object.values(fb).find(s => s && s.name === '系统表');
                                 const hdr = (sysSheet && sysSheet.content && sysSheet.content[0]) || [];
                                 const mcIdx = hdr.indexOf('当前MC点');
+                                const snapSys = Object.values(snap || {}).find(s => s && s.name === '系统表');
+                                const snapHdr = (snapSys && snapSys.content && snapSys.content[0]) || [];
+                                const snapMcIdx = snapHdr.indexOf('当前MC点');
                                 dbg('[快照提交] target.系统.当前MC点=' + JSON.stringify(effectiveTarget.系统 && effectiveTarget.系统.当前MC点) +
+                                    ' | 原始snap当前MC点=' + JSON.stringify(snapSys && snapSys.content[1] && snapSys.content[1][snapMcIdx]) +
                                     ' | 提交快照系统表当前MC点=' + JSON.stringify(sysSheet && sysSheet.content[1] && sysSheet.content[1][mcIdx]) +
-                                    ' | 系统表行数=' + (sysSheet && sysSheet.content ? sysSheet.content.length : 'N/A'));
+                                    ' | 系统表行数=' + (sysSheet && sysSheet.content ? sysSheet.content.length : 'N/A') +
+                                    ' | snapKeys=' + Object.keys(snap || {}).filter(k => k.indexOf('sheet_') === 0).join(','));
                             } catch (e) {}
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(fallbackData), {}));
                             if (ok) {
