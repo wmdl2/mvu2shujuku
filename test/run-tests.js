@@ -1433,7 +1433,7 @@ function bridgeSandbox(r, opts = {}) {
     const addCheckpoint = () => {
         // 模拟插件提交成功后真的建立 full checkpoint
         chat.push({ message_id: chat.length, is_user: false, mes: '模拟消息',
-            TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: Date.now() } } } }) });
+            TavernDB_ACU_IsolatedData: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: Date.now() } } } }) });
     };
     const fakeApi = {
         exportTableAsJson: () => tables,
@@ -1835,7 +1835,7 @@ test('性能回归：桥的 重建/写入 按批次只导出一次全表快照�
         exportTableAsJson: () => { exportCount += 1; return tables; },
         importTemplateFromData: async () => ({ success: true }),
         initGameSession: async () => {
-            chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) });
+            chat.push({ message_id: chat.length, TavernDB_ACU_IsolatedData: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) });
             return { success: true, runtimeReady: true };
         },
         registerTableUpdateCallback: () => {},
@@ -1925,7 +1925,7 @@ test('单例/整组JSON表仅表头时自动补初始行（updateCell 不再 Row
         getTableTemplate: () => r.template,
         importTemplateFromData: async () => ({ success: true }),
         initGameSession: async () => {
-            chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) });
+            chat.push({ message_id: chat.length, TavernDB_ACU_IsolatedData: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) });
             return { success: true, runtimeReady: true };
         },
         registerTableUpdateCallback: () => {},
@@ -2965,7 +2965,7 @@ test('写库直接 diff 落表（移除锚点前置/重置门控）', async () =
             importTemplateFromData: async () => ({ success: true }),
             initGameSession: async () => {
                 counters.init += 1;
-                chat.push({ message_id: chat.length, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) });
+                chat.push({ message_id: chat.length, TavernDB_ACU_IsolatedData: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) });
                 return { success: true, runtimeReady: true };
             },
             importTableAsJson: async () => false,
@@ -3029,11 +3029,11 @@ test('写库不受锚点形态门控（移除运行时锚点重建机制）', as
     const tables = JSON.parse(JSON.stringify(r.template));
     const cases = [
         // 非 full：模板派生 checkpoint（initGameSession 留下的形态）——不应算已锚定
-        [{ message_id: 0, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'template_only_root', ts: 1 } } } }) }],
+        [{ message_id: 0, TavernDB_ACU_IsolatedData: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'template_only_root', ts: 1 } } } }) }],
         // 缺 version/logEntries：旧格式——不应算已锚定
-        [{ message_id: 0, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { checkpoint: { kind: 'full', ts: 1 } } } }) }],
+        [{ message_id: 0, TavernDB_ACU_IsolatedData: JSON.stringify({ 系统: { storageFrame: { checkpoint: { kind: 'full', ts: 1 } } } }) }],
         // 真正的 V2 full checkpoint——应算已锚定
-        [{ message_id: 0, TavernDB_ACU_isolated: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) }],
+        [{ message_id: 0, TavernDB_ACU_IsolatedData: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } } } }) }],
     ];
     for (let ci = 0; ci < cases.length; ci++) {
         const chat = cases[ci];
@@ -3167,7 +3167,7 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
         if (!Array.isArray(context.chat) || context.chat.length === 0) return;
         const msg = context.chat[0];
         if (!msg) return;
-        msg.TavernDB_ACU_isolated = JSON.stringify({
+        msg.TavernDB_ACU_IsolatedData = JSON.stringify({
             系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: Date.now() } } },
         });
     };
@@ -3179,9 +3179,18 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
             initialized = true;
             lastInitTemplateData = (opts && opts.templateData) || null;
             attachCheckpoint();
+            if (opts && opts.templateData && typeof opts.templateData === 'object') {
+                for (const k of Object.keys(tables)) delete tables[k];
+                Object.assign(tables, opts.templateData);
+            }
             return { success: true, runtimeReady: true };
         },
         importTemplateFromData: async () => ({ success: true }),
+        importTableAsJson: async (jsonStr) => {
+            try { const parsed = JSON.parse(jsonStr); for (const k of Object.keys(tables)) delete tables[k]; Object.assign(tables, parsed); } catch (e) {}
+            attachCheckpoint();
+            return true;
+        },
         insertRow: async () => 1,
         updateCell: async (tableName, rowIndex, col, value) => {
             const s = Object.values(tables).find(x => x && x.name === tableName);
@@ -3313,7 +3322,10 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     await win.Mvu.replaceMvuData({ stat_data: { 主角: { 姓名: '缓存兜底' } } });
     await new Promise(res => setTimeout(res, 1000));
     assert.ok(initCalls > initCallsBeforeWrite, '缓存键不匹配时名称兜底应使写库成功（实际 initCalls ' + initCallsBeforeWrite + ' → ' + initCalls + '）');
-    assert.ok(JSON.stringify(lastInitTemplateData || {}).includes('缓存兜底'), '名称兜底写入应包含注入值');
+    // 写库可能走 initGameSession 合并路径或（重锚已建 checkpoint 时）快照/差异路径，
+    // 功能断言看表格内容而非 lastInitTemplateData 这个实现细节
+    const zjFallback = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.strictEqual(zjFallback.content[1][zjFallback.content[0].indexOf('姓名')], '缓存兜底', '名称兜底写入应包含注入值');
     context.chat = [];
     // 模拟催眠卡日志场景：前端 target 只有 系统（缺 主角）时，写库必须保留已有主角数据
     const zjKeep = Object.values(tables).find(s => s && s.name === '主角表');
@@ -3437,7 +3449,7 @@ test('懒加载角色：缓存键用列表对象（带 avatar），开场写入�
     let lastInitTemplateData = null;
     const attachCheckpoint = () => {
         if (!Array.isArray(context.chat) || context.chat.length === 0) return;
-        context.chat[0].TavernDB_ACU_isolated = JSON.stringify({
+        context.chat[0].TavernDB_ACU_IsolatedData = JSON.stringify({
             系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: Date.now() } } },
         });
     };
@@ -3449,9 +3461,18 @@ test('懒加载角色：缓存键用列表对象（带 avatar），开场写入�
             initialized = true;
             lastInitTemplateData = (opts && opts.templateData) || null;
             attachCheckpoint();
+            if (opts && opts.templateData && typeof opts.templateData === 'object') {
+                for (const k of Object.keys(tables)) delete tables[k];
+                Object.assign(tables, opts.templateData);
+            }
             return { success: true, runtimeReady: true };
         },
         importTemplateFromData: async () => ({ success: true }),
+        importTableAsJson: async (jsonStr) => {
+            try { const parsed = JSON.parse(jsonStr); for (const k of Object.keys(tables)) delete tables[k]; Object.assign(tables, parsed); } catch (e) {}
+            attachCheckpoint();
+            return true;
+        },
         insertRow: async () => 1,
         updateCell: async (tableName, rowIndex, col, value) => {
             const s = Object.values(tables).find(x => x && x.name === tableName);
@@ -3557,7 +3578,9 @@ test('懒加载角色：缓存键用列表对象（带 avatar），开场写入�
     context.chat = [{ message_id: 0, mes: '开场白' }];
     await win.Mvu.replaceMvuData({ stat_data: { 主角: { 姓名: '懒加载注入' } } });
     await new Promise(res => setTimeout(res, 1000));
-    assert.ok(JSON.stringify(lastInitTemplateData || {}).includes('懒加载注入'), '懒加载场景开场写入应落库');
+    // 功能断言看表格内容（写库可能走 initGameSession 或快照/差异路径）
+    const zjLazy = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.strictEqual(zjLazy.content[1][zjLazy.content[0].indexOf('姓名')], '懒加载注入', '懒加载场景开场写入应落库');
 
     // 真实 ST 完整对象形状：extensions / 世界书都在 data 下、顶层没有 extensions——
     // 必须免 fetch 识别转换卡（不依赖“角色列表对象缺 extensions 再取完整卡”的兜底）
@@ -3590,6 +3613,135 @@ test('懒加载角色：缓存键用列表对象（带 avatar），开场写入�
     await new Promise(res => setTimeout(res, 1000));
     const zj2 = Object.values(tables).find(s => s && s.name === '主角表');
     assert.strictEqual(zj2.content[1][zj2.content[0].indexOf('姓名')], '真实结构注入', '真实 ST 对象形状下开场写入应落库');
+});
+
+test('刷新后运行时表空但 checkpoint 有数据：写库以 checkpoint 为基线，不覆盖持久化数据', async () => {
+    const vm2 = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => (e.kind === 'singleton'
+            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
+            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const srcDir = path.join(__dirname, '..', 'src');
+    const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
+    const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
+    const yamlLibsData = fs.readFileSync(path.join(srcDir, 'vendor', 'mvu-yaml-libs.js'), 'utf8');
+    const jsonrepairData = fs.readFileSync(path.join(srcDir, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+    const pinyinInline = pinyinData.replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ').replace(/;\s*$/, ';');
+    const yamlLibsInline = ['(function () {', '  var module = { exports: {} };', '  var exports = module.exports;', yamlLibsData, '  var target = typeof globalThis !== "undefined" ? globalThis : this;', '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;', '})();', ''].join('\n');
+    const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+    const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+
+    // 持久化数据：主角表 姓名='斯维姆'（刷新前写入过）
+    const persisted = JSON.parse(JSON.stringify(r.template));
+    const zjP = Object.values(persisted).find(s => s && s.name === '主角表');
+    zjP.content[1][zjP.content[0].indexOf('姓名')] = '斯维姆';
+    // 运行时表：刷新后回放未完成，只有表头
+    const tables = JSON.parse(JSON.stringify(r.template));
+    for (const k of Object.keys(tables)) {
+        if (tables[k] && Array.isArray(tables[k].content)) tables[k].content = [tables[k].content[0]];
+    }
+    const checkpointMsg = {
+        message_id: 0,
+        TavernDB_ACU_IsolatedData: JSON.stringify({
+            系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', data: persisted, ts: 1 } } },
+        }),
+    };
+    const converted = {
+        name: '刷新卡',
+        avatar: 'r.png',
+        data: {
+            extensions: {
+                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
+                regex_scripts: [],
+            },
+            character_book: {
+                entries: [{
+                    keys: ['__ACU_TEMPLATE_DATA__'],
+                    content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
+                }],
+            },
+        },
+    };
+    let initCalls = 0;
+    const fakeApi = {
+        getTemplatePresetNames: () => [],
+        exportTableAsJson: () => tables,
+        initGameSession: async () => { initCalls += 1; return { success: true, runtimeReady: true }; },
+        importTemplateFromData: async () => ({ success: true }),
+        importTableAsJson: async (jsonStr) => {
+            const parsed = JSON.parse(jsonStr);
+            for (const k of Object.keys(tables)) delete tables[k];
+            Object.assign(tables, parsed);
+            return true;
+        },
+        insertRow: async () => 1,
+        updateCell: async () => true,
+        deleteRow: async () => true,
+        registerTableUpdateCallback: () => true,
+    };
+    const handlers = {};
+    const context = {
+        chatId: 'c1', name: '测试', chat: [checkpointMsg],
+        characters: [converted], characterId: 0,
+        extensionSettings: { mvu2shujuku: { debug: true } },
+        eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received', MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated', MESSAGE_EDITED: 'edited', MESSAGE_SENT: 'sent', MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {}, saveChatConditional: async () => {}, saveChat: async () => {},
+        getRequestHeaders: () => ({}), setChatMessages: () => {},
+    };
+    const fakeEl = () => {
+        const el = {
+            dataset: {}, style: {}, children: [], _listeners: {}, _value: '',
+            addEventListener: (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); },
+            removeEventListener: () => {}, dispatchEvent: () => true,
+            appendChild: (c) => { el.children.push(c); return c; }, removeChild: () => {},
+            querySelector: () => fakeEl(), querySelectorAll: () => [],
+            click: () => {}, focus: () => {}, blur: () => {}, contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(el, 'innerHTML', { get: () => el._html || '', set: (v) => { el._html = v; } });
+        Object.defineProperty(el, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(el, 'value', { get: () => el._value, set: (v) => { el._value = v; } });
+        Object.defineProperty(el, 'checked', { get: () => !!el._checked, set: (v) => { el._checked = v; } });
+        Object.defineProperty(el, 'disabled', { get: () => !!el._disabled, set: (v) => { el._disabled = v; } });
+        return el;
+    };
+    const doc = {
+        querySelector: () => fakeEl(), getElementById: () => fakeEl(), createElement: () => fakeEl(),
+        createTextNode: () => fakeEl(), addEventListener: () => {}, body: fakeEl(),
+    };
+    const win = {
+        top: null, parent: null, document: doc, console,
+        setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t),
+        CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {}, toastr: undefined,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm2.createContext(win);
+    vm2.runInContext(extIndex, win);
+
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 2500));
+    assert.strictEqual(initCalls, 0, '已有 full checkpoint 时自动建表应跳过（与日志一致）');
+    // 前端写入一个变化：必须以 checkpoint 为基线，保留持久化数据（主角姓名）并应用变化
+    await win.Mvu.replaceMvuData({ stat_data: { 世界: { 当前时间: '测试时间' } } });
+    await new Promise(res => setTimeout(res, 1000));
+    const zjAfter = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.strictEqual(zjAfter.content[1][zjAfter.content[0].indexOf('姓名')], '斯维姆', '刷新后写库不得把持久化的主角姓名覆盖成默认值');
+    const worldAfter = Object.values(tables).find(s => s && s.name === '世界表');
+    assert.strictEqual(worldAfter.content[1][worldAfter.content[0].indexOf('当前时间')], '测试时间', '本次写入的变化应应用');
 });
 
 runTests();

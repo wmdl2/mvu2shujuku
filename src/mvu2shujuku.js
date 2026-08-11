@@ -5869,10 +5869,12 @@ ${DB_INIT_SNIPPET}
     // 把目标 stat_data 还原成完整表格 JSON：以当前导出为基座，覆盖目标值。
     // 供 importTableAsJson 走插件自己的提交管线——插件自己管理 V2 checkpoint，
     // 避免裸 updateCell 破坏锚点（实测裸写会触发 boundary_after_data_mismatch）。
-    function buildTableSnapshotFromStat(api, layoutEntries, tplCached, targetStat) {
+    function buildTableSnapshotFromStat(api, layoutEntries, tplCached, targetStat, baselineTables) {
         const tables = {};
         try {
-            const cur = api.exportTableAsJson() || {};
+            // 基线表：默认用运行时 export；刷新后插件回放异步导致运行时为空时，
+            // 调用方可传入持久化 checkpoint 的表格数据，避免把已有数据覆盖成空。
+            const cur = baselineTables || (api.exportTableAsJson() || {});
             for (const k of Object.keys(cur)) tables[k] = JSON.parse(JSON.stringify(cur[k]));
         } catch (e) {}
         const sd = targetStat || {};
@@ -6324,7 +6326,10 @@ ${DB_INIT_SNIPPET}
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
             for (const msg of chat) {
                 if (!msg || typeof msg !== 'object') continue;
-                const iso = msg.TavernDB_ACU_IsolatedData;
+                let iso = msg.TavernDB_ACU_IsolatedData;
+                // 插件实际按字符串存储；hasFullShujukuCheckpoint 会解析，这里也必须解析，
+                // 否则刷新后读不到持久化 checkpoint，基线缺失导致数据被覆盖成默认。
+                if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
                 if (!iso || typeof iso !== 'object') continue;
                 for (const k of Object.keys(iso)) {
                     const tag = iso[k];
@@ -6466,7 +6471,33 @@ ${DB_INIT_SNIPPET}
                         return;
                     }
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                    const prev = all.stat_data || {};
+                    let prev = all.stat_data || {};
+                    // 刷新后插件回放是异步的：运行时表格可能暂时为空，但 full checkpoint 里有持久化数据。
+                    // 此时以 checkpoint 表格数据为基线（prev 与快照都从它构建），
+                    // 避免把已有数据覆盖成空/默认（日志表现：checkpoint 33947 → 9307 被冲掉）。
+                    let baselineTables = null;
+                    let hasCp = false;
+                    try {
+                        hasCp = hasFullShujukuCheckpoint();
+                        if (hasCp) {
+                            const cur = api.exportTableAsJson() || {};
+                            let runtimeRows = 0;
+                            for (const k in cur) {
+                                if (k.indexOf('sheet_') === 0 && cur[k] && Array.isArray(cur[k].content)) {
+                                    runtimeRows += Math.max(0, cur[k].content.length - 1);
+                                }
+                            }
+                            if (runtimeRows === 0) {
+                                baselineTables = readFullCheckpointData();
+                                if (baselineTables) {
+                                    try {
+                                        const cpAll = window.MVU2SHUJUKU_CORE.statDataFromTables(activeLayout, baselineTables);
+                                        if (cpAll && cpAll.stat_data && typeof cpAll.stat_data === 'object') prev = cpAll.stat_data;
+                                    } catch (e) {}
+                                }
+                            }
+                        }
+                    } catch (e) {}
                     // 前端/脚本传来的 target 可能不完整：开场读取时布局未就绪，只拿到部分组
                     // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
                     // 缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
@@ -6492,8 +6523,11 @@ ${DB_INIT_SNIPPET}
                         // UI 显示“已初始化”，刷新后从 full checkpoint 恢复。
                         // 注意不能依赖 mvu2shujukuTablesSafeToAnchor 判断：物化垫脚行会让它误判非初始。
                         const chatKeyNow = autoInitChatId();
-                        const isFirstWrite = !initializedViaGameSession.has(chatKeyNow);
-                        const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, effectiveTarget);
+                        // 已有 full checkpoint = 该聊天已初始化过（持久化数据存在），
+                        // 不能当作“首次写库”用 initGameSession 重建（会覆盖持久化数据），
+                        // 应走合并/快照路径并把 checkpoint 数据当基线。
+                        const isFirstWrite = !initializedViaGameSession.has(chatKeyNow) && !hasCp;
+                        const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, effectiveTarget, baselineTables);
                         // 首次写库直接用注入后的 stat_data 覆盖模板行（等价于参考卡 buildOpeningTemplateData）：
                         // 开局时运行时表格常为空，exportTableAsJson 拿不到任何表，快照合并会把用户数据丢掉；
                         // 直接改模板 content 则无论运行时状态如何，注入数据都在传入 initGameSession 的模板里。
