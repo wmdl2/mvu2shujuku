@@ -6364,34 +6364,53 @@ ${DB_INIT_SNIPPET}
     }
 
     // 读取聊天中 full checkpoint 的数据（跨所有消息与隔离标签）。
-    // 只认 storageFrame.version=2 + checkpoint.kind=full 的帧；读不到返回 null。
+    // 与插件 V2 回放语义一致：
+    //   1. checkpoint.kind=full 的帧；
+    //   2. 没有可用 full checkpoint 时，logEntries 里最后一个 data_replace 自带完整后态，
+    //      可作持久化真相（插件 findLastUsableReplacementAnchor_ACU 同款语义）。
+    // 多份候选并存时按 (消息序号, 条目序号) 取最新一份，避免旧锚/模板默认值遮蔽真数据。
     function readFullCheckpointData() {
         try {
             const ctx = getContextSafe();
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-            // 多份 full checkpoint 并存时（首楼替换/重锚历史残留），取数据最完整的一份：
-            // 旧锚可能只含模板/默认值，而真正带注入数据的 checkpoint 挂在后续消息上
-            // （实测道渊：msg0=30KB 旧锚，msg1=383KB 真数据）。按数据体积取最大，避免
-            // 重进恢复/写库基线读到旧锚而把数据覆盖成默认。
             let best = null;
-            let bestSize = -1;
-            for (const msg of chat) {
+            let bestPos = Number.NEGATIVE_INFINITY;
+            const consider = (data, pos) => {
+                if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+                let sheets = 0;
+                for (const k in data) { if (k.indexOf('sheet_') === 0) sheets++; }
+                if (!sheets) return;
+                if (pos > bestPos) { best = data; bestPos = pos; }
+            };
+            for (let mi = 0; mi < chat.length; mi++) {
+                const msg = chat[mi];
                 if (!msg || typeof msg !== 'object') continue;
                 let iso = msg.TavernDB_ACU_IsolatedData;
                 // 插件实际按字符串存储；hasFullShujukuCheckpoint 会解析，这里也必须解析，
                 // 否则刷新后读不到持久化 checkpoint，基线缺失导致数据被覆盖成默认。
                 if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
-                if (!iso || typeof iso !== 'object') continue;
+                if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
                 for (const k of Object.keys(iso)) {
                     const tag = iso[k];
-                    if (!tag || typeof tag !== 'object') continue;
+                    if (!tag || typeof tag !== 'object' || Array.isArray(tag)) continue;
                     const sf = tag.storageFrame;
                     if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
                     const cp = sf.checkpoint;
-                    if (cp && cp.kind === 'full' && cp.data && typeof cp.data === 'object') {
-                        let size = 0;
-                        try { size = JSON.stringify(cp.data).length; } catch (e) {}
-                        if (size > bestSize) { best = cp.data; bestSize = size; }
+                    // full checkpoint 视为该消息内最早的完整状态
+                    if (cp && typeof cp === 'object' && cp.kind === 'full' && cp.data && typeof cp.data === 'object') {
+                        consider(cp.data, mi * 1e6 - 1);
+                    }
+                    // data_replace 自带完整后态：最新一条即当前持久化状态（对齐插件回放基底）
+                    for (let ei = 0; ei < sf.logEntries.length; ei++) {
+                        const entry = sf.logEntries[ei];
+                        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+                        const ops = Array.isArray(entry.operations) ? entry.operations : [];
+                        for (let oi = 0; oi < ops.length; oi++) {
+                            const op = ops[oi];
+                            if (op && typeof op === 'object' && op.kind === 'data_replace') {
+                                consider(op.data, mi * 1e6 + ei * 1000 + oi);
+                            }
+                        }
                     }
                 }
             }
