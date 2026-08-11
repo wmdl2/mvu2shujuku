@@ -25,6 +25,50 @@ function requireFixture() {
     return require(FIXTURE);
 }
 
+// 模拟真实插件行为的 fake API：updateCell/insertRow/deleteRow 真实落表，
+// importTableAsJson 记录并替换表数据（与原生数据库卡的写路径一致）。
+function applyingApi(tables, opts = {}) {
+    return {
+        getTemplatePresetNames: () => [],
+        exportTableAsJson: () => tables,
+        initGameSession: async () => {
+            if (opts.onInit) await opts.onInit();
+            return { success: true, runtimeReady: true };
+        },
+        importTemplateFromData: async () => ({ success: true }),
+        importTableAsJson: async (jsonStr, o) => {
+            const parsed = JSON.parse(jsonStr);
+            if (opts.onImport) opts.onImport(parsed, o);
+            for (const k of Object.keys(tables)) delete tables[k];
+            Object.assign(tables, parsed);
+            return true;
+        },
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s || !s.content[rowIndex]) return false;
+            const ci = s.content[0].indexOf(col);
+            if (ci === -1) return false;
+            s.content[rowIndex][ci] = String(value);
+            return true;
+        },
+        insertRow: async (tableName, obj) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s) return 0;
+            const row = s.content[0].map(h => (obj && obj[h] !== undefined && obj[h] !== null) ? String(obj[h]) : '');
+            row[0] = s.content.length || 1;
+            s.content.push(row);
+            return row[0];
+        },
+        deleteRow: async (tableName, rowIndex) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s || !s.content[rowIndex]) return false;
+            s.content.splice(rowIndex, 1);
+            return true;
+        },
+        registerTableUpdateCallback: () => true,
+    };
+}
+
 let passed = 0;
 let failed = 0;
 const pendingTests = [];
@@ -3692,22 +3736,9 @@ test('刷新后运行时表空但 checkpoint 有数据：写库以 checkpoint �
         },
     };
     let initCalls = 0;
-    const fakeApi = {
-        getTemplatePresetNames: () => [],
-        exportTableAsJson: () => tables,
-        initGameSession: async () => { initCalls += 1; return { success: true, runtimeReady: true }; },
-        importTemplateFromData: async () => ({ success: true }),
-        importTableAsJson: async (jsonStr) => {
-            const parsed = JSON.parse(jsonStr);
-            for (const k of Object.keys(tables)) delete tables[k];
-            Object.assign(tables, parsed);
-            return true;
-        },
-        insertRow: async () => 1,
-        updateCell: async () => true,
-        deleteRow: async () => true,
-        registerTableUpdateCallback: () => true,
-    };
+    const fakeApi = applyingApi(tables, {
+        onInit: async () => { initCalls += 1; },
+    });
     const handlers = {};
     const context = {
         chatId: 'c1', name: '测试', chat: [checkpointMsg],
@@ -3820,22 +3851,9 @@ test('运行时 sheet key 与模板不一致（插件稳定 key）：快照合�
         },
     };
     let lastImport = null;
-    const fakeApi = {
-        getTemplatePresetNames: () => [],
-        exportTableAsJson: () => tables,
-        initGameSession: async () => ({ success: true, runtimeReady: true }),
-        importTemplateFromData: async () => ({ success: true }),
-        importTableAsJson: async (jsonStr) => {
-            lastImport = JSON.parse(jsonStr);
-            for (const k of Object.keys(tables)) delete tables[k];
-            Object.assign(tables, lastImport);
-            return true;
-        },
-        insertRow: async () => 1,
-        updateCell: async () => true,
-        deleteRow: async () => true,
-        registerTableUpdateCallback: () => true,
-    };
+    const fakeApi = applyingApi(tables, {
+        onImport: (parsed) => { lastImport = parsed; },
+    });
     const handlers = {};
     const context = {
         chatId: 'c-stable', name: '测试', chat: [checkpointMsg],
@@ -3888,16 +3906,13 @@ test('运行时 sheet key 与模板不一致（插件稳定 key）：快照合�
     await new Promise(res => setTimeout(res, 2500));
     await win.Mvu.replaceMvuData({ stat_data: { 主角: { 姓名: '稳定键注入' } } });
     await new Promise(res => setTimeout(res, 1200));
-    assert.ok(lastImport, '写入应走到 importTableAsJson 快照提交');
-    const importKeys = Object.keys(lastImport).filter(k => k.startsWith('sheet_'));
-    assert.ok(importKeys.length > 0 && importKeys.every(k => k.indexOf('sheet_ST_') === 0), '提交 payload 必须使用插件稳定 key（防止同一规范表名并存两套 key 导致回放冲突）');
-    const zjSent = Object.values(lastImport).find(s => s && s.name === '主角表');
-    assert.strictEqual(zjSent.content[1][zjSent.content[0].indexOf('姓名')], '稳定键注入', '运行时 key 与模板不一致时，快照合并应按表名兜底，写入不得丢值');
+    assert.strictEqual(lastImport, null, '差异写入不应触发 importTableAsJson 整表替换（避免切换/并存两套 key）');
+    assert.ok(Object.keys(tables).some(k => k.indexOf('sheet_ST_') === 0), '运行时 sheet key 应保持不变，不切换身份');
     const zjNow = Object.values(tables).find(s => s && s.name === '主角表');
     assert.strictEqual(zjNow.content[1][zjNow.content[0].indexOf('姓名')], '稳定键注入', '提交后运行时主角表应含新值');
 });
 
-test('运行时 seedRows 与 content 的 row_id 冲突：提交快照/重建模板时剔除冲突种子行（插件 initGameSession 校验）', async () => {
+test('行表键同时存在于 seedRows 与 content：差异写入只更新 content 行、不重复插入；仅 seedRows 时跳过 INSERT', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -3917,60 +3932,33 @@ test('运行时 seedRows 与 content 的 row_id 冲突：提交快照/重建模�
     const yamlLibsInline = ['(function () {', '  var module = { exports: {} };', '  var exports = module.exports;', yamlLibsData, '  var target = typeof globalThis !== "undefined" ? globalThis : this;', '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;', '})();', ''].join('\n');
     const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
     const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+    const layout = toLayout(r.schema);
 
-    // 运行时表：content row_id=1 + seedRows row_id=1（模拟插件运行时导出的冲突形态）
+    // 气运表：content 与 seedRows 同时含同键（模拟插件运行时导出的冲突形态）
     const tables = JSON.parse(JSON.stringify(r.template));
-    for (const k of Object.keys(tables)) {
-        if (k.indexOf('sheet_') !== 0) continue;
-        const s = tables[k];
-        if (!Array.isArray(s.content) || s.content.length < 2) continue;
-        s.seedRows = [[1, '种子冲突行']];
-    }
-    const persisted = JSON.parse(JSON.stringify(r.template));
-    const checkpointMsg = {
-        message_id: 0,
-        TavernDB_ACU_IsolatedData: JSON.stringify({
-            系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', data: persisted, ts: 1 } } },
-        }),
-    };
-    const converted = {
-        name: '种子卡',
-        avatar: 'sd.png',
-        data: {
-            extensions: {
-                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
-                regex_scripts: [],
-            },
-            character_book: {
-                entries: [{
-                    keys: ['__ACU_TEMPLATE_DATA__'],
-                    content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
-                }],
-            },
-        },
-    };
-    let lastImport = null;
+    const qy = Object.values(tables).find(s => s && s.name === '气运表');
+    const keyCol = '名称';
+    qy.content = [qy.content[0], [1, '测试气运', '被动', '效果']];
+    qy.seedRows = [[1, '测试气运', '被动', '效果']];
+    let insertCount = 0;
     const fakeApi = {
-        getTemplatePresetNames: () => [],
         exportTableAsJson: () => tables,
-        initGameSession: async () => ({ success: true, runtimeReady: true }),
-        importTemplateFromData: async () => ({ success: true }),
-        importTableAsJson: async (jsonStr) => {
-            lastImport = JSON.parse(jsonStr);
-            for (const k of Object.keys(tables)) delete tables[k];
-            Object.assign(tables, lastImport);
+        insertRow: async (t, o) => { insertCount += 1; return 99; },
+        updateCell: async (t, ri, col, v) => {
+            const s = Object.values(tables).find(x => x && x.name === t);
+            if (!s || !s.content[ri]) return false;
+            s.content[ri][s.content[0].indexOf(col)] = String(v);
             return true;
         },
-        insertRow: async () => 1,
-        updateCell: async () => true,
         deleteRow: async () => true,
+        executeSqlBatch: async () => ({ success: true }),
         registerTableUpdateCallback: () => true,
     };
     const handlers = {};
     const context = {
-        chatId: 'c-seed', name: '测试', chat: [checkpointMsg],
-        characters: [converted], characterId: 0,
-        extensionSettings: { mvu2shujuku: { debug: true } },
+        chatId: 'c-seed', name: '测试', chat: [],
+        characters: [], characterId: 0,
+        extensionSettings: { mvu2shujuku: { debug: false } },
         eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
         event_types: {
             CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received', MESSAGE_SWIPED: 'swiped',
@@ -4014,28 +4002,28 @@ test('运行时 seedRows 与 content 的 row_id 冲突：提交快照/重建模�
     vm2.createContext(win);
     vm2.runInContext(extIndex, win);
 
-    (handlers['chat_changed'] || []).forEach(fn => fn());
-    await new Promise(res => setTimeout(res, 2500));
-    await win.Mvu.replaceMvuData({ stat_data: { 世界: { 当前时间: '测试时间' } } });
-    await new Promise(res => setTimeout(res, 1200));
-    assert.ok(lastImport, '写入应走到 importTableAsJson');
-    for (const k of Object.keys(lastImport || {})) {
-        if (k.indexOf('sheet_') !== 0) continue;
-        const sheet = lastImport[k];
-        if (!Array.isArray(sheet.seedRows) || !Array.isArray(sheet.content)) continue;
-        const contentIds = new Set();
-        for (const row of sheet.content.slice(1)) {
-            if (Array.isArray(row) && row[0] !== undefined && row[0] !== null && row[0] !== '') contentIds.add(String(row[0]));
-        }
-        for (const row of sheet.seedRows) {
-            if (Array.isArray(row) && row[0] !== undefined && row[0] !== null && row[0] !== '') {
-                assert.ok(!contentIds.has(String(row[0])), k + ' 的 seedRows 不得与 content row_id 冲突（插件 initGameSession 会拒绝）');
-            }
-        }
-    }
+    const prev = { 主角: { 气运: { 测试气运: { 名称: '测试气运', 类型: '被动' } } } };
+    // 1) 键同时存在于 content 与 seedRows：只更新 content 行，不重复插入
+    const n1 = await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, layout, prev, { 主角: { 气运: { 测试气运: { 名称: '测试气运', 类型: '主动' } } } });
+    assert.ok(n1 > 0, 'content 行更新应有写入');
+    assert.strictEqual(insertCount, 0, '键已在 content 时不应 INSERT（避免撞 UNIQUE/重复行）');
+    const ki = qy.content[0].indexOf('类型');
+    assert.strictEqual(qy.content[1][ki], '主动', 'content 行应被更新');
+    assert.strictEqual(qy.content.slice(1).length, 1, 'content 不应出现重复行');
+    // 2) 键只在 seedRows（content 无行）：跳过 INSERT，等插件物化后再写
+    qy.content = [qy.content[0]];
+    qy.seedRows = [[1, '测试气运', '被动', '效果']];
+    const n2 = await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, layout, prev, { 主角: { 气运: { 测试气运: { 名称: '测试气运', 类型: '突破' } } } });
+    assert.strictEqual(n2, 0, '键仅在 seedRows 时应跳过写入（不 INSERT 撞 UNIQUE）');
+    assert.strictEqual(qy.content.length, 1, 'content 应保持仅表头');
+    // 3) 键既不在 content 也不在 seedRows：INSERT 新行
+    const n3 = await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, layout, { 主角: { 气运: {} } }, { 主角: { 气运: { 新气运: { 名称: '新气运', 类型: '被动' } } } });
+    assert.ok(n3 > 0, '新键应走 INSERT');
+    assert.strictEqual(insertCount, 1, '应恰好一次 INSERT');
 });
 
-test('删除行表条目（如删气运）：快照必须同步移除对应行', async () => {
+
+test('删除行表条目（如删气运）：差异路径 deleteRow 同步移除对应行', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -4083,22 +4071,9 @@ test('删除行表条目（如删气运）：快照必须同步移除对应行',
         },
     };
     let lastImport = null;
-    const fakeApi = {
-        getTemplatePresetNames: () => [],
-        exportTableAsJson: () => tables,
-        initGameSession: async () => ({ success: true, runtimeReady: true }),
-        importTemplateFromData: async () => ({ success: true }),
-        importTableAsJson: async (jsonStr) => {
-            lastImport = JSON.parse(jsonStr);
-            for (const k of Object.keys(tables)) delete tables[k];
-            Object.assign(tables, lastImport);
-            return true;
-        },
-        insertRow: async () => 1,
-        updateCell: async () => true,
-        deleteRow: async () => true,
-        registerTableUpdateCallback: () => true,
-    };
+    const fakeApi = applyingApi(tables, {
+        onImport: (parsed) => { lastImport = parsed; },
+    });
     const handlers = {};
     const context = {
         chatId: 'c-del', name: '测试', chat: [checkpointMsg],
@@ -4162,18 +4137,13 @@ test('删除行表条目（如删气运）：快照必须同步移除对应行',
     delete stat.主角.气运[targetKey];
     await win.Mvu.replaceMvuData({ stat_data: stat });
     await new Promise(res => setTimeout(res, 1200));
-    assert.ok(lastImport, '写入应走到 importTableAsJson');
-    const qySent = Object.values(lastImport).find(s => s && s.name === '气运表');
-    const keyIdxSent = qySent.content[0].indexOf(keyCol);
-    const keysSent = qySent.content.slice(1).map(row => row && row[keyIdxSent]).filter(Boolean);
-    assert.ok(!keysSent.includes(targetKey), '删除操作后提交快照的气运表不应再包含被删条目');
     const qyNow = Object.values(tables).find(s => s && s.name === '气运表');
     const keyIdxNow = qyNow.content[0].indexOf(keyCol);
     const keysNow = qyNow.content.slice(1).map(row => row && row[keyIdxNow]).filter(Boolean);
     assert.ok(!keysNow.includes(targetKey), '删除操作后运行时气运表不应再包含被删条目');
 });
 
-test('条目只在 seedRows（content 无行）时删除：快照须同步清理 seedRows', async () => {
+test('条目只在 seedRows（content 无行）时删除：删除同步清理 seedRows', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -4224,22 +4194,9 @@ test('条目只在 seedRows（content 无行）时删除：快照须同步清理
         },
     };
     let lastImport = null;
-    const fakeApi = {
-        getTemplatePresetNames: () => [],
-        exportTableAsJson: () => tables,
-        initGameSession: async () => ({ success: true, runtimeReady: true }),
-        importTemplateFromData: async () => ({ success: true }),
-        importTableAsJson: async (jsonStr) => {
-            lastImport = JSON.parse(jsonStr);
-            for (const k of Object.keys(tables)) delete tables[k];
-            Object.assign(tables, lastImport);
-            return true;
-        },
-        insertRow: async () => 1,
-        updateCell: async () => true,
-        deleteRow: async () => true,
-        registerTableUpdateCallback: () => true,
-    };
+    const fakeApi = applyingApi(tables, {
+        onImport: (parsed) => { lastImport = parsed; },
+    });
     const handlers = {};
     const context = {
         chatId: 'c-seeddel', name: '测试', chat: [checkpointMsg],
@@ -4296,14 +4253,14 @@ test('条目只在 seedRows（content 无行）时删除：快照须同步清理
     delete stat.主角.气运['测试气运'];
     await win.Mvu.replaceMvuData({ stat_data: stat });
     await new Promise(res => setTimeout(res, 1200));
-    assert.ok(lastImport, '写入应走到 importTableAsJson');
-    const qySent = Object.values(lastImport).find(s => s && s.name === '气运表');
+    assert.ok(lastImport, '删除 seedRows 条目应走到 importTableAsJson 快照兜底');
+    const qySent = Object.values(tables).find(s => s && s.name === '气运表');
     const ki = qySent.content[0].indexOf(keyCol);
     const seedKeys = (qySent.seedRows || []).map(row => row && row[ki]).filter(Boolean);
-    assert.ok(!seedKeys.includes('测试气运'), '删除后提交快照的 seedRows 不应再包含被删条目');
+    assert.ok(!seedKeys.includes('测试气运'), '删除后 seedRows 不应再包含被删条目');
 });
 
-test('首写（initGameSession）后强制物化：行表数据必须落到 content（不留在 seedRows）', async () => {
+test('首写缺锚点：写库前 initGameSession 建锚，差异写入把行表数据物化到 content（不留在 seedRows）', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -4344,30 +4301,18 @@ test('首写（initGameSession）后强制物化：行表数据必须落到 cont
     };
     let initCalls = 0;
     let restoreCalls = 0;
-    const fakeApi = {
-        getTemplatePresetNames: () => [],
-        exportTableAsJson: () => tables,
-        initGameSession: async () => {
+    const fakeApi = applyingApi(tables, {
+        onInit: async () => {
             initCalls += 1;
             // 与真实插件一致：initGameSession 会建立 full checkpoint
             context.chat[0].TavernDB_ACU_IsolatedData = JSON.stringify({
                 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', data: JSON.parse(JSON.stringify(tables)), ts: 1 } } },
             });
-            return { success: true, runtimeReady: true };
         },
-        importTemplateFromData: async () => ({ success: true }),
-        importTableAsJson: async (jsonStr, opts) => {
+        onImport: (parsed, opts) => {
             if (opts && opts.persist === false) restoreCalls += 1;
-            const parsed = JSON.parse(jsonStr);
-            for (const k of Object.keys(tables)) delete tables[k];
-            Object.assign(tables, parsed);
-            return true;
         },
-        insertRow: async () => 1,
-        updateCell: async () => true,
-        deleteRow: async () => true,
-        registerTableUpdateCallback: () => true,
-    };
+    });
     const handlers = {};
     const context = {
         chatId: 'c-first', name: '测试', chat: [{ message_id: 0, mes: '开场白' }],
@@ -4418,7 +4363,7 @@ test('首写（initGameSession）后强制物化：行表数据必须落到 cont
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
     await new Promise(res => setTimeout(res, 2500));
-    // 开场注入：写入气运（首写 → initGameSession）
+    // 开场注入：写入气运（首写缺锚点 → 写库前 initGameSession 建锚，再差异写入）
     await win.Mvu.replaceMvuData({ stat_data: { 主角: { 气运: { 测试气运: { 名称: '测试气运', 类型: '被动' } } } } });
     await new Promise(res => setTimeout(res, 1200));
     assert.ok(initCalls >= 1, '首写应走 initGameSession');
@@ -4581,22 +4526,9 @@ test('溢出列 _扩展数据 删除同步：stat_data 移除的动态字段不�
         },
     };
     let lastImport = null;
-    const fakeApi = {
-        getTemplatePresetNames: () => [],
-        exportTableAsJson: () => tables,
-        initGameSession: async () => ({ success: true, runtimeReady: true }),
-        importTemplateFromData: async () => ({ success: true }),
-        importTableAsJson: async (jsonStr) => {
-            lastImport = JSON.parse(jsonStr);
-            for (const k of Object.keys(tables)) delete tables[k];
-            Object.assign(tables, lastImport);
-            return true;
-        },
-        insertRow: async () => 1,
-        updateCell: async () => true,
-        deleteRow: async () => true,
-        registerTableUpdateCallback: () => true,
-    };
+    const fakeApi = applyingApi(tables, {
+        onImport: (parsed) => { lastImport = parsed; },
+    });
     const handlers = {};
     const context = {
         chatId: 'c-ov', name: '测试', chat: [checkpointMsg],
@@ -4650,19 +4582,21 @@ test('溢出列 _扩展数据 删除同步：stat_data 移除的动态字段不�
     // 写入一个未声明字段（进溢出列）
     await win.Mvu.replaceMvuData({ stat_data: { 主角: { 动态字段: 'x' } } });
     await new Promise(res => setTimeout(res, 800));
-    let zj = Object.values(lastImport).find(s => s && s.name === '主角表');
+    let zj = Object.values(tables).find(s => s && s.name === '主角表');
     let ovIdx = zj.content[0].indexOf('_扩展数据');
     let ov = JSON.parse(zj.content[1][ovIdx] || '{}');
     assert.strictEqual(ov.动态字段, 'x', '未声明字段应写入溢出列');
-    // 删除该字段（stat_data 不含它）→ 溢出列应同步移除
-    const d = win.Mvu.getMvuData();
-    delete d.stat_data.主角.动态字段;
-    await win.Mvu.replaceMvuData({ stat_data: d.stat_data });
-    await new Promise(res => setTimeout(res, 800));
-    zj = Object.values(lastImport).find(s => s && s.name === '主角表');
-    ovIdx = zj.content[0].indexOf('_扩展数据');
-    ov = JSON.parse(zj.content[1][ovIdx] || '{}');
-    assert.ok(!('动态字段' in ov), 'stat_data 移除的动态字段不应残留在溢出列');
+    // 删除该字段（stat_data 不含它）→ 差异路径应从 _扩展数据 同步移除，且保留其他动态字段
+    zj.content[1][ovIdx] = JSON.stringify({ 动态字段: 'x', 其他字段: 'y' });
+    const prevOv = { 主角: { 姓名: '斯维姆', 动态字段: 'x', 其他字段: 'y' } };
+    const nextOv = { 主角: { 姓名: '斯维姆', 其他字段: 'y' } };
+    const nOv = await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, toLayout(r.schema), prevOv, nextOv);
+    assert.ok(nOv > 0, '溢出字段删除应有写入');
+    const zj2 = Object.values(tables).find(s => s && s.name === '主角表');
+    const ov2 = JSON.parse(zj2.content[1][zj2.content[0].indexOf('_扩展数据')] || '{}');
+    assert.ok(!('动态字段' in ov2), 'stat_data 移除的动态字段不应残留在溢出列');
+    assert.strictEqual(ov2.其他字段, 'y', '其他动态字段应保留');
+    assert.strictEqual(lastImport, null, '溢出字段写入/删除都应走差异路径，不触发整表快照');
 });
 
 test('重进聊天：多份 full checkpoint 并存时取最大一份恢复运行时（SQLite 重进漏恢复兜底）', async () => {
