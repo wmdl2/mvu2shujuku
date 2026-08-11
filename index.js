@@ -5325,7 +5325,12 @@ ${DB_INIT_SNIPPET}
         if (typeof api.importTableAsJson === 'function') {
             dbg('[锚点] ' + reason + '：表含数据且无锚点，用 importTableAsJson 把当前状态提交为 checkpoint…');
             try {
-                const snap = JSON.stringify(api.exportTableAsJson() || {});
+                // importTableAsJson 要求 {mate, sheet_*}：export 视图可能无 mate，补空 mate
+                // （插件 sanitizeChatSheetsObject ensureMate 补齐），避免结构校验拒绝。
+                const rawSnap = api.exportTableAsJson() || {};
+                const snapObj = Object.assign({}, rawSnap);
+                if (!(snapObj.mate && typeof snapObj.mate === 'object')) snapObj.mate = {};
+                const snap = JSON.stringify(snapObj);
                 const ok2 = await Promise.resolve(api.importTableAsJson(snap, {}));
                 dbg('[锚点] ' + reason + '：importTableAsJson 锚定=' + (ok2 ? '成功' : '失败'));
                 return !!ok2;
@@ -5353,7 +5358,12 @@ ${DB_INIT_SNIPPET}
         if (typeof api.importTableAsJson === 'function' && !mvu2shujukuInitSessionHung) {
             dbg('[锚点] 写库前：initGameSession 未建立锚点，改用 importTableAsJson 强制锚定…');
             try {
-                const snap = JSON.stringify(api.exportTableAsJson() || {});
+                // importTableAsJson 要求 {mate, sheet_*}：export 视图可能无 mate，补空 mate
+                // （插件 sanitizeChatSheetsObject ensureMate 补齐），避免结构校验拒绝。
+                const rawSnap = api.exportTableAsJson() || {};
+                const snapObj = Object.assign({}, rawSnap);
+                if (!(snapObj.mate && typeof snapObj.mate === 'object')) snapObj.mate = {};
+                const snap = JSON.stringify(snapObj);
                 await Promise.resolve(api.importTableAsJson(snap, {}));
             } catch (e) {
                 dbgWarn('[锚点] 写库前 importTableAsJson 强制锚定异常:', e);
@@ -6900,10 +6910,11 @@ ${DB_INIT_SNIPPET}
             const cpData = readFullCheckpointData();
             if (!cpData || typeof api.importTableAsJson !== 'function') return false;
             // 插件 importTableAsJson 要求输入含 {mate, sheet_*}：checkpoint.data 是插件自身
-            // 持久化格式（无 mate），直接导入会被拒。先试裸数据（最干净），失败后用
-            // getTableTemplate 提供的 mate 包装 cpData 再试，最终回退 initGameSession 重建
-            // （插件接受无 mate 的模板格式，且会用规范化数据写含 mate 的新 checkpoint，自愈）。
-            if (await restoreWith(cpData, '裸 checkpoint')) return true;
+            // 持久化格式（无 mate）。先补一个空 mate（插件 sanitizeChatSheetsObject 会
+            // ensureMate 补齐结构），避免插件直接拒绝并弹 toastr。深拷贝，不污染聊天里的 checkpoint。
+            const payload = JSON.parse(JSON.stringify(cpData));
+            if (!(payload.mate && typeof payload.mate === 'object')) payload.mate = {};
+            if (await restoreWith(payload, 'checkpoint+mate')) return true;
             let tpl = null;
             try { tpl = await Promise.resolve(api.getTableTemplate({ scope: 'chat' })) || null; } catch (e) { tpl = null; }
             const base = (tpl && typeof tpl === 'object' && tpl.mate) ? JSON.parse(JSON.stringify(tpl)) : null;
@@ -7113,6 +7124,9 @@ ${DB_INIT_SNIPPET}
                         // 快照兜底：只用插件稳定 key（snap），不写原始 key 模板
                         try {
                             const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, effectiveTarget, null);
+                            // importTableAsJson 要求 {mate, sheet_*}：快照构建器只产出 sheet 表，
+                            // 补空 mate（插件 sanitizeChatSheetsObject ensureMate 补齐）避免结构校验拒绝。
+                            if (!(snap.mate && typeof snap.mate === 'object')) snap.mate = {};
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
                             if (ok) {
                                 writeOk = true;
@@ -19791,7 +19805,12 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         if (typeof api.importTableAsJson === 'function') {
             dbg('[锚点] ' + reason + '：表含数据且无锚点，用 importTableAsJson 把当前状态提交为 checkpoint…');
             try {
-                const snap = JSON.stringify(api.exportTableAsJson() || {});
+                // importTableAsJson 要求 {mate, sheet_*}：export 视图可能无 mate，补空 mate
+                // （插件 sanitizeChatSheetsObject ensureMate 补齐），避免结构校验拒绝。
+                const rawSnap = api.exportTableAsJson() || {};
+                const snapObj = Object.assign({}, rawSnap);
+                if (!(snapObj.mate && typeof snapObj.mate === 'object')) snapObj.mate = {};
+                const snap = JSON.stringify(snapObj);
                 const ok2 = await Promise.resolve(api.importTableAsJson(snap, {}));
                 dbg('[锚点] ' + reason + '：importTableAsJson 锚定=' + (ok2 ? '成功' : '失败'));
                 return !!ok2;
@@ -19819,7 +19838,12 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         if (typeof api.importTableAsJson === 'function' && !mvu2shujukuInitSessionHung) {
             dbg('[锚点] 写库前：initGameSession 未建立锚点，改用 importTableAsJson 强制锚定…');
             try {
-                const snap = JSON.stringify(api.exportTableAsJson() || {});
+                // importTableAsJson 要求 {mate, sheet_*}：export 视图可能无 mate，补空 mate
+                // （插件 sanitizeChatSheetsObject ensureMate 补齐），避免结构校验拒绝。
+                const rawSnap = api.exportTableAsJson() || {};
+                const snapObj = Object.assign({}, rawSnap);
+                if (!(snapObj.mate && typeof snapObj.mate === 'object')) snapObj.mate = {};
+                const snap = JSON.stringify(snapObj);
                 await Promise.resolve(api.importTableAsJson(snap, {}));
             } catch (e) {
                 dbgWarn('[锚点] 写库前 importTableAsJson 强制锚定异常:', e);
@@ -21366,10 +21390,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const cpData = readFullCheckpointData();
             if (!cpData || typeof api.importTableAsJson !== 'function') return false;
             // 插件 importTableAsJson 要求输入含 {mate, sheet_*}：checkpoint.data 是插件自身
-            // 持久化格式（无 mate），直接导入会被拒。先试裸数据（最干净），失败后用
-            // getTableTemplate 提供的 mate 包装 cpData 再试，最终回退 initGameSession 重建
-            // （插件接受无 mate 的模板格式，且会用规范化数据写含 mate 的新 checkpoint，自愈）。
-            if (await restoreWith(cpData, '裸 checkpoint')) return true;
+            // 持久化格式（无 mate）。先补一个空 mate（插件 sanitizeChatSheetsObject 会
+            // ensureMate 补齐结构），避免插件直接拒绝并弹 toastr。深拷贝，不污染聊天里的 checkpoint。
+            const payload = JSON.parse(JSON.stringify(cpData));
+            if (!(payload.mate && typeof payload.mate === 'object')) payload.mate = {};
+            if (await restoreWith(payload, 'checkpoint+mate')) return true;
             let tpl = null;
             try { tpl = await Promise.resolve(api.getTableTemplate({ scope: 'chat' })) || null; } catch (e) { tpl = null; }
             const base = (tpl && typeof tpl === 'object' && tpl.mate) ? JSON.parse(JSON.stringify(tpl)) : null;
@@ -21579,6 +21604,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         // 快照兜底：只用插件稳定 key（snap），不写原始 key 模板
                         try {
                             const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, effectiveTarget, null);
+                            // importTableAsJson 要求 {mate, sheet_*}：快照构建器只产出 sheet 表，
+                            // 补空 mate（插件 sanitizeChatSheetsObject ensureMate 补齐）避免结构校验拒绝。
+                            if (!(snap.mate && typeof snap.mate === 'object')) snap.mate = {};
                             const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
                             if (ok) {
                                 writeOk = true;
