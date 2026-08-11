@@ -6965,6 +6965,58 @@ ${DB_INIT_SNIPPET}
                 if (frameInfo !== '无') break;
             }
             const rtCur = api.exportTableAsJson() || {};
+            // 逐 log 条目 dump 操作（定位回放丢行：row_upsert 被跳过 / row_delete 删行 / sql_sheet_batch 覆盖）
+            try {
+                const opSummaries = [];
+                for (let mi = 0; mi < chat.length; mi++) {
+                    const msg = chat[mi];
+                    if (!msg || typeof msg !== 'object') continue;
+                    let iso = msg.TavernDB_ACU_IsolatedData;
+                    if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
+                    if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
+                    for (const tagKey of Object.keys(iso)) {
+                        const tag = iso[tagKey];
+                        if (!tag || typeof tag !== 'object' || Array.isArray(tag)) continue;
+                        const sf = tag.storageFrame;
+                        if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
+                        for (let ei = 0; ei < sf.logEntries.length; ei++) {
+                            const en = sf.logEntries[ei];
+                            const ops = Array.isArray(en && en.operations) ? en.operations : [];
+                            if (ops.length === 0) { opSummaries.push('msg' + mi + '#e' + ei + ':no-ops'); continue; }
+                            for (let oi = 0; oi < ops.length; oi++) {
+                                const op = ops[oi];
+                                if (!op || typeof op !== 'object') continue;
+                                const kind = op.kind;
+                                const sk = op.sheetKey || '';
+                                const rid = op.rowId !== undefined && op.rowId !== null ? String(op.rowId) : '';
+                                let detail = '';
+                                if (Array.isArray(op.cells)) detail = 'cells=' + op.cells.length + ':[' + String(op.cells[0] ?? '') + '|' + String(op.cells[1] ?? '') + ']';
+                                else if (typeof op.sql === 'string') detail = 'sql=' + op.sql.slice(0, 90).replace(/\n/g, ' ');
+                                else if (op.sheet && op.sheet.content && Array.isArray(op.sheet.content)) detail = 'sheetRows=' + (op.sheet.content.length - 1);
+                                opSummaries.push('msg' + mi + '#e' + ei + '#o' + oi + ':' + kind + ':' + (sk || '-') + ':' + (rid || '-') + ':' + detail);
+                            }
+                        }
+                    }
+                }
+                dbg('[重进诊断] logEntries 操作: ' + (opSummaries.length ? opSummaries.join(' | ') : '无'));
+            } catch (eLog) {}
+            // 角色表/持有物品表等有行表：dump checkpoint 原始行（row_id + 前两列），确认 row_id 是否合法
+            try {
+                const rowDumps = [];
+                for (const k in (cpData || {})) {
+                    if (k.indexOf('sheet_') !== 0) continue;
+                    const s = cpData[k];
+                    if (!s || typeof s !== 'object' || !Array.isArray(s.content)) continue;
+                    if (s.content.length <= 1) continue;
+                    const hdr = s.content[0] || [];
+                    const rows = s.content.slice(1, 6).map(r => {
+                        if (!Array.isArray(r)) return 'bad-row';
+                        return '[' + String(r[0] ?? '') + '|' + String(r[1] ?? '') + '|' + String(r[2] ?? '') + ']';
+                    }).join(',');
+                    rowDumps.push(k + ':' + (s.name || '?') + ':header=' + JSON.stringify(hdr.slice(0, 4)) + ':rows=' + rows);
+                }
+                dbg('[重进诊断] checkpoint 行详情: ' + (rowDumps.length ? rowDumps.join(' || ') : '无'));
+            } catch (eRow) {}
             dbg('[重进诊断] ' + frameInfo);
             dbg('[重进诊断] checkpoint sheets: ' + sheetSummary(cpData));
             dbg('[重进诊断] runtime(exportTableAsJson) sheets: ' + sheetSummary(rtCur));
