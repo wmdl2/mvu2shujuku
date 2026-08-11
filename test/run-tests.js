@@ -308,6 +308,10 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     assert.ok(hub.sourceData.note.includes('【可写路径与约束】'), 'JSON 表有可写规则时不应一刀切只读');
     assert.ok(hub.sourceData.note.includes('户.<门牌>.妻.好感值（数值范围 0~100；仅本人在场时更新）'), 'JSON 表 note 应列出可写路径与约束');
     assert.ok(!hub.sourceData.note.includes('AI 不应直接修改本表'), 'JSON 表有可写规则时不应再标“AI 不应直接修改”');
+    assert.ok(hub.sourceData.note.includes('【更新守卫】'), 'JSON 表有可写规则时应附加更新守卫');
+    assert.ok(hub.sourceData.note.includes('必须替换为「内容」列当前 JSON 中实际存在的键名'), '更新守卫应说明通配键替换');
+    assert.ok(hub.sourceData.note.includes('未在【可写路径与约束】列出的字段一律只读'), '更新守卫应包含未列出字段只读');
+    assert.ok(hub.sourceData.updateNode.includes('未列出字段一律只读'), 'JSON 表 updateNode 应包含只读守卫');
     assert.ok(hub.sourceData.ddl.includes('CHECK(json_valid(neirong))'), 'JSON 表内容列应有 json_valid CHECK（SQLite 模式生效）');
     const cash = Object.values(r.template).find(s => s && s.name === '现金表');
     assert.ok(cash.sourceData.note.includes('AI 不应直接修改本表'), '无规则的 JSON 表仍应保持只读');

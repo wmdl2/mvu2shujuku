@@ -2019,6 +2019,11 @@
                     if (parts.length) L.push(`- ${r.path}（${parts.join('；')}）`);
                 }
                 for (const rule of gc.map(sanitizeCheckRule).filter(Boolean)) L.push(`- ${rule}`);
+                L.push('【更新守卫】');
+                L.push('- 路径中的 <…> 为通配键，必须替换为「内容」列当前 JSON 中实际存在的键名（如 <门牌> → 101）；键不存在时（如对象为空/尚未登场），本轮不改对应数据');
+                L.push('- 只更新当前 JSON 中实际存在的可写路径；未在【可写路径与约束】列出的字段一律只读，严禁新增字段、对象或记录');
+                L.push('- 只更新本轮剧情中明确出现并被影响到的对象；其余对象的数据保持原样');
+                L.push('- 写回时必须完整保留 JSON 中其余全部字段；数值字段保持数字类型、字符串字段保持字符串类型');
             } else {
                 L.push(`整组 JSON 存储表（row_id=1）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除记录。`);
             }
@@ -2169,7 +2174,7 @@
         if (group.kind === 'json') {
             if (kind === 'update') {
                 return ((group.wildcardRules || []).length || (group.groupChecks || []).length)
-                    ? '读取「内容」列当前 JSON，只改变目标路径的值（其余字段保持原样），整体写回；禁止整列清空或凭空重建。'
+                    ? '只更新当前 JSON 中实际存在的可写路径（见 note 的【可写路径与约束】【更新守卫】）；未列出字段一律只读，目标对象不存在时跳过，其余字段原样保留后整体写回；禁止整列清空或凭空重建。'
                     : '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
             }
             return '禁止。';
