@@ -5075,6 +5075,8 @@ ${DB_INIT_SNIPPET}
     let lastAnchorAttempt = 0;
     let lastAnchorStateLog = 0;
     let reAnchorAttempts = 0;
+    // 同一聊天只做一次“重进恢复”（防止每次 CHAT_CHANGED/消息事件都重复物化）
+    let lastRuntimeRestoreChat = '';
     const reAnchorSkipLog = {};
     async function reAnchorCheckpointIfNeeded() {
         const now = Date.now();
@@ -5142,6 +5144,18 @@ ${DB_INIT_SNIPPET}
                 if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
                     dbg('[重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
                 } else {
+                    // checkpoint 存在：SQLite 模式重进时插件可能没把 checkpoint 恢复进运行时
+                    // （内存表停在模板默认值；探针实测 checkpoint 有注入值、运行时却是默认）。
+                    // 这里校验并按 checkpoint 物化一次（persist:false，只恢复内存，不写 checkpoint）。
+                    try {
+                        const cpData = readFullCheckpointData();
+                        const api2 = getAcuApi();
+                        if (cpData && api2 && !runtimeSyncedWithCheckpoint(api2, cpData) && lastRuntimeRestoreChat !== key) {
+                            lastRuntimeRestoreChat = key;
+                            const rtOk = await materializeRuntimeFromCheckpoint(api2);
+                            dbg('[重进恢复] 运行时与 checkpoint 不一致，已按 checkpoint 物化=' + (rtOk ? '成功' : '失败'));
+                        }
+                    } catch (e) {}
                     logSkip('聊天仍有 full checkpoint'); return;
                 }
             }
@@ -6359,6 +6373,12 @@ ${DB_INIT_SNIPPET}
         try {
             const ctx = getContextSafe();
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            // 多份 full checkpoint 并存时（首楼替换/重锚历史残留），取数据最完整的一份：
+            // 旧锚可能只含模板/默认值，而真正带注入数据的 checkpoint 挂在后续消息上
+            // （实测道渊：msg0=30KB 旧锚，msg1=383KB 真数据）。按数据体积取最大，避免
+            // 重进恢复/写库基线读到旧锚而把数据覆盖成默认。
+            let best = null;
+            let bestSize = -1;
             for (const msg of chat) {
                 if (!msg || typeof msg !== 'object') continue;
                 let iso = msg.TavernDB_ACU_IsolatedData;
@@ -6372,11 +6392,37 @@ ${DB_INIT_SNIPPET}
                     const sf = tag.storageFrame;
                     if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
                     const cp = sf.checkpoint;
-                    if (cp && cp.kind === 'full' && cp.data && typeof cp.data === 'object') return cp.data;
+                    if (cp && cp.kind === 'full' && cp.data && typeof cp.data === 'object') {
+                        let size = 0;
+                        try { size = JSON.stringify(cp.data).length; } catch (e) {}
+                        if (size > bestSize) { best = cp.data; bestSize = size; }
+                    }
                 }
             }
+            if (best) return best;
         } catch (e) {}
         return null;
+    }
+
+    // 重进聊天时校验运行时表是否已按 checkpoint 恢复（SQLite 模式插件可能漏恢复，
+    // 内存表停在模板默认值）。逐表比对内容；任一表不一致即视为未同步。
+    function runtimeSyncedWithCheckpoint(api, cpData) {
+        try {
+            const cur = api.exportTableAsJson() || {};
+            for (const k in cpData) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const cp = cpData[k];
+                const name = cp && cp.name;
+                if (!name) continue;
+                let rt = null;
+                for (const k2 in cur) {
+                    if (k2.indexOf('sheet_') === 0 && cur[k2] && cur[k2].name === name) { rt = cur[k2]; break; }
+                }
+                if (!rt) return false;
+                if (JSON.stringify(rt.content || []) !== JSON.stringify(cp.content || [])) return false;
+            }
+            return true;
+        } catch (e) { return false; }
     }
 
     // 用目标 stat_data 的非默认值作为 needle，检查 full checkpoint 数据里是否真的包含注入值。
@@ -19397,6 +19443,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     let lastAnchorAttempt = 0;
     let lastAnchorStateLog = 0;
     let reAnchorAttempts = 0;
+    // 同一聊天只做一次“重进恢复”（防止每次 CHAT_CHANGED/消息事件都重复物化）
+    let lastRuntimeRestoreChat = '';
     const reAnchorSkipLog = {};
     async function reAnchorCheckpointIfNeeded() {
         const now = Date.now();
@@ -19464,6 +19512,18 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
                     dbg('[重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
                 } else {
+                    // checkpoint 存在：SQLite 模式重进时插件可能没把 checkpoint 恢复进运行时
+                    // （内存表停在模板默认值；探针实测 checkpoint 有注入值、运行时却是默认）。
+                    // 这里校验并按 checkpoint 物化一次（persist:false，只恢复内存，不写 checkpoint）。
+                    try {
+                        const cpData = readFullCheckpointData();
+                        const api2 = getAcuApi();
+                        if (cpData && api2 && !runtimeSyncedWithCheckpoint(api2, cpData) && lastRuntimeRestoreChat !== key) {
+                            lastRuntimeRestoreChat = key;
+                            const rtOk = await materializeRuntimeFromCheckpoint(api2);
+                            dbg('[重进恢复] 运行时与 checkpoint 不一致，已按 checkpoint 物化=' + (rtOk ? '成功' : '失败'));
+                        }
+                    } catch (e) {}
                     logSkip('聊天仍有 full checkpoint'); return;
                 }
             }
@@ -20681,6 +20741,12 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         try {
             const ctx = getContextSafe();
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            // 多份 full checkpoint 并存时（首楼替换/重锚历史残留），取数据最完整的一份：
+            // 旧锚可能只含模板/默认值，而真正带注入数据的 checkpoint 挂在后续消息上
+            // （实测道渊：msg0=30KB 旧锚，msg1=383KB 真数据）。按数据体积取最大，避免
+            // 重进恢复/写库基线读到旧锚而把数据覆盖成默认。
+            let best = null;
+            let bestSize = -1;
             for (const msg of chat) {
                 if (!msg || typeof msg !== 'object') continue;
                 let iso = msg.TavernDB_ACU_IsolatedData;
@@ -20694,11 +20760,37 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     const sf = tag.storageFrame;
                     if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
                     const cp = sf.checkpoint;
-                    if (cp && cp.kind === 'full' && cp.data && typeof cp.data === 'object') return cp.data;
+                    if (cp && cp.kind === 'full' && cp.data && typeof cp.data === 'object') {
+                        let size = 0;
+                        try { size = JSON.stringify(cp.data).length; } catch (e) {}
+                        if (size > bestSize) { best = cp.data; bestSize = size; }
+                    }
                 }
             }
+            if (best) return best;
         } catch (e) {}
         return null;
+    }
+
+    // 重进聊天时校验运行时表是否已按 checkpoint 恢复（SQLite 模式插件可能漏恢复，
+    // 内存表停在模板默认值）。逐表比对内容；任一表不一致即视为未同步。
+    function runtimeSyncedWithCheckpoint(api, cpData) {
+        try {
+            const cur = api.exportTableAsJson() || {};
+            for (const k in cpData) {
+                if (k.indexOf('sheet_') !== 0) continue;
+                const cp = cpData[k];
+                const name = cp && cp.name;
+                if (!name) continue;
+                let rt = null;
+                for (const k2 in cur) {
+                    if (k2.indexOf('sheet_') === 0 && cur[k2] && cur[k2].name === name) { rt = cur[k2]; break; }
+                }
+                if (!rt) return false;
+                if (JSON.stringify(rt.content || []) !== JSON.stringify(cp.content || [])) return false;
+            }
+            return true;
+        } catch (e) { return false; }
     }
 
     // 用目标 stat_data 的非默认值作为 needle，检查 full checkpoint 数据里是否真的包含注入值。
