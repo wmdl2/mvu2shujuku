@@ -4296,6 +4296,22 @@ test('条目只在 seedRows（content 无行）时删除：快照须同步清理
     assert.ok(!seedKeys.includes('测试气运'), '删除后提交快照的 seedRows 不应再包含被删条目');
 });
 
+test('行表初始数据不进模板 content（避免插件 seedRows 反复补回导致删不掉）', () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    // 主角.气运 在开场注入（initvar 中为空），模板气运表不应预置内容行——
+    // 若预置，插件会把 content 行转成 seedRows 并在删除后从模板 scope 补回（实测删不掉）。
+    const qy = Object.values(r.template).find(s => s && s.name === '气运表');
+    assert.ok(qy, '转换结果应包含气运表');
+    assert.strictEqual((qy.content || []).length, 1, '气运表模板 content 只应有表头（初始行由开场注入物化）');
+    assert.ok(!Array.isArray(qy.seedRows) || qy.seedRows.length === 0, '气运表模板不应有 seedRows');
+    // 道侣/人物/机遇等行表同样不应预置模板行
+    for (const name of ['道侣表', '人物表', '机遇表']) {
+        const s = Object.values(r.template).find(x => x && x.name === name);
+        if (s) assert.strictEqual((s.content || []).length, 1, name + ' 模板 content 只应有表头');
+    }
+});
+
 test('重进聊天：多份 full checkpoint 并存时取最大一份恢复运行时（SQLite 重进漏恢复兜底）', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
