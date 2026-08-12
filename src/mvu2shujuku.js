@@ -5917,6 +5917,8 @@ ${DB_INIT_SNIPPET}
     let nativeFillInProgress = false;
     let nativeFillSettleTimer = null;
     let tableFillGuardInstalled = false;
+    // 跨卡残留前端写库丢弃的限频标记（按聊天去重，避免刷屏）
+    let lastForeignWriteDropChat = '';
 
     // 检测插件原生填表/追平是否在最近 windowMs 内提交过（group_fill 日志条目）：
     // 插件的“手动追平”（runManualCatchUp → orchestrateManualCatchUp）不触发
@@ -6099,6 +6101,24 @@ ${DB_INIT_SNIPPET}
                         const rtAll = window.MVU2SHUJUKU_CORE.statDataFromTables(activeLayout, api.exportTableAsJson());
                         if (rtAll && rtAll.stat_data && typeof rtAll.stat_data === 'object') prev = rtAll.stat_data;
                     } catch (eP) {}
+                    // 调用方归属校验：target 顶层组混入当前布局外的组（如切到催眠APP后，
+                    // 上一张道渊的前端 iframe 仍在运行、定时 replaceMvuData）→ 调用方是
+                    // 跨卡残留的旧前端，整笔丢弃，不再剥离后继续写。否则每 150ms 一次
+                    // 无意义写库+保存刷屏，还会在原生填表窗口制造“第二写者”竞争。
+                    const rawGroups2 = Object.keys(target || {}).filter(g => g !== '$internal');
+                    const layoutGroupSet2 = new Set((Array.isArray(activeLayout) ? activeLayout : []).map(L => L.group));
+                    let hasForeignGroup2 = false;
+                    for (const g of rawGroups2) {
+                        if (!layoutGroupSet2.has(g)) { hasForeignGroup2 = true; break; }
+                    }
+                    if (hasForeignGroup2 && rawGroups2.length) {
+                        if (lastForeignWriteDropChat !== chatKeyNow) {
+                            lastForeignWriteDropChat = chatKeyNow;
+                            dbgWarn('[切卡隔离] 检测到跨卡残留前端写库（target 混入布局外组：' + rawGroups2.join('、') + '），整笔丢弃，后续同类写入静默跳过。');
+                        }
+                        if (statWriteOverlayGen === gen) pendingStatWrite = null;
+                        return;
+                    }
                     // 前端/脚本传来的 target 可能不完整：开场读取时布局未就绪，只拿到部分组
                     // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
                     // 缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
@@ -6255,7 +6275,7 @@ ${DB_INIT_SNIPPET}
                             (typeof ctx2.saveChat === 'function' && ctx2.saveChat.bind(ctx2)) ||
                             (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
                             (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
-                        if (saveFn2) {
+                        if (n > 0 && saveFn2) {
                             await Promise.resolve(saveFn2());
                             dbg('[保存] 写库后已等待酒馆保存完成。');
                         }
