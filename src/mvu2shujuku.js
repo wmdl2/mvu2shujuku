@@ -2766,20 +2766,29 @@
                 const SE0 = SE.layout || SE;
                 const found2 = sheetOf(SE0.table);
                 if (!found2 || !Array.isArray(found2.sheet.content) || found2.sheet.content.length > 1) continue;
-                let sObj = null;
+                // 初始行对象：布局列默认值兜底（布局一定在，且默认值=卡模板初始行），
+                // 再叠加模板（若拿得到）里的值。之前只依赖 getTableTemplate/模板缓存，
+                // 首楼替换窗口里两者都可能缺失 → sObj={} → INSERT 依赖列 DEFAULT，
+                // 某些表/时刻会失败且返回值被忽略 → updateCell 全部越界 → 注入部分丢失。
+                let sObj = {};
+                const layoutCols = Array.isArray(SE0.cols) ? SE0.cols : [];
+                for (const c of layoutCols) {
+                    const colZh = Array.isArray(c) ? c[0] : (c && c.zh);
+                    if (!colZh || colZh === '_扩展数据') continue;
+                    const fb = Array.isArray(c) ? c[2] : c.fallback;
+                    sObj[colZh] = (fb === undefined || fb === null) ? '' : fb;
+                }
                 if (tplSrc && typeof tplSrc === 'object') {
                     for (const k in tplSrc) {
                         if (k.indexOf('sheet_') === 0 && tplSrc[k] && tplSrc[k].name === SE0.table) {
                             const s = tplSrc[k];
                             const hdr = Array.isArray(s.content) && Array.isArray(s.content[0]) ? s.content[0] : [];
                             const row = Array.isArray(s.content) && s.content[1] ? s.content[1] : [];
-                            sObj = {};
                             for (let i = 1; i < hdr.length; i++) sObj[hdr[i]] = (row[i] !== undefined && row[i] !== null) ? row[i] : '';
                             break;
                         }
                     }
                 }
-                if (!sObj) sObj = {};
                 if (SE.kind === 'json') {
                     // 整组 JSON 表：身份行 + 内容列必须是合法 JSON（模板行可能为空串，
                     // 插件 SQLite 表带 CHECK json_valid(neirong)，空串/非 JSON 会被拒绝）
@@ -2789,8 +2798,12 @@
                     else { try { JSON.parse(jv0); } catch (e) { sObj['内容'] = '{}'; } }
                 }
                 try {
-                    await Promise.resolve(api.insertRow(SE0.table, sObj));
-                    dbg(' 已为表「' + SE0.table + '」补初始行（原表仅表头）。');
+                    const ir = await Promise.resolve(api.insertRow(SE0.table, sObj));
+                    if (ir === -1 || ir === false || ir === undefined || ir === null) {
+                        dbgWarn(' 补初始行失败：insertRow(' + SE0.table + ') 返回 ' + String(ir) + '（原表仅表头）。');
+                    } else {
+                        dbg(' 已为表「' + SE0.table + '」补初始行（原表仅表头）。');
+                    }
                 } catch (e) {
                     dbgWarn(' 补初始行失败:', e);
                 }
@@ -3016,7 +3029,44 @@
                     try { await Promise.resolve(api.insertRow(L.table, r.newRowObj)); } catch (e) {}
                     continue;
                 }
-                try { await Promise.resolve(api.updateCell(L.table, r.rowIndex, r.colZh, r.value)); } catch (e) {}
+                try {
+                    const ok = await Promise.resolve(api.updateCell(L.table, r.rowIndex, r.colZh, r.value));
+                    if (!ok && r.layout && r.layout.kind === 'singleton') {
+                        // 单例表数据行缺失/被清空（首楼替换、插件回放窗口会清空运行时）：
+                        // 按布局默认值补行后重写该单元格，避免开场注入部分丢失。
+                        // 必须查“实时”运行时：快照可能仍带着已被清掉的行，导致漏判。
+                        let live2 = {};
+                        try { live2 = api.exportTableAsJson() || {}; } catch (e) {}
+                        const liveSheet2 = (() => {
+                            for (const k2 in live2) {
+                                if (k2.indexOf('sheet_') === 0 && live2[k2] && live2[k2].name === r.layout.table) return live2[k2];
+                            }
+                            return null;
+                        })();
+                        const liveHasRow = liveSheet2 && Array.isArray(liveSheet2.content) && liveSheet2.content.length > 1;
+                        if (!liveHasRow) {
+                            const sObj2 = {};
+                            for (const c of (Array.isArray(r.layout.cols) ? r.layout.cols : [])) {
+                                const colZh2 = Array.isArray(c) ? c[0] : (c && c.zh);
+                                if (!colZh2 || colZh2 === '_扩展数据') continue;
+                                const fb2 = Array.isArray(c) ? c[2] : c.fallback;
+                                sObj2[colZh2] = (fb2 === undefined || fb2 === null) ? '' : fb2;
+                            }
+                            try {
+                                const ir2 = await Promise.resolve(api.insertRow(r.layout.table, sObj2));
+                                if (ir2 !== -1 && ir2 !== false && ir2 !== undefined && ir2 !== null) {
+                                    dbg(' 已为表「' + r.layout.table + '」补初始行并重写 ' + r.colZh + '（写入越界/运行时被清空重试）。');
+                                    await Promise.resolve(api.updateCell(r.layout.table, 1, r.colZh, r.value));
+                                }
+                            } catch (e2) {
+                                dbgWarn(' 补行重试失败:', e2);
+                            }
+                        } else {
+                            // 行其实存在（可能只是瞬态失败）：直接重试一次
+                            await Promise.resolve(api.updateCell(r.layout.table, r.rowIndex, r.colZh, r.value));
+                        }
+                    }
+                } catch (e) {}
             } catch (e) {}
         }
         await runDirectOps();
