@@ -2696,13 +2696,12 @@
                             }
                             if (!isChildGroup && !isFlattened) {
                                 // 前端渲染回写抑制（通用）：`_` 前缀内部状态字段（如 _hypnoos）
-                                // 当前不存在且新值为“全默认/空”时，是前端 schema 默认回声
-                                // （前端每次可重建），跳过不落库；字段有真实内容（如成就领取后
-                                // achievements 非空）或已存在后的更新照常允许。
-                                // 避免运行时被回声污染、帧未落盘 → 手动追平校验误报。
+                                // 当前不存在且新值为“全默认/空”时，标记为“回声候选”，稍后按
+                                // 组级判定：同批写入若有其他真实变化（如成就领取同时改 当前MC点）
+                                // 则放行；只有它自己是唯一变化时才是前端 schema 默认回声，跳过。
                                 const mk0 = entry.kind === 'rows' ? rel[1] : rel[0];
                                 if (String(mk0).charAt(0) === '_' && pv === undefined && isStructurallyDefault(nv)) {
-                                    dbg(' [渲染回写抑制] 跳过全默认内部状态字段 ' + np + '（前端回声，不落库）。');
+                                    ops.push({ np, entry, value: nv, prev: pv, overflow: true, echoCandidate: true, mergeKey: entry.kind === 'rows' ? rel[1] : rel[0], rowKey: entry.kind === 'rows' ? rel[0] : undefined });
                                     continue;
                                 }
                                 ops.push({ np, entry, value: nv, overflow: true, mergeKey: entry.kind === 'rows' ? rel[1] : rel[0], rowKey: entry.kind === 'rows' ? rel[0] : undefined });
@@ -2801,6 +2800,38 @@
             }
         };
         detectOverflowRemovals(prevStat || {}, nextStat || {}, '');
+
+        // 组级判定：`_` 前缀内部字段的“回声候选”仅在同表没有其他真实写入时才跳过。
+        // 前端真实操作（如成就领取：当前MC点 +PT 与 _hypnoos 同批写回）会带声明列/真实
+        // 变化 → 放行；渲染回声（只有 _hypnoos 全默认，其余声明列同值）→ 跳过不落库。
+        const echoCandidates = ops.filter(op => op && op.echoCandidate);
+        if (echoCandidates.length) {
+            const realTables = new Set();
+            for (const op of ops) {
+                if (!op || op.echoCandidate) continue;
+                const tbl = op.entry && op.entry.layout && op.entry.layout.table;
+                if (!tbl) continue;
+                // 声明列 cell（无 kind/json/overflow/replace 标记）：值类型等价时不产生写入，
+                // 不算真实变化（渲染回声的整组声明列都是同值，不能因此放行 _hypnoos）。
+                const isPlainCell = !op.kind && !op.json && !op.overflow && !op.replace;
+                if (isPlainCell && sameValue(op.value, op.prev)) continue;
+                realTables.add(tbl);
+            }
+            for (const op of ops) {
+                if (op && op.echoCandidate) {
+                    const tbl = op.entry && op.entry.layout && op.entry.layout.table;
+                    if (realTables.has(tbl)) {
+                        delete op.echoCandidate;
+                    } else {
+                        dbg(' [渲染回写抑制] 组级判定：' + op.np + ' 是同表唯一全默认内部状态回声，跳过不落库。');
+                    }
+                }
+            }
+            // echoCandidate 已清除的保留；其余回声候选被过滤掉
+            const keptOps = ops.filter(op => !(op && op.echoCandidate));
+            ops.length = 0;
+            for (const kept of keptOps) ops.push(kept);
+        }
 
         // 单例/整组JSON表若缺初始行（插件可能只保留表头+seedRows，未物化到 content），先按模板补行，
         // 避免 updateCell: Row index 1 out of bounds 导致写入落空
