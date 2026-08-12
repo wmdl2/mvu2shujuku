@@ -5921,6 +5921,44 @@ ${DB_INIT_SNIPPET}
     let nativeFillInProgress = false;
     let nativeFillSettleTimer = null;
     let tableFillGuardInstalled = false;
+
+    // 检测插件原生填表/追平是否在最近 windowMs 内提交过（group_fill 日志条目）：
+    // 插件的“手动追平”（runManualCatchUp → orchestrateManualCatchUp）不触发
+    // registerTableFillStartCallback，只能靠帧扫描兜底。填表提交后插件会立刻做
+    // replay vs runtime 完整性校验（异步、带 yield），此窗口内我们的 manual_crud
+    // 提交可能只改了运行时而帧未被校验读到 → 不一致回载。扫描到最近提交就暂停写库，
+    // 等校验窗口过去（条目年龄超过窗口即恢复）。
+    function nativeFillRecentlyCommitted(windowMs) {
+        try {
+            const ctx = getContextSafe();
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            if (!chat.length) return false;
+            const now = Date.now();
+            const cutoff = now - Math.max(0, Number(windowMs) || 7000);
+            const scanFrom = Math.max(0, chat.length - 3);
+            for (let mi = chat.length - 1; mi >= scanFrom; mi--) {
+                const msg = chat[mi];
+                if (!msg || typeof msg !== 'object') continue;
+                let iso = msg.TavernDB_ACU_IsolatedData;
+                if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
+                if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
+                for (const tagKey of Object.keys(iso)) {
+                    const tag = iso[tagKey];
+                    const sf = tag && tag.storageFrame;
+                    if (!sf || typeof sf !== 'object') continue;
+                    const logs = Array.isArray(sf.logEntries) ? sf.logEntries : [];
+                    for (let li = logs.length - 1; li >= 0; li--) {
+                        const en = logs[li];
+                        const at = Number(en && en.createdAt) || 0;
+                        if (at < cutoff) break;
+                        const src = String((en && en.source) || '');
+                        if (src === 'group_fill' || src === 'manual_fill' || src === 'fill') return true;
+                    }
+                }
+            }
+            return false;
+        } catch (e) { return false; }
+    }
     // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
     // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
     const initializedViaGameSession = new Set();
@@ -5974,8 +6012,10 @@ ${DB_INIT_SNIPPET}
                     // 插件原生填表（手动填表/自动更新）进行中：数据库由插件自己的事务管线
                     // 写入并做 replay 完整性校验。转换器此刻写库会与校验竞争（越界/不一致回载），
                     // 直接丢弃待写快照，等原生流程结束后的后续写入接手。
-                    if (nativeFillInProgress) {
-                        dbg('[填表守卫] 插件原生填表进行中，丢弃本次 Mvu 合并写库（等待原生流程结束）。');
+                    // “手动追平”不触发 fill-start 回调，用帧扫描最近 group_fill 提交兜底。
+                    const fillActiveNow = nativeFillInProgress || nativeFillRecentlyCommitted(7000);
+                    if (fillActiveNow) {
+                        dbg('[填表守卫] 插件原生填表进行中' + (nativeFillInProgress ? '（fill-start 回调）' : '（帧扫描最近 group_fill）') + '，丢弃本次 Mvu 合并写库（等待原生流程结束）。');
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
@@ -19674,6 +19714,44 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     let nativeFillInProgress = false;
     let nativeFillSettleTimer = null;
     let tableFillGuardInstalled = false;
+
+    // 检测插件原生填表/追平是否在最近 windowMs 内提交过（group_fill 日志条目）：
+    // 插件的“手动追平”（runManualCatchUp → orchestrateManualCatchUp）不触发
+    // registerTableFillStartCallback，只能靠帧扫描兜底。填表提交后插件会立刻做
+    // replay vs runtime 完整性校验（异步、带 yield），此窗口内我们的 manual_crud
+    // 提交可能只改了运行时而帧未被校验读到 → 不一致回载。扫描到最近提交就暂停写库，
+    // 等校验窗口过去（条目年龄超过窗口即恢复）。
+    function nativeFillRecentlyCommitted(windowMs) {
+        try {
+            const ctx = getContextSafe();
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            if (!chat.length) return false;
+            const now = Date.now();
+            const cutoff = now - Math.max(0, Number(windowMs) || 7000);
+            const scanFrom = Math.max(0, chat.length - 3);
+            for (let mi = chat.length - 1; mi >= scanFrom; mi--) {
+                const msg = chat[mi];
+                if (!msg || typeof msg !== 'object') continue;
+                let iso = msg.TavernDB_ACU_IsolatedData;
+                if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
+                if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
+                for (const tagKey of Object.keys(iso)) {
+                    const tag = iso[tagKey];
+                    const sf = tag && tag.storageFrame;
+                    if (!sf || typeof sf !== 'object') continue;
+                    const logs = Array.isArray(sf.logEntries) ? sf.logEntries : [];
+                    for (let li = logs.length - 1; li >= 0; li--) {
+                        const en = logs[li];
+                        const at = Number(en && en.createdAt) || 0;
+                        if (at < cutoff) break;
+                        const src = String((en && en.source) || '');
+                        if (src === 'group_fill' || src === 'manual_fill' || src === 'fill') return true;
+                    }
+                }
+            }
+            return false;
+        } catch (e) { return false; }
+    }
     // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
     // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
     const initializedViaGameSession = new Set();
@@ -19727,8 +19805,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     // 插件原生填表（手动填表/自动更新）进行中：数据库由插件自己的事务管线
                     // 写入并做 replay 完整性校验。转换器此刻写库会与校验竞争（越界/不一致回载），
                     // 直接丢弃待写快照，等原生流程结束后的后续写入接手。
-                    if (nativeFillInProgress) {
-                        dbg('[填表守卫] 插件原生填表进行中，丢弃本次 Mvu 合并写库（等待原生流程结束）。');
+                    // “手动追平”不触发 fill-start 回调，用帧扫描最近 group_fill 提交兜底。
+                    const fillActiveNow = nativeFillInProgress || nativeFillRecentlyCommitted(7000);
+                    if (fillActiveNow) {
+                        dbg('[填表守卫] 插件原生填表进行中' + (nativeFillInProgress ? '（fill-start 回调）' : '（帧扫描最近 group_fill）') + '，丢弃本次 Mvu 合并写库（等待原生流程结束）。');
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
