@@ -3527,7 +3527,7 @@
             `installTavernHelperShim();`,
             '',
             `// 与 MVU/TH 生态一致：提供裸全局 getVariables / updateVariablesWith（游戏逻辑脚本直接调用）`,
-            `function mvuBridgeStat(){try{var a=window.getAllVariables?window.getAllVariables():{stat_data:{}};return a.stat_data||{};}catch(e){return {};}}`,
+            `function mvuBridgeStat(){try{if(window.__mvu2shujukuPendingStat&&typeof window.__mvu2shujukuPendingStat==='object')return window.__mvu2shujukuPendingStat;var a=window.getAllVariables?window.getAllVariables():{stat_data:{}};return a.stat_data||{};}catch(e){return {};}}`,
             `function mvuBridgeInstallGlobals(){`,
             `  for(var gi=0;gi<roots.length;gi++){`,
             `    var gw=roots[gi];`,
@@ -3537,7 +3537,8 @@
             `      try{`,
             `        if(typeof updater!=='function')return false;`,
             `        var all=window.getAllVariables?window.getAllVariables():{stat_data:{}};`,
-            `        var next=JSON.parse(JSON.stringify(all.stat_data||{}));`,
+            `        var base=(window.__mvu2shujukuPendingStat&&typeof window.__mvu2shujukuPendingStat==='object')?window.__mvu2shujukuPendingStat:(all.stat_data||{});`,
+            `        var next=JSON.parse(JSON.stringify(base));`,
             `        updater(next);`,
             `        var m=window.Mvu||mvuFake;`,
             `        if(m&&typeof m.replaceMvuData==='function')return await m.replaceMvuData({stat_data:next,display_data:all.display_data||{},delta_data:all.delta_data||{},initialized_lorebooks:all.initialized_lorebooks||{}},opts);`,
@@ -6009,6 +6010,12 @@ ${DB_INIT_SNIPPET}
         try { writeChatKey = autoInitChatId(); } catch (e) {}
         statWriteOverlayGen += 1;
         pendingStatWrite = next;
+        // 共享给卡内桥/其他窗口的“最新待写状态”：连续 读-改-写 都基于它累积，
+        // 避免 150ms 合并窗口内后写读旧运行时把前写覆盖（成就标记丢失）。
+        try {
+            const ph = (typeof window !== 'undefined' ? window : root);
+            if (ph) ph.__mvu2shujukuPendingStat = next;
+        } catch (e) {}
         if (statWriteTimer) hostWindow.clearTimeout(statWriteTimer);
         statWriteTimer = hostWindow.setTimeout(async () => {
             statWriteTimer = null;
@@ -6339,7 +6346,13 @@ ${DB_INIT_SNIPPET}
             } catch (e) {
                 dbgWarn(' Mvu 合并写入异常:', e);
             } finally {
-                if (statWriteOverlayGen === gen) pendingStatWrite = null;
+                if (statWriteOverlayGen === gen) {
+                    pendingStatWrite = null;
+                    try {
+                        const ph = (typeof window !== 'undefined' ? window : root);
+                        if (ph && ph.__mvu2shujukuPendingStat === target) ph.__mvu2shujukuPendingStat = null;
+                    } catch (e) {}
+                }
             }
         }, 150);
     }
@@ -7119,6 +7132,12 @@ ${DB_INIT_SNIPPET}
                 // 数据库模型下所有 type 都返回当前 stat_data；写入走 Mvu.replaceMvuData。
                 const makeGetVariables = () => {
                     try {
+                        // 与 getMvuData 一致：有待写快照时优先返回待写快照，
+                        // 保证前端连续“读-改-写”（如成就领取 updateResources + updateStoreWith）
+                        // 在 150ms 合并窗口内基于同一状态累积，不会互相覆盖丢标记。
+                        if (pendingStatWrite && typeof pendingStatWrite === 'object') {
+                            return pendingStatWrite;
+                        }
                         const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                         return all.stat_data || {};
                     } catch (e) { return {}; }
@@ -7135,7 +7154,10 @@ ${DB_INIT_SNIPPET}
                     try {
                         if (typeof updater !== 'function') return false;
                         const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                        const next = JSON.parse(JSON.stringify(all.stat_data || {}));
+                        const base = (pendingStatWrite && typeof pendingStatWrite === 'object')
+                            ? pendingStatWrite
+                            : (all.stat_data || {});
+                        const next = JSON.parse(JSON.stringify(base));
                         updater(next);
                         return windowMvuFake.replaceMvuData({ stat_data: next, display_data: all.display_data || {}, delta_data: all.delta_data || {}, initialized_lorebooks: all.initialized_lorebooks || {} }, opts);
                     } catch (e) {
