@@ -5860,6 +5860,41 @@ ${DB_INIT_SNIPPET}
                         }
                         return out;
                     })();
+                    // 写回守卫：单例组“整组写回”若把多个字段同时重置成模板初始值，而当前运行时是
+                    // 非默认值，判定为前端“空读/旧读 → schema 默认值 → 写回”，恢复运行时值（保留数据库真值）。
+                    // 通用实现：用卡自己的模板初始行做基准，任何转换卡都适用；只拦“回退到模板默认”的写回。
+                    try {
+                        const tplGuard = cachedTemplateForCurrentCard();
+                        if (tplGuard && effectiveTarget && typeof effectiveTarget === 'object') {
+                            for (const L of (Array.isArray(activeLayout) ? activeLayout : [])) {
+                                if (L.kind !== 'singleton') continue;
+                                const tplSheet = Object.values(tplGuard).find(function (s) { return s && s.name === L.table; });
+                                if (!tplSheet || !Array.isArray(tplSheet.content) || tplSheet.content.length < 2) continue;
+                                const tplHdr = tplSheet.content[0];
+                                const tplRow = tplSheet.content[1];
+                                const tgt = effectiveTarget[L.group];
+                                const base = prev[L.group];
+                                if (!tgt || typeof tgt !== 'object' || Array.isArray(tgt)) continue;
+                                if (!base || typeof base !== 'object' || Array.isArray(base)) continue;
+                                const str = function (v) { return String(v == null ? '' : v); };
+                                let resetCount = 0;
+                                const cols = [];
+                                for (let ci = 1; ci < tplHdr.length; ci++) {
+                                    const col = tplHdr[ci];
+                                    if (col === '_扩展数据') continue;
+                                    if (!(col in tgt) || !(col in base)) continue;
+                                    const tv = str(tplRow[ci]);
+                                    const gv = str(tgt[col]);
+                                    const bv = str(base[col]);
+                                    if (gv === tv && bv !== tv) { resetCount += 1; cols.push(col); }
+                                }
+                                if (resetCount >= 2) {
+                                    for (const col of cols) tgt[col] = base[col];
+                                    dbg(' [写回守卫] 单例组「' + L.group + '」检测到默认值写回（' + cols.join('、') + '），保留数据库真值。');
+                                }
+                            }
+                        }
+                    } catch (eG) {}
                     // 参考卡原生路径：写库 = 差异写入（updateCell/insertRow/deleteRow 原生 CRUD）。
                     // 运行时/checkpoint/落盘全部由插件自己的事务管线维护，与原生数据库卡一致；
                     // 不做整表快照导入、不做手动物化/锚定/单例补行（转换器只翻译，不参与运行时）。
@@ -19270,6 +19305,41 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         }
                         return out;
                     })();
+                    // 写回守卫：单例组“整组写回”若把多个字段同时重置成模板初始值，而当前运行时是
+                    // 非默认值，判定为前端“空读/旧读 → schema 默认值 → 写回”，恢复运行时值（保留数据库真值）。
+                    // 通用实现：用卡自己的模板初始行做基准，任何转换卡都适用；只拦“回退到模板默认”的写回。
+                    try {
+                        const tplGuard = cachedTemplateForCurrentCard();
+                        if (tplGuard && effectiveTarget && typeof effectiveTarget === 'object') {
+                            for (const L of (Array.isArray(activeLayout) ? activeLayout : [])) {
+                                if (L.kind !== 'singleton') continue;
+                                const tplSheet = Object.values(tplGuard).find(function (s) { return s && s.name === L.table; });
+                                if (!tplSheet || !Array.isArray(tplSheet.content) || tplSheet.content.length < 2) continue;
+                                const tplHdr = tplSheet.content[0];
+                                const tplRow = tplSheet.content[1];
+                                const tgt = effectiveTarget[L.group];
+                                const base = prev[L.group];
+                                if (!tgt || typeof tgt !== 'object' || Array.isArray(tgt)) continue;
+                                if (!base || typeof base !== 'object' || Array.isArray(base)) continue;
+                                const str = function (v) { return String(v == null ? '' : v); };
+                                let resetCount = 0;
+                                const cols = [];
+                                for (let ci = 1; ci < tplHdr.length; ci++) {
+                                    const col = tplHdr[ci];
+                                    if (col === '_扩展数据') continue;
+                                    if (!(col in tgt) || !(col in base)) continue;
+                                    const tv = str(tplRow[ci]);
+                                    const gv = str(tgt[col]);
+                                    const bv = str(base[col]);
+                                    if (gv === tv && bv !== tv) { resetCount += 1; cols.push(col); }
+                                }
+                                if (resetCount >= 2) {
+                                    for (const col of cols) tgt[col] = base[col];
+                                    dbg(' [写回守卫] 单例组「' + L.group + '」检测到默认值写回（' + cols.join('、') + '），保留数据库真值。');
+                                }
+                            }
+                        }
+                    } catch (eG) {}
                     // 参考卡原生路径：写库 = 差异写入（updateCell/insertRow/deleteRow 原生 CRUD）。
                     // 运行时/checkpoint/落盘全部由插件自己的事务管线维护，与原生数据库卡一致；
                     // 不做整表快照导入、不做手动物化/锚定/单例补行（转换器只翻译，不参与运行时）。
