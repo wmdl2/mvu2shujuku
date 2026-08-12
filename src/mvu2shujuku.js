@@ -6187,6 +6187,16 @@ ${DB_INIT_SNIPPET}
                         }
                         return out;
                     })();
+                    // 诊断：打印实际到达写路径的 系统._hypnoos（成就/购买等内部状态），
+                    // 判断前端是否把标记放进写回、以及我们是否丢值。
+                    try {
+                        if (mvu2shujukuDebugOn() && target && target.系统 && typeof target.系统 === 'object') {
+                            const h0 = target.系统._hypnoos;
+                            if (h0 !== undefined) {
+                                dbg('[写库诊断] target 系统._hypnoos = ' + JSON.stringify(h0).slice(0, 500));
+                            }
+                        }
+                    } catch (eH) {}
                     // 写回守卫：单例组“整组写回”若把多个字段同时重置成模板初始值，而当前运行时是
                     // 非默认值，判定为前端“空读/旧读 → schema 默认值 → 写回”，恢复运行时值（保留数据库真值）。
                     // 通用实现：用卡自己的模板初始行做基准，任何转换卡都适用；只拦“回退到模板默认”的写回。
