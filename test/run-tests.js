@@ -5393,4 +5393,132 @@ test('全新聊天运行时仅表头且无 checkpoint：读侧退回布局默认
         '全新聊天仅表头时主角表应返回布局默认值，实际=' + JSON.stringify(gv.stat_data.主角 && gv.stat_data.主角.姓名));
 });
 
+test('首楼替换清空运行时后开场注入仍完整落库：updateCell 越界时按布局补行并重写（道渊开场部分注入回归）', async () => {
+    const vm2 = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => (e.kind === 'singleton'
+            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
+            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const srcDir = path.join(__dirname, '..', 'src');
+    const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
+    const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
+    const yamlLibsData = fs.readFileSync(path.join(srcDir, 'vendor', 'mvu-yaml-libs.js'), 'utf8');
+    const jsonrepairData = fs.readFileSync(path.join(srcDir, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+    const pinyinInline = pinyinData.replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ').replace(/;\s*$/, ';');
+    const yamlLibsInline = ['(function () {', '  var module = { exports: {} };', '  var exports = module.exports;', yamlLibsData, '  var target = typeof globalThis !== "undefined" ? globalThis : this;', '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;', '})();', ''].join('\n');
+    const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+    const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+
+    // 运行时：主角表已有模板行（初始已物化），其它表仅表头；无 checkpoint
+    const tables = JSON.parse(JSON.stringify(r.template));
+    for (const k of Object.keys(tables)) {
+        if (k.indexOf('sheet_') === 0 && tables[k] && Array.isArray(tables[k].content) && tables[k].name !== '主角表') {
+            tables[k].content = [tables[k].content[0]];
+        }
+    }
+    const log = [];
+    let cleared = false;
+    const fakeApi = Object.assign(applyingApi(tables), {
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            // 第一次单元格写入时模拟“首楼替换”清空运行时：主角表行被清掉
+            if (tableName === '主角表' && !cleared) {
+                cleared = true;
+                const zj = Object.values(tables).find(x => x && x.name === '主角表');
+                zj.content = [zj.content[0]];
+                log.push('clear');
+                return false;
+            }
+            if (!s || !s.content[rowIndex]) return false;
+            const ci = s.content[0].indexOf(col);
+            if (ci === -1) return false;
+            s.content[rowIndex][ci] = String(value);
+            return true;
+        },
+    });
+    const handlers = {};
+    const converted = {
+        name: '首楼替换卡',
+        avatar: 'replace.png',
+        data: {
+            extensions: {
+                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
+                regex_scripts: [],
+            },
+            character_book: {
+                entries: [{
+                    keys: ['__ACU_TEMPLATE_DATA__'],
+                    content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
+                }],
+            },
+        },
+    };
+    const context = {
+        chatId: 'c-replace', name: '测试', chat: [],
+        characters: [converted], characterId: 0,
+        extensionSettings: { mvu2shujuku: { debug: false } },
+        eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received', MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated', MESSAGE_EDITED: 'edited', MESSAGE_SENT: 'sent', MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {}, saveChatConditional: async () => {}, saveChat: async () => {},
+        getRequestHeaders: () => ({}), setChatMessages: () => {},
+    };
+    const fakeEl = () => {
+        const el = {
+            dataset: {}, style: {}, children: [], _listeners: {}, _value: '',
+            addEventListener: (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); },
+            removeEventListener: () => {}, dispatchEvent: () => true,
+            appendChild: (c) => { el.children.push(c); return c; }, removeChild: () => {},
+            querySelector: () => fakeEl(), querySelectorAll: () => [],
+            click: () => {}, focus: () => {}, blur: () => {}, contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(el, 'innerHTML', { get: () => el._html || '', set: (v) => { el._html = v; } });
+        Object.defineProperty(el, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(el, 'value', { get: () => el._value, set: (v) => { el._value = v; } });
+        Object.defineProperty(el, 'checked', { get: () => !!el._checked, set: (v) => { el._checked = v; } });
+        Object.defineProperty(el, 'disabled', { get: () => !!el._disabled, set: (v) => { el._disabled = v; } });
+        return el;
+    };
+    const doc = {
+        querySelector: () => fakeEl(), getElementById: () => fakeEl(), createElement: () => fakeEl(),
+        createTextNode: () => fakeEl(), addEventListener: () => {}, body: fakeEl(),
+    };
+    const win = {
+        top: null, parent: null, document: doc, console,
+        setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t),
+        CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {}, toastr: undefined,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm2.createContext(win);
+    vm2.runInContext(extIndex, win);
+
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 2600));
+    await win.Mvu.replaceMvuData({ stat_data: {
+        主角: { 姓名: '斯维姆', 性别: '男', 容貌: '相貌丑陋', 身形: '未知', 衣着: '未知', 境界: '凡人', 宗门: '无', 宗门贡献: 0 },
+    } });
+    await new Promise(res => setTimeout(res, 1200));
+    assert.ok(log.indexOf('clear') !== -1, '模拟首楼替换应真的清空过一次运行时');
+    const zj = Object.values(tables).find(s => s && s.name === '主角表');
+    const hdr = zj.content[0];
+    assert.strictEqual(zj.content.length, 2, '自愈后主角表应恢复单数据行');
+    assert.strictEqual(zj.content[1][hdr.indexOf('姓名')], '斯维姆', '开场道号应落库');
+    assert.strictEqual(zj.content[1][hdr.indexOf('性别')], '男', '开场性别应落库');
+    assert.strictEqual(zj.content[1][hdr.indexOf('容貌')], '相貌丑陋', '开场容貌应落库');
+    assert.strictEqual(zj.content[1][hdr.indexOf('境界')], '凡人', '开场境界应落库');
+});
+
 runTests();
