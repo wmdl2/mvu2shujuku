@@ -2607,6 +2607,23 @@
         };
         let tables = {};
         try { tables = api.exportTableAsJson() || {}; } catch (e) {}
+        // 前端“渲染回写”抑制的辅助判定：`_` 前缀内部状态（如 _hypnoos）是否为“全默认/空”。
+        // version 键按“任何数字=默认”处理（schema 版本号），其余数字须为 0；
+        // 只要有任何真实内容（非空容器/true/非零值）即为非默认 → 允许落库（用户真实操作）。
+        const isStructurallyDefault = (v, isVersion) => {
+            if (v === undefined || v === null) return true;
+            if (typeof v === 'string') return v === '';
+            if (typeof v === 'boolean') return v === false;
+            if (typeof v === 'number') return isVersion ? true : v === 0;
+            if (Array.isArray(v)) return v.length === 0;
+            if (typeof v === 'object') {
+                for (const kk in v) {
+                    if (!isStructurallyDefault(v[kk], kk === 'version')) return false;
+                }
+                return true;
+            }
+            return false;
+        };
         const sheetOf = (name) => {
             for (const k in tables) {
                 if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return { key: k, sheet: tables[k] };
@@ -2679,11 +2696,12 @@
                             }
                             if (!isChildGroup && !isFlattened) {
                                 // 前端渲染回写抑制（通用）：`_` 前缀内部状态字段（如 _hypnoos）
-                                // 当前运行时/数据库里不存在时，是前端 schema 默认回声（前端每次
-                                // 可重建），整条跳过不落库；字段已存在后的更新照常允许。
+                                // 当前不存在且新值为“全默认/空”时，是前端 schema 默认回声
+                                // （前端每次可重建），跳过不落库；字段有真实内容（如成就领取后
+                                // achievements 非空）或已存在后的更新照常允许。
                                 // 避免运行时被回声污染、帧未落盘 → 手动追平校验误报。
                                 const mk0 = entry.kind === 'rows' ? rel[1] : rel[0];
-                                if (String(mk0).charAt(0) === '_' && pv === undefined) {
+                                if (String(mk0).charAt(0) === '_' && pv === undefined && isStructurallyDefault(nv)) {
                                     dbg(' [渲染回写抑制] 跳过全默认内部状态字段 ' + np + '（前端回声，不落库）。');
                                     continue;
                                 }
@@ -5562,7 +5580,6 @@ ${DB_INIT_SNIPPET}
                 installWindowGetAllVariables();
                 installWindowMvuShim();
                 installTableUpdateHook();
-                installTableFillGuard();
                 // 建表/初始化成功（或聊天已有 checkpoint 跳过）≈ MVU 的 VARIABLE_INITIALIZED 时机。
                 // 不能立刻广播：插件回放/物化可能尚未完成，此刻 getAllVariables 可能返回空/旧值，
                 // 前端收到后重读会显示默认值并写回。等 stat_data 非空后再派发（见 scheduleDataReadyNotify）。
@@ -5929,56 +5946,9 @@ ${DB_INIT_SNIPPET}
     // 模板缓存未就绪时写库重试次数（仅由 replaceMvuData 外部入口重置，
     // 避免重试自身把计数清零导致无限循环）
     let overlayFlushRetries = 0;
-    // 插件原生填表（手动填表/自动更新，orchestrateManualCatchUp/group_fill）进行中：
-    // 此时数据库由插件自己的事务管线写入，转换器的 Mvu 写路径必须暂停。
-    // 参考卡的前端直接用 AutoCardUpdaterAPI 写，不会与原生填表竞争；
-    // 转换卡的前端仍走 Mvu.replaceMvuData，若在填表窗口写库，会与插件的
-    // “手动追平完整性校验”（replay vs runtime）竞争：
-    //   - runtime 被清空/回放中 → updateCell 越界（Row index 1 out of bounds）；
-    //   - 提交发生在校验回放读取聊天之前 → V2 replay 与本轮已提交数据不一致 → 回载。
-    let nativeFillInProgress = false;
-    let nativeFillSettleTimer = null;
-    let tableFillGuardInstalled = false;
     // 跨卡残留前端写库丢弃的限频标记（按聊天去重，避免刷屏）
     let lastForeignWriteDropChat = '';
 
-    // 检测插件原生填表/追平是否在最近 windowMs 内提交过（group_fill 日志条目）：
-    // 插件的“手动追平”（runManualCatchUp → orchestrateManualCatchUp）不触发
-    // registerTableFillStartCallback，只能靠帧扫描兜底。填表提交后插件会立刻做
-    // replay vs runtime 完整性校验（异步、带 yield），此窗口内我们的 manual_crud
-    // 提交可能只改了运行时而帧未被校验读到 → 不一致回载。扫描到最近提交就暂停写库，
-    // 等校验窗口过去（条目年龄超过窗口即恢复）。
-    function nativeFillRecentlyCommitted(windowMs) {
-        try {
-            const ctx = getContextSafe();
-            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-            if (!chat.length) return false;
-            const now = Date.now();
-            const cutoff = now - Math.max(0, Number(windowMs) || 7000);
-            const scanFrom = Math.max(0, chat.length - 3);
-            for (let mi = chat.length - 1; mi >= scanFrom; mi--) {
-                const msg = chat[mi];
-                if (!msg || typeof msg !== 'object') continue;
-                let iso = msg.TavernDB_ACU_IsolatedData;
-                if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
-                if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
-                for (const tagKey of Object.keys(iso)) {
-                    const tag = iso[tagKey];
-                    const sf = tag && tag.storageFrame;
-                    if (!sf || typeof sf !== 'object') continue;
-                    const logs = Array.isArray(sf.logEntries) ? sf.logEntries : [];
-                    for (let li = logs.length - 1; li >= 0; li--) {
-                        const en = logs[li];
-                        const at = Number(en && en.createdAt) || 0;
-                        if (at < cutoff) break;
-                        const src = String((en && en.source) || '');
-                        if (src === 'group_fill' || src === 'manual_fill' || src === 'fill') return true;
-                    }
-                }
-            }
-            return false;
-        } catch (e) { return false; }
-    }
     // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
     // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
     const initializedViaGameSession = new Set();
@@ -6029,16 +5999,6 @@ ${DB_INIT_SNIPPET}
                 }
                 const api = getAcuApi();
                 if (api && activeLayout) {
-                    // 插件原生填表（手动填表/自动更新）进行中：数据库由插件自己的事务管线
-                    // 写入并做 replay 完整性校验。转换器此刻写库会与校验竞争（越界/不一致回载），
-                    // 直接丢弃待写快照，等原生流程结束后的后续写入接手。
-                    // “手动追平”不触发 fill-start 回调，用帧扫描最近 group_fill 提交兜底。
-                    const fillActiveNow = nativeFillInProgress || nativeFillRecentlyCommitted(7000);
-                    if (fillActiveNow) {
-                        dbg('[填表守卫] 插件原生填表进行中' + (nativeFillInProgress ? '（fill-start 回调）' : '（帧扫描最近 group_fill）') + '，丢弃本次 Mvu 合并写库（等待原生流程结束）。');
-                        if (statWriteOverlayGen === gen) pendingStatWrite = null;
-                        return;
-                    }
                     // 插件自己的事务管线负责 checkpoint/落盘；这里只做运行时就绪等待与差异写入。
                     // 不再手工锚定：initGameSession/插件提交管线自动建立并维护 checkpoint。
                     
@@ -6135,7 +6095,7 @@ ${DB_INIT_SNIPPET}
                                     pRows.push(L.table + ':' + (ps && Array.isArray(ps.content) ? ps.content.length - 1 : 0));
                                 }
                             }
-                            dbg('[写库时序] gen=' + gen + ' 重试=' + overlayFlushRetries + ' 填表守卫=' + nativeFillInProgress +
+                            dbg('[写库时序] gen=' + gen + ' 重试=' + overlayFlushRetries +
                                 ' | 运行时行数: ' + rtRows.join(',') +
                                 (pRows.length ? ' | 持久化行数: ' + pRows.join(',') : ' | 持久化重建: 无'));
                         }
@@ -6180,12 +6140,15 @@ ${DB_INIT_SNIPPET}
                             if (allowedGroups.has(k)) {
                                 const tv = target[k];
                                 const pv = out[k];
-                                // 空组保护：前端 target 该组为空对象而当前（prev）有数据时，
-                                // 保留 prev——MVU 前端常分批/按需发 stat_data，空组≠“清空意图”，
-                                // 若直接覆盖会把持久化行判成删除（DELETE-only sql_sheet_batch → 回放丢行）。
+                                // 空组保护（仅行表 rows）：前端 target 该组为空对象而当前（prev）
+                                // 有数据时保留 prev——MVU 前端常分批/按需发 stat_data，行表空组
+                                // 可能是“数据未加载”而非“删除所有行”（DELETE-only 会丢行）。
+                                // JSON 表显式置空 = 清空内容（前端取消任务等真实操作，如 任务={}），
+                                // 单例表空对象无键自然无操作——两者都不需要保护。
                                 const isEmptyObj = tv && typeof tv === 'object' && !Array.isArray(tv) && Object.keys(tv).length === 0;
                                 const prevNonEmpty = pv && typeof pv === 'object' && !Array.isArray(pv) && Object.keys(pv).length > 0;
-                                if (isEmptyObj && prevNonEmpty) {
+                                const grpLayout = (Array.isArray(activeLayout) ? activeLayout : []).find(L => L.group === k);
+                                if (isEmptyObj && prevNonEmpty && grpLayout && grpLayout.kind === 'rows') {
                                     dbg(' [空组保护] target.' + k + ' 为空对象而 prev 有数据，保留 prev（不视为删除）。');
                                     continue;
                                 }
@@ -6716,42 +6679,6 @@ ${DB_INIT_SNIPPET}
                 } catch (e2) {}
                 dispatchVariableUpdateEnded();
             });
-            return true;
-        } catch (e) { return false; }
-    }
-
-    // 注册插件“填表开始”回调：原生填表期间暂停转换器写库（丢弃待写快照）。
-    // 插件没有“填表结束”回调：填表提交/校验必然触发表更新，因此用
-    // “填表开始 → 首个表更新 → 连续 5 秒无更新”判定结束（AI 生成阶段无表更新，
-    // 守卫保持；多次 bucket 提交之间静默期会重置）。另加 90s 兜底超时，
-    // 防止填表异常中断后守卫永久停摆。
-    function installTableFillGuard() {
-        if (tableFillGuardInstalled) return true;
-        const api = getAcuApi();
-        if (!api || typeof api.registerTableFillStartCallback !== 'function') return false;
-        try {
-            api.registerTableFillStartCallback(() => {
-                nativeFillInProgress = true;
-                if (nativeFillSettleTimer) hostWindow.clearTimeout(nativeFillSettleTimer);
-                nativeFillSettleTimer = hostWindow.setTimeout(() => {
-                    nativeFillInProgress = false;
-                    nativeFillSettleTimer = null;
-                    dbgWarn('[填表守卫] 原生填表 90s 超时，强制恢复转换器写库。');
-                }, 90000);
-                dbg('[填表守卫] 插件原生填表开始，暂停转换器写库（等待原生流程完成）。');
-            });
-            if (typeof api.registerTableUpdateCallback === 'function') {
-                api.registerTableUpdateCallback(() => {
-                    if (!nativeFillInProgress || !nativeFillSettleTimer) return;
-                    hostWindow.clearTimeout(nativeFillSettleTimer);
-                    nativeFillSettleTimer = hostWindow.setTimeout(() => {
-                        nativeFillInProgress = false;
-                        nativeFillSettleTimer = null;
-                        dbg('[填表守卫] 插件原生填表已结束（静默期无表更新），恢复转换器写库。');
-                    }, 5000);
-                });
-            }
-            tableFillGuardInstalled = true;
             return true;
         } catch (e) { return false; }
     }
@@ -19399,7 +19326,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 installWindowGetAllVariables();
                 installWindowMvuShim();
                 installTableUpdateHook();
-                installTableFillGuard();
                 // 建表/初始化成功（或聊天已有 checkpoint 跳过）≈ MVU 的 VARIABLE_INITIALIZED 时机。
                 // 不能立刻广播：插件回放/物化可能尚未完成，此刻 getAllVariables 可能返回空/旧值，
                 // 前端收到后重读会显示默认值并写回。等 stat_data 非空后再派发（见 scheduleDataReadyNotify）。
@@ -19766,56 +19692,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     // 模板缓存未就绪时写库重试次数（仅由 replaceMvuData 外部入口重置，
     // 避免重试自身把计数清零导致无限循环）
     let overlayFlushRetries = 0;
-    // 插件原生填表（手动填表/自动更新，orchestrateManualCatchUp/group_fill）进行中：
-    // 此时数据库由插件自己的事务管线写入，转换器的 Mvu 写路径必须暂停。
-    // 参考卡的前端直接用 AutoCardUpdaterAPI 写，不会与原生填表竞争；
-    // 转换卡的前端仍走 Mvu.replaceMvuData，若在填表窗口写库，会与插件的
-    // “手动追平完整性校验”（replay vs runtime）竞争：
-    //   - runtime 被清空/回放中 → updateCell 越界（Row index 1 out of bounds）；
-    //   - 提交发生在校验回放读取聊天之前 → V2 replay 与本轮已提交数据不一致 → 回载。
-    let nativeFillInProgress = false;
-    let nativeFillSettleTimer = null;
-    let tableFillGuardInstalled = false;
     // 跨卡残留前端写库丢弃的限频标记（按聊天去重，避免刷屏）
     let lastForeignWriteDropChat = '';
 
-    // 检测插件原生填表/追平是否在最近 windowMs 内提交过（group_fill 日志条目）：
-    // 插件的“手动追平”（runManualCatchUp → orchestrateManualCatchUp）不触发
-    // registerTableFillStartCallback，只能靠帧扫描兜底。填表提交后插件会立刻做
-    // replay vs runtime 完整性校验（异步、带 yield），此窗口内我们的 manual_crud
-    // 提交可能只改了运行时而帧未被校验读到 → 不一致回载。扫描到最近提交就暂停写库，
-    // 等校验窗口过去（条目年龄超过窗口即恢复）。
-    function nativeFillRecentlyCommitted(windowMs) {
-        try {
-            const ctx = getContextSafe();
-            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-            if (!chat.length) return false;
-            const now = Date.now();
-            const cutoff = now - Math.max(0, Number(windowMs) || 7000);
-            const scanFrom = Math.max(0, chat.length - 3);
-            for (let mi = chat.length - 1; mi >= scanFrom; mi--) {
-                const msg = chat[mi];
-                if (!msg || typeof msg !== 'object') continue;
-                let iso = msg.TavernDB_ACU_IsolatedData;
-                if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
-                if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
-                for (const tagKey of Object.keys(iso)) {
-                    const tag = iso[tagKey];
-                    const sf = tag && tag.storageFrame;
-                    if (!sf || typeof sf !== 'object') continue;
-                    const logs = Array.isArray(sf.logEntries) ? sf.logEntries : [];
-                    for (let li = logs.length - 1; li >= 0; li--) {
-                        const en = logs[li];
-                        const at = Number(en && en.createdAt) || 0;
-                        if (at < cutoff) break;
-                        const src = String((en && en.source) || '');
-                        if (src === 'group_fill' || src === 'manual_fill' || src === 'fill') return true;
-                    }
-                }
-            }
-            return false;
-        } catch (e) { return false; }
-    }
     // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
     // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
     const initializedViaGameSession = new Set();
@@ -19866,16 +19745,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 }
                 const api = getAcuApi();
                 if (api && activeLayout) {
-                    // 插件原生填表（手动填表/自动更新）进行中：数据库由插件自己的事务管线
-                    // 写入并做 replay 完整性校验。转换器此刻写库会与校验竞争（越界/不一致回载），
-                    // 直接丢弃待写快照，等原生流程结束后的后续写入接手。
-                    // “手动追平”不触发 fill-start 回调，用帧扫描最近 group_fill 提交兜底。
-                    const fillActiveNow = nativeFillInProgress || nativeFillRecentlyCommitted(7000);
-                    if (fillActiveNow) {
-                        dbg('[填表守卫] 插件原生填表进行中' + (nativeFillInProgress ? '（fill-start 回调）' : '（帧扫描最近 group_fill）') + '，丢弃本次 Mvu 合并写库（等待原生流程结束）。');
-                        if (statWriteOverlayGen === gen) pendingStatWrite = null;
-                        return;
-                    }
                     // 插件自己的事务管线负责 checkpoint/落盘；这里只做运行时就绪等待与差异写入。
                     // 不再手工锚定：initGameSession/插件提交管线自动建立并维护 checkpoint。
                     
@@ -19972,7 +19841,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                     pRows.push(L.table + ':' + (ps && Array.isArray(ps.content) ? ps.content.length - 1 : 0));
                                 }
                             }
-                            dbg('[写库时序] gen=' + gen + ' 重试=' + overlayFlushRetries + ' 填表守卫=' + nativeFillInProgress +
+                            dbg('[写库时序] gen=' + gen + ' 重试=' + overlayFlushRetries +
                                 ' | 运行时行数: ' + rtRows.join(',') +
                                 (pRows.length ? ' | 持久化行数: ' + pRows.join(',') : ' | 持久化重建: 无'));
                         }
@@ -20017,12 +19886,15 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             if (allowedGroups.has(k)) {
                                 const tv = target[k];
                                 const pv = out[k];
-                                // 空组保护：前端 target 该组为空对象而当前（prev）有数据时，
-                                // 保留 prev——MVU 前端常分批/按需发 stat_data，空组≠“清空意图”，
-                                // 若直接覆盖会把持久化行判成删除（DELETE-only sql_sheet_batch → 回放丢行）。
+                                // 空组保护（仅行表 rows）：前端 target 该组为空对象而当前（prev）
+                                // 有数据时保留 prev——MVU 前端常分批/按需发 stat_data，行表空组
+                                // 可能是“数据未加载”而非“删除所有行”（DELETE-only 会丢行）。
+                                // JSON 表显式置空 = 清空内容（前端取消任务等真实操作，如 任务={}），
+                                // 单例表空对象无键自然无操作——两者都不需要保护。
                                 const isEmptyObj = tv && typeof tv === 'object' && !Array.isArray(tv) && Object.keys(tv).length === 0;
                                 const prevNonEmpty = pv && typeof pv === 'object' && !Array.isArray(pv) && Object.keys(pv).length > 0;
-                                if (isEmptyObj && prevNonEmpty) {
+                                const grpLayout = (Array.isArray(activeLayout) ? activeLayout : []).find(L => L.group === k);
+                                if (isEmptyObj && prevNonEmpty && grpLayout && grpLayout.kind === 'rows') {
                                     dbg(' [空组保护] target.' + k + ' 为空对象而 prev 有数据，保留 prev（不视为删除）。');
                                     continue;
                                 }
@@ -20553,42 +20425,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 } catch (e2) {}
                 dispatchVariableUpdateEnded();
             });
-            return true;
-        } catch (e) { return false; }
-    }
-
-    // 注册插件“填表开始”回调：原生填表期间暂停转换器写库（丢弃待写快照）。
-    // 插件没有“填表结束”回调：填表提交/校验必然触发表更新，因此用
-    // “填表开始 → 首个表更新 → 连续 5 秒无更新”判定结束（AI 生成阶段无表更新，
-    // 守卫保持；多次 bucket 提交之间静默期会重置）。另加 90s 兜底超时，
-    // 防止填表异常中断后守卫永久停摆。
-    function installTableFillGuard() {
-        if (tableFillGuardInstalled) return true;
-        const api = getAcuApi();
-        if (!api || typeof api.registerTableFillStartCallback !== 'function') return false;
-        try {
-            api.registerTableFillStartCallback(() => {
-                nativeFillInProgress = true;
-                if (nativeFillSettleTimer) hostWindow.clearTimeout(nativeFillSettleTimer);
-                nativeFillSettleTimer = hostWindow.setTimeout(() => {
-                    nativeFillInProgress = false;
-                    nativeFillSettleTimer = null;
-                    dbgWarn('[填表守卫] 原生填表 90s 超时，强制恢复转换器写库。');
-                }, 90000);
-                dbg('[填表守卫] 插件原生填表开始，暂停转换器写库（等待原生流程完成）。');
-            });
-            if (typeof api.registerTableUpdateCallback === 'function') {
-                api.registerTableUpdateCallback(() => {
-                    if (!nativeFillInProgress || !nativeFillSettleTimer) return;
-                    hostWindow.clearTimeout(nativeFillSettleTimer);
-                    nativeFillSettleTimer = hostWindow.setTimeout(() => {
-                        nativeFillInProgress = false;
-                        nativeFillSettleTimer = null;
-                        dbg('[填表守卫] 插件原生填表已结束（静默期无表更新），恢复转换器写库。');
-                    }, 5000);
-                });
-            }
-            tableFillGuardInstalled = true;
             return true;
         } catch (e) { return false; }
     }
