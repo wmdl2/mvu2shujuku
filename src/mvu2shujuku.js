@@ -5450,6 +5450,24 @@ ${DB_INIT_SNIPPET}
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
                     hostWindow.setTimeout(autoInitDatabase, 600);
+                    // 刷新/重进后：插件回放完成前前端可能已读了一次旧 stat_data，而插件加载完成
+                    // 不主动通知前端。等运行时就绪后派发一次 VARIABLE_UPDATE_ENDED，让前端重读最新值
+                    // （对齐参考卡桥 registerTableUpdateCallback → dispatchVariableUpdateEnded 的同步链路）。
+                    hostWindow.setTimeout(async () => {
+                        try {
+                            const apiR = getAcuApi();
+                            if (!apiR || !activeLayout) return;
+                            if (await waitRuntimeTablesReady(apiR, activeLayout, 6000)) {
+                                // 表结构就绪后再给插件回放/物化一个微窗口，确保值是最终态
+                                await new Promise(res => hostWindow.setTimeout(res, 500));
+                                const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                                const sdR = allR.stat_data || {};
+                                dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
+                                dispatchVariableUpdateEnded();
+                                dbg('[重读通知] 已派发 VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
+                            }
+                        } catch (e) {}
+                    }, 1000);
                     // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
                     syncRuntimeForCurrentCard();
                     activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
