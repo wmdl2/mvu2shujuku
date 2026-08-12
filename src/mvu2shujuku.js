@@ -3056,6 +3056,29 @@
                     continue;
                 }
                 if (r.newRowObj) {
+                    // 行表 INSERT 前检查：若持久化帧里该表已有同键行，说明运行时仅表头只是
+                    // 插件回放未完成（切聊天/刷新窗口）。此刻 insertRow 会造出重复行，
+                    // 回放完成后 row_id 错位 → 触发插件“手动追平完整性校验失败”/多余行。
+                    // 跳过并标记失败，由合并层延迟重试等回放完成。
+                    if (persistedTables && typeof persistedTables === 'object') {
+                        const pSheet2 = Object.values(persistedTables).find(s => s && s.name === L.table);
+                        if (pSheet2 && Array.isArray(pSheet2.content) && pSheet2.content.length > 1) {
+                            const ki2 = pSheet2.content[0] ? pSheet2.content[0].indexOf(L.keyCol) : -1;
+                            let dupKey = false;
+                            if (ki2 >= 0) {
+                                const want = String(r.newRowObj[L.keyCol] == null ? '' : r.newRowObj[L.keyCol]);
+                                for (let ri2 = 1; ri2 < pSheet2.content.length; ri2++) {
+                                    const row2 = pSheet2.content[ri2];
+                                    if (Array.isArray(row2) && String(row2[ki2] == null ? '' : row2[ki2]) === want) { dupKey = true; break; }
+                                }
+                            }
+                            if (dupKey) {
+                                dbg(' 行表「' + L.table + '」持久化已有键「' + r.newRowObj[L.keyCol] + '」而运行时空（回放中），跳过 INSERT 稍后重试。');
+                                statWriteHadFailure = true;
+                                continue;
+                            }
+                        }
+                    }
                     try {
                         const ir = await Promise.resolve(api.insertRow(L.table, r.newRowObj));
                         if (ir === -1 || ir === false || ir === undefined || ir === null) statWriteHadFailure = true;
@@ -3063,8 +3086,27 @@
                     continue;
                 }
                 try {
+                    // 单例/JSON 表 updateCell 前检查：运行时仅表头（回放未完成）而持久化已有
+                    // 该表数据行时，updateCell 必然越界报错（Row index 1 out of bounds）且插件
+                    // 日志刷屏。直接跳过并标记失败，由合并层延迟重试（等插件回放完成）。
+                    if (r.rowIndex >= 1 && r.sheet && Array.isArray(r.sheet.content) && r.sheet.content.length <= 1) {
+                        if (persistedTables && typeof persistedTables === 'object') {
+                            const pSheet3 = Object.values(persistedTables).find(s => s && s.name === L.table);
+                            if (pSheet3 && Array.isArray(pSheet3.content) && pSheet3.content.length > 1) {
+                                dbg(' 表「' + L.table + '」运行时仅表头而持久化已有数据行（回放窗口），跳过 updateCell 稍后重试。');
+                                statWriteHadFailure = true;
+                                continue;
+                            }
+                        }
+                    }
                     const ok = await Promise.resolve(api.updateCell(L.table, r.rowIndex, r.colZh, r.value));
-                    if (!ok) statWriteHadFailure = true;
+                    if (!ok) {
+                        statWriteHadFailure = true;
+                        if (mvu2shujukuDebugOn()) {
+                            dbg(' updateCell 失败: ' + L.table + ' row=' + r.rowIndex + ' col=' + r.colZh +
+                                ' 运行时行数=' + (Array.isArray(r.sheet && r.sheet.content) ? r.sheet.content.length : 0));
+                        }
+                    }
                 } catch (e) {}
             } catch (e) {}
         }
@@ -3075,6 +3117,17 @@
             for (const d of directOps) {
                 try {
                     if (d.kind === 'json') {
+                        // 整组 JSON 表同样可能在回放窗口仅表头：持久化已有行而运行时为空时跳过，
+                        // 由合并层延迟重试（否则 updateCell(…, 1, …) 越界刷屏）。
+                        if (persistedTables && typeof persistedTables === 'object') {
+                            const pSheetJ = Object.values(persistedTables).find(s => s && s.name === d.layout.table);
+                            if (pSheetJ && Array.isArray(pSheetJ.content) && pSheetJ.content.length > 1 &&
+                                (!d.sheet || !Array.isArray(d.sheet.content) || d.sheet.content.length <= 1)) {
+                                dbg(' JSON表「' + d.layout.table + '」运行时仅表头而持久化已有数据行（回放窗口），跳过写入稍后重试。');
+                                statWriteHadFailure = true;
+                                continue;
+                            }
+                        }
                         const jok = await Promise.resolve(api.updateCell(d.layout.table, 1, '内容', d.value));
                         if (!jok) statWriteHadFailure = true;
                     } else if (d.kind === 'overflow' || d.kind === 'overflow-remove') {
@@ -5487,6 +5540,7 @@ ${DB_INIT_SNIPPET}
                 installWindowGetAllVariables();
                 installWindowMvuShim();
                 installTableUpdateHook();
+                installTableFillGuard();
                 // 建表/初始化成功（或聊天已有 checkpoint 跳过）≈ MVU 的 VARIABLE_INITIALIZED 时机。
                 // 不能立刻广播：插件回放/物化可能尚未完成，此刻 getAllVariables 可能返回空/旧值，
                 // 前端收到后重读会显示默认值并写回。等 stat_data 非空后再派发（见 scheduleDataReadyNotify）。
@@ -5853,6 +5907,16 @@ ${DB_INIT_SNIPPET}
     // 模板缓存未就绪时写库重试次数（仅由 replaceMvuData 外部入口重置，
     // 避免重试自身把计数清零导致无限循环）
     let overlayFlushRetries = 0;
+    // 插件原生填表（手动填表/自动更新，orchestrateManualCatchUp/group_fill）进行中：
+    // 此时数据库由插件自己的事务管线写入，转换器的 Mvu 写路径必须暂停。
+    // 参考卡的前端直接用 AutoCardUpdaterAPI 写，不会与原生填表竞争；
+    // 转换卡的前端仍走 Mvu.replaceMvuData，若在填表窗口写库，会与插件的
+    // “手动追平完整性校验”（replay vs runtime）竞争：
+    //   - runtime 被清空/回放中 → updateCell 越界（Row index 1 out of bounds）；
+    //   - 提交发生在校验回放读取聊天之前 → V2 replay 与本轮已提交数据不一致 → 回载。
+    let nativeFillInProgress = false;
+    let nativeFillSettleTimer = null;
+    let tableFillGuardInstalled = false;
     // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
     // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
     const initializedViaGameSession = new Set();
@@ -5903,6 +5967,14 @@ ${DB_INIT_SNIPPET}
                 }
                 const api = getAcuApi();
                 if (api && activeLayout) {
+                    // 插件原生填表（手动填表/自动更新）进行中：数据库由插件自己的事务管线
+                    // 写入并做 replay 完整性校验。转换器此刻写库会与校验竞争（越界/不一致回载），
+                    // 直接丢弃待写快照，等原生流程结束后的后续写入接手。
+                    if (nativeFillInProgress) {
+                        dbg('[填表守卫] 插件原生填表进行中，丢弃本次 Mvu 合并写库（等待原生流程结束）。');
+                        if (statWriteOverlayGen === gen) pendingStatWrite = null;
+                        return;
+                    }
                     // 插件自己的事务管线负责 checkpoint/落盘；这里只做运行时就绪等待与差异写入。
                     // 不再手工锚定：initGameSession/插件提交管线自动建立并维护 checkpoint。
                     
@@ -5956,6 +6028,30 @@ ${DB_INIT_SNIPPET}
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
+                    // 诊断：写库前运行时与持久化重建的行数对比，定位“回放窗口/填表窗口”竞争
+                    try {
+                        if (mvu2shujukuDebugOn()) {
+                            const cur2 = api.exportTableAsJson() || {};
+                            const rtRows = [];
+                            const pRows = [];
+                            let pData = null;
+                            try { pData = readPersistedTableData(); } catch (e) {}
+                            for (const L of (Array.isArray(activeLayout) ? activeLayout : [])) {
+                                let rc = 0;
+                                for (const k in cur2) {
+                                    if (k.indexOf('sheet_') === 0 && cur2[k] && cur2[k].name === L.table && Array.isArray(cur2[k].content)) { rc = cur2[k].content.length - 1; break; }
+                                }
+                                rtRows.push(L.table + ':' + rc);
+                                if (pData) {
+                                    const ps = Object.values(pData).find(s => s && s.name === L.table);
+                                    pRows.push(L.table + ':' + (ps && Array.isArray(ps.content) ? ps.content.length - 1 : 0));
+                                }
+                            }
+                            dbg('[写库时序] gen=' + gen + ' 重试=' + overlayFlushRetries + ' 填表守卫=' + nativeFillInProgress +
+                                ' | 运行时行数: ' + rtRows.join(',') +
+                                (pRows.length ? ' | 持久化行数: ' + pRows.join(',') : ' | 持久化重建: 无'));
+                        }
+                    } catch (eDiag) {}
                     // 写基线用运行时（插件已就绪，运行时即最新已提交状态）而不是持久化重建，
                     // 避免与持久化帧的提交时序产生差异；持久化优先只服务前端读侧。
                     let prev = {};
@@ -6518,6 +6614,42 @@ ${DB_INIT_SNIPPET}
         } catch (e) { return false; }
     }
 
+    // 注册插件“填表开始”回调：原生填表期间暂停转换器写库（丢弃待写快照）。
+    // 插件没有“填表结束”回调：填表提交/校验必然触发表更新，因此用
+    // “填表开始 → 首个表更新 → 连续 5 秒无更新”判定结束（AI 生成阶段无表更新，
+    // 守卫保持；多次 bucket 提交之间静默期会重置）。另加 90s 兜底超时，
+    // 防止填表异常中断后守卫永久停摆。
+    function installTableFillGuard() {
+        if (tableFillGuardInstalled) return true;
+        const api = getAcuApi();
+        if (!api || typeof api.registerTableFillStartCallback !== 'function') return false;
+        try {
+            api.registerTableFillStartCallback(() => {
+                nativeFillInProgress = true;
+                if (nativeFillSettleTimer) hostWindow.clearTimeout(nativeFillSettleTimer);
+                nativeFillSettleTimer = hostWindow.setTimeout(() => {
+                    nativeFillInProgress = false;
+                    nativeFillSettleTimer = null;
+                    dbgWarn('[填表守卫] 原生填表 90s 超时，强制恢复转换器写库。');
+                }, 90000);
+                dbg('[填表守卫] 插件原生填表开始，暂停转换器写库（等待原生流程完成）。');
+            });
+            if (typeof api.registerTableUpdateCallback === 'function') {
+                api.registerTableUpdateCallback(() => {
+                    if (!nativeFillInProgress || !nativeFillSettleTimer) return;
+                    hostWindow.clearTimeout(nativeFillSettleTimer);
+                    nativeFillSettleTimer = hostWindow.setTimeout(() => {
+                        nativeFillInProgress = false;
+                        nativeFillSettleTimer = null;
+                        dbg('[填表守卫] 插件原生填表已结束（静默期无表更新），恢复转换器写库。');
+                    }, 5000);
+                });
+            }
+            tableFillGuardInstalled = true;
+            return true;
+        } catch (e) { return false; }
+    }
+
     // =================================================================
     // 扩展侧 Mvu 兼容层：按 MVU 官方全局 API（createMvu）完整实现，
     // 覆盖式接管运行环境里残留的真 MVU（避免双轨冲突），桥不在主窗口时也能读写数据库。
@@ -6836,6 +6968,18 @@ ${DB_INIT_SNIPPET}
                         return false;
                     }
                     overlayFlushRetries = 0;
+                    if (mvu2shujukuDebugOn()) {
+                        // 诊断：记录 replaceMvuData 的调用来源（前端 iframe/桥/卡内脚本），
+                        // 用于区分“用户操作写库”与“前端渲染/填表窗口自动写库”。
+                        let caller = '';
+                        try {
+                            const st = new Error().stack || '';
+                            const lines2 = String(st).split('\n').filter(l => l.indexOf('mvu2shujuku') === -1 && l.indexOf('scheduleWindowStatOverlay') === -1);
+                            if (lines2.length) caller = String(lines2[0]).trim();
+                        } catch (e) {}
+                        const g0 = data && data.stat_data ? Object.keys(data.stat_data).filter(k => k !== '$internal') : [];
+                        dbg(' Mvu.replaceMvuData 调用来源=' + (caller || '未知') + ' | 顶层组=' + g0.join(','));
+                    }
                     scheduleWindowStatOverlay((data && data.stat_data) || {});
                     return true;
                 } catch (e) {
