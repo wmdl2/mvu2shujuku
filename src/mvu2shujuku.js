@@ -5934,6 +5934,67 @@ ${DB_INIT_SNIPPET}
     // 只在当前卡是本转换器产物时安装；切到其他卡时恢复原函数（或删除），不污染其他卡。
     let installedGetAllVariables = false;
     let originalGetAllVariables = undefined;
+    // 只读：运行时为空/插件异步回放中/切卡残留时，从当前聊天持久化帧（V2 storageFrame）重建表格数据。
+    // 仅用于读侧兜底，防止前端“空读 → schema 默认值 → 写回”把数据库重置成默认值；不写运行时。
+    // 基底取最后一个 full checkpoint 或 data_replace 完整后态；随后按 logEntries 顺序应用
+    // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁），即“数据库原始真相”。
+    function readPersistedTableData() {
+        try {
+            const ctx = getContextSafe();
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            let base = null;
+            const ops = [];
+            for (let mi = 0; mi < chat.length; mi++) {
+                const msg = chat[mi];
+                if (!msg || typeof msg !== 'object') continue;
+                let iso = msg.TavernDB_ACU_IsolatedData;
+                if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
+                if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
+                for (const tagKey of Object.keys(iso)) {
+                    const tag = iso[tagKey];
+                    if (!tag || typeof tag !== 'object' || Array.isArray(tag)) continue;
+                    const sf = tag.storageFrame;
+                    if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
+                    const cp = sf.checkpoint;
+                    if (cp && cp.kind === 'full' && cp.data && typeof cp.data === 'object') {
+                        base = JSON.parse(JSON.stringify(cp.data));
+                    }
+                    for (const en of sf.logEntries) {
+                        const eops = Array.isArray(en && en.operations) ? en.operations : [];
+                        for (const op of eops) {
+                            if (!op || typeof op !== 'object') continue;
+                            if (op.kind === 'data_replace' && op.data && typeof op.data === 'object') {
+                                base = JSON.parse(JSON.stringify(op.data));
+                            } else if (op.kind === 'row_upsert' || op.kind === 'row_delete') {
+                                ops.push(op);
+                            }
+                        }
+                    }
+                }
+            }
+            if (!base) return null;
+            for (const op of ops) {
+                const sheet = base[op.sheetKey];
+                if (!sheet || !Array.isArray(sheet.content)) continue;
+                if (op.kind === 'row_delete') {
+                    const rid = String(op.rowId == null ? '' : op.rowId);
+                    sheet.content = sheet.content.filter(function (row, idx) {
+                        return idx === 0 || !Array.isArray(row) || String(row[0] == null ? '' : row[0]).trim() !== rid;
+                    });
+                } else if (op.kind === 'row_upsert' && Array.isArray(op.cells)) {
+                    const rid = String(op.rowId == null ? '' : op.rowId);
+                    const cells = JSON.parse(JSON.stringify(op.cells));
+                    const idx = sheet.content.findIndex(function (row, i2) {
+                        return i2 > 0 && Array.isArray(row) && String(row[0] == null ? '' : row[0]).trim() === rid;
+                    });
+                    if (idx >= 0) sheet.content[idx] = cells;
+                    else sheet.content.push(cells);
+                }
+            }
+            return base;
+        } catch (e) { return null; }
+    }
+
     function installWindowGetAllVariables() {
         const core = window.MVU2SHUJUKU_CORE;
         if (typeof window.getAllVariables === 'function') return;
@@ -5954,13 +6015,28 @@ ${DB_INIT_SNIPPET}
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     return { stat_data: {}, display_data: {} };
                 }
-                // 切卡隔离：插件运行时可能还没从上一张卡切过来（异步 reload 空窗期），
-                // 透传旧卡表格会让前端拿到上一张卡的 stat_data 并写回当前聊天（串卡污染）。
-                // 检测到跨卡残留表时返回空，让前端从零构建，等 autoInit/插件切换完成。
+                // 切卡隔离：插件运行时可能还没从上一张卡切过来（异步 reload 空窗期）。
+                // 检测到跨卡残留表或运行时为空时，一律从当前聊天的持久化帧重建（读数据库真相），
+                // 不让前端拿到空/旧卡数据——否则前端“空读 → schema 默认值 → 写回”会重置数据库。
                 try {
+                    const cur = api.exportTableAsJson() || {};
+                    let hasTables = false;
+                    for (const k in cur) {
+                        if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) { hasTables = true; break; }
+                    }
+                    if (!hasTables) {
+                        const persisted = readPersistedTableData();
+                        if (persisted) return core.statDataFromTables(activeLayout, persisted);
+                        return { stat_data: {}, display_data: {} };
+                    }
                     const foreign = runtimeForeignTableNames(api, activeLayout);
                     if (foreign.length) {
-                        dbg(' [切卡隔离] 运行时含跨卡残留表：' + foreign.join('、') + '，读取返回空（等待插件完成聊天切换）。');
+                        const persisted2 = readPersistedTableData();
+                        if (persisted2) {
+                            dbg(' [切卡隔离] 运行时含跨卡残留表：' + foreign.join('、') + '，改用持久化帧重建当前聊天数据。');
+                            return core.statDataFromTables(activeLayout, persisted2);
+                        }
+                        dbg(' [切卡隔离] 运行时含跨卡残留表且无持久化帧，读取返回空。');
                         return { stat_data: {}, display_data: {} };
                     }
                 } catch (e) {}
