@@ -2562,7 +2562,12 @@
      * api: AutoCardUpdaterAPI；layoutEntries: buildLayoutJson 输出；prev/next: stat_data 前后快照。
      * 与卡内数据桥 writeDiffToDb 同逻辑，供扩展在桥不运行时提供写库能力。
      */
+    // 上次写库是否出现失败的 CRUD（updateCell/insertRow 返回 false/-1）：
+    // 供扩展合并层判断是否需要延迟重试（首楼替换/插件回放会清空运行时导致写入落空，
+    // 等运行时稳定后重跑一次即可；直接补行会在原行恢复时造成重复行）。
+    let statWriteHadFailure = false;
     async function writeStatDiffToDb(api, layoutEntries, prevStat, nextStat) {
+        statWriteHadFailure = false;
         const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
         const pathParts = (s) => String(s || '').split('.');
         const tableEntryByPath = (pathStr) => {
@@ -3026,46 +3031,15 @@
                     continue;
                 }
                 if (r.newRowObj) {
-                    try { await Promise.resolve(api.insertRow(L.table, r.newRowObj)); } catch (e) {}
+                    try {
+                        const ir = await Promise.resolve(api.insertRow(L.table, r.newRowObj));
+                        if (ir === -1 || ir === false || ir === undefined || ir === null) statWriteHadFailure = true;
+                    } catch (e) {}
                     continue;
                 }
                 try {
                     const ok = await Promise.resolve(api.updateCell(L.table, r.rowIndex, r.colZh, r.value));
-                    if (!ok && r.layout && r.layout.kind === 'singleton') {
-                        // 单例表数据行缺失/被清空（首楼替换、插件回放窗口会清空运行时）：
-                        // 按布局默认值补行后重写该单元格，避免开场注入部分丢失。
-                        // 必须查“实时”运行时：快照可能仍带着已被清掉的行，导致漏判。
-                        let live2 = {};
-                        try { live2 = api.exportTableAsJson() || {}; } catch (e) {}
-                        const liveSheet2 = (() => {
-                            for (const k2 in live2) {
-                                if (k2.indexOf('sheet_') === 0 && live2[k2] && live2[k2].name === r.layout.table) return live2[k2];
-                            }
-                            return null;
-                        })();
-                        const liveHasRow = liveSheet2 && Array.isArray(liveSheet2.content) && liveSheet2.content.length > 1;
-                        if (!liveHasRow) {
-                            const sObj2 = {};
-                            for (const c of (Array.isArray(r.layout.cols) ? r.layout.cols : [])) {
-                                const colZh2 = Array.isArray(c) ? c[0] : (c && c.zh);
-                                if (!colZh2 || colZh2 === '_扩展数据') continue;
-                                const fb2 = Array.isArray(c) ? c[2] : c.fallback;
-                                sObj2[colZh2] = (fb2 === undefined || fb2 === null) ? '' : fb2;
-                            }
-                            try {
-                                const ir2 = await Promise.resolve(api.insertRow(r.layout.table, sObj2));
-                                if (ir2 !== -1 && ir2 !== false && ir2 !== undefined && ir2 !== null) {
-                                    dbg(' 已为表「' + r.layout.table + '」补初始行并重写 ' + r.colZh + '（写入越界/运行时被清空重试）。');
-                                    await Promise.resolve(api.updateCell(r.layout.table, 1, r.colZh, r.value));
-                                }
-                            } catch (e2) {
-                                dbgWarn(' 补行重试失败:', e2);
-                            }
-                        } else {
-                            // 行其实存在（可能只是瞬态失败）：直接重试一次
-                            await Promise.resolve(api.updateCell(r.layout.table, r.rowIndex, r.colZh, r.value));
-                        }
-                    }
+                    if (!ok) statWriteHadFailure = true;
                 } catch (e) {}
             } catch (e) {}
         }
@@ -3076,7 +3050,8 @@
             for (const d of directOps) {
                 try {
                     if (d.kind === 'json') {
-                        await Promise.resolve(api.updateCell(d.layout.table, 1, '内容', d.value));
+                        const jok = await Promise.resolve(api.updateCell(d.layout.table, 1, '内容', d.value));
+                        if (!jok) statWriteHadFailure = true;
                     } else if (d.kind === 'overflow' || d.kind === 'overflow-remove') {
                         // 同一次写入可能同时有“改动态字段”和“删动态字段”：必须读当前单元格再
                         // 合并/删除，不能直接覆盖整列（否则先写后删会把本次新增也抹掉）。
@@ -3088,11 +3063,13 @@
                             else cur[d.mergeKey] = d.value;
                             const out = JSON.stringify(cur);
                             if (!sameValue(curRow[ovcIdx], out)) {
-                                await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', out));
+                                const ook = await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', out));
+                                if (!ook) statWriteHadFailure = true;
                             }
                         }
                     } else if (d.kind === 'overflow-insert') {
-                        await Promise.resolve(api.insertRow(d.layout.table, d.rowObj));
+                        const oir = await Promise.resolve(api.insertRow(d.layout.table, d.rowObj));
+                        if (oir === -1 || oir === false || oir === undefined || oir === null) statWriteHadFailure = true;
                     }
                 } catch (e) {
                     dbgWarn(' 整组JSON/溢出列写入失败:', e);
@@ -6002,6 +5979,20 @@ ${DB_INIT_SNIPPET}
                         } else {
                             dbg(' 差异写入无操作（运行时与目标一致），跳过。');
                         }
+                        // 写入出现失败（首楼替换/插件回放会清空运行时，导致 updateCell 越界等）：
+                        // 不能当场补行——原行稍后会被重放恢复，补出来的行会变成重复行。
+                        // 改为延迟重跑整次合并：waitRuntimeTablesReady 会等到插件重放完成，
+                        // 原行回来就直接写、不重复；行真没了才由 seedNeeded 补。
+                        try {
+                            const coreNow = window.MVU2SHUJUKU_CORE;
+                            if (coreNow && coreNow.lastStatWriteFailed && overlayFlushRetries < 4) {
+                                overlayFlushRetries += 1;
+                                dbg(' 写入存在失败（运行时被清空/行缺失），稍后重试合并（#' + overlayFlushRetries + '）。');
+                                hostWindow.setTimeout(() => {
+                                    if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                                }, 1500);
+                            }
+                        } catch (eR) {}
                     } catch (e) {
                         dbgWarn(' 差异写入异常:', e && e.message ? e.message : e);
                     }
@@ -7763,6 +7754,7 @@ ${DB_INIT_SNIPPET}
         generateBridgeScript,
         statDataFromTables,
         writeStatDiffToDb,
+        get lastStatWriteFailed() { return statWriteHadFailure; },
         rewriteEjsConditions,
         toPinyinSlug,
         transformCard,
