@@ -2252,9 +2252,16 @@
         const template = {
             mate: {
                 type: 'chatSheets',
-                version: 1,
+                // 对齐 SP·数据库 插件的默认 mate：插件在 initGameSession/迁移时会把
+                // globalInjectionConfig（默认世界书注入位置）写回模板，并升到 version 2。
+                // 若转换模板保持 v1+空配置，保存的预设库与聊天作用域/迁移结果会只在 mate 上
+                // 不一致，插件面板显示“当前生效模板与预设库内容不同”。生成时直接带上同一配置。
+                version: 2,
                 updateConfigUiSentinel: -1,
-                globalInjectionConfig: {},
+                globalInjectionConfig: {
+                    readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+                    wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+                },
             },
         };
         const order = {};
@@ -4871,7 +4878,17 @@
      */
     function mergeTemplates(base, source, selectedUids) {
         const merged = JSON.parse(JSON.stringify(base && typeof base === 'object' ? base : {}));
-        if (!merged.mate) merged.mate = { type: 'chatSheets', version: 1 };
+        if (!merged.mate) {
+            merged.mate = {
+                type: 'chatSheets',
+                version: 2,
+                updateConfigUiSentinel: -1,
+                globalInjectionConfig: {
+                    readableEntryPlacement: { position: 'before_character_definition', depth: 2, order: 99981 },
+                    wrapperPlacement: { position: 'before_character_definition', depth: 2, order: 99980 },
+                },
+            };
+        }
         const src = source && typeof source === 'object' ? source : {};
         const names = new Set();
         for (const k of Object.keys(merged).filter(k => k.startsWith('sheet_'))) {
