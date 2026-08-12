@@ -5450,31 +5450,41 @@ ${DB_INIT_SNIPPET}
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
                     hostWindow.setTimeout(autoInitDatabase, 600);
-                    // 刷新/重进后：插件回放完成前前端可能已读了一次旧 stat_data，而插件加载完成
-                    // 不主动通知前端。等运行时就绪后派发一次 VARIABLE_UPDATE_ENDED，让前端重读最新值
-                    // （对齐参考卡桥 registerTableUpdateCallback → dispatchVariableUpdateEnded 的同步链路）。
-                    hostWindow.setTimeout(async () => {
+                    // 刷新/重进/切聊天后：前端（尤其整页注入式常驻前端）可能已读旧数据，而插件加载完成
+                    // 不主动通知前端。用“运行时有表 + 数据指纹变化”判定新聊天数据就绪，并在 1.5s/3.5s/6s
+                    // 分三次广播 VARIABLE_UPDATE_ENDED，覆盖插件异步加载时序（清空瞬间已由
+                    // installTableUpdateHook 抑制，不会广播空数据）。
+                    reentryNotifyFingerprint = '';
+                    const dispatchReentryNotify = async () => {
                         try {
                             const apiR = getAcuApi();
                             if (!apiR || !activeLayout) return;
-                            if (await waitRuntimeTablesReady(apiR, activeLayout, 6000)) {
-                                // 表结构就绪后再给插件回放/物化一个微窗口，确保值是最终态
-                                await new Promise(res => hostWindow.setTimeout(res, 500));
-                                const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                                const sdR = allR.stat_data || {};
-                                dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
-                                // 前端 SYSTEM_SCHEMA/STORE_SCHEMA 解析诊断：确认字段名/类型是否匹配
-                                try {
-                                    const sysR = sdR['系统'] || {};
-                                    const fields = ['_MC能量','MC能量','_MC能量上限','MC能量上限','当前MC点','_累计消耗MC点','累计消耗MC点','持有零花钱','主角可疑度','_hypnoos','_催眠APP订阅等级'];
-                                    const parts = fields.map(function (f) { return f + '=' + (f in sysR ? (typeof sysR[f] === 'object' ? JSON.stringify(sysR[f]).slice(0, 120) : String(sysR[f])) : '<缺>'); });
-                                    dbg('[重读通知] 系统 schema 字段: ' + parts.join(' | '));
-                                } catch (eS) {}
-                                dispatchVariableUpdateEnded();
-                                dbg('[重读通知] 已派发 VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
+                            const curR = apiR.exportTableAsJson() || {};
+                            let hasTables = false;
+                            for (const k in curR) {
+                                if (k.indexOf('sheet_') === 0 && curR[k] && curR[k].name) { hasTables = true; break; }
                             }
+                            if (!hasTables) return; // 插件仍在加载（运行时空）
+                            const fp = JSON.stringify(curR);
+                            if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
+                            reentryNotifyFingerprint = fp;
+                            const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                            const sdR = allR.stat_data || {};
+                            dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
+                            // 前端 SYSTEM_SCHEMA/STORE_SCHEMA 解析诊断：确认字段名/类型是否匹配
+                            try {
+                                const sysR = sdR['系统'] || {};
+                                const fields = ['_MC能量','MC能量','_MC能量上限','MC能量上限','当前MC点','_累计消耗MC点','累计消耗MC点','持有零花钱','主角可疑度','_hypnoos','_催眠APP订阅等级'];
+                                const parts = fields.map(function (f) { return f + '=' + (f in sysR ? (typeof sysR[f] === 'object' ? JSON.stringify(sysR[f]).slice(0, 120) : String(sysR[f])) : '<缺>'); });
+                                dbg('[重读通知] 系统 schema 字段: ' + parts.join(' | '));
+                            } catch (eS) {}
+                            dispatchVariableUpdateEnded();
+                            dbg('[重读通知] 已派发 VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
                         } catch (e) {}
-                    }, 1000);
+                    };
+                    hostWindow.setTimeout(() => { dispatchReentryNotify(); }, 1500);
+                    hostWindow.setTimeout(() => { dispatchReentryNotify(); }, 3500);
+                    hostWindow.setTimeout(() => { dispatchReentryNotify(); }, 6000);
                     // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
                     syncRuntimeForCurrentCard();
                     activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
@@ -5691,6 +5701,8 @@ ${DB_INIT_SNIPPET}
     // 当前卡是否依赖 <StatusPlaceHolderImpl/>（前端注入正则）；由扩展本体维护占位符，
     // 不依赖 tavern_helper 桥是否运行
     let activePlaceholderNeeded = false;
+    // 重读通知去重：同一份运行时数据只广播一次（数据变化后再次广播）
+    let reentryNotifyFingerprint = '';
     // Mvu.replaceMvuData 合并写入：MVU 卡开局初始化常连续多次调用（每次只改一个字段），
     // 每次都触发插件整表持久化；合并为一次后只持久化一次。
     let pendingStatWrite = null;
@@ -6059,7 +6071,16 @@ ${DB_INIT_SNIPPET}
         if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
         try {
             api.registerTableUpdateCallback(() => {
-                
+                // 插件在聊天切换时会先清空运行时（clearDerivedRuntimeState + notifyRuntimeTableCleared）
+                // 再加载新聊天：清空瞬间不广播，否则前端读到空数据显示默认值且不再刷新。
+                try {
+                    const cur = api.exportTableAsJson() || {};
+                    let hasAny = false;
+                    for (const k in cur) {
+                        if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) { hasAny = true; break; }
+                    }
+                    if (!hasAny) return;
+                } catch (e2) {}
                 dispatchVariableUpdateEnded();
             });
             return true;
