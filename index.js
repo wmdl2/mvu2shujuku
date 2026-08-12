@@ -5705,6 +5705,9 @@ ${DB_INIT_SNIPPET}
     let activePlaceholderNeeded = false;
     // 重读通知去重：同一份运行时数据只广播一次（数据变化后再次广播）
     let reentryNotifyFingerprint = '';
+    // 最近一次数据库写入时间：写入后 ~1.5s 内运行时可能领先持久化帧，读侧优先信任运行时；
+    // 之后若运行时与持久化帧不一致，视为插件回放未完成/旧值，读侧以持久化帧（数据库真相）为准。
+    let lastDbWriteAt = 0;
     // Mvu.replaceMvuData 合并写入：MVU 卡开局初始化常连续多次调用（每次只改一个字段），
     // 每次都触发插件整表持久化；合并为一次后只持久化一次。
     let pendingStatWrite = null;
@@ -5912,6 +5915,7 @@ ${DB_INIT_SNIPPET}
                         n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget);
                         if (n > 0) {
                             initializedViaGameSession.add(chatKeyNow);
+                            lastDbWriteAt = Date.now();
                             dbg(' Mvu 写入完成：差异 ' + n + ' 条（原生 CRUD，插件自行持久化）');
                         } else {
                             dbg(' 差异写入无操作（运行时与目标一致），跳过。');
@@ -6045,9 +6049,9 @@ ${DB_INIT_SNIPPET}
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     return { stat_data: {}, display_data: {} };
                 }
-                // 运行时优先：插件就绪后运行时即最新（含本次提交），持久化帧只作兜底——
-                // 运行时为空（异步回放中）或含跨卡残留表（切聊天中）时，从当前聊天持久化帧重建，
-                // 避免前端“空读/旧读 → schema 默认值 → 写回”把数据库重置成默认值。
+                // 运行时优先，但与持久化帧交叉校验：插件就绪后运行时即最新（含本次提交）。
+                // 若运行时与持久化帧不一致，且最近没有写入（>1.5s），说明运行时是插件回放未完成的旧值
+                // （切聊天/刷新空窗），此时以持久化帧（数据库真相）为准，防止前端“旧读→默认值→写回”。
                 const cur = api.exportTableAsJson() || {};
                 let hasTables = false;
                 for (const k in cur) {
@@ -6069,6 +6073,20 @@ ${DB_INIT_SNIPPET}
                         }
                         dbg(' [切卡隔离] 运行时含跨卡残留表且无持久化帧，读取返回空。');
                         return { stat_data: {}, display_data: {} };
+                    }
+                } catch (e) {}
+                // 交叉校验：运行时 vs 持久化帧（按布局表内容指纹）
+                try {
+                    const persisted = readPersistedTableData();
+                    if (persisted) {
+                        const rtData = core.statDataFromTables(activeLayout, cur);
+                        const pdData = core.statDataFromTables(activeLayout, persisted);
+                        const rtFp = JSON.stringify(rtData.stat_data || {});
+                        const pdFp = JSON.stringify(pdData.stat_data || {});
+                        if (rtFp !== pdFp && (Date.now() - lastDbWriteAt > 1500)) {
+                            dbg(' [读侧纠偏] 运行时与持久化帧不一致（最近无写入），以数据库真相为准。');
+                            return pdData;
+                        }
                     }
                 } catch (e) {}
                 return core.statDataFromTables(activeLayout, api.exportTableAsJson());
@@ -19099,6 +19117,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     let activePlaceholderNeeded = false;
     // 重读通知去重：同一份运行时数据只广播一次（数据变化后再次广播）
     let reentryNotifyFingerprint = '';
+    // 最近一次数据库写入时间：写入后 ~1.5s 内运行时可能领先持久化帧，读侧优先信任运行时；
+    // 之后若运行时与持久化帧不一致，视为插件回放未完成/旧值，读侧以持久化帧（数据库真相）为准。
+    let lastDbWriteAt = 0;
     // Mvu.replaceMvuData 合并写入：MVU 卡开局初始化常连续多次调用（每次只改一个字段），
     // 每次都触发插件整表持久化；合并为一次后只持久化一次。
     let pendingStatWrite = null;
@@ -19306,6 +19327,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget);
                         if (n > 0) {
                             initializedViaGameSession.add(chatKeyNow);
+                            lastDbWriteAt = Date.now();
                             dbg(' Mvu 写入完成：差异 ' + n + ' 条（原生 CRUD，插件自行持久化）');
                         } else {
                             dbg(' 差异写入无操作（运行时与目标一致），跳过。');
@@ -19439,9 +19461,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     return { stat_data: {}, display_data: {} };
                 }
-                // 运行时优先：插件就绪后运行时即最新（含本次提交），持久化帧只作兜底——
-                // 运行时为空（异步回放中）或含跨卡残留表（切聊天中）时，从当前聊天持久化帧重建，
-                // 避免前端“空读/旧读 → schema 默认值 → 写回”把数据库重置成默认值。
+                // 运行时优先，但与持久化帧交叉校验：插件就绪后运行时即最新（含本次提交）。
+                // 若运行时与持久化帧不一致，且最近没有写入（>1.5s），说明运行时是插件回放未完成的旧值
+                // （切聊天/刷新空窗），此时以持久化帧（数据库真相）为准，防止前端“旧读→默认值→写回”。
                 const cur = api.exportTableAsJson() || {};
                 let hasTables = false;
                 for (const k in cur) {
@@ -19463,6 +19485,20 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         }
                         dbg(' [切卡隔离] 运行时含跨卡残留表且无持久化帧，读取返回空。');
                         return { stat_data: {}, display_data: {} };
+                    }
+                } catch (e) {}
+                // 交叉校验：运行时 vs 持久化帧（按布局表内容指纹）
+                try {
+                    const persisted = readPersistedTableData();
+                    if (persisted) {
+                        const rtData = core.statDataFromTables(activeLayout, cur);
+                        const pdData = core.statDataFromTables(activeLayout, persisted);
+                        const rtFp = JSON.stringify(rtData.stat_data || {});
+                        const pdFp = JSON.stringify(pdData.stat_data || {});
+                        if (rtFp !== pdFp && (Date.now() - lastDbWriteAt > 1500)) {
+                            dbg(' [读侧纠偏] 运行时与持久化帧不一致（最近无写入），以数据库真相为准。');
+                            return pdData;
+                        }
                     }
                 } catch (e) {}
                 return core.statDataFromTables(activeLayout, api.exportTableAsJson());
