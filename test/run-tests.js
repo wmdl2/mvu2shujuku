@@ -1707,7 +1707,7 @@ test('空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删
         top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
-        getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+        getContext: () => ({ chatId: 'c1', name: '测试', chat: [{ role: 'assistant', name: '测试', mes: '开场白', is_user: false }], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
@@ -1793,7 +1793,7 @@ test('已声明单例/行表：未声明的动态字段写入 _扩展数据 并�
         top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
-        getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+        getContext: () => ({ chatId: 'c1', name: '测试', chat: [{ role: 'assistant', name: '测试', mes: '开场白', is_user: false }], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
@@ -1871,7 +1871,7 @@ test('表结构校验：旧模板（同名表缺列）会被识别并重新导�
         top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
-        getContext: () => ({ chatId: 'c1', name: '测试', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+        getContext: () => ({ chatId: 'c1', name: '测试', chat: [{ role: 'assistant', name: '测试', mes: '开场白', is_user: false }], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
@@ -2222,6 +2222,7 @@ test('桥复刻 MVU 占位符维护：AI 回复自动追加 <StatusPlaceHolderIm
         top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({ chatId: 'c1', chat: [{ role: 'assistant', name: '测试', mes: '开场白', is_user: false }], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
     };
     const contextObj = {
         chatId: 'c1',
@@ -2306,7 +2307,7 @@ test('插件 initGameSession 挂起时不阻塞建表（超时后继续，不再
         top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
-        getContext: () => ({ chatId: 'c1', name: '挂起卡', chat: [], eventSource: { on: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+        getContext: () => ({ chatId: 'c1', name: '挂起卡', chat: [{ role: 'assistant', name: '挂起卡', mes: '开场白', is_user: false }], eventSource: { on: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
@@ -2901,6 +2902,7 @@ test('开局自动建表：单例/JSON 表仅表头且无 seedRows 时自动补�
         top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => ({ chatId: 'c1', chat: [{ role: 'assistant', name: '测试', mes: '开场白', is_user: false }], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = {
@@ -2985,7 +2987,7 @@ test('桥启动即提供 eventOn 兜底，且 VARIABLE_UPDATE_ENDED 按 (after, 
         removeEventListener(name, fn) { listeners[name] = (listeners[name] || []).filter(f => f !== fn); },
         dispatchEvent(ev) { (listeners[ev.type] || []).slice().forEach(fn => { try { fn(ev); } catch (e) {} }); return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
-        getContext: () => ({ chatId: 'c1', chat: [], eventSource: { on() {}, emit() {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
+        getContext: () => ({ chatId: 'c1', chat: [{ role: 'assistant', name: '测试', mes: '开场白', is_user: false }], eventSource: { on() {}, emit() {} }, event_types: { MESSAGE_RECEIVED: 'x' } }),
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = {
@@ -3276,7 +3278,7 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     const context = {
         chatId: 'c1',
         name: '测试',
-        chat: [],
+        chat: [{ role: 'assistant', name: '测试', mes: '开场白', is_user: false }],
         characters: [nonConverted],
         characterId: 0,
         extensionSettings: {},
@@ -3556,7 +3558,7 @@ test('懒加载角色：缓存键用列表对象（带 avatar），开场写入�
     const context = {
         chatId: 'c1',
         name: '测试',
-        chat: [],
+        chat: [{ role: 'assistant', name: '测试', mes: '开场白', is_user: false }],
         characters: [lazy],
         characterId: 0,
         extensionSettings: { mvu2shujuku: { debug: true } },
@@ -4894,7 +4896,7 @@ test('开局建表：运行时全表仅表头且带 seedRows（插件 native 初
         top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
         CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
         TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
-        getContext: () => ({ chatId: 'c-seed-init', chat: [], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'message_received' } }),
+        getContext: () => ({ chatId: 'c-seed-init', chat: [{ role: 'assistant', name: '测试', mes: '开场白', is_user: false }], eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'message_received' } }),
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = {
@@ -5749,6 +5751,104 @@ test('首楼替换后作用域整体缺失：修复只拷回 InternalSheetGuide�
     assert.strictEqual(chatMsg.TavernDB_ACU_ScopedConfig, undefined, '作用域缺失时不得用转换器模板重建 ScopedConfig（防止两套 sheet key 冲突）');
     assert.ok(context.chat_metadata.TavernDB_ACU_ScopedConfig === undefined, 'chat_metadata 也不应被写入转换器模板作用域');
     assert.ok(win.__mvu2shujukuTemplateCache, '模板缓存存在（证明“不重建”是主动守卫而非缺材料）');
+});
+
+test('聊天尚无 AI 楼层（首楼未就绪/切换加载中）时不调 initGameSession，避免“不存在可写入初始化 checkpoint 的 AI 楼层”报错', async () => {
+    const vm2 = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => (e.kind === 'singleton'
+            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
+            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const srcDir = path.join(__dirname, '..', 'src');
+    const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
+    const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
+    const yamlLibsData = fs.readFileSync(path.join(srcDir, 'vendor', 'mvu-yaml-libs.js'), 'utf8');
+    const jsonrepairData = fs.readFileSync(path.join(srcDir, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+    const pinyinInline = pinyinData.replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ').replace(/;\s*$/, ';');
+    const yamlLibsInline = ['(function () {', '  var module = { exports: {} };', '  var exports = module.exports;', yamlLibsData, '  var target = typeof globalThis !== "undefined" ? globalThis : this;', '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;', '})();', ''].join('\n');
+    const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+    const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+
+    const tables = JSON.parse(JSON.stringify(r.template));
+    for (const k of Object.keys(tables)) {
+        if (k.indexOf('sheet_') === 0 && tables[k] && Array.isArray(tables[k].content)) tables[k].content = [tables[k].content[0]];
+    }
+    const converted = {
+        name: '无首楼卡',
+        avatar: 'nogreet.png',
+        data: {
+            extensions: {
+                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
+                regex_scripts: [],
+            },
+            character_book: {
+                entries: [{
+                    keys: ['__ACU_TEMPLATE_DATA__'],
+                    content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
+                }],
+            },
+        },
+    };
+    let initCalls = 0;
+    const fakeApi = applyingApi(tables, {
+        onInit: async () => { initCalls += 1; },
+    });
+    const handlers = {};
+    const context = {
+        chatId: 'c-nofloor', name: '测试', chat: [], // 聊天为空：首楼未就绪/切换加载中
+        characters: [converted], characterId: 0,
+        extensionSettings: { mvu2shujuku: { debug: false } },
+        eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received', MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated', MESSAGE_EDITED: 'edited', MESSAGE_SENT: 'sent', MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {}, saveChatConditional: async () => {}, saveChat: async () => {},
+        getRequestHeaders: () => ({}), setChatMessages: () => {},
+    };
+    const fakeEl = () => {
+        const el = {
+            dataset: {}, style: {}, children: [], _listeners: {}, _value: '',
+            addEventListener: (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); },
+            removeEventListener: () => {}, dispatchEvent: () => true,
+            appendChild: (c) => { el.children.push(c); return c; }, removeChild: () => {},
+            querySelector: () => fakeEl(), querySelectorAll: () => [],
+            click: () => {}, focus: () => {}, blur: () => {}, contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(el, 'innerHTML', { get: () => el._html || '', set: (v) => { el._html = v; } });
+        Object.defineProperty(el, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(el, 'value', { get: () => el._value, set: (v) => { el._value = v; } });
+        Object.defineProperty(el, 'checked', { get: () => !!el._checked, set: (v) => { el._checked = v; } });
+        Object.defineProperty(el, 'disabled', { get: () => !!el._disabled, set: (v) => { el._disabled = v; } });
+        return el;
+    };
+    const doc = {
+        querySelector: () => fakeEl(), getElementById: () => fakeEl(), createElement: () => fakeEl(),
+        createTextNode: () => fakeEl(), addEventListener: () => {}, body: fakeEl(),
+    };
+    const win = {
+        top: null, parent: null, document: doc, console,
+        setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t),
+        CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {}, toastr: undefined,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm2.createContext(win);
+    vm2.runInContext(extIndex, win);
+
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 2600));
+    assert.strictEqual(initCalls, 0, '聊天无 AI 楼层时不得调用 initGameSession（否则插件报“不存在可写入初始化 checkpoint 的 AI 楼层”）');
 });
 
 runTests();
