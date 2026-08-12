@@ -485,7 +485,7 @@ test('SQL 示例优先用默认值，TEXT 无默认才用“列名示例”', ()
     const dl = Object.values(r.template).find(s => s && s.name === '道侣表');
     assert.ok(dl.sourceData.insertNode.includes("VALUES ('林若悠', 50, 0, '性格示例')"), 'INSERT 应含真实值/默认值/列名示例');
     assert.ok(dl.sourceData.updateNode.includes('SET qinmi = 0'), 'UPDATE 示例应使用占位值而非当前值');
-    assert.ok(dl.sourceData.updateNode.includes('示例值仅为格式演示'), 'UPDATE 应注明示例值仅为格式演示');
+    assert.ok(!dl.sourceData.updateNode.includes('示例值仅为格式演示'), 'UPDATE 示例不再带“示例值仅为格式演示”后缀（与插件内置模板一致）');
 });
 
 test('单例 UPDATE 示例：与行表一致的“规则 + SQL示例:”格式，TEXT 用“新值”占位', () => {
@@ -496,7 +496,7 @@ test('单例 UPDATE 示例：与行表一致的“规则 + SQL示例:”格式�
     assert.ok(node.includes('SQL示例: UPDATE shijiebiao SET dangqianshijian ='), '单例 updateNode 应有 SQL示例: 前缀');
     assert.ok(node.includes("= '新值'"), 'TEXT 字段 UPDATE 示例应用“新值”占位，而非当前默认值');
     assert.ok(!node.includes("'未知'"), 'UPDATE 示例不应使用当前默认值（避免读成更新成原值）');
-    assert.ok(node.includes('示例值仅为格式演示'), '应注明示例值仅为格式演示');
+    assert.ok(!node.includes('示例值仅为格式演示'), 'UPDATE 示例不再带“示例值仅为格式演示”后缀（与插件内置模板一致）');
 });
 
 test('相邻顶层组不被跳过 + check 机制词清洗（op/delta/replace/分指令）', () => {

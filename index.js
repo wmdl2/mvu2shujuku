@@ -2046,7 +2046,9 @@
         // 但没有更新规则），只在表级用一行说明约束，避免逐列占提示词。
         if (hasUserReadonly && !allReadonly) {
             // MVU 规范：下划线开头字段（如 _xxx）是脚本维护的只读状态，AI 禁止更新
-            L.push('下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新，更新会被回滚。');
+            // 注意：只声明“不列入填表字段/严禁更新”，不要声称“更新会被回滚”——
+            // 转换器没有回滚机制（下划线字段只是不进填表规则，AI 若硬写 SQL 不会被回滚）。
+            L.push('下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。');
         }
         if (aiCols.length) {
             L.push('【列定义】');
@@ -2136,7 +2138,8 @@
 
     // UPDATE 示例取值：不能拿当前值/默认值当示例值，否则会读成“把它更新成原值”的指令
     // （如 SET 当前时间 = '未知'，而当前时间本来就是 '未知'）。TEXT 一律用 '新值' 占位；
-    // INTEGER 给 DDL 默认数字（0 或初始值），配合“示例值仅为格式演示”消歧。
+    // INTEGER 给 DDL 默认数字（0 或初始值）。示例统一不带“示例值仅为格式演示”后缀，
+    // 与插件内置模板风格一致；占位语义由“SQL示例”标签与 note 的“不得虚构数据”约束兜底。
     function exampleUpdateValue(col) {
         if (col && col.type === 'INTEGER') {
             const dv = col.value === undefined || col.value === null ? '' : col.value;
@@ -2191,7 +2194,7 @@
                 if (!col) return '本表全部字段均为脚本/系统维护的只读状态，AI 不应修改本表。';
                 const ident = col.ident;
                 const val = exampleUpdateValue(col);
-                return `只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；正文明确造成字段变化时更新对应字段，示例值仅为格式演示。\nSQL示例: UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1;`;
+                return `只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；正文明确造成字段变化时更新对应字段。\nSQL示例: UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1;`;
             }
             return '禁止。';
         }
@@ -2226,12 +2229,12 @@
         if (kind === 'update') {
             const updCol = exampleCols[1] || exampleCols[0];
             const updVal = updCol ? exampleUpdateValue(updCol) : "'新值'";
-            return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段（示例值仅为格式演示）。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${updVal} WHERE ${keyIdent} = ${keyValue};`;
+            return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${updVal} WHERE ${keyIdent} = ${keyValue};`;
         }
         if (kind === 'insert') {
-            // 完整列示例：全部列都列出，列数与 VALUES 一一对应
+            // 完整列示例：全部列都列出，列数与 VALUES 一一对应；
+            // 不写 row_id——新版数据库（SQLite 模式）内置自增，省略即可，AI 无需手算。
             const cols = allIdents;
-            // 列数与 VALUES 一一对应，避免示例语句列值数量不匹配
             const vals = exampleCols.map((c, i) => {
                 if (i === 0) return keyValue;
                 const colIdx = group.columns.indexOf(c);
