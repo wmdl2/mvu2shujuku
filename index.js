@@ -2607,6 +2607,17 @@
         };
         let tables = {};
         try { tables = api.exportTableAsJson() || {}; } catch (e) {}
+        // 前端“渲染回写”抑制的辅助判定：值是否为“全默认/空”（可被前端随时重建）。
+        // 用于识别 schema 默认回声（如 _hypnoos 的初始状态），避免其污染运行时。
+        const isStructurallyDefault = (v) => {
+            if (v === undefined || v === null) return true;
+            if (typeof v === 'string') return v === '';
+            if (typeof v === 'number') return v === 0;
+            if (typeof v === 'boolean') return v === false;
+            if (Array.isArray(v)) return v.length === 0;
+            if (typeof v === 'object') { for (const kk in v) { if (!isStructurallyDefault(v[kk])) return false; } return true; }
+            return false;
+        };
         const sheetOf = (name) => {
             for (const k in tables) {
                 if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return { key: k, sheet: tables[k] };
@@ -2640,6 +2651,15 @@
                     continue;
                 }
                 if (entry && entry.kind === 'json') {
+                    // 前端渲染回写抑制（通用）：整组 JSON 表当前为空对象 {} 时被写成标量
+                    // （字符串/数字，如 催眠APP 的 本轮APP操作="无"）——这是前端 schema 默认
+                    // 回声，不是用户编辑。内容列语义是对象；标量回声会污染运行时、造成
+                    // 运行时/checkpoint 分裂（手动追平校验误报）。有真实对象内容再写。
+                    const isScalar = nv === null || (typeof nv !== 'object');
+                    if (isScalar && (pv === undefined || pv === null || (typeof pv === 'object' && !Array.isArray(pv) && Object.keys(pv).length === 0))) {
+                        dbg(' [渲染回写抑制] 跳过 JSON 表「' + entry.layout.group + '」空对象→标量回声写（' + String(nv).slice(0, 24) + '）。');
+                        continue;
+                    }
                     ops.push({ np, entry, value: nv, json: true });
                     continue;
                 }
@@ -2669,6 +2689,14 @@
                                 }
                             }
                             if (!isChildGroup && !isFlattened) {
+                                // 前端渲染回写抑制（通用）：`_` 前缀内部状态字段（如 _hypnoos）
+                                // 当前不存在且新值为“全默认”时，是前端 schema 默认回声（前端每次
+                                // 可重建），跳过不落库；有真实内容再写。避免运行时/checkpoint 分裂。
+                                const mk0 = entry.kind === 'rows' ? rel[1] : rel[0];
+                                if (String(mk0).charAt(0) === '_' && pv === undefined && isStructurallyDefault(nv)) {
+                                    dbg(' [渲染回写抑制] 跳过全默认内部状态字段 ' + np + '（前端回声，不落库）。');
+                                    continue;
+                                }
                                 ops.push({ np, entry, value: nv, overflow: true, mergeKey: entry.kind === 'rows' ? rel[1] : rel[0], rowKey: entry.kind === 'rows' ? rel[0] : undefined });
                                 continue;
                             }
@@ -6071,6 +6099,30 @@ ${DB_INIT_SNIPPET}
                             return;
                         }
                         dbgWarn('[流程] 插件运行时迟迟未就绪，放弃本次写入。');
+                        if (statWriteOverlayGen === gen) pendingStatWrite = null;
+                        return;
+                    }
+                    // 插件 SQLite 运行时“完整发布”门控：聊天切换/重载窗口内 querySql /
+                    // executeSqlQuery 等读取 API 会被插件隐藏（返回 undefined）。此刻提交
+                    // 可能“SQLite 已改、帧写入因 target message changed 中止”，造成
+                    // 运行时与 checkpoint 分裂（手动追平校验误报）。门控未就绪则延后重试。
+                    let sqlGateReady = true;
+                    try {
+                        const gatedApi = api;
+                        if (gatedApi && ('querySql' in gatedApi || 'executeSqlQuery' in gatedApi)) {
+                            sqlGateReady = typeof gatedApi.querySql === 'function' || typeof gatedApi.executeSqlQuery === 'function';
+                        }
+                    } catch (eG) {}
+                    if (!sqlGateReady) {
+                        if (overlayFlushRetries < 6) {
+                            overlayFlushRetries += 1;
+                            dbg('[流程] 插件 SQLite 运行时未完整发布（切换/重载窗口），延后重试写库（#' + overlayFlushRetries + '）。');
+                            hostWindow.setTimeout(() => {
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                            }, 800);
+                            return;
+                        }
+                        dbgWarn('[流程] 插件 SQLite 运行时迟迟未完整发布，放弃本次写入。');
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
@@ -19884,6 +19936,30 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             return;
                         }
                         dbgWarn('[流程] 插件运行时迟迟未就绪，放弃本次写入。');
+                        if (statWriteOverlayGen === gen) pendingStatWrite = null;
+                        return;
+                    }
+                    // 插件 SQLite 运行时“完整发布”门控：聊天切换/重载窗口内 querySql /
+                    // executeSqlQuery 等读取 API 会被插件隐藏（返回 undefined）。此刻提交
+                    // 可能“SQLite 已改、帧写入因 target message changed 中止”，造成
+                    // 运行时与 checkpoint 分裂（手动追平校验误报）。门控未就绪则延后重试。
+                    let sqlGateReady = true;
+                    try {
+                        const gatedApi = api;
+                        if (gatedApi && ('querySql' in gatedApi || 'executeSqlQuery' in gatedApi)) {
+                            sqlGateReady = typeof gatedApi.querySql === 'function' || typeof gatedApi.executeSqlQuery === 'function';
+                        }
+                    } catch (eG) {}
+                    if (!sqlGateReady) {
+                        if (overlayFlushRetries < 6) {
+                            overlayFlushRetries += 1;
+                            dbg('[流程] 插件 SQLite 运行时未完整发布（切换/重载窗口），延后重试写库（#' + overlayFlushRetries + '）。');
+                            hostWindow.setTimeout(() => {
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                            }, 800);
+                            return;
+                        }
+                        dbgWarn('[流程] 插件 SQLite 运行时迟迟未完整发布，放弃本次写入。');
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
