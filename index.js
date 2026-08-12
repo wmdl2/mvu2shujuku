@@ -5480,16 +5480,6 @@ ${DB_INIT_SNIPPET}
                             if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
                             reentryNotifyFingerprint = fp;
                             dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
-                            // 前端 SYSTEM_SCHEMA/STORE_SCHEMA 解析诊断：仅对含 MC 字段的卡输出（避免道渊等卡刷屏）
-                            try {
-                                const sysR = sdR['系统'] || {};
-                                const hasMcFields = ('_MC能量' in sysR) || ('当前MC点' in sysR) || ('持有零花钱' in sysR);
-                                if (hasMcFields) {
-                                    const fields = ['_MC能量','MC能量','_MC能量上限','MC能量上限','当前MC点','_累计消耗MC点','累计消耗MC点','持有零花钱','主角可疑度','_hypnoos','_催眠APP订阅等级'];
-                                    const parts = fields.map(function (f) { return f + '=' + (f in sysR ? (typeof sysR[f] === 'object' ? JSON.stringify(sysR[f]).slice(0, 120) : String(sysR[f])) : '<缺>'); });
-                                    dbg('[重读通知] 系统 schema 字段: ' + parts.join(' | '));
-                                }
-                            } catch (eS) {}
                             dispatchVariableUpdateEnded();
                             dbg('[重读通知] 已派发 VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
                         } catch (e) {}
@@ -5828,8 +5818,13 @@ ${DB_INIT_SNIPPET}
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
-                    const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                    let prev = all.stat_data || {};
+                    // 写基线用运行时（插件已就绪，运行时即最新已提交状态）而不是持久化重建，
+                    // 避免与持久化帧的提交时序产生差异；持久化优先只服务前端读侧。
+                    let prev = {};
+                    try {
+                        const rtAll = window.MVU2SHUJUKU_CORE.statDataFromTables(activeLayout, api.exportTableAsJson());
+                        if (rtAll && rtAll.stat_data && typeof rtAll.stat_data === 'object') prev = rtAll.stat_data;
+                    } catch (eP) {}
                     // 前端/脚本传来的 target 可能不完整：开场读取时布局未就绪，只拿到部分组
                     // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
                     // 缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
@@ -5950,10 +5945,25 @@ ${DB_INIT_SNIPPET}
     // 仅用于读侧兜底，防止前端“空读 → schema 默认值 → 写回”把数据库重置成默认值；不写运行时。
     // 基底取最后一个 full checkpoint 或 data_replace 完整后态；随后按 logEntries 顺序应用
     // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁），即“数据库原始真相”。
+    let persistedReadCache = { key: '', data: null };
+    // 只读：从当前聊天持久化帧（V2 storageFrame）重建表格数据——“数据库真相”。
+    // 基底取最后一个 full checkpoint 或 data_replace 完整后态；只应用其后 logEntries 的
+    // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁）。
+    // 用于读侧兜底：运行时只是缓存（异步回放中可能为空/旧值），持久化帧才是最新真相，
+    // 防止前端“空读/旧读 → schema 默认值 → 写回”把数据库重置成默认值。不写运行时。
+    // 带按聊天缓存（key = 各消息 storage 帧长度和），写库/切聊天后自动失效。
     function readPersistedTableData() {
         try {
             const ctx = getContextSafe();
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            let key = chat.length + ':';
+            for (let mi = 0; mi < chat.length; mi++) {
+                const msg = chat[mi];
+                if (!msg || typeof msg !== 'object') continue;
+                const iso = msg.TavernDB_ACU_IsolatedData;
+                key += (typeof iso === 'string' ? iso.length : (iso ? JSON.stringify(iso).length : 0)) + ',';
+            }
+            if (persistedReadCache.key === key) return persistedReadCache.data;
             let base = null;
             const ops = [];
             for (let mi = 0; mi < chat.length; mi++) {
@@ -5970,6 +5980,7 @@ ${DB_INIT_SNIPPET}
                     const cp = sf.checkpoint;
                     if (cp && cp.kind === 'full' && cp.data && typeof cp.data === 'object') {
                         base = JSON.parse(JSON.stringify(cp.data));
+                        ops.length = 0; // 该 checkpoint 已包含此前所有操作
                     }
                     for (const en of sf.logEntries) {
                         const eops = Array.isArray(en && en.operations) ? en.operations : [];
@@ -5977,6 +5988,7 @@ ${DB_INIT_SNIPPET}
                             if (!op || typeof op !== 'object') continue;
                             if (op.kind === 'data_replace' && op.data && typeof op.data === 'object') {
                                 base = JSON.parse(JSON.stringify(op.data));
+                                ops.length = 0;
                             } else if (op.kind === 'row_upsert' || op.kind === 'row_delete') {
                                 ops.push(op);
                             }
@@ -5984,45 +5996,31 @@ ${DB_INIT_SNIPPET}
                     }
                 }
             }
-            if (!base) return null;
-            for (const op of ops) {
-                const sheet = base[op.sheetKey];
-                if (!sheet || !Array.isArray(sheet.content)) continue;
-                if (op.kind === 'row_delete') {
-                    const rid = String(op.rowId == null ? '' : op.rowId);
-                    sheet.content = sheet.content.filter(function (row, idx) {
-                        return idx === 0 || !Array.isArray(row) || String(row[0] == null ? '' : row[0]).trim() !== rid;
-                    });
-                } else if (op.kind === 'row_upsert' && Array.isArray(op.cells)) {
-                    const rid = String(op.rowId == null ? '' : op.rowId);
-                    const cells = JSON.parse(JSON.stringify(op.cells));
-                    const idx = sheet.content.findIndex(function (row, i2) {
-                        return i2 > 0 && Array.isArray(row) && String(row[0] == null ? '' : row[0]).trim() === rid;
-                    });
-                    if (idx >= 0) sheet.content[idx] = cells;
-                    else sheet.content.push(cells);
+            let result = null;
+            if (base) {
+                for (const op of ops) {
+                    const sheet = base[op.sheetKey];
+                    if (!sheet || !Array.isArray(sheet.content)) continue;
+                    if (op.kind === 'row_delete') {
+                        const rid = String(op.rowId == null ? '' : op.rowId);
+                        sheet.content = sheet.content.filter(function (row, idx) {
+                            return idx === 0 || !Array.isArray(row) || String(row[0] == null ? '' : row[0]).trim() !== rid;
+                        });
+                    } else if (op.kind === 'row_upsert' && Array.isArray(op.cells)) {
+                        const rid = String(op.rowId == null ? '' : op.rowId);
+                        const cells = JSON.parse(JSON.stringify(op.cells));
+                        const idx = sheet.content.findIndex(function (row, i2) {
+                            return i2 > 0 && Array.isArray(row) && String(row[0] == null ? '' : row[0]).trim() === rid;
+                        });
+                        if (idx >= 0) sheet.content[idx] = cells;
+                        else sheet.content.push(cells);
+                    }
                 }
+                result = base;
             }
-            return base;
+            persistedReadCache = { key, data: result };
+            return result;
         } catch (e) { return null; }
-    }
-
-    // 即时按当前角色解析布局（autoInit 缓存前的挂载期兜底）：
-    // 前端挂载读需要布局才能把表格重建为 stat_data，布局未就绪就返回空会诱发空读写回。
-    function ensureActiveLayoutLazy() {
-        try {
-            if (activeLayout && layoutBelongsToCurrentCard(activeLayoutCardKey)) return true;
-            const ch = currentCharacter();
-            if (!ch) return false;
-            const ext = charExtensions(ch);
-            const mk = ext && ext.mvu2shujuku;
-            if (mk && typeof mk.layout === 'string') {
-                activeLayout = JSON.parse(mk.layout);
-                activeLayoutCardKey = cardCacheKey(ch);
-                return true;
-            }
-        } catch (e) {}
-        return false;
     }
 
     function installWindowGetAllVariables() {
@@ -6047,20 +6045,21 @@ ${DB_INIT_SNIPPET}
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     return { stat_data: {}, display_data: {} };
                 }
-                // 切卡隔离：插件运行时可能还没从上一张卡切过来（异步 reload 空窗期）。
-                // 检测到跨卡残留表或运行时为空时，一律从当前聊天的持久化帧重建（读数据库真相），
-                // 不让前端拿到空/旧卡数据——否则前端“空读 → schema 默认值 → 写回”会重置数据库。
+                // 运行时优先：插件就绪后运行时即最新（含本次提交），持久化帧只作兜底——
+                // 运行时为空（异步回放中）或含跨卡残留表（切聊天中）时，从当前聊天持久化帧重建，
+                // 避免前端“空读/旧读 → schema 默认值 → 写回”把数据库重置成默认值。
+                const cur = api.exportTableAsJson() || {};
+                let hasTables = false;
+                for (const k in cur) {
+                    if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) { hasTables = true; break; }
+                }
+                if (!hasTables) {
+                    const persisted = readPersistedTableData();
+                    if (persisted) return core.statDataFromTables(activeLayout, persisted);
+                    return { stat_data: {}, display_data: {} };
+                }
+                // 切卡隔离：运行时含跨卡残留表时用持久化帧重建当前聊天数据
                 try {
-                    const cur = api.exportTableAsJson() || {};
-                    let hasTables = false;
-                    for (const k in cur) {
-                        if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) { hasTables = true; break; }
-                    }
-                    if (!hasTables) {
-                        const persisted = readPersistedTableData();
-                        if (persisted) return core.statDataFromTables(activeLayout, persisted);
-                        return { stat_data: {}, display_data: {} };
-                    }
                     const foreign = runtimeForeignTableNames(api, activeLayout);
                     if (foreign.length) {
                         const persisted2 = readPersistedTableData();
@@ -18875,16 +18874,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
                             reentryNotifyFingerprint = fp;
                             dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
-                            // 前端 SYSTEM_SCHEMA/STORE_SCHEMA 解析诊断：仅对含 MC 字段的卡输出（避免道渊等卡刷屏）
-                            try {
-                                const sysR = sdR['系统'] || {};
-                                const hasMcFields = ('_MC能量' in sysR) || ('当前MC点' in sysR) || ('持有零花钱' in sysR);
-                                if (hasMcFields) {
-                                    const fields = ['_MC能量','MC能量','_MC能量上限','MC能量上限','当前MC点','_累计消耗MC点','累计消耗MC点','持有零花钱','主角可疑度','_hypnoos','_催眠APP订阅等级'];
-                                    const parts = fields.map(function (f) { return f + '=' + (f in sysR ? (typeof sysR[f] === 'object' ? JSON.stringify(sysR[f]).slice(0, 120) : String(sysR[f])) : '<缺>'); });
-                                    dbg('[重读通知] 系统 schema 字段: ' + parts.join(' | '));
-                                }
-                            } catch (eS) {}
                             dispatchVariableUpdateEnded();
                             dbg('[重读通知] 已派发 VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
                         } catch (e) {}
@@ -19223,8 +19212,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
-                    const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                    let prev = all.stat_data || {};
+                    // 写基线用运行时（插件已就绪，运行时即最新已提交状态）而不是持久化重建，
+                    // 避免与持久化帧的提交时序产生差异；持久化优先只服务前端读侧。
+                    let prev = {};
+                    try {
+                        const rtAll = window.MVU2SHUJUKU_CORE.statDataFromTables(activeLayout, api.exportTableAsJson());
+                        if (rtAll && rtAll.stat_data && typeof rtAll.stat_data === 'object') prev = rtAll.stat_data;
+                    } catch (eP) {}
                     // 前端/脚本传来的 target 可能不完整：开场读取时布局未就绪，只拿到部分组
                     // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
                     // 缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
@@ -19345,10 +19339,25 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     // 仅用于读侧兜底，防止前端“空读 → schema 默认值 → 写回”把数据库重置成默认值；不写运行时。
     // 基底取最后一个 full checkpoint 或 data_replace 完整后态；随后按 logEntries 顺序应用
     // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁），即“数据库原始真相”。
+    let persistedReadCache = { key: '', data: null };
+    // 只读：从当前聊天持久化帧（V2 storageFrame）重建表格数据——“数据库真相”。
+    // 基底取最后一个 full checkpoint 或 data_replace 完整后态；只应用其后 logEntries 的
+    // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁）。
+    // 用于读侧兜底：运行时只是缓存（异步回放中可能为空/旧值），持久化帧才是最新真相，
+    // 防止前端“空读/旧读 → schema 默认值 → 写回”把数据库重置成默认值。不写运行时。
+    // 带按聊天缓存（key = 各消息 storage 帧长度和），写库/切聊天后自动失效。
     function readPersistedTableData() {
         try {
             const ctx = getContextSafe();
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            let key = chat.length + ':';
+            for (let mi = 0; mi < chat.length; mi++) {
+                const msg = chat[mi];
+                if (!msg || typeof msg !== 'object') continue;
+                const iso = msg.TavernDB_ACU_IsolatedData;
+                key += (typeof iso === 'string' ? iso.length : (iso ? JSON.stringify(iso).length : 0)) + ',';
+            }
+            if (persistedReadCache.key === key) return persistedReadCache.data;
             let base = null;
             const ops = [];
             for (let mi = 0; mi < chat.length; mi++) {
@@ -19365,6 +19374,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     const cp = sf.checkpoint;
                     if (cp && cp.kind === 'full' && cp.data && typeof cp.data === 'object') {
                         base = JSON.parse(JSON.stringify(cp.data));
+                        ops.length = 0; // 该 checkpoint 已包含此前所有操作
                     }
                     for (const en of sf.logEntries) {
                         const eops = Array.isArray(en && en.operations) ? en.operations : [];
@@ -19372,6 +19382,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             if (!op || typeof op !== 'object') continue;
                             if (op.kind === 'data_replace' && op.data && typeof op.data === 'object') {
                                 base = JSON.parse(JSON.stringify(op.data));
+                                ops.length = 0;
                             } else if (op.kind === 'row_upsert' || op.kind === 'row_delete') {
                                 ops.push(op);
                             }
@@ -19379,45 +19390,31 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     }
                 }
             }
-            if (!base) return null;
-            for (const op of ops) {
-                const sheet = base[op.sheetKey];
-                if (!sheet || !Array.isArray(sheet.content)) continue;
-                if (op.kind === 'row_delete') {
-                    const rid = String(op.rowId == null ? '' : op.rowId);
-                    sheet.content = sheet.content.filter(function (row, idx) {
-                        return idx === 0 || !Array.isArray(row) || String(row[0] == null ? '' : row[0]).trim() !== rid;
-                    });
-                } else if (op.kind === 'row_upsert' && Array.isArray(op.cells)) {
-                    const rid = String(op.rowId == null ? '' : op.rowId);
-                    const cells = JSON.parse(JSON.stringify(op.cells));
-                    const idx = sheet.content.findIndex(function (row, i2) {
-                        return i2 > 0 && Array.isArray(row) && String(row[0] == null ? '' : row[0]).trim() === rid;
-                    });
-                    if (idx >= 0) sheet.content[idx] = cells;
-                    else sheet.content.push(cells);
+            let result = null;
+            if (base) {
+                for (const op of ops) {
+                    const sheet = base[op.sheetKey];
+                    if (!sheet || !Array.isArray(sheet.content)) continue;
+                    if (op.kind === 'row_delete') {
+                        const rid = String(op.rowId == null ? '' : op.rowId);
+                        sheet.content = sheet.content.filter(function (row, idx) {
+                            return idx === 0 || !Array.isArray(row) || String(row[0] == null ? '' : row[0]).trim() !== rid;
+                        });
+                    } else if (op.kind === 'row_upsert' && Array.isArray(op.cells)) {
+                        const rid = String(op.rowId == null ? '' : op.rowId);
+                        const cells = JSON.parse(JSON.stringify(op.cells));
+                        const idx = sheet.content.findIndex(function (row, i2) {
+                            return i2 > 0 && Array.isArray(row) && String(row[0] == null ? '' : row[0]).trim() === rid;
+                        });
+                        if (idx >= 0) sheet.content[idx] = cells;
+                        else sheet.content.push(cells);
+                    }
                 }
+                result = base;
             }
-            return base;
+            persistedReadCache = { key, data: result };
+            return result;
         } catch (e) { return null; }
-    }
-
-    // 即时按当前角色解析布局（autoInit 缓存前的挂载期兜底）：
-    // 前端挂载读需要布局才能把表格重建为 stat_data，布局未就绪就返回空会诱发空读写回。
-    function ensureActiveLayoutLazy() {
-        try {
-            if (activeLayout && layoutBelongsToCurrentCard(activeLayoutCardKey)) return true;
-            const ch = currentCharacter();
-            if (!ch) return false;
-            const ext = charExtensions(ch);
-            const mk = ext && ext.mvu2shujuku;
-            if (mk && typeof mk.layout === 'string') {
-                activeLayout = JSON.parse(mk.layout);
-                activeLayoutCardKey = cardCacheKey(ch);
-                return true;
-            }
-        } catch (e) {}
-        return false;
     }
 
     function installWindowGetAllVariables() {
@@ -19442,20 +19439,21 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     return { stat_data: {}, display_data: {} };
                 }
-                // 切卡隔离：插件运行时可能还没从上一张卡切过来（异步 reload 空窗期）。
-                // 检测到跨卡残留表或运行时为空时，一律从当前聊天的持久化帧重建（读数据库真相），
-                // 不让前端拿到空/旧卡数据——否则前端“空读 → schema 默认值 → 写回”会重置数据库。
+                // 运行时优先：插件就绪后运行时即最新（含本次提交），持久化帧只作兜底——
+                // 运行时为空（异步回放中）或含跨卡残留表（切聊天中）时，从当前聊天持久化帧重建，
+                // 避免前端“空读/旧读 → schema 默认值 → 写回”把数据库重置成默认值。
+                const cur = api.exportTableAsJson() || {};
+                let hasTables = false;
+                for (const k in cur) {
+                    if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) { hasTables = true; break; }
+                }
+                if (!hasTables) {
+                    const persisted = readPersistedTableData();
+                    if (persisted) return core.statDataFromTables(activeLayout, persisted);
+                    return { stat_data: {}, display_data: {} };
+                }
+                // 切卡隔离：运行时含跨卡残留表时用持久化帧重建当前聊天数据
                 try {
-                    const cur = api.exportTableAsJson() || {};
-                    let hasTables = false;
-                    for (const k in cur) {
-                        if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) { hasTables = true; break; }
-                    }
-                    if (!hasTables) {
-                        const persisted = readPersistedTableData();
-                        if (persisted) return core.statDataFromTables(activeLayout, persisted);
-                        return { stat_data: {}, display_data: {} };
-                    }
                     const foreign = runtimeForeignTableNames(api, activeLayout);
                     if (foreign.length) {
                         const persisted2 = readPersistedTableData();
