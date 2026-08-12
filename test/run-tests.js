@@ -4389,7 +4389,7 @@ test('行表初始数据不进模板 content（避免插件 seedRows 反复补�
     }
 });
 
-test('diff 路径行表删除：stat_data 移除的键 → 调用 deleteRow', async () => {
+test('diff 路径行表删除：空组不视为删除（空组保护），非空组缺键才触发 deleteRow', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -4413,7 +4413,7 @@ test('diff 路径行表删除：stat_data 移除的键 → 调用 deleteRow', as
     const tables = JSON.parse(JSON.stringify(r.template));
     const qy = Object.values(tables).find(s => s && s.name === '气运表');
     const keyCol = '名称';
-    qy.content = [qy.content[0], [2, '测试气运', '被动', '效果']];
+    qy.content = [qy.content[0], [1, '测试气运', '被动', '效果'], [2, '其他气运', '主动', '效果2']];
     const deleted = [];
     const fakeApi = {
         exportTableAsJson: () => tables,
@@ -4471,10 +4471,16 @@ test('diff 路径行表删除：stat_data 移除的键 → 调用 deleteRow', as
     vm2.createContext(win);
     vm2.runInContext(extIndex, win);
 
-    const prev = { 主角: { 气运: { 测试气运: { 名称: '测试气运' } } } };
-    const next = { 主角: { 气运: {} } };
-    const n = await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, toLayout(r.schema), prev, next);
-    assert.ok(n > 0, 'diff 应有写入');
+    const prev = { 主角: { 气运: { 测试气运: { 名称: '测试气运' }, 其他气运: { 名称: '其他气运' } } } };
+    // 空组保护：target 该组为空对象（前端分批写/未提供该组）→ 不视为删除意图，不触发 deleteRow
+    const nextEmpty = { 主角: { 气运: {} } };
+    const n0 = await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, toLayout(r.schema), prev, nextEmpty);
+    assert.strictEqual(n0, 0, '空组不应产生删除/写入（空组保护，避免 DELETE-only 误删持久化行）');
+    assert.strictEqual(deleted.length, 0, '空组保护：不应调用 deleteRow');
+    // 非空组缺键 → 显式移除该条目，deleteRow 照常触发
+    const nextPartial = { 主角: { 气运: { 其他气运: { 名称: '其他气运' } } } };
+    const n1 = await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, toLayout(r.schema), prev, nextPartial);
+    assert.ok(n1 > 0, '非空组缺键应有写入');
     assert.strictEqual(deleted.length, 1, '应调用一次 deleteRow');
     assert.strictEqual(deleted[0][0], '气运表', '删除目标表应为气运表');
     assert.strictEqual(deleted[0][1], 1, '删除 rowIndex 应为 content 数据行索引 1');
