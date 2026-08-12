@@ -6225,7 +6225,10 @@ ${DB_INIT_SNIPPET}
                 if (!hasDataRows) {
                     const persisted = readPersistedTableData();
                     if (persisted) return core.statDataFromTables(activeLayout, persisted);
-                    return { stat_data: {}, display_data: {} };
+                    // 无持久化帧（全新聊天、插件尚未建锚/物化）：退回按运行时表重建。
+                    // 只有表头时单例表回到布局默认值（= 卡模板初始行，与旧行为一致），
+                    // 避免前端拿到空对象后按它自己的默认值（如 25/6000）写回。
+                    return core.statDataFromTables(activeLayout, cur);
                 }
                 // 切卡隔离：运行时含跨卡残留表时用持久化帧重建当前聊天数据
                 try {
@@ -19788,7 +19791,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (!hasDataRows) {
                     const persisted = readPersistedTableData();
                     if (persisted) return core.statDataFromTables(activeLayout, persisted);
-                    return { stat_data: {}, display_data: {} };
+                    // 无持久化帧（全新聊天、插件尚未建锚/物化）：退回按运行时表重建。
+                    // 只有表头时单例表回到布局默认值（= 卡模板初始行，与旧行为一致），
+                    // 避免前端拿到空对象后按它自己的默认值（如 25/6000）写回。
+                    return core.statDataFromTables(activeLayout, cur);
                 }
                 // 切卡隔离：运行时含跨卡残留表时用持久化帧重建当前聊天数据
                 try {
