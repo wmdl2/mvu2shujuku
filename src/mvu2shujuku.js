@@ -5349,11 +5349,10 @@ ${DB_INIT_SNIPPET}
                 installWindowGetAllVariables();
                 installWindowMvuShim();
                 installTableUpdateHook();
-                // 建表/初始化成功 ≈ MVU 的 VARIABLE_INITIALIZED 时机，广播给前端
-                try {
-                    const curStat = window.getAllVariables ? (window.getAllVariables().stat_data || {}) : {};
-                    emitMvuEvent('mag_variable_initialized', { stat_data: curStat, display_data: curStat, delta_data: {}, initialized_lorebooks: {} });
-                } catch (e) {}
+                // 建表/初始化成功（或聊天已有 checkpoint 跳过）≈ MVU 的 VARIABLE_INITIALIZED 时机。
+                // 不能立刻广播：插件回放/物化可能尚未完成，此刻 getAllVariables 可能返回空/旧值，
+                // 前端收到后重读会显示默认值并写回。等 stat_data 非空后再派发（见 scheduleDataReadyNotify）。
+                scheduleDataReadyNotify();
             }
         } catch (e) {
             console.warn('[mvu2shujuku] 开局自动建表异常：' + (e && e.message ? e.message : e));
@@ -5441,6 +5440,37 @@ ${DB_INIT_SNIPPET}
         }
     }
 
+    // 数据就绪通知：刷新/重进/切聊天后，前端（尤其整页注入式常驻前端）在插件异步回放完成前
+    // 可能已读旧/空数据，而插件加载完成不主动通知前端。这里在 stat_data 非空后分三次广播：
+    //   - VARIABLE_INITIALIZED：HypnosisAPP5 等前端在收到它时才会重读 userData 并重渲染；
+    //   - VARIABLE_UPDATE_ENDED：刷新主页时钟/成就列表。
+    // 用 stat_data 指纹去重：同一份数据只广播一次，数据变化（如回放完成）后再广播。
+    function scheduleDataReadyNotify() {
+        reentryNotifyFingerprint = '';
+        const dispatch = async () => {
+            try {
+                if (!activeLayout) return;
+                const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                const sdR = allR.stat_data || {};
+                let hasData = false;
+                for (const g in sdR) {
+                    if (sdR[g] && typeof sdR[g] === 'object' && Object.keys(sdR[g]).length) { hasData = true; break; }
+                }
+                if (!hasData) return; // 空 stat_data 不广播（避免前端读到空显示默认值）
+                const fp = JSON.stringify(sdR);
+                if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
+                reentryNotifyFingerprint = fp;
+                dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
+                emitMvuEvent('mag_variable_initialized', allR, null);
+                dispatchVariableUpdateEnded();
+                dbg('[重读通知] 已派发 VARIABLE_INITIALIZED + VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
+            } catch (e) {}
+        };
+        hostWindow.setTimeout(() => { dispatch(); }, 1500);
+        hostWindow.setTimeout(() => { dispatch(); }, 3500);
+        hostWindow.setTimeout(() => { dispatch(); }, 6000);
+    }
+
     function bindAutoInit(context) {
         const es = context && (context.eventSource || context.event_source);
         const et = context && (context.event_types || context.eventTypes);
@@ -5450,39 +5480,10 @@ ${DB_INIT_SNIPPET}
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
                     hostWindow.setTimeout(autoInitDatabase, 600);
-                    // 刷新/重进/切聊天后：前端（尤其整页注入式常驻前端）可能已读旧数据，而插件加载完成
-                    // 不主动通知前端。用“运行时有表 + 数据指纹变化”判定新聊天数据就绪，并在 1.5s/3.5s/6s
-                    // 分三次广播 VARIABLE_UPDATE_ENDED，覆盖插件异步加载时序（清空瞬间已由
-                    // installTableUpdateHook 抑制，不会广播空数据）。
-                    reentryNotifyFingerprint = '';
-                    const dispatchReentryNotify = async () => {
-                        try {
-                            const apiR = getAcuApi();
-                            if (!apiR || !activeLayout) return;
-                            const curR = apiR.exportTableAsJson() || {};
-                            let hasTables = false;
-                            for (const k in curR) {
-                                if (k.indexOf('sheet_') === 0 && curR[k] && curR[k].name) { hasTables = true; break; }
-                            }
-                            if (!hasTables) return; // 插件仍在加载（运行时空）
-                            const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                            const sdR = allR.stat_data || {};
-                            let hasData = false;
-                            for (const g in sdR) {
-                                if (sdR[g] && typeof sdR[g] === 'object' && Object.keys(sdR[g]).length) { hasData = true; break; }
-                            }
-                            if (!hasData) return; // 空 stat_data 不广播（避免前端读到空显示默认值）
-                            const fp = JSON.stringify(curR);
-                            if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
-                            reentryNotifyFingerprint = fp;
-                            dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
-                            dispatchVariableUpdateEnded();
-                            dbg('[重读通知] 已派发 VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
-                        } catch (e) {}
-                    };
-                    hostWindow.setTimeout(() => { dispatchReentryNotify(); }, 1500);
-                    hostWindow.setTimeout(() => { dispatchReentryNotify(); }, 3500);
-                    hostWindow.setTimeout(() => { dispatchReentryNotify(); }, 6000);
+                    // 刷新/重进/切聊天后：前端可能已读旧数据，而插件加载完成不主动通知前端；
+                    // 等数据就绪后派发 VARIABLE_INITIALIZED（前端会重读 userData）+
+                    // VARIABLE_UPDATE_ENDED（刷新时钟），覆盖插件异步加载时序。
+                    scheduleDataReadyNotify();
                     // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
                     syncRuntimeForCurrentCard();
                     activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
@@ -6037,7 +6038,7 @@ ${DB_INIT_SNIPPET}
                             if (op.kind === 'data_replace' && op.data && typeof op.data === 'object') {
                                 base = JSON.parse(JSON.stringify(op.data));
                                 ops.length = 0;
-                            } else if (op.kind === 'row_upsert' || op.kind === 'row_delete') {
+                            } else if (op.kind === 'row_upsert' || op.kind === 'row_delete' || op.kind === 'sql_sheet_batch') {
                                 ops.push(op);
                             }
                         }
@@ -6062,6 +6063,12 @@ ${DB_INIT_SNIPPET}
                         });
                         if (idx >= 0) sheet.content[idx] = cells;
                         else sheet.content.push(cells);
+                    } else if (op.kind === 'sql_sheet_batch') {
+                        // SQLite 模式的原生 CRUD（updateCell/insertRow/deleteRow）持久化为
+                        // sql_sheet_batch（逐条 UPDATE/INSERT/DELETE 语句）。此前重建只认
+                        // row_upsert/row_delete，会漏掉这些写入，导致“运行时为空”窗口内读到
+                        // 陈旧 checkpoint（如充值后前端读到旧值并写回）。这里按语句回放。
+                        replaySqlBatchIntoSheet(sheet, op);
                     }
                 }
                 result = base;
@@ -6069,6 +6076,114 @@ ${DB_INIT_SNIPPET}
             persistedReadCache = { key, data: result };
             return result;
         } catch (e) { return null; }
+    }
+
+    // 把插件 SQLite 模式持久化的 sql_sheet_batch（statements + params 数组）按序回放到
+    // 重建的 sheet 上。支持三种语句形状（与插件 createTableCrudApi 一致）：
+    //   UPDATE tbl SET col = ? WHERE row_id = ?;
+    //   INSERT INTO tbl (c1, ...) VALUES (?, ...);
+    //   DELETE FROM tbl WHERE row_id = ?;
+    // 物理列名是中文表头的拼音 slug（toPinyinSlug），与扩展/插件命名一致。
+    function replaySqlBatchIntoSheet(sheet, op) {
+        try {
+            const stmts = Array.isArray(op.statements) ? op.statements : [];
+            const paramsList = Array.isArray(op.params) ? op.params : [];
+            if (!Array.isArray(sheet.content) || !sheet.content.length) return;
+            const header = sheet.content[0] || [];
+            // 拼音 slug 助手：UI 运行副本（extensionIndexUi）的作用域里没有 toPinyinSlug，
+            // 但同文件核心副本把它导出在 MVU2SHUJUKU_CORE 上（转换器/核心共享同一字典）。
+            const slugOf = function (zh) {
+                try {
+                    if (typeof toPinyinSlug === 'function') return toPinyinSlug(String(zh));
+                } catch (e) {}
+                try {
+                    const holder = (typeof window !== 'undefined' ? window : root);
+                    if (holder && holder.MVU2SHUJUKU_CORE && typeof holder.MVU2SHUJUKU_CORE.toPinyinSlug === 'function') {
+                        return holder.MVU2SHUJUKU_CORE.toPinyinSlug(String(zh));
+                    }
+                } catch (e) {}
+                return '';
+            };
+            const colIndexBySlug = {};
+            for (let hi = 0; hi < header.length; hi++) {
+                const slug = slugOf(String(header[hi]));
+                if (slug && colIndexBySlug[slug] === undefined) colIndexBySlug[slug] = hi;
+            }
+            const findRow = (rid) => {
+                const s = String(rid == null ? '' : rid).trim();
+                if (!s) return -1;
+                for (let ri = 1; ri < sheet.content.length; ri++) {
+                    const r = sheet.content[ri];
+                    if (Array.isArray(r) && String(r[0] == null ? '' : r[0]).trim() === s) return ri;
+                }
+                return -1;
+            };
+            for (let si = 0; si < stmts.length; si++) {
+                const sql = String(stmts[si] || '');
+                const params = Array.isArray(paramsList[si]) ? paramsList[si] : [];
+                const up = /UPDATE\s+\`?[A-Za-z0-9_]+\`?\s+SET\s+\`?([A-Za-z0-9_]+)\`?\s*=\s*\?\s*WHERE\s+\`?row_id\`?\s*=\s*\?/i.exec(sql);
+                if (up) {
+                    const ci = colIndexBySlug[String(up[1]).toLowerCase()];
+                    if (ci === undefined) continue;
+                    const ri = findRow(params[1]);
+                    if (ri < 0) continue;
+                    sheet.content[ri][ci] = params[0];
+                    continue;
+                }
+                const del = /DELETE\s+FROM\s+\`?[A-Za-z0-9_]+\`?\s+WHERE\s+\`?row_id\`?\s*=\s*\?/i.exec(sql);
+                if (del) {
+                    const rid = String(params[0] == null ? '' : params[0]).trim();
+                    if (rid) {
+                        sheet.content = sheet.content.filter(function (row, idx) {
+                            return idx === 0 || !Array.isArray(row) || String(row[0] == null ? '' : row[0]).trim() !== rid;
+                        });
+                    }
+                    continue;
+                }
+                const ins = /INSERT\s+INTO\s+\`?[A-Za-z0-9_]+\`?\s*(?:\(([^)]*)\))?\s*(?:VALUES\s*\(([^)]*)\))?/i.exec(sql);
+                if (ins) {
+                    const colPart = String(ins[1] || '');
+                    const colNames = colPart.split(',').map(function (s) { return String(s).replace(/[\`\s]/g, '').toLowerCase(); }).filter(Boolean);
+                    const row = header.map(function () { return ''; });
+                    let hasRowId = false;
+                    let nameVal = null;
+                    let nameIdx = -1;
+                    for (let ci2 = 0; ci2 < colNames.length; ci2++) {
+                        const cn = colNames[ci2];
+                        let hIdx = -1;
+                        if (cn === 'row_id') hIdx = 0;
+                        else if (colIndexBySlug[cn] !== undefined) hIdx = colIndexBySlug[cn];
+                        if (hIdx >= 0) {
+                            if (hIdx === 0) hasRowId = true;
+                            if (hIdx > 0 && String(header[hIdx]) === '名称') { nameIdx = hIdx; nameVal = params[ci2]; }
+                            if (params[ci2] !== undefined) row[hIdx] = params[ci2];
+                        }
+                    }
+                    let targetRi = -1;
+                    if (nameIdx >= 0 && nameVal !== null && nameVal !== undefined) {
+                        for (let ri2 = 1; ri2 < sheet.content.length; ri2++) {
+                            const r2 = sheet.content[ri2];
+                            if (Array.isArray(r2) && String(r2[nameIdx] == null ? '' : r2[nameIdx]) === String(nameVal)) { targetRi = ri2; break; }
+                        }
+                    }
+                    if (targetRi >= 0) {
+                        for (let ci3 = 0; ci3 < row.length; ci3++) {
+                            if (row[ci3] !== '' && row[ci3] !== null && row[ci3] !== undefined) sheet.content[targetRi][ci3] = row[ci3];
+                        }
+                    } else {
+                        if (!hasRowId || row[0] === '' || row[0] === null || row[0] === undefined) {
+                            let maxId = 0;
+                            for (let ri3 = 1; ri3 < sheet.content.length; ri3++) {
+                                const r3 = sheet.content[ri3];
+                                if (Array.isArray(r3) && r3[0] !== undefined && r3[0] !== null && !isNaN(Number(r3[0]))) maxId = Math.max(maxId, Number(r3[0]));
+                            }
+                            row[0] = String(maxId + 1);
+                        }
+                        sheet.content.push(row);
+                    }
+                }
+            }
+        } catch (e) {}
     }
 
     function installWindowGetAllVariables() {
@@ -6094,13 +6209,16 @@ ${DB_INIT_SNIPPET}
                     return { stat_data: {}, display_data: {} };
                 }
                 // 运行时优先：插件就绪后运行时即插件完整回放的权威状态（含全部表与溢出字段）。
-                // 持久化重建只是空/跨卡窗口的兜底（row_upsert 只带单次写入状态，不保证完整，不能覆盖运行时）。
+                // 持久化重建只是空/跨卡窗口的兜底。判定“就绪”用真实数据行而非表名：
+                // 插件回放/物化未完成时可能只有表头（content 仅 1 行），此时若按运行时读，
+                // 单例表会退化成布局默认值（如 当前MC点=0/零花钱=6000），前端读到后既显示又写回；
+                // 必须先等 content 有行，或改用持久化重建（checkpoint + row_upsert/sql_sheet_batch）。
                 const cur = api.exportTableAsJson() || {};
-                let hasTables = false;
+                let hasDataRows = false;
                 for (const k in cur) {
-                    if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) { hasTables = true; break; }
+                    if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name && Array.isArray(cur[k].content) && cur[k].content.length > 1) { hasDataRows = true; break; }
                 }
-                if (!hasTables) {
+                if (!hasDataRows) {
                     const persisted = readPersistedTableData();
                     if (persisted) return core.statDataFromTables(activeLayout, persisted);
                     return { stat_data: {}, display_data: {} };

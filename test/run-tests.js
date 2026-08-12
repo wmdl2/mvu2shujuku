@@ -5138,4 +5138,150 @@ test('单例表已有 content 行时写库不再 insertRow 垫脚行：不产生
     assert.strictEqual(zj.content[1][hdr.indexOf('姓名')], '幂等写入', '写入应落在 row_id=1 上');
 });
 
+test('读侧持久化重建回放 sql_sheet_batch：运行时为空窗口内读到 checkpoint 后的最新写入而非旧值', async () => {
+    const vm2 = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => (e.kind === 'singleton'
+            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
+            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const srcDir = path.join(__dirname, '..', 'src');
+    const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
+    const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
+    const yamlLibsData = fs.readFileSync(path.join(srcDir, 'vendor', 'mvu-yaml-libs.js'), 'utf8');
+    const jsonrepairData = fs.readFileSync(path.join(srcDir, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+    const pinyinInline = pinyinData.replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ').replace(/;\s*$/, ';');
+    const yamlLibsInline = ['(function () {', '  var module = { exports: {} };', '  var exports = module.exports;', yamlLibsData, '  var target = typeof globalThis !== "undefined" ? globalThis : this;', '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;', '})();', ''].join('\n');
+    const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+    const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+
+    // 持久化帧：checkpoint 基底（遭遇冷却=20、姓名=未知）+ 两条 logEntries：
+    //   sql_sheet_batch（SQLite 模式 updateCell 的持久化形态）把 遭遇冷却 改成 25，
+    //   row_upsert 把 主角表 姓名 改成 斯维姆。
+    const persisted = JSON.parse(JSON.stringify(r.template));
+    const sjP = Object.values(persisted).find(s => s && s.name === '世界表');
+    const zjP = Object.values(persisted).find(s => s && s.name === '主角表');
+    const sjKey = Object.keys(persisted).find(k => persisted[k] === sjP);
+    const zjKey = Object.keys(persisted).find(k => persisted[k] === zjP);
+    const sjHdr = sjP.content[0];
+    sjP.content[1][sjHdr.indexOf('遭遇冷却')] = 20;
+    const zjHdr = zjP.content[0];
+    const zjRow = JSON.parse(JSON.stringify(zjP.content[1]));
+    zjRow[zjHdr.indexOf('姓名')] = '斯维姆';
+    const checkpointMsg = {
+        message_id: 0,
+        TavernDB_ACU_IsolatedData: JSON.stringify({
+            系统: {
+                storageFrame: {
+                    version: 2,
+                    logEntries: [
+                        {
+                            seq: 1,
+                            operations: [
+                                {
+                                    kind: 'sql_sheet_batch',
+                                    sheetKey: sjKey,
+                                    statements: ['UPDATE `shijiebiao` SET `zaoyulengque` = ? WHERE `row_id` = ?;'],
+                                    params: [[25, '1']],
+                                    tableName: 'shijiebiao',
+                                    reason: 'manual_crud',
+                                },
+                            ],
+                        },
+                        {
+                            seq: 2,
+                            operations: [
+                                { kind: 'row_upsert', sheetKey: zjKey, rowId: '1', cells: zjRow },
+                            ],
+                        },
+                    ],
+                    checkpoint: { kind: 'full', data: persisted, ts: 1 },
+                },
+            },
+        }),
+    };
+    const converted = {
+        name: '重建卡',
+        avatar: 'rb.png',
+        data: {
+            extensions: {
+                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
+                regex_scripts: [],
+            },
+            character_book: {
+                entries: [{
+                    keys: ['__ACU_TEMPLATE_DATA__'],
+                    content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
+                }],
+            },
+        },
+    };
+    // 运行时为空：模拟插件回放未完成（exportTableAsJson 返回 {}），读侧必须走持久化重建
+    const tables = {};
+    let initCalls = 0;
+    const fakeApi = applyingApi(tables, {
+        onInit: async () => { initCalls += 1; },
+    });
+    const handlers = {};
+    const context = {
+        chatId: 'c-replay', name: '测试', chat: [checkpointMsg],
+        characters: [converted], characterId: 0,
+        extensionSettings: { mvu2shujuku: { debug: false } },
+        eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received', MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated', MESSAGE_EDITED: 'edited', MESSAGE_SENT: 'sent', MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {}, saveChatConditional: async () => {}, saveChat: async () => {},
+        getRequestHeaders: () => ({}), setChatMessages: () => {},
+    };
+    const fakeEl = () => {
+        const el = {
+            dataset: {}, style: {}, children: [], _listeners: {}, _value: '',
+            addEventListener: (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); },
+            removeEventListener: () => {}, dispatchEvent: () => true,
+            appendChild: (c) => { el.children.push(c); return c; }, removeChild: () => {},
+            querySelector: () => fakeEl(), querySelectorAll: () => [],
+            click: () => {}, focus: () => {}, blur: () => {}, contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(el, 'innerHTML', { get: () => el._html || '', set: (v) => { el._html = v; } });
+        Object.defineProperty(el, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(el, 'value', { get: () => el._value, set: (v) => { el._value = v; } });
+        Object.defineProperty(el, 'checked', { get: () => !!el._checked, set: (v) => { el._checked = v; } });
+        Object.defineProperty(el, 'disabled', { get: () => !!el._disabled, set: (v) => { el._disabled = v; } });
+        return el;
+    };
+    const doc = {
+        querySelector: () => fakeEl(), getElementById: () => fakeEl(), createElement: () => fakeEl(),
+        createTextNode: () => fakeEl(), addEventListener: () => {}, body: fakeEl(),
+    };
+    const win = {
+        top: null, parent: null, document: doc, console,
+        setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t),
+        CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {}, toastr: undefined,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm2.createContext(win);
+    vm2.runInContext(extIndex, win);
+
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 2500));
+    assert.strictEqual(initCalls, 0, '已有 full checkpoint 时不重建表');
+    // 运行时仍为空 → getAllVariables 走持久化重建；sql_sheet_batch 必须被回放
+    const gv = win.getAllVariables();
+    assert.strictEqual(gv.stat_data.世界 && gv.stat_data.世界.遭遇冷却, 25,
+        'sql_sheet_batch 写入应覆盖 checkpoint 旧值（否则前端读到旧值会显示并写回），实际 stat_data=' + JSON.stringify(gv.stat_data));
+    assert.strictEqual(gv.stat_data.主角 && gv.stat_data.主角.姓名, '斯维姆', 'row_upsert 写入应被回放，实际 stat_data=' + JSON.stringify(gv.stat_data));
+});
+
 runTests();
