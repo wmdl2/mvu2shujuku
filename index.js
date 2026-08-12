@@ -2585,7 +2585,7 @@
     // 供扩展合并层判断是否需要延迟重试（首楼替换/插件回放会清空运行时导致写入落空，
     // 等运行时稳定后重跑一次即可；直接补行会在原行恢复时造成重复行）。
     let statWriteHadFailure = false;
-    async function writeStatDiffToDb(api, layoutEntries, prevStat, nextStat) {
+    async function writeStatDiffToDb(api, layoutEntries, prevStat, nextStat, persistedTables) {
         statWriteHadFailure = false;
         const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
         const pathParts = (s) => String(s || '').split('.');
@@ -2792,6 +2792,14 @@
                 const SE0 = SE.layout || SE;
                 const found2 = sheetOf(SE0.table);
                 if (!found2 || !Array.isArray(found2.sheet.content) || found2.sheet.content.length > 1) continue;
+                // 持久化帧里该表已有数据行（checkpoint/content 非空）→ 运行时仅表头只是插件
+                // 回放未完成。此时补行会造出重复/错位行（row_id 对不上重放），触发插件的
+                // “手动追平持久化完整性校验失败：V2 replay 与本轮已提交数据不一致”。
+                // 跳过补行：updateCell 越界 → 合并层延迟重试，等回放完成后直接写。
+                if (persistedTables && typeof persistedTables === 'object') {
+                    const pSheet = Object.values(persistedTables).find(s => s && s.name === SE0.table);
+                    if (pSheet && Array.isArray(pSheet.content) && pSheet.content.length > 1) continue;
+                }
                 // 初始行对象：布局列默认值兜底（布局一定在，且默认值=卡模板初始行），
                 // 再叠加模板（若拿得到）里的值。之前只依赖 getTableTemplate/模板缓存，
                 // 首楼替换窗口里两者都可能缺失 → sObj={} → INSERT 依赖列 DEFAULT，
@@ -6078,7 +6086,11 @@ ${DB_INIT_SNIPPET}
                                 dbg('[注入合并] 分组诊断: ' + (groupDiags.length ? groupDiags.join(' | ') : '无'));
                             } catch (eGrp) {}
                         } catch (e) {}
-                        n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget);
+                        // 把持久化重建结果传给核心写路径：运行时仅表头但 checkpoint/日志已有该表
+                        // 数据行时，核心补行必须跳过（否则造重复行 → “手动追平完整性校验失败”）。
+                        let persistedForWrite = null;
+                        try { persistedForWrite = readPersistedTableData(); } catch (e) {}
+                        n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget, persistedForWrite);
                         if (n > 0) {
                             initializedViaGameSession.add(chatKeyNow);
                             lastDbWriteAt = Date.now();
@@ -19736,7 +19748,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 dbg('[注入合并] 分组诊断: ' + (groupDiags.length ? groupDiags.join(' | ') : '无'));
                             } catch (eGrp) {}
                         } catch (e) {}
-                        n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget);
+                        // 把持久化重建结果传给核心写路径：运行时仅表头但 checkpoint/日志已有该表
+                        // 数据行时，核心补行必须跳过（否则造重复行 → “手动追平完整性校验失败”）。
+                        let persistedForWrite = null;
+                        try { persistedForWrite = readPersistedTableData(); } catch (e) {}
+                        n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget, persistedForWrite);
                         if (n > 0) {
                             initializedViaGameSession.add(chatKeyNow);
                             lastDbWriteAt = Date.now();
