@@ -5469,18 +5469,26 @@ ${DB_INIT_SNIPPET}
                                 if (k.indexOf('sheet_') === 0 && curR[k] && curR[k].name) { hasTables = true; break; }
                             }
                             if (!hasTables) return; // 插件仍在加载（运行时空）
+                            const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                            const sdR = allR.stat_data || {};
+                            let hasData = false;
+                            for (const g in sdR) {
+                                if (sdR[g] && typeof sdR[g] === 'object' && Object.keys(sdR[g]).length) { hasData = true; break; }
+                            }
+                            if (!hasData) return; // 空 stat_data 不广播（避免前端读到空显示默认值）
                             const fp = JSON.stringify(curR);
                             if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
                             reentryNotifyFingerprint = fp;
-                            const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                            const sdR = allR.stat_data || {};
                             dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
-                            // 前端 SYSTEM_SCHEMA/STORE_SCHEMA 解析诊断：确认字段名/类型是否匹配
+                            // 前端 SYSTEM_SCHEMA/STORE_SCHEMA 解析诊断：仅对含 MC 字段的卡输出（避免道渊等卡刷屏）
                             try {
                                 const sysR = sdR['系统'] || {};
-                                const fields = ['_MC能量','MC能量','_MC能量上限','MC能量上限','当前MC点','_累计消耗MC点','累计消耗MC点','持有零花钱','主角可疑度','_hypnoos','_催眠APP订阅等级'];
-                                const parts = fields.map(function (f) { return f + '=' + (f in sysR ? (typeof sysR[f] === 'object' ? JSON.stringify(sysR[f]).slice(0, 120) : String(sysR[f])) : '<缺>'); });
-                                dbg('[重读通知] 系统 schema 字段: ' + parts.join(' | '));
+                                const hasMcFields = ('_MC能量' in sysR) || ('当前MC点' in sysR) || ('持有零花钱' in sysR);
+                                if (hasMcFields) {
+                                    const fields = ['_MC能量','MC能量','_MC能量上限','MC能量上限','当前MC点','_累计消耗MC点','累计消耗MC点','持有零花钱','主角可疑度','_hypnoos','_催眠APP订阅等级'];
+                                    const parts = fields.map(function (f) { return f + '=' + (f in sysR ? (typeof sysR[f] === 'object' ? JSON.stringify(sysR[f]).slice(0, 120) : String(sysR[f])) : '<缺>'); });
+                                    dbg('[重读通知] 系统 schema 字段: ' + parts.join(' | '));
+                                }
                             } catch (eS) {}
                             dispatchVariableUpdateEnded();
                             dbg('[重读通知] 已派发 VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
@@ -5999,6 +6007,24 @@ ${DB_INIT_SNIPPET}
         } catch (e) { return null; }
     }
 
+    // 即时按当前角色解析布局（autoInit 缓存前的挂载期兜底）：
+    // 前端挂载读需要布局才能把表格重建为 stat_data，布局未就绪就返回空会诱发空读写回。
+    function ensureActiveLayoutLazy() {
+        try {
+            if (activeLayout && layoutBelongsToCurrentCard(activeLayoutCardKey)) return true;
+            const ch = currentCharacter();
+            if (!ch) return false;
+            const ext = charExtensions(ch);
+            const mk = ext && ext.mvu2shujuku;
+            if (mk && typeof mk.layout === 'string') {
+                activeLayout = JSON.parse(mk.layout);
+                activeLayoutCardKey = cardCacheKey(ch);
+                return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
     function installWindowGetAllVariables() {
         const core = window.MVU2SHUJUKU_CORE;
         if (typeof window.getAllVariables === 'function') return;
@@ -6009,11 +6035,13 @@ ${DB_INIT_SNIPPET}
         }
         window.getAllVariables = function () {
             try {
-                // 布局归属校验：切卡空窗期 activeLayout 还是上一张卡的，
-                // 用它读当前表格会得到错形状的 stat_data（前端据此初始化就会写歪）。
-                // 未就绪时返回空，让前端从零构建；autoInit 完成后布局/缓存就绪。
+                // 布局归属校验：切卡空窗期 activeLayout 还是上一张卡的。
+                // 未就绪时先从当前角色即时解析布局（挂载期 autoInit 可能还没跑完），
+                // 仍拿不到才返回空——否则前端空读→schema 默认值→写回会重置数据库。
                 if (!layoutBelongsToCurrentCard(activeLayoutCardKey)) {
-                    return { stat_data: {}, display_data: {} };
+                    if (!ensureActiveLayoutLazy()) {
+                        return { stat_data: {}, display_data: {} };
+                    }
                 }
                 const api = getAcuApi();
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
@@ -18836,18 +18864,26 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 if (k.indexOf('sheet_') === 0 && curR[k] && curR[k].name) { hasTables = true; break; }
                             }
                             if (!hasTables) return; // 插件仍在加载（运行时空）
+                            const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                            const sdR = allR.stat_data || {};
+                            let hasData = false;
+                            for (const g in sdR) {
+                                if (sdR[g] && typeof sdR[g] === 'object' && Object.keys(sdR[g]).length) { hasData = true; break; }
+                            }
+                            if (!hasData) return; // 空 stat_data 不广播（避免前端读到空显示默认值）
                             const fp = JSON.stringify(curR);
                             if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
                             reentryNotifyFingerprint = fp;
-                            const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                            const sdR = allR.stat_data || {};
                             dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
-                            // 前端 SYSTEM_SCHEMA/STORE_SCHEMA 解析诊断：确认字段名/类型是否匹配
+                            // 前端 SYSTEM_SCHEMA/STORE_SCHEMA 解析诊断：仅对含 MC 字段的卡输出（避免道渊等卡刷屏）
                             try {
                                 const sysR = sdR['系统'] || {};
-                                const fields = ['_MC能量','MC能量','_MC能量上限','MC能量上限','当前MC点','_累计消耗MC点','累计消耗MC点','持有零花钱','主角可疑度','_hypnoos','_催眠APP订阅等级'];
-                                const parts = fields.map(function (f) { return f + '=' + (f in sysR ? (typeof sysR[f] === 'object' ? JSON.stringify(sysR[f]).slice(0, 120) : String(sysR[f])) : '<缺>'); });
-                                dbg('[重读通知] 系统 schema 字段: ' + parts.join(' | '));
+                                const hasMcFields = ('_MC能量' in sysR) || ('当前MC点' in sysR) || ('持有零花钱' in sysR);
+                                if (hasMcFields) {
+                                    const fields = ['_MC能量','MC能量','_MC能量上限','MC能量上限','当前MC点','_累计消耗MC点','累计消耗MC点','持有零花钱','主角可疑度','_hypnoos','_催眠APP订阅等级'];
+                                    const parts = fields.map(function (f) { return f + '=' + (f in sysR ? (typeof sysR[f] === 'object' ? JSON.stringify(sysR[f]).slice(0, 120) : String(sysR[f])) : '<缺>'); });
+                                    dbg('[重读通知] 系统 schema 字段: ' + parts.join(' | '));
+                                }
                             } catch (eS) {}
                             dispatchVariableUpdateEnded();
                             dbg('[重读通知] 已派发 VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
@@ -19366,6 +19402,24 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         } catch (e) { return null; }
     }
 
+    // 即时按当前角色解析布局（autoInit 缓存前的挂载期兜底）：
+    // 前端挂载读需要布局才能把表格重建为 stat_data，布局未就绪就返回空会诱发空读写回。
+    function ensureActiveLayoutLazy() {
+        try {
+            if (activeLayout && layoutBelongsToCurrentCard(activeLayoutCardKey)) return true;
+            const ch = currentCharacter();
+            if (!ch) return false;
+            const ext = charExtensions(ch);
+            const mk = ext && ext.mvu2shujuku;
+            if (mk && typeof mk.layout === 'string') {
+                activeLayout = JSON.parse(mk.layout);
+                activeLayoutCardKey = cardCacheKey(ch);
+                return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
     function installWindowGetAllVariables() {
         const core = window.MVU2SHUJUKU_CORE;
         if (typeof window.getAllVariables === 'function') return;
@@ -19376,11 +19430,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         }
         window.getAllVariables = function () {
             try {
-                // 布局归属校验：切卡空窗期 activeLayout 还是上一张卡的，
-                // 用它读当前表格会得到错形状的 stat_data（前端据此初始化就会写歪）。
-                // 未就绪时返回空，让前端从零构建；autoInit 完成后布局/缓存就绪。
+                // 布局归属校验：切卡空窗期 activeLayout 还是上一张卡的。
+                // 未就绪时先从当前角色即时解析布局（挂载期 autoInit 可能还没跑完），
+                // 仍拿不到才返回空——否则前端空读→schema 默认值→写回会重置数据库。
                 if (!layoutBelongsToCurrentCard(activeLayoutCardKey)) {
-                    return { stat_data: {}, display_data: {} };
+                    if (!ensureActiveLayoutLazy()) {
+                        return { stat_data: {}, display_data: {} };
+                    }
                 }
                 const api = getAcuApi();
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
