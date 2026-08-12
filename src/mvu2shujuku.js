@@ -2684,10 +2684,12 @@
             const prevDict = dictAt(prevStat);
             const nextDict = dictAt(nextStat);
             if (!prevDict || typeof prevDict !== 'object' || Array.isArray(prevDict)) continue;
-            const nextKeys = (nextDict && typeof nextDict === 'object' && !Array.isArray(nextDict)) ? new Set(Object.keys(nextDict)) : new Set();
-            // 空组保护：prev 有行但 target 该组为空（前端分批写/未提供该组，或嵌套 writePaths 组为空）
-            // → 不视为删除意图，跳过本次扫描，避免 DELETE-only 误删持久化行。
-            if (Object.keys(prevDict).length > 0 && nextKeys.size === 0) continue;
+            const nextObj = (nextDict && typeof nextDict === 'object' && !Array.isArray(nextDict)) ? nextDict : null;
+            const nextKeys = nextObj ? new Set(Object.keys(nextObj)) : new Set();
+            // 空组保护只在 target 完全没提供该组（nextObj 为 null，前端分批写）时生效：
+            // 此时组缺失≠删除意图，跳过扫描避免 DELETE-only 误删。
+            // 显式把组置空（nextObj 存在但无键，如前端点删除后整组变 {}）是明确的删除意图，必须执行删除。
+            if (nextObj === null && Object.keys(prevDict).length > 0 && nextKeys.size === 0) continue;
             for (const k of Object.keys(prevDict)) {
                 if (!nextKeys.has(k)) {
                     ops.push({ np: wp.concat([k]).join('.'), entry: { layout: L, kind: 'rows', prefix: wp }, kind: 'row-delete', rowKey: k });
@@ -5196,6 +5198,102 @@ ${DB_INIT_SNIPPET}
         } catch (e) { return 'unknown'; }
     }
 
+    // 首楼替换修复：原版道渊“重塑仙缘”等机制用 setChatMessages 替换第零层，会把
+    // TavernDB_ACU_ScopedConfig / InternalSheetGuide 从首楼消息上抹掉；插件随后读不到
+    // 模板作用域，就按 legacy 迁移冻结成“旧版聊天冻结模板”（催眠APP没有首楼替换所以正常）。
+    // 参考卡（道渊-开局收尾桥）在替换时快照/拷回这些字段；转换卡没有，这里在重进/切聊天/
+    // 首楼更新后做幂等修复（仅转换卡）：
+    //   1) 首楼缺插件字段 → 从 chat_metadata 权威副本拷回；
+    //   2) 模板作用域被冻结（presetName 为旧版标签）→ 恢复为当前卡模板名（templateStr 内容不变）；
+    //   3) 作用域整体缺失 → 用卡内模板重建。
+    function repairChatTemplateScope() {
+        try {
+            if (!activeLayout) return; // 只处理转换卡
+            const context = getContextSafe();
+            const chat = Array.isArray(context.chat) ? context.chat : [];
+            if (!chat.length || !chat[0] || typeof chat[0] !== 'object') return;
+            const first = chat[0];
+            const metadata = (context.chat_metadata && typeof context.chat_metadata === 'object') ? context.chat_metadata : null;
+            let changed = false;
+            // 1) 消息级字段丢失 → 从 chat_metadata 拷回
+            if (metadata) {
+                for (const field of ['TavernDB_ACU_InternalSheetGuide', 'TavernDB_ACU_ScopedConfig']) {
+                    if (first[field] === undefined && metadata[field] !== undefined) {
+                        try { first[field] = JSON.parse(JSON.stringify(metadata[field])); changed = true; } catch (e) {}
+                    }
+                }
+            }
+            // 2) 作用域被冻结 → 恢复模板名
+            let sc = first.TavernDB_ACU_ScopedConfig;
+            if (typeof sc === 'string') { try { sc = JSON.parse(sc); } catch (e) { sc = null; } }
+            if (sc && sc.template && typeof sc.template === 'object' && !Array.isArray(sc.template)) {
+                const ch = currentCharacter();
+                const properName = ch ? String(ch.name || '') + '模板' : '';
+                let nameChanged = false;
+                for (const k of Object.keys(sc.template)) {
+                    const st = sc.template[k];
+                    if (!st || typeof st !== 'object') continue;
+                    const pn = String(st.presetName || '');
+                    if (pn.indexOf('旧版') === 0 && properName && pn !== properName) {
+                        st.presetName = properName;
+                        if (typeof st.source === 'string' && st.source.indexOf('legacy') === 0) st.source = 'ui';
+                        st.updatedAt = Date.now();
+                        nameChanged = true;
+                    }
+                }
+                if (nameChanged) { changed = true; first.TavernDB_ACU_ScopedConfig = sc; }
+            }
+            // 3) 作用域整体缺失 → 用卡内模板重建（模板缓存已由 autoInitDatabase 设置）
+            if (!first.TavernDB_ACU_ScopedConfig) {
+                try {
+                    const holder = (typeof window !== 'undefined' ? window : globalThis);
+                    const tplCache = holder && holder.__mvu2shujukuTemplateCache;
+                    const ch2 = currentCharacter();
+                    const properName2 = ch2 ? String(ch2.name || '') + '模板' : '';
+                    if (tplCache && properName2) {
+                        first.TavernDB_ACU_ScopedConfig = {
+                            version: 1,
+                            template: {
+                                '': {
+                                    mode: 'chat_override',
+                                    isolationKey: '',
+                                    presetName: properName2,
+                                    templateStr: JSON.stringify(tplCache),
+                                    updatedAt: Date.now(),
+                                    source: 'ui',
+                                },
+                            },
+                        };
+                        changed = true;
+                    }
+                } catch (e) {}
+            }
+            // 同步 chat_metadata（插件以 metadata 为权威源），并落盘
+            if (changed) {
+                if (metadata) {
+                    try {
+                        for (const field of ['TavernDB_ACU_InternalSheetGuide', 'TavernDB_ACU_ScopedConfig']) {
+                            if (first[field] !== undefined) metadata[field] = JSON.parse(JSON.stringify(first[field]));
+                        }
+                    } catch (e) {}
+                    try {
+                        const updater = (typeof context.updateChatMetadata === 'function' && context.updateChatMetadata.bind(context)) ||
+                            (typeof window.updateChatMetadata === 'function' ? window.updateChatMetadata.bind(window) : null);
+                        if (updater) updater({
+                            TavernDB_ACU_ScopedConfig: metadata.TavernDB_ACU_ScopedConfig,
+                            TavernDB_ACU_InternalSheetGuide: metadata.TavernDB_ACU_InternalSheetGuide,
+                        }, false);
+                    } catch (e) {}
+                }
+                const saveFn = (typeof context.saveChatConditional === 'function' && context.saveChatConditional.bind(context)) ||
+                    (typeof context.saveChat === 'function' && context.saveChat.bind(context)) ||
+                    (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
+                    (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
+                if (saveFn) { Promise.resolve(saveFn()); dbg(' [模板作用域修复] 已恢复首楼插件字段/模板名。'); }
+            }
+        } catch (e) {}
+    }
+
     // 对应 MVU 的 init 时机：进入聊天/收到首条消息时，若卡内有模板且表格缺失则自动建表。
     // 只处理本转换器产出的卡（extensions.mvu2shujuku 标记 + 世界书 __ACU_TEMPLATE_DATA__ 模板），
     // 其余卡一律不动（别的数据库卡也可能带 __ACU_TEMPLATE_DATA__，但不会有我们的独有标记）。
@@ -5345,6 +5443,9 @@ ${DB_INIT_SNIPPET}
             if (holder) holder.__mvu2shujukuTemplateCacheFor = cardCacheKey(cacheChar);
             if (holder) holder.__mvu2shujukuTemplateCacheForName = cacheChar ? String(cacheChar.name || '') : '';
         } catch (e) {}
+        // 首楼替换（道渊重塑仙缘等）会把插件作用域字段从首楼抹掉，导致插件按 legacy 冻结模板；
+        // 每次进入/切回聊天都做一次幂等修复（拷回/改名/重建）。
+        repairChatTemplateScope();
         // 对齐参考卡：每个聊天只在“缺表”时初始化一次（下方 ensureInit），
         // 已有表格的聊天绝不重初始化，避免切聊天时误重置别的聊天。
         // 锚点/持久化由插件自己的 initGameSession 与提交管线维护，扩展不做手工锚定。
