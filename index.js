@@ -5467,6 +5467,13 @@ ${DB_INIT_SNIPPET}
                                 const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                                 const sdR = allR.stat_data || {};
                                 dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
+                                // 前端 SYSTEM_SCHEMA/STORE_SCHEMA 解析诊断：确认字段名/类型是否匹配
+                                try {
+                                    const sysR = sdR['系统'] || {};
+                                    const fields = ['_MC能量','MC能量','_MC能量上限','MC能量上限','当前MC点','_累计消耗MC点','累计消耗MC点','持有零花钱','主角可疑度','_hypnoos','_催眠APP订阅等级'];
+                                    const parts = fields.map(function (f) { return f + '=' + (f in sysR ? (typeof sysR[f] === 'object' ? JSON.stringify(sysR[f]).slice(0, 120) : String(sysR[f])) : '<缺>'); });
+                                    dbg('[重读通知] 系统 schema 字段: ' + parts.join(' | '));
+                                } catch (eS) {}
                                 dispatchVariableUpdateEnded();
                                 dbg('[重读通知] 已派发 VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
                             }
@@ -18730,6 +18737,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                                 const sdR = allR.stat_data || {};
                                 dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
+                                // 前端 SYSTEM_SCHEMA/STORE_SCHEMA 解析诊断：确认字段名/类型是否匹配
+                                try {
+                                    const sysR = sdR['系统'] || {};
+                                    const fields = ['_MC能量','MC能量','_MC能量上限','MC能量上限','当前MC点','_累计消耗MC点','累计消耗MC点','持有零花钱','主角可疑度','_hypnoos','_催眠APP订阅等级'];
+                                    const parts = fields.map(function (f) { return f + '=' + (f in sysR ? (typeof sysR[f] === 'object' ? JSON.stringify(sysR[f]).slice(0, 120) : String(sysR[f])) : '<缺>'); });
+                                    dbg('[重读通知] 系统 schema 字段: ' + parts.join(' | '));
+                                } catch (eS) {}
                                 dispatchVariableUpdateEnded();
                                 dbg('[重读通知] 已派发 VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
                             }
