@@ -2680,6 +2680,9 @@
             const nextDict = dictAt(nextStat);
             if (!prevDict || typeof prevDict !== 'object' || Array.isArray(prevDict)) continue;
             const nextKeys = (nextDict && typeof nextDict === 'object' && !Array.isArray(nextDict)) ? new Set(Object.keys(nextDict)) : new Set();
+            // 空组保护：prev 有行但 target 该组为空（前端分批写/未提供该组，或嵌套 writePaths 组为空）
+            // → 不视为删除意图，跳过本次扫描，避免 DELETE-only 误删持久化行。
+            if (Object.keys(prevDict).length > 0 && nextKeys.size === 0) continue;
             for (const k of Object.keys(prevDict)) {
                 if (!nextKeys.has(k)) {
                     ops.push({ np: wp.concat([k]).join('.'), entry: { layout: L, kind: 'rows', prefix: wp }, kind: 'row-delete', rowKey: k });
@@ -7311,7 +7314,20 @@ ${DB_INIT_SNIPPET}
                         const allowedGroups = new Set((Array.isArray(activeLayout) ? activeLayout : []).map(L => L.group));
                         for (const k of Object.keys(target)) {
                             if (k === '$internal') continue;
-                            if (allowedGroups.has(k)) out[k] = target[k];
+                            if (allowedGroups.has(k)) {
+                                const tv = target[k];
+                                const pv = out[k];
+                                // 空组保护：前端 target 该组为空对象而当前（prev）有数据时，
+                                // 保留 prev——MVU 前端常分批/按需发 stat_data，空组≠“清空意图”，
+                                // 若直接覆盖会把持久化行判成删除（DELETE-only sql_sheet_batch → 回放丢行）。
+                                const isEmptyObj = tv && typeof tv === 'object' && !Array.isArray(tv) && Object.keys(tv).length === 0;
+                                const prevNonEmpty = pv && typeof pv === 'object' && !Array.isArray(pv) && Object.keys(pv).length > 0;
+                                if (isEmptyObj && prevNonEmpty) {
+                                    dbg(' [空组保护] target.' + k + ' 为空对象而 prev 有数据，保留 prev（不视为删除）。');
+                                    continue;
+                                }
+                                out[k] = tv;
+                            }
                             else if (target[k] !== undefined && target[k] !== null && typeof target[k] === 'object') {
                                 dbg(' [切卡隔离] target 剥离布局外组：' + k);
                             }
