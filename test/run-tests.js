@@ -992,6 +992,64 @@ test('条目字段全是叶子的字典应判为行表（修复误判为单例�
     assert.ok(t.content[0].includes('亲密'), '列应含条目字段');
 });
 
+test('行表条目自带「名称」字段时键列改名，表头不得重复（技能熟练度类结构）', () => {
+    const makeCard = (initvar) => ({
+        spec: 'chara_card_v3',
+        data: {
+            name: '技能槽卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{
+                    comment: '[InitVar]',
+                    content: JSON.stringify(initvar),
+                }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    });
+    // 报告场景：嵌套在单例下的子行表（角色.技能熟练度: { 技能1: { 名称, 熟练度, 等级 } }）
+    const r1 = core.convert(makeCard({
+        角色: {
+            货币: 0,
+            等级: 1,
+            技能熟练度: {
+                技能1: { 名称: '未获得', 熟练度: 0, 等级: 1 },
+                技能2: { 名称: '未获得', 熟练度: 0, 等级: 1 },
+            },
+        },
+    }), { mode: 'both' });
+    const t1 = Object.values(r1.template).find(s => s && s.name === '技能熟练度表');
+    assert.ok(t1, '应有技能熟练度表');
+    const h1 = t1.content[0];
+    assert.strictEqual(new Set(h1).size, h1.length, `子行表表头不得重复：${JSON.stringify(h1)}`);
+    assert.ok(h1.includes('条目名') && h1.includes('名称'), `键列应改名「条目名」且保留「名称」字段：${JSON.stringify(h1)}`);
+    assert.strictEqual(t1.content[1][1], '技能1', '键列值应为技能1');
+    assert.strictEqual(t1.content[1][2], '未获得', '名称字段值应保留');
+    // 顶层行表同样结构（主 rows 分支）
+    const r2 = core.convert(makeCard({
+        技能: {
+            技能1: { 名称: '未获得', 熟练度: 0, 等级: 1 },
+            技能2: { 名称: '未获得', 熟练度: 0, 等级: 1 },
+        },
+    }), { mode: 'both' });
+    const t2 = Object.values(r2.template).find(s => s && s.name === '技能表');
+    assert.ok(t2, '应有技能表');
+    const h2 = t2.content[0];
+    assert.strictEqual(new Set(h2).size, h2.length, `顶层行表表头不得重复：${JSON.stringify(h2)}`);
+    assert.ok(h2.includes('条目名') && h2.includes('名称'), `键列应改名「条目名」且保留「名称」字段：${JSON.stringify(h2)}`);
+    // 名字型字典（条目无 名称 字段）键列也应统一为「条目名」
+    const r3 = core.convert(makeCard({
+        道侣: {
+            林若悠: { 亲密: [88, ''], 种族: ['人族', ''] },
+            苏媚: { 亲密: [77, ''], 种族: ['妖族', ''] },
+        },
+    }), { mode: 'both' });
+    const t3 = Object.values(r3.template).find(s => s && s.name === '道侣表');
+    assert.ok(t3, '应有道侣表');
+    assert.strictEqual(t3.content[0][1], '条目名', `名字型字典键列也应为「条目名」：${JSON.stringify(t3.content[0])}`);
+});
+
 test('行表条目内的空嵌套对象不再拆出每条目重复子表', () => {
     const card = {
         spec: 'chara_card_v3',
@@ -1472,7 +1530,7 @@ test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
     // 填入一行道侣数据
     const companions = tables[byName('道侣表')];
     const header = companions.content[0];
-    const row = header.map(h => ({ 名称: '林若悠', 性别: '女', 种族: '人族', 境界: '筑基', 生命: 95, 灵力: 90, 修为: 45, 道心: 60, 亲密: 88, 性格: '温柔' }[h] !== undefined ? { 名称: '林若悠', 性别: '女', 种族: '人族', 境界: '筑基', 生命: 95, 灵力: 90, 修为: 45, 道心: 60, 亲密: 88, 性格: '温柔' }[h] : ''));
+    const row = header.map(h => ({ 条目名: '林若悠', 性别: '女', 种族: '人族', 境界: '筑基', 生命: 95, 灵力: 90, 修为: 45, 道心: 60, 亲密: 88, 性格: '温柔' }[h] !== undefined ? { 条目名: '林若悠', 性别: '女', 种族: '人族', 境界: '筑基', 生命: 95, 灵力: 90, 修为: 45, 道心: 60, 亲密: 88, 性格: '温柔' }[h] : ''));
     row[0] = 1;
     companions.content = [header, row];
     const allData = win.getAllVariables();
@@ -1681,7 +1739,7 @@ test('空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删
     assert.strictEqual(taskEntry.kind, 'json', '空字典且无字段线索应生成整组 JSON 表');
     assert.strictEqual(opEntry.kind, 'json', '空字典且无字段线索应生成整组 JSON 表');
     const taskSheet = Object.values(r.template).find(s => s && s.name === '任务表');
-    assert.deepStrictEqual(taskSheet.content[0], ['row_id', '名称', '内容'], 'JSON 表头应为 row_id/名称/内容');
+    assert.deepStrictEqual(taskSheet.content[0], ['row_id', '条目名', '内容'], 'JSON 表头应为 row_id/条目名/内容');
     assert.ok(!taskSheet.sourceData.note.includes('【列定义】'), 'JSON 表不应展示列定义');
     assert.ok(!taskSheet.sourceData.note.includes('【强制约束】'), 'JSON 表不应展示强制约束');
     assert.ok(taskSheet.sourceData.note.includes('AI 不应直接修改本表'), 'JSON 表应保留整组说明');
@@ -1881,7 +1939,7 @@ test('表结构校验：旧模板（同名表缺列）会被识别并重新导�
         setTimeout(() => {
             try {
                 assert.ok(initCalls >= 1 || importCalls >= 1, '旧模板缺列时应触发重新建表（initGameSession 或 importTemplateFromData）');
-                assert.deepStrictEqual(tables[taskKey].content[0], ['row_id', '名称', '内容'], '导入后任务表应恢复为名称+内容结构');
+                assert.deepStrictEqual(tables[taskKey].content[0], ['row_id', '条目名', '内容'], '导入后任务表应恢复为条目名+内容结构');
                 resolve();
             } catch (e) { reject(e); }
         }, 100);
@@ -4392,7 +4450,7 @@ test('首写缺锚点：写库前 initGameSession 建锚，差异写入把行表
     await new Promise(res => setTimeout(res, 1200));
     assert.strictEqual(initCalls, 0, '首写不再手工 initGameSession（锚点由插件提交管线建立）');
     const qy = Object.values(tables).find(s => s && s.name === '气运表');
-    const ki = qy.content[0].indexOf('名称');
+    const ki = qy.content[0].indexOf('条目名');
     const contentKeys = qy.content.slice(1).map(r => r && r[ki]).filter(Boolean);
     assert.ok(contentKeys.includes('测试气运'), '首写后行表数据必须落到 content（不留在 seedRows）');
 });

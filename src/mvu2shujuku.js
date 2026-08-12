@@ -1393,7 +1393,7 @@
                 // 顶层非对象（数组/标量）：按数组表或行表处理
                 if (raw !== null) {
                     const tableName = makeGroupTableName(groupName);
-                    const keyCol = '名称';
+                    const keyCol = '条目名';
                     const isArray = Array.isArray(raw);
                     if (isArray) {
                         // 数组表的值列用「内容」（数组项本身）
@@ -1469,7 +1469,11 @@
             }
             seenTables.add(tableName);
 
-            const keyCol = '名称';
+            // 键列名统一为「条目名」（键列存的是条目键，如 技能1/西园寺爱丽莎；
+            // 标量/JSON 表存的是组名）。不再用「名称」：条目自身也常带「名称」字段
+            // （如 技能1: { 名称: 未获得 }），键列若叫「名称」会与字段重名导致表头重复。
+            const keyCol = '条目名';
+            let rowsKeyCol = '条目名';
             const childTables = [];
             const prefixPath = [groupName];
             if (kind === 'json') {
@@ -1533,7 +1537,7 @@
                     if (!isPlainObject(entry)) {
                         sawScalarEntries = true;
                         scalarIsNumber = scalarIsNumber || typeof entry === 'number';
-                        entryRows.push({ [keyCol]: entryName, value: entry, __scalar: true });
+                        entryRows.push({ [rowsKeyCol]: entryName, value: entry, __scalar: true });
                         continue;
                     }
                     const entryCols = [];
@@ -1565,16 +1569,16 @@
                     for (const c of entryCols) {
                         if (!fieldOrder.includes(c.zh)) fieldOrder.push(c.zh);
                     }
-                    const row = { [keyCol]: entryName };
+                    const row = { [rowsKeyCol]: entryName };
                     for (const c of entryCols) row[c.zh] = c.value;
                     entryRows.push(row);
                 }
                 // 字段顺序：先 usage 里出现的，再条目里出现的
-                const usageFields = (usage[groupName] || []).filter(f => f !== keyCol);
-                const shapeFields = (shapes[groupName] || []).filter(f => f !== keyCol);
+                const usageFields = (usage[groupName] || []).filter(f => f !== rowsKeyCol);
+                const shapeFields = (shapes[groupName] || []).filter(f => f !== rowsKeyCol);
                 const allFields = [...new Set([...shapeFields, ...usageFields, ...fieldOrder])];
                 columns.length = 0;
-                columns.push({ zh: keyCol, path: [groupName], value: '', desc: '条目名称', type: 'TEXT', ident: toIdent(keyCol, new Set(['row_id']), 'column') });
+                columns.push({ zh: rowsKeyCol, path: [groupName], value: '', desc: '条目名称（字典键，如 技能1）', type: 'TEXT', ident: toIdent(rowsKeyCol, new Set(['row_id']), 'column') });
                 const used = new Set(['row_id', columns[0].ident.toLowerCase()]);
                 for (const f of allFields) {
                     columns.push({
@@ -1618,7 +1622,7 @@
                     });
                 }
                 rows = entryRows.map(r => {
-                    const rowArr = [r.__rowId || (columns.length + 1), r[keyCol]];
+                    const rowArr = [r.__rowId || (columns.length + 1), r[rowsKeyCol]];
                     for (const c of columns.slice(1)) {
                         let v = r[c.zh];
                         if (v === undefined || v === null) v = '';
@@ -1705,7 +1709,7 @@
                 tableName,
                 ident: toIdent(tableName, usedTableIdents, 'table'),
                 kind,
-                keyCol,
+                keyCol: kind === 'rows' ? rowsKeyCol : keyCol,
                 keyValue: kind === 'singleton' ? groupName : '',
                 columns,
                 rows,
@@ -1719,10 +1723,10 @@
         for (const g of groups) {
             for (const ct of g.childTables) {
                 const tableName = makeGroupTableName(ct.key);
-                const keyCol = '名称';
-                const usageFields = (usage[ct.key] || []).filter(f => f !== keyCol);
-                const shapeFields = (shapes[ct.key] || []).filter(f => f !== keyCol);
-                const columns = [{ zh: keyCol, path: [...ct.path], value: '', desc: '条目名称', type: 'TEXT', ident: toIdent(keyCol, new Set(['row_id']), 'column') }];
+                const rowsKeyCol = '条目名';
+                const usageFields = (usage[ct.key] || []).filter(f => f !== rowsKeyCol);
+                const shapeFields = (shapes[ct.key] || []).filter(f => f !== rowsKeyCol);
+                const columns = [{ zh: rowsKeyCol, path: [...ct.path], value: '', desc: '条目名称（字典键）', type: 'TEXT', ident: toIdent(rowsKeyCol, new Set(['row_id']), 'column') }];
                 const used = new Set(['row_id', columns[0].ident.toLowerCase()]);
                 const fieldOrder = [];
                 const entryRows = [];
@@ -1734,13 +1738,13 @@
                         if (!isPlainObject(entry)) {
                             sawScalarEntries = true;
                             scalarIsNumber = scalarIsNumber || typeof entry === 'number';
-                            entryRows.push({ [keyCol]: entryName, value: entry, __scalar: true });
+                            entryRows.push({ [rowsKeyCol]: entryName, value: entry, __scalar: true });
                             continue;
                         }
                         for (const subKey of Object.keys(entry)) {
                             if (!fieldOrder.includes(subKey)) fieldOrder.push(subKey);
                         }
-                        const row = { [keyCol]: entryName };
+                        const row = { [rowsKeyCol]: entryName };
                         for (const subKey of Object.keys(entry)) {
                             const sv = entry[subKey];
                             row[subKey] = isLeaf(sv) ? leafInfo(sv).value : JSON.stringify(sv);
@@ -1796,7 +1800,7 @@
                     });
                 }
                 const rows = entryRows.map(r => {
-                    const rowArr = [r.__rowId || (columns.length + 1), r[keyCol]];
+                    const rowArr = [r.__rowId || (columns.length + 1), r[rowsKeyCol]];
                     for (const c of columns.slice(1)) {
                         let v = r[c.zh];
                         if (v === undefined || v === null) v = '';
@@ -1812,7 +1816,7 @@
                     tableName,
                     ident: toIdent(tableName, usedTableIdents, 'table'),
                     kind: 'rows',
-                    keyCol,
+                    keyCol: rowsKeyCol,
                     keyValue: '',
                     columns,
                     rows,
