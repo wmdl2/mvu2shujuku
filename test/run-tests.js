@@ -776,7 +776,7 @@ function applySqlToTables(tables, sql) {
     }
 }
 
-test('writeStatDiffToDb：多操作走 SQL 批量事务，只提交一次且 row_id 不冲突', async () => {
+test('writeStatDiffToDb：多操作走逐条原生 CRUD（不再用 executeSqlBatch），row_id 不冲突', async () => {
     const layout = [
         { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前MC点', 'number', '', '', '', '']], writePaths: [], mirrors: [] },
         { kind: 'rows', group: '角色', table: '角色表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['好感度', 'number', '', '', '', '']], writePaths: [['角色']], mirrors: [] },
@@ -788,23 +788,28 @@ test('writeStatDiffToDb：多操作走 SQL 批量事务，只提交一次且 row
         sheet_2: { name: '角色表', content: [['row_id', '名称', '好感度'], [1, '西园寺爱丽莎', 0]] },
         sheet_3: { name: '台词表', content: [['row_id', '内容'], [1, '旧']] },
     };
+    let crudCalls = 0;
     let sqlBatchCalls = 0;
     const api = {
         exportTableAsJson: () => tables,
-        executeSqlBatch: async (sql) => {
-            sqlBatchCalls++;
-            applySqlToTables(tables, sql);
-            return { success: true, appliedEdits: 1 };
+        executeSqlBatch: async () => { sqlBatchCalls++; throw new Error('原生 CRUD 路径不应走 executeSqlBatch'); },
+        updateCell: async (tn, ri, col, val) => { crudCalls++; const s = Object.values(tables).find(x => x.name === tn); const ci = s.content[0].indexOf(col); s.content[ri][ci] = val; return true; },
+        insertRow: async (tn, data) => {
+            crudCalls++;
+            const s = Object.values(tables).find(x => x.name === tn);
+            const row = s.content[0].map(h => (data && data[h] !== undefined && data[h] !== null) ? String(data[h]) : '');
+            row[0] = s.content.length;
+            s.content.push(row);
+            return row[0];
         },
-        updateCell: async () => { throw new Error('批量路径不应走逐格 updateCell'); },
-        insertRow: async () => { throw new Error('批量路径不应走逐行 insertRow'); },
-        deleteRow: async () => { throw new Error('批量路径不应走逐行 deleteRow'); },
+        deleteRow: async (tn, ri) => { crudCalls++; const s = Object.values(tables).find(x => x.name === tn); if (s && s.content[ri]) s.content.splice(ri, 1); return true; },
     };
     const prev = { 系统: { 当前MC点: 100 }, 角色: { 西园寺爱丽莎: { 好感度: 0 } }, '$器灵台词': ['旧'] };
     const next = { 系统: { 当前MC点: 80 }, 角色: { 西园寺爱丽莎: { 好感度: 5 }, 月咏深雪: { 好感度: 3 }, 苏媚: { 好感度: 2 } }, '$器灵台词': ['新1', '新2'] };
     const n = await core.writeStatDiffToDb(api, layout, prev, next);
     assert.ok(n >= 5, '应产生 5 个以上差异操作');
-    assert.strictEqual(sqlBatchCalls, 1, '多操作应只提交一次 SQL 批量事务');
+    assert.strictEqual(sqlBatchCalls, 0, '原生 CRUD 路径不应调用 executeSqlBatch');
+    assert.ok(crudCalls >= 5, '多操作应逐条走原生 CRUD');
     assert.strictEqual(tables.sheet_1.content[1][2], 80, '单例更新应生效');
     assert.strictEqual(tables.sheet_2.content[1][2], 5, '行表更新应生效');
     const names = tables.sheet_2.content.slice(1).map(r => r[1]);
@@ -822,19 +827,20 @@ test('writeStatDiffToDb：同一新行的多字段合并为一条 INSERT（不�
         mate: { type: 'chatSheets', version: 1 },
         sheet_1: { name: '气运表', content: [['row_id', '名称', '效果', '说明']] },
     };
-    const inserts = [];
+    const insertedRows = [];
     const api = {
         exportTableAsJson: () => tables,
-        executeSqlBatch: async (sql) => {
-            applySqlToTables(tables, sql);
-            for (const line of sql.split(';')) {
-                if (line.includes('INSERT INTO')) inserts.push(line.trim());
-            }
-            return { success: true, appliedEdits: 1 };
+        executeSqlBatch: async () => { throw new Error('原生 CRUD 路径不应走 executeSqlBatch'); },
+        updateCell: async () => { throw new Error('不应走 updateCell'); },
+        insertRow: async (tn, data) => {
+            insertedRows.push({ tn, data: JSON.parse(JSON.stringify(data)) });
+            const s = Object.values(tables).find(x => x.name === tn);
+            const row = s.content[0].map(h => (data && data[h] !== undefined && data[h] !== null) ? String(data[h]) : '');
+            row[0] = s.content.length;
+            s.content.push(row);
+            return row[0];
         },
-        updateCell: async () => { throw new Error('批量路径不应走逐格 updateCell'); },
-        insertRow: async () => { throw new Error('批量路径不应走逐行 insertRow'); },
-        deleteRow: async () => { throw new Error('批量路径不应走逐行 deleteRow'); },
+        deleteRow: async () => { throw new Error('不应走 deleteRow'); },
     };
     const prev = { 气运: {} };
     const next = {
@@ -845,8 +851,11 @@ test('writeStatDiffToDb：同一新行的多字段合并为一条 INSERT（不�
     };
     const n = await core.writeStatDiffToDb(api, layout, prev, next);
     assert.ok(n >= 2, '应写入两个新条目');
-    assert.strictEqual(inserts.length, 2, '两个新条目应各只有一条 INSERT，实际 ' + inserts.length + ' 条');
-    assert.ok(inserts.some(s => s.includes('阿勒苏霍德之笔') && s.includes('写下的故事会成真') && s.includes('传说中的笔')), '同一新行多个字段应合并进同一条 INSERT');
+    assert.strictEqual(insertedRows.length, 2, '两个新条目应各只有一次 insertRow，实际 ' + insertedRows.length + ' 次');
+    const penRow = insertedRows.find(r => r.data['名称'] === '阿勒苏霍德之笔');
+    assert.ok(penRow, '应插入阿勒苏霍德之笔');
+    assert.strictEqual(penRow.data['效果'], '写下的故事会成真', '同一新行多字段应合并进同一次 insertRow');
+    assert.strictEqual(penRow.data['说明'], '传说中的笔', '同一新行多字段应合并进同一次 insertRow');
     const names = tables.sheet_1.content.slice(1).map(r => r[1]);
     assert.strictEqual(names.length, 2, '表内应有 2 行');
 });
@@ -911,7 +920,7 @@ test('writeStatDiffToDb：小批量（1~4 条）保持逐格增量写入，不�
     assert.strictEqual(tables.sheet_2.content.length, 3, '应插入新行');
 });
 
-test('writeStatDiffToDb：SQL 批量失败时自动回退逐条写入', async () => {
+test('writeStatDiffToDb：写路径纯原生 CRUD，executeSqlBatch 永不调用', async () => {
     const layout = [
         { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前MC点', 'number', '', '', '', '']], writePaths: [], mirrors: [] },
         { kind: 'rows', group: '角色', table: '角色表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['好感度', 'number', '', '', '', '']], writePaths: [['角色']], mirrors: [] },
@@ -924,7 +933,7 @@ test('writeStatDiffToDb：SQL 批量失败时自动回退逐条写入', async ()
     let sqlBatchCalls = 0;
     const api = {
         exportTableAsJson: () => tables,
-        executeSqlBatch: async () => { sqlBatchCalls++; return { success: false, error: '模拟重绑失败' }; },
+        executeSqlBatch: async () => { sqlBatchCalls++; throw new Error('不应调用 executeSqlBatch'); },
         updateCell: async (tn, ri, col, val) => {
             const s = Object.values(tables).find(x => x.name === tn);
             const ci = s.content[0].indexOf(col);
@@ -941,11 +950,11 @@ test('writeStatDiffToDb：SQL 批量失败时自动回退逐条写入', async ()
     const prev = { 系统: { 当前MC点: 100 }, 角色: { 西园寺爱丽莎: { 好感度: 0 } } };
     const next = { 系统: { 当前MC点: 80 }, 角色: { 西园寺爱丽莎: { 好感度: 5 }, 月咏深雪: { 好感度: 3 } } };
     const n = await core.writeStatDiffToDb(api, layout, prev, next);
-    assert.ok(n >= 3, '回退后仍应返回差异操作数');
-    assert.strictEqual(sqlBatchCalls, 1, 'SQL 批量应只尝试一次');
-    assert.strictEqual(tables.sheet_1.content[1][2], 80, '回退后单例更新应生效');
-    assert.strictEqual(tables.sheet_2.content[1][2], 5, '回退后行表更新应生效');
-    assert.strictEqual(tables.sheet_2.content.length, 3, '回退后应插入新行');
+    assert.ok(n >= 3, '应返回差异操作数');
+    assert.strictEqual(sqlBatchCalls, 0, 'executeSqlBatch 不应被调用');
+    assert.strictEqual(tables.sheet_1.content[1][2], 80, '单例更新应生效');
+    assert.strictEqual(tables.sheet_2.content[1][2], 5, '行表更新应生效');
+    assert.strictEqual(tables.sheet_2.content.length, 3, '应插入新行');
 });
 
 test('条目字段全是叶子的字典应判为行表（修复误判为单例）', () => {
@@ -3376,7 +3385,7 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     context.chat = [{ message_id: 0, mes: '开场白' }];
     await win.Mvu.replaceMvuData({ stat_data: { 主角: { 姓名: '缓存兜底' } } });
     await new Promise(res => setTimeout(res, 1000));
-    assert.ok(initCalls > initCallsBeforeWrite, '缓存键不匹配时名称兜底应使写库成功（实际 initCalls ' + initCallsBeforeWrite + ' → ' + initCalls + '）');
+    assert.strictEqual(initCalls, initCallsBeforeWrite, '名称兜底写库不再触发 initGameSession（原生 CRUD 直写，实际 initCalls ' + initCallsBeforeWrite + ' → ' + initCalls + '）');
     // 写库可能走 initGameSession 合并路径或（重锚已建 checkpoint 时）快照/差异路径，
     // 功能断言看表格内容而非 lastInitTemplateData 这个实现细节
     const zjFallback = Object.values(tables).find(s => s && s.name === '主角表');
@@ -3421,13 +3430,11 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     const gapStat = win.getAllVariables ? (win.getAllVariables().stat_data || {}) : {};
     // 注意：VM 沙箱 realm 的对象原型与测试进程不同，deepStrictEqual 会误判，用 keys 长度断言
     assert.strictEqual(Object.keys(gapStat).length, 0, '切卡空窗期 getAllVariables 不应返回上一张卡的旧布局数据');
-    // 等待周期重锚（3s 间隔 + 2.5s 节流）用当前卡 C 的模板重建
-    await new Promise(res => setTimeout(res, 4500));
-    const namesC = Object.keys(lastInitTemplateData || {})
-        .filter(k => k.indexOf('sheet_') === 0)
-        .map(k => lastInitTemplateData[k].name);
-    assert.ok(namesC.includes('仓库表'), '重锚应使用当前卡 C 的模板，实际：' + namesC.join('、'));
-    assert.ok(!namesC.includes('主角表'), '重锚不得串用上一张卡（B）的模板缓存');
+    // 新契约：不再有周期重锚——建表/锚点归插件；扩展只做运行时接管与切卡隔离
+    await new Promise(res => setTimeout(res, 2500));
+    const namesC = Object.keys(tables).filter(k => k.indexOf('sheet_') === 0).map(k => tables[k].name);
+    assert.ok(!namesC.includes('仓库表'), '切卡不重建运行时表格（扩展不再参与建表/重锚，建表归插件）');
+    assert.ok(namesC.includes('主角表'), '运行时仍是上一张卡（B）的表格（切卡隔离会拦写，绝不串模板）');
 
     // 阶段4：切回普通卡——所有接管必须撤销，且不再有任何建表/写入
     const initCallsBefore = initCalls;
@@ -3790,7 +3797,10 @@ test('刷新后运行时表空但 checkpoint 有数据：写库以 checkpoint �
     (handlers['chat_changed'] || []).forEach(fn => fn());
     await new Promise(res => setTimeout(res, 2500));
     assert.strictEqual(initCalls, 0, '已有 full checkpoint 时自动建表应跳过（与日志一致）');
-    // 前端写入一个变化：必须以 checkpoint 为基线，保留持久化数据（主角姓名）并应用变化
+    // 新契约：扩展不手工物化；插件原生回放会把 checkpoint 恢复进运行时（这里模拟已恢复）
+    for (const k of Object.keys(tables)) delete tables[k];
+    Object.assign(tables, JSON.parse(JSON.stringify(persisted)));
+    // 前端写入一个变化：必须以运行时为基线，保留持久化数据（主角姓名）并应用变化
     await win.Mvu.replaceMvuData({ stat_data: { 世界: { 当前时间: '测试时间' } } });
     await new Promise(res => setTimeout(res, 1000));
     const zjAfter = Object.values(tables).find(s => s && s.name === '主角表');
@@ -3943,7 +3953,12 @@ test('行表键同时存在于 seedRows 与 content：差异写入只更新 cont
     let insertCount = 0;
     const fakeApi = {
         exportTableAsJson: () => tables,
-        insertRow: async (t, o) => { insertCount += 1; return 99; },
+        insertRow: async (t, o) => {
+            insertCount += 1;
+            const s = Object.values(tables).find(x => x && x.name === t);
+            if (s) { const row = s.content[0].map(h => (o && o[h] !== undefined && o[h] !== null) ? String(o[h]) : ''); row[0] = s.content.length; s.content.push(row); }
+            return 99;
+        },
         updateCell: async (t, ri, col, v) => {
             const s = Object.values(tables).find(x => x && x.name === t);
             if (!s || !s.content[ri]) return false;
@@ -4010,16 +4025,16 @@ test('行表键同时存在于 seedRows 与 content：差异写入只更新 cont
     const ki = qy.content[0].indexOf('类型');
     assert.strictEqual(qy.content[1][ki], '主动', 'content 行应被更新');
     assert.strictEqual(qy.content.slice(1).length, 1, 'content 不应出现重复行');
-    // 2) 键只在 seedRows（content 无行）：跳过 INSERT，等插件物化后再写
+    // 2) 键只在 seedRows（content 无行）：直接 INSERT（插件 seed 物化会按业务键去重，不会重复）
     qy.content = [qy.content[0]];
     qy.seedRows = [[1, '测试气运', '被动', '效果']];
     const n2 = await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, layout, prev, { 主角: { 气运: { 测试气运: { 名称: '测试气运', 类型: '突破' } } } });
-    assert.strictEqual(n2, 0, '键仅在 seedRows 时应跳过写入（不 INSERT 撞 UNIQUE）');
-    assert.strictEqual(qy.content.length, 1, 'content 应保持仅表头');
+    assert.ok(n2 > 0, '键仅在 seedRows 时应 INSERT（不再跳过——快照兜底已删，跳过 = 永远落不了库）');
+    assert.strictEqual(qy.content.length, 2, 'content 应新增一行');
     // 3) 键既不在 content 也不在 seedRows：INSERT 新行
     const n3 = await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, layout, { 主角: { 气运: {} } }, { 主角: { 气运: { 新气运: { 名称: '新气运', 类型: '被动' } } } });
     assert.ok(n3 > 0, '新键应走 INSERT');
-    assert.strictEqual(insertCount, 1, '应恰好一次 INSERT');
+    assert.strictEqual(insertCount, 2, '两次 INSERT（seed-only 一次 + 新键一次）');
 });
 
 
@@ -4124,26 +4139,28 @@ test('删除行表条目（如删气运）：差异路径 deleteRow 同步移除
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
     await new Promise(res => setTimeout(res, 2500));
-    // 先写入一个气运条目（应插入行）
-    const targetKey = '测试气运';
-    await win.Mvu.replaceMvuData({ stat_data: { 主角: { 气运: { [targetKey]: { 名称: targetKey, 类型: '测试' } } } } });
+    // 先写入两个气运条目（应插入行）
+    const keyA = '测试气运';
+    const keyB = '保留气运';
+    await win.Mvu.replaceMvuData({ stat_data: { 主角: { 气运: { [keyA]: { 名称: keyA, 类型: '测试' }, [keyB]: { 名称: keyB, 类型: '测试' } } } } });
     await new Promise(res => setTimeout(res, 1000));
     const qyIns = Object.values(tables).find(s => s && s.name === '气运表');
     const keyIdxIns = qyIns.content[0].indexOf(keyCol);
-    assert.ok(qyIns.content.slice(1).some(row => row && row[keyIdxIns] === targetKey), '插入后气运表应包含新条目');
-    // 前端删除：stat_data 里去掉该气运条目
+    assert.ok(qyIns.content.slice(1).some(row => row && row[keyIdxIns] === keyA), '插入后气运表应包含新条目');
+    // 前端删除其中一条：target 组仍非空 → 触发 deleteRow（空组保护只拦“整组未发”）
     const d = win.Mvu.getMvuData();
     const stat = d.stat_data;
-    delete stat.主角.气运[targetKey];
+    delete stat.主角.气运[keyA];
     await win.Mvu.replaceMvuData({ stat_data: stat });
     await new Promise(res => setTimeout(res, 1200));
     const qyNow = Object.values(tables).find(s => s && s.name === '气运表');
     const keyIdxNow = qyNow.content[0].indexOf(keyCol);
     const keysNow = qyNow.content.slice(1).map(row => row && row[keyIdxNow]).filter(Boolean);
-    assert.ok(!keysNow.includes(targetKey), '删除操作后运行时气运表不应再包含被删条目');
+    assert.ok(!keysNow.includes(keyA), '删除操作后运行时气运表不应再包含被删条目');
+    assert.ok(keysNow.includes(keyB), '保留的气运条目应仍在');
 });
 
-test('条目只在 seedRows（content 无行）时删除：删除同步清理 seedRows', async () => {
+test('条目只在 seedRows（content 无行）时删除：扩展不再快照兜底/清 seed（seed 由插件模板管理）', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -4253,11 +4270,11 @@ test('条目只在 seedRows（content 无行）时删除：删除同步清理 se
     delete stat.主角.气运['测试气运'];
     await win.Mvu.replaceMvuData({ stat_data: stat });
     await new Promise(res => setTimeout(res, 1200));
-    assert.ok(lastImport, '删除 seedRows 条目应走到 importTableAsJson 快照兜底');
+    assert.strictEqual(lastImport, null, '不再走 importTableAsJson 快照兜底（seedRows 由插件模板/guide 管理）');
     const qySent = Object.values(tables).find(s => s && s.name === '气运表');
     const ki = qySent.content[0].indexOf(keyCol);
     const seedKeys = (qySent.seedRows || []).map(row => row && row[ki]).filter(Boolean);
-    assert.ok(!seedKeys.includes('测试气运'), '删除后 seedRows 不应再包含被删条目');
+    assert.ok(seedKeys.includes('测试气运'), 'seed-only 行不参与 stat_data 对账，seedRows 保持不变');
 });
 
 test('首写缺锚点：写库前 initGameSession 建锚，差异写入把行表数据物化到 content（不留在 seedRows）', async () => {
@@ -4363,10 +4380,10 @@ test('首写缺锚点：写库前 initGameSession 建锚，差异写入把行表
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
     await new Promise(res => setTimeout(res, 2500));
-    // 开场注入：写入气运（首写缺锚点 → 写库前 initGameSession 建锚，再差异写入）
+    // 开场注入：写入气运（不再手工建锚，差异写入直接落库，插件提交管线建立 checkpoint）
     await win.Mvu.replaceMvuData({ stat_data: { 主角: { 气运: { 测试气运: { 名称: '测试气运', 类型: '被动' } } } } });
     await new Promise(res => setTimeout(res, 1200));
-    assert.ok(initCalls >= 1, '首写应走 initGameSession');
+    assert.strictEqual(initCalls, 0, '首写不再手工 initGameSession（锚点由插件提交管线建立）');
     const qy = Object.values(tables).find(s => s && s.name === '气运表');
     const ki = qy.content[0].indexOf('名称');
     const contentKeys = qy.content.slice(1).map(r => r && r[ki]).filter(Boolean);
@@ -4605,7 +4622,7 @@ test('溢出列 _扩展数据 删除同步：stat_data 移除的动态字段不�
     assert.strictEqual(lastImport, null, '溢出字段写入/删除都应走差异路径，不触发整表快照');
 });
 
-test('重进聊天：多份 full checkpoint 并存时取最大一份恢复运行时（SQLite 重进漏恢复兜底）', async () => {
+test('重进聊天：扩展不再手工物化/取最大 checkpoint，运行时由插件原生回放恢复', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -4720,11 +4737,14 @@ test('重进聊天：多份 full checkpoint 并存时取最大一份恢复运行
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
     await new Promise(res => setTimeout(res, 3500));
+    // 新契约：插件原生回放取最新帧恢复运行时（这里模拟已恢复）；扩展不再手工物化
+    for (const k of Object.keys(tables)) delete tables[k];
+    Object.assign(tables, JSON.parse(JSON.stringify(bigCp)));
     const zjAfter = Object.values(tables).find(s => s && s.name === '主角表');
-    assert.strictEqual(zjAfter.content[1][zjAfter.content[0].indexOf('姓名')], '斯维姆', '重进后应取最大的 full checkpoint 恢复运行时（而非 msg0 旧锚）');
+    assert.strictEqual(zjAfter.content[1][zjAfter.content[0].indexOf('姓名')], '斯维姆', '插件原生恢复后运行时应为最新 checkpoint 数据');
 });
 
-test('无 full checkpoint 但存在 data_replace 日志：以最后一个 data_replace 作为持久化真相恢复运行时', async () => {
+test('无 full checkpoint 但有 data_replace：扩展不手工恢复，运行时由插件原生回放', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -4837,8 +4857,11 @@ test('无 full checkpoint 但存在 data_replace 日志：以最后一个 data_r
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
     await new Promise(res => setTimeout(res, 3500));
+    // 新契约：插件原生回放 data_replace 恢复运行时（这里模拟已恢复）；扩展不再手工物化
+    for (const k of Object.keys(tables)) delete tables[k];
+    Object.assign(tables, JSON.parse(JSON.stringify(realData)));
     const zjAfter = Object.values(tables).find(s => s && s.name === '主角表');
-    assert.strictEqual(zjAfter.content[1][zjAfter.content[0].indexOf('姓名')], '斯维姆', '无 full checkpoint 时应以最后一个 data_replace 作为持久化真相恢复运行时');
+    assert.strictEqual(zjAfter.content[1][zjAfter.content[0].indexOf('姓名')], '斯维姆', '插件原生回放后运行时应为 data_replace 数据');
 });
 
 
@@ -4988,6 +5011,9 @@ test('长聊天（楼层>4）刷新后：checkpoint 有行、运行时仅表头�
     (handlers['chat_changed'] || []).forEach(fn => fn());
     await new Promise(res => setTimeout(res, 2500));
     assert.strictEqual(initCalls, 0, '已有 full checkpoint 的长聊天不应触发 initGameSession');
+    // 新契约：扩展不手工物化；插件原生回放恢复 checkpoint（这里模拟已恢复）
+    for (const k of Object.keys(tables)) delete tables[k];
+    Object.assign(tables, JSON.parse(JSON.stringify(persisted)));
     await win.Mvu.replaceMvuData({ stat_data: { 世界: { 当前时间: '测试时间' } } });
     await new Promise(res => setTimeout(res, 2500)); // 越过延时恢复窗口（CHAT_CHANGED+600ms+2500ms）
     const zjAfter = Object.values(tables).find(s => s && s.name === '主角表');

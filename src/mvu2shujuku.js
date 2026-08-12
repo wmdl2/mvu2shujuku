@@ -2925,15 +2925,8 @@
                 if (keyVal === undefined) continue;
                 rowIndex = findRowByColumn(sheet, L.keyCol, keyVal);
                 if (rowIndex === -1) {
-                    // 行可能只存在于 seedRows（插件未物化到 content）：避免 INSERT 撞 UNIQUE，本次跳过
-                    const srHeader = header;
-                    const srFound = Array.isArray(sheet.seedRows) && sheet.seedRows.length
-                        ? findRowByColumn({ content: [srHeader, ...sheet.seedRows] }, L.keyCol, keyVal)
-                        : -1;
-                    if (srFound !== -1) {
-                        dbg(' 表「' + L.table + '」键「' + keyVal + '」存在于 seedRows，跳过 INSERT（等待插件物化）。');
-                        continue;
-                    }
+                    // 行不在 content：直接 INSERT（含 seedRows 里的模板行——插件 seed 物化
+                    // 会按业务键去重，不会重复；快照兜底已删，跳过 = 永远落不了库）
                     // 同一新行的多个字段合并为一条 INSERT，避免重复 INSERT 撞 UNIQUE
                     let colZh = parts[parts.length - 1];
                     if (header.indexOf(colZh) === -1) {
@@ -2996,82 +2989,10 @@
         }
         if (resolved.length === 0 && directOps.length === 0) return 0;
 
-        // 多操作批量写入：走插件 executeSqlBatch（增量事务，一次提交），
-        // 避免逐格 updateCell 导致的几十次整表持久化卡顿。
-        // 不用 importTableAsJson 整体导入：那是整表替换 + 完整检查点，
-        // 中途调用会过度重写、刷世界书并膨胀聊天，且存在导出-导回间的竞态窗口。
-        // SQL 中文表名/列名由插件自动重绑（与 AI 填表同一条链路）；失败时回退逐条写入。
-        if (resolved.length >= 2 && typeof api.executeSqlBatch === 'function') {
-            try {
-                const sqlLit = (v, numeric) => {
-                    if (v === undefined || v === null || v === '') return "''";
-                    if (numeric || typeof v === 'number') {
-                        const n = Number(v);
-                        if (isFinite(n)) return String(n);
-                    }
-                    return "'" + String(v).replace(/'/g, "''") + "'";
-                };
-                const colType = (L, zh) => {
-                    if (L && Array.isArray(L.cols)) {
-                        const c = L.cols.find(x => x && x[0] === zh);
-                        if (c) return String(c[1] || '').toLowerCase();
-                    }
-                    return '';
-                };
-                const isNum = (t) => /number|int|float|real|numeric|decimal/.test(t);
-                const statements = [];
-                for (const r of resolved) {
-                    const L = r.layout;
-                    const tname = L.table;
-                    if (r.kind === 'row-delete') {
-                        const rid = r.sheet.content[r.rowIndex] ? r.sheet.content[r.rowIndex][0] : undefined;
-                        if (rid === undefined || rid === null || rid === '') continue;
-                        statements.push('DELETE FROM ' + tname + ' WHERE row_id = ' + Number(rid) + ';');
-                        continue;
-                    }
-                    if (r.kind === 'array') {
-                        for (let i = 1; i < r.sheet.content.length; i++) {
-                            const rid = r.sheet.content[i] ? r.sheet.content[i][0] : undefined;
-                            if (rid === undefined || rid === null || rid === '') continue;
-                            statements.push('DELETE FROM ' + tname + ' WHERE row_id = ' + Number(rid) + ';');
-                        }
-                        const vcol = r.header[1] || '内容';
-                        for (let ai = 0; ai < r.arr.length; ai++) {
-                            statements.push('INSERT INTO ' + tname + ' (' + vcol + ') VALUES (' + sqlLit(r.arr[ai], false) + ');');
-                        }
-                        continue;
-                    }
-                    if (r.newRowArr) {
-                        const cols = [];
-                        const vals = [];
-                        for (let nc = 0; nc < L.cols.length; nc++) {
-                            const cc = L.cols[nc];
-                            const cIdx = r.header.indexOf(cc[0]);
-                            const v = cIdx >= 0 ? r.newRowArr[cIdx] : '';
-                            if (cc[0] === L.keyCol || (v !== undefined && v !== null && v !== '')) {
-                                cols.push(cc[0]);
-                                vals.push(sqlLit(v, isNum(colType(L, cc[0]))));
-                            }
-                        }
-                        if (cols.length) statements.push('INSERT INTO ' + tname + ' (' + cols.join(', ') + ') VALUES (' + vals.join(', ') + ');');
-                        continue;
-                    }
-                    const rid = r.sheet.content[r.rowIndex] ? r.sheet.content[r.rowIndex][0] : undefined;
-                    if (rid === undefined || rid === null || rid === '') continue;
-                    statements.push('UPDATE ' + tname + ' SET ' + r.colZh + ' = ' + sqlLit(r.value, isNum(colType(L, r.colZh))) + ' WHERE row_id = ' + Number(rid) + ';');
-                }
-                if (statements.length) {
-                    const out = await Promise.resolve(api.executeSqlBatch(statements.join('\n'), { skipChatSave: false }));
-                    if (!out || out.success === false) throw new Error((out && out.error) || 'executeSqlBatch 返回失败');
-                    await runDirectOps();
-                    return resolved.length + directOps.length;
-                }
-            } catch (e) {
-                dbgWarn(' SQL 批量写入失败，回退逐条写入：' + (e && e.message ? e.message : e));
-            }
-        }
-
-        // 逐条写入（回退路径，保持原行为）
+        // 逐条写入（对齐参考卡原生 CRUD）：updateCell/insertRow/deleteRow → 插件持久化为
+        // row_upsert/row_delete 操作，回放确定性恢复。不使用 executeSqlBatch——那会存成
+        // sql_sheet_batch（回放重跑 SQL），且批量 DELETE 误删时无法恢复（实测丢行根因）。
+        // 批量性能由插件的提交管线与酒馆保存防抖兜底。
         for (const r of resolved) {
             const L = r.layout;
             try {
@@ -5155,42 +5076,6 @@ ${DB_INIT_SNIPPET}
             return !!(mk && mk.converter === 'mvu2shujuku');
         } catch (e) { return false; }
     }
-
-    // 聊天里是否存在 SP·数据库 的 full checkpoint（V2 锚点）：扫描消息上的 TavernDB_ACU_*/_acu_* 字段。
-    // 开场白切换/首楼重写会弄丢锚点，此时继续写库会产生无锚点 artifacts，触发插件的
-    // “V2 boundary_after_data_mismatch”拒绝建立 full checkpoint。
-    function hasFullShujukuCheckpoint() {
-        try {
-            const context = getContextSafe();
-            const chat = Array.isArray(context.chat) ? context.chat : [];
-            for (const msg of chat) {
-                if (!msg || typeof msg !== 'object') continue;
-                for (const k of Object.keys(msg)) {
-                    if (k.indexOf('TavernDB_ACU_') !== 0 && k.indexOf('_acu_') !== 0) continue;
-                    let v = msg[k];
-                    if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { continue; } }
-                    if (!v || typeof v !== 'object') continue;
-                    // 与插件 hasAnyV2Checkpoint_ACU 一致：必须是 V2 帧（version=2 + logEntries）且 checkpoint.kind === 'full'。
-                    // initGameSession 可能留下“模板派生”的非 full checkpoint，不能算已锚定。
-                    const hasCheckpoint = (o) => {
-                        if (!o || typeof o !== 'object') return false;
-                        const frame = o.storageFrame;
-                        if (!frame || typeof frame !== 'object') return false;
-                        if (frame.version !== 2 || !Array.isArray(frame.logEntries)) return false;
-                        return !!(frame.checkpoint && frame.checkpoint.kind === 'full');
-                    };
-                    if (hasCheckpoint(v)) return true;
-                    for (const ck of Object.keys(v)) {
-                        let child = v[ck];
-                        if (typeof child === 'string') { try { child = JSON.parse(child); } catch (e) { continue; } }
-                        if (hasCheckpoint(child)) return true;
-                    }
-                }
-            }
-        } catch (e) {}
-        return false;
-    }
-
     // 取当前卡的模板：优先用已缓存，否则从当前角色世界书 __ACU_TEMPLATE_DATA__ 条目解析并缓存。
     // 缓存归属键：卡名 + 头像。注意 avatar 不能作为唯一判据——列表对象与
     // /api/characters/get 返回的 full.data（avatar 在顶层、data 里没有）可能不一致，
@@ -5277,342 +5162,6 @@ ${DB_INIT_SNIPPET}
         } catch (e) {}
         return null;
     }
-
-    // 是否仍处于开局阶段：聊天只有 1~2 条消息（首楼 + 可能的首轮回复）。
-    // 只有开局阶段才允许"重置重建锚点"；一旦进入正常对话，绝不重置已有数据。
-    function isOpeningPhase() {
-        try {
-            const context = getContextSafe();
-            const chat = Array.isArray(context.chat) ? context.chat : [];
-            return chat.length <= 2;
-        } catch (e) { return true; }
-    }
-
-    // 聊天缺 full checkpoint 时重建锚点，供开局自动建表与每次写库前调用。
-    // 表仍是模板初始状态 → initGameSession 重建（不丢数据）；
-    // 表已含用户数据 → 用插件 importTableAsJson 把当前状态提交成 full checkpoint（同样不丢数据）。
-    // 返回是否已具备锚点（或已成功重建）。
-    async function anchorCheckpointIfMissing(api, tplCached, reason) {
-        if (!api || !tplCached) return false;
-        if (mvu2shujukuInitSessionHung) {
-            dbgWarn('[锚点] ' + reason + '：initGameSession 曾挂起，跳过重建。');
-            return false;
-        }
-        if (hasFullShujukuCheckpoint()) return true;
-        if (mvu2shujukuTablesSafeToAnchor(api, tplCached)) {
-            const expected = mvu2shujukuExpectedTableNames(tplCached);
-            const missing = mvu2shujukuMissingTableNames(api, expected);
-            if (missing.length) {
-                dbg('[锚点] ' + reason + '：缺表 ' + missing.join('、') + '，交给建表流程处理。');
-                return false;
-            }
-            dbg('[锚点] ' + reason + '：聊天缺少 full checkpoint，重建数据库锚点…');
-            const r = await mvu2shujukuWithTimeout(
-                api.initGameSession({}, { injectTemplate: true, loadPreset: false, templateData: tplCached, templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板' }),
-                20000,
-                'initGameSession(锚点)'
-            );
-            const ok = !(r && r.success === false) && !(r && r.timeout);
-            const anchored = ok && hasFullShujukuCheckpoint();
-            dbg('[锚点] ' + reason + '：重建结果=' + (r && r.timeout ? '超时' : (r && r.success === false ? (r.message || '失败') : '完成')) + ' | 锚点=' + anchored);
-            return anchored;
-        }
-        // 表数据与模板不一致（含“模板行被注入/捏人改动”）时，**绝不** initGameSession 重置——
-        // 重置会用模板覆盖表格，把开场白注入的数据清掉；只允许表格仍与模板完全一致时重置（无损）。
-        // 因此这里不再区分“有额外行/无额外行”，只要不一致就走下方 importTableAsJson 锚定当前状态。
-        // 表已含用户数据但无锚点：用插件提交 API 把当前状态落成 full checkpoint（不丢数据）
-        if (typeof api.importTableAsJson === 'function') {
-            dbg('[锚点] ' + reason + '：表含数据且无锚点，用 importTableAsJson 把当前状态提交为 checkpoint…');
-            try {
-                // importTableAsJson 要求 {mate, sheet_*}：export 视图可能无 mate，补空 mate
-                // （插件 sanitizeChatSheetsObject ensureMate 补齐），避免结构校验拒绝。
-                const rawSnap = api.exportTableAsJson() || {};
-                const snapObj = Object.assign({}, rawSnap);
-                if (!(snapObj.mate && typeof snapObj.mate === 'object')) snapObj.mate = {};
-                const snap = JSON.stringify(snapObj);
-                const ok2 = await Promise.resolve(api.importTableAsJson(snap, {}));
-                dbg('[锚点] ' + reason + '：importTableAsJson 锚定=' + (ok2 ? '成功' : '失败'));
-                return !!ok2;
-            } catch (e) {
-                dbgWarn('[锚点] ' + reason + '：importTableAsJson 锚定异常:', e);
-                return false;
-            }
-        }
-        dbgWarn('[锚点] ' + reason + '：表含数据且无锚点，且插件无 importTableAsJson，无法锚定。');
-        return false;
-    }
-
-    // 写库前保证 full checkpoint 存在。
-    // - 表仍是模板初始状态（无真实用户数据）→ initGameSession 重建（重置不丢数据，随后重放本次写入）
-    // - 表无额外行（仅模板行被改动，如开局捏人写入）→ 重置+重放本次写入无损，也可重建
-    // - 表有额外行（真实积累数据）→ importTableAsJson 锚定当前状态；失败则放弃本次写入，绝不重置已有数据
-    async function ensureCheckpointBeforeWrite(api, tplCached) {
-        const hasCp = hasFullShujukuCheckpoint();
-        dbg('[流程] 写库前锚点状态：hasCheckpoint=' + hasCp);
-        if (hasCp) return true;
-        await anchorCheckpointIfMissing(api, tplCached, '写库前');
-        if (hasFullShujukuCheckpoint()) return true;
-        // 插件 initGameSession 可能“完成”却不建 V2 checkpoint：改用 importTableAsJson 提交当前状态强制建锚。
-        // 开局阶段（尚无 artifacts）插件会接受并建立 full checkpoint。
-        if (typeof api.importTableAsJson === 'function' && !mvu2shujukuInitSessionHung) {
-            dbg('[锚点] 写库前：initGameSession 未建立锚点，改用 importTableAsJson 强制锚定…');
-            try {
-                // importTableAsJson 要求 {mate, sheet_*}：export 视图可能无 mate，补空 mate
-                // （插件 sanitizeChatSheetsObject ensureMate 补齐），避免结构校验拒绝。
-                const rawSnap = api.exportTableAsJson() || {};
-                const snapObj = Object.assign({}, rawSnap);
-                if (!(snapObj.mate && typeof snapObj.mate === 'object')) snapObj.mate = {};
-                const snap = JSON.stringify(snapObj);
-                await Promise.resolve(api.importTableAsJson(snap, {}));
-            } catch (e) {
-                dbgWarn('[锚点] 写库前 importTableAsJson 强制锚定异常:', e);
-            }
-            if (hasFullShujukuCheckpoint()) return true;
-        }
-        dbgWarn('[锚点] 写库前：仍无 full checkpoint，放弃本次写入（避免无锚点 artifacts）。');
-        return false;
-    }
-
-    // 首楼替换/删除（部分卡的开场流程会重写或删除 greeting 楼层，如道渊）会带走挂在
-    // 首楼上的 full checkpoint：刷新后插件在聊天里找不到数据库帧，会从模板重建（数据回默认）。
-    // 检测到“表格已有数据但无锚点”且仍处于开局阶段时，用当前运行时数据重建模板并重新
-    // initGameSession，把 checkpoint 落到替换后的新首楼上（对齐参考卡“checkpoint 始终
-    // 留在原消息对象”的语义，这里由扩展在消息替换后补偿完成）。
-    let anchorRetryTimer = null;
-    let lastAnchorChat = '';
-    let lastAnchorAttempt = 0;
-    let lastAnchorStateLog = 0;
-    let reAnchorAttempts = 0;
-    // 同一聊天只做一次“重进恢复”（防止每次 CHAT_CHANGED/消息事件都重复物化）
-    let lastRuntimeRestoreChat = '';
-    // 物化失败后的冷却：避免 initGameSession 回退路径每 3 秒重复重型重建
-    let lastRuntimeRestoreFailAt = 0;
-    // 长聊天重进恢复去重：同一聊天只做一次（reAnchor 只覆盖开局阶段）
-    let reentryCheckedChat = '';
-    // 自本次聊天加载以来是否发生过写库：发生过就不再按 checkpoint 物化（避免用陈旧 checkpoint
-    // 覆盖比持久化更新的运行时状态；写库路径自己会以 checkpoint 为基线）
-    let anyWriteSinceLoad = false;
-    const reAnchorSkipLog = {};
-    async function reAnchorCheckpointIfNeeded() {
-        const now = Date.now();
-        if (now - lastAnchorAttempt < 2500) return;
-        lastAnchorAttempt = now;
-        try {
-            const key = autoInitChatId();
-            if (key !== lastAnchorChat) {
-                lastAnchorChat = key;
-                // 切聊天后先重置节流窗口，给新聊天的事件序列留出时间
-                lastAnchorAttempt = now;
-                reAnchorAttempts = 0;
-            }
-            const logSkip = (reason) => {
-                const k = key + '|' + reason;
-                if (reAnchorSkipLog[k]) return;
-                reAnchorSkipLog[k] = true;
-                dbg('[重锚] 跳过（' + reason + '，chat=' + key + '）');
-            };
-            // 廉价门控先跑：非转换卡 / 不在开局阶段时直接返回，避免周期自检的开销
-            const ch = currentCharacter();
-            // 角色列表懒加载对象可能缺 extensions，activeLayout 只在转换卡完整读取后设置，
-            // 两者任一成立即可视为转换卡。
-            const isConverted = isConvertedMvuCard(ch) || (Array.isArray(activeLayout) && activeLayout.length > 0);
-            if (!isConverted) { logSkip('非转换卡'); return; }
-            let chat = [];
-            try {
-                const ctx = getContextSafe();
-                chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-            } catch (e) { logSkip('读取聊天上下文失败'); return; }
-            if (chat.length > 4) { logSkip('聊天楼层过多（' + chat.length + '）'); return; }
-            const api = getAcuApi();
-            if (!api) { logSkip('未找到数据库 API'); return; }
-            // 状态摘要（开局阶段节流 ~10s 一条）：定位首楼替换/checkpoint 丢失的精确时机，
-            // 以及当时运行时表格里有没有数据。
-            if (now - lastAnchorStateLog >= 10000) {
-                lastAnchorStateLog = now;
-                try {
-                    const cur = api.exportTableAsJson() || {};
-                    let rowCount = 0;
-                    for (const k in cur) {
-                        if (k.indexOf('sheet_') !== 0) continue;
-                        const s = cur[k];
-                        if (s && Array.isArray(s.content)) rowCount += Math.max(0, s.content.length - 1);
-                    }
-                    let msg0info = 'msg0.isolated=无';
-                    try {
-                        const c0 = chat[0];
-                        const iso0 = c0 && c0.TavernDB_ACU_IsolatedData;
-                        if (iso0) msg0info = 'msg0.isolatedLen=' + String(JSON.stringify(iso0) || '').length;
-                    } catch (e2) {}
-                    dbg('[锚点自检] chatLen=' + chat.length + ' | hasCp=' + hasFullShujukuCheckpoint() +
-                        ' | ' + msg0info + ' | exportRows=' + rowCount + '（chat=' + key + '）');
-                } catch (e3) {}
-            }
-            // 缓存的开场 stat（写入路径在 initGameSession 后缓存，含用户注入数据）
-            const holder = (typeof window !== 'undefined' ? window : globalThis);
-            const opening = (holder && holder.__mvu2shujukuOpeningStat) || null;
-            const statForCheck = (opening && opening.chat === key && opening.stat) ? opening.stat : null;
-            const hasCp = hasFullShujukuCheckpoint();
-            // 重进诊断：checkpoint 全表仅表头（content 无真实数据行）时，插件原生 v2-replay
-            // 无法恢复任何行——SqlTableService.loadFromData 的 hasRealDataRows 门禁要求至少
-            // 一张表 content 有行；且 checkpoint 存在后 shouldUseInitialSeedRows 关闭，seedRows
-            // 不再物化。此时重建“带行”锚点（运行时也无真实行时无损：没有可丢的数据）。
-            let cpHeaderOnly = false;
-            let cpRuntimeHasRows = false;
-            if (hasCp) {
-                let cpNow = null;
-                try { cpNow = readFullCheckpointData(); } catch (e) {}
-                cpHeaderOnly = !!(cpNow && !checkpointHasRealRows(cpNow));
-                try {
-                    const curRt = api.exportTableAsJson() || {};
-                    for (const kRt in curRt) {
-                        if (kRt.indexOf('sheet_') !== 0) continue;
-                        const sRt = curRt[kRt];
-                        if (sRt && typeof sRt === 'object' && Array.isArray(sRt.content) && sRt.content.length > 1) { cpRuntimeHasRows = true; break; }
-                    }
-                } catch (e) {}
-                // 有 checkpoint 但仍要校验数据：开局阶段若 checkpoint 缺注入值
-                // （initGameSession 被开场流程并发回滚、或持久化的是默认模板），
-                // 需要重建干净锚点；校验通过才跳过。
-                if (cpHeaderOnly && !cpRuntimeHasRows) {
-                    dbg('[重进诊断] full checkpoint 无真实数据行（全表仅表头）且运行时也无行，重建带行锚点…');
-                } else if (cpHeaderOnly) {
-                    dbg('[重进诊断] checkpoint 无真实数据行但运行时已有行（checkpoint 落后于运行时），不重置；由下次写库提交为 data_replace 自动补齐。');
-                    logSkip('聊天仍有 full checkpoint'); return;
-                } else if (statForCheck && !checkpointHasStatData(activeLayout, statForCheck)) {
-                    dbg('[重锚] full checkpoint 存在但缺少注入数据（可能被开场流程回滚），重建锚点…');
-                } else {
-                    // checkpoint 存在：SQLite 模式重进时插件可能没把 checkpoint 恢复进运行时
-                    // （内存表停在模板默认值；探针实测 checkpoint 有注入值、运行时却是默认）。
-                    // 这里校验并按 checkpoint 物化一次（persist:false，只恢复内存，不写 checkpoint）。
-                    try {
-                        const cpData = readFullCheckpointData();
-                        const api2 = getAcuApi();
-                        if (cpData && api2 && !runtimeSyncedWithCheckpoint(api2, cpData) &&
-                            lastRuntimeRestoreChat !== key && (Date.now() - lastRuntimeRestoreFailAt > 30000)) {
-                            lastRuntimeRestoreChat = key;
-                            logReentryDiagnostics(api2, cpData);
-                            const rtOk = await materializeRuntimeFromCheckpoint(api2);
-                            dbg('[重进恢复] 运行时与 checkpoint 不一致，已按 checkpoint 物化=' + (rtOk ? '成功' : '失败'));
-                            if (!rtOk) {
-                                lastRuntimeRestoreFailAt = Date.now();
-                                lastRuntimeRestoreChat = ''; // 失败允许后续重试（模板/API 就绪后可能成功）
-                            }
-                        }
-                    } catch (e) {}
-                    logSkip('聊天仍有 full checkpoint'); return;
-                }
-            }
-            // 防循环：同一聊天内重锚失败超过 20 次（约 1 分钟）就停止，避免反复重型 initGameSession
-            reAnchorAttempts += 1;
-            if (reAnchorAttempts > 20) {
-                logSkip('重锚失败次数过多（20），已停止自动重试');
-                return;
-            }
-            const tplCached = cachedTemplateForCurrentCard();
-            if (!tplCached) { logSkip('无模板缓存'); return; }
-            // 表格里必须已有真实数据才值得重锚（空表说明是普通建表流程，交给 autoInit）
-            const cur = api.exportTableAsJson() || {};
-            let hasRows = false;
-            for (const k in cur) {
-                if (k.indexOf('sheet_') !== 0) continue;
-                const s = cur[k];
-                if (s && Array.isArray(s.content) && s.content.length > 1) { hasRows = true; break; }
-                if (s && Array.isArray(s.seedRows) && s.seedRows.length) { hasRows = true; break; }
-            }
-            if (!hasRows && !statForCheck && !cpHeaderOnly) { logSkip('表格无数据行'); return; }
-            dbg('[重锚] full checkpoint 缺失或缺少注入数据（chat=' + key + '，尝试 #' + reAnchorAttempts + '），重建锚点…');
-            // 重建模板：优先用缓存的开场 stat（精确含用户注入值，不依赖运行时状态），
-            // 否则退回用当前运行时数据合并回模板（保留 sourceData/规则）。
-            const reTpl = statForCheck
-                ? applyTargetToTemplate(tplCached, activeLayout, statForCheck)
-                : mergeSnapshotIntoTemplate(tplCached, cur);
-            // 旧卡模板/运行时 seedRows 可能与 content 的 row_id=1 重复，插件 initGameSession
-            // 会拒绝（'seedRows 第 1 行 row_id「1」重复'）。统一剔除与 content 冲突的 seedRows。
-            try {
-                for (const k of Object.keys(reTpl || {})) {
-                    if (k.indexOf('sheet_') !== 0) continue;
-                    const sheet = reTpl[k];
-                    if (!sheet || !Array.isArray(sheet.seedRows)) continue;
-                    const ids = new Set();
-                    if (Array.isArray(sheet.content)) {
-                        for (const row of sheet.content.slice(1)) {
-                            if (Array.isArray(row) && row[0] !== undefined && row[0] !== null && row[0] !== '') ids.add(String(row[0]));
-                        }
-                    }
-                    sheet.seedRows = sheet.seedRows.filter((row) => {
-                        if (!Array.isArray(row) || row[0] === undefined || row[0] === null || row[0] === '') return false;
-                        return !ids.has(String(row[0]));
-                    });
-                }
-            } catch (e) {}
-            if (!reTpl) return;
-            const initResult = await Promise.resolve(api.initGameSession({}, {
-                injectTemplate: true,
-                loadPreset: false,
-                templateData: reTpl,
-                templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板',
-            }));
-            const ok = !(initResult && initResult.success === false);
-            dbg('[重锚] initGameSession 重建结果=' + (ok ? '完成' : ((initResult && initResult.message) || '失败')) +
-                ' | runtimeReady=' + (initResult ? initResult.runtimeReady : 'N/A') + ' | 锚点=' + hasFullShujukuCheckpoint() +
-                ' | checkpoint含注入数据=' + (statForCheck ? checkpointHasStatData(activeLayout, statForCheck) : 'N/A'));
-            // 重建成功后，运行时必须物化为稳定 key 的 checkpoint 数据：
-            // 否则后续编辑器/AI 写入的 baseRevision 会引用原始 key，刷新回放失败（实测根因）。
-            if (ok || hasFullShujukuCheckpoint()) {
-                const cpHasData = statForCheck ? checkpointHasStatData(activeLayout, statForCheck) : false;
-                if (cpHasData) {
-                    const rtOk = await materializeRuntimeFromCheckpoint(api);
-                    if (rtOk) {
-                        const afterRows = (() => {
-                            try {
-                                const all2 = api.exportTableAsJson() || {};
-                                let n = 0;
-                                for (const k in all2) {
-                                    if (k.indexOf('sheet_') === 0 && all2[k] && Array.isArray(all2[k].content)) n += Math.max(0, all2[k].content.length - 1);
-                                }
-                                return n;
-                            } catch (e) { return -1; }
-                        })();
-                        dbg('[重锚] 重建后运行时已按 checkpoint 物化（exportRows=' + afterRows + '）。');
-                    }
-                }
-            }
-            // 重锚成功必须落盘：首楼替换后 chat 已被插件/酒馆重新保存过（不带 checkpoint 或带旧默认值），
-            // 仅改内存会在下一次保存或刷新时再次丢失。
-            if (ok || hasFullShujukuCheckpoint()) {
-                try {
-                    const ctx2 = getContextSafe();
-                    const saveFn2 = (typeof ctx2.saveChatConditional === 'function' && ctx2.saveChatConditional.bind(ctx2)) ||
-                        (typeof ctx2.saveChat === 'function' && ctx2.saveChat.bind(ctx2)) ||
-                        (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
-                        (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
-                    if (saveFn2) {
-                        for (let attempt = 0; attempt < 2; attempt++) {
-                            try {
-                                await Promise.resolve(saveFn2());
-                                dbg('[重锚] 重建后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
-                                break;
-                            } catch (saveErr) {
-                                dbgWarn('[重锚] 重建后保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
-                            }
-                        }
-                    }
-                } catch (e) {
-                    dbgWarn('[重锚] 重建后保存异常:', e && e.message ? e.message : e);
-                }
-            }
-        } catch (e) {
-            dbgWarn('[重锚] 异常:', e && e.message ? e.message : e);
-        }
-    }
-    function scheduleReAnchorCheckpoint() {
-        if (anchorRetryTimer) hostWindow.clearTimeout(anchorRetryTimer);
-        anchorRetryTimer = hostWindow.setTimeout(() => {
-            anchorRetryTimer = null;
-            reAnchorCheckpointIfNeeded();
-        }, 2500);
-    }
-
     function autoInitChatId() {
         try {
             const context = getContextSafe();
@@ -5771,7 +5320,7 @@ ${DB_INIT_SNIPPET}
         } catch (e) {}
         // 对齐参考卡：每个聊天只在“缺表”时初始化一次（下方 ensureInit），
         // 已有表格的聊天绝不重初始化，避免切聊天时误重置别的聊天。
-        // 聊天内锚点丢失/写库前缺锚点由写库前检查兜底（ensureCheckpointBeforeWrite）。
+        // 锚点/持久化由插件自己的 initGameSession 与提交管线维护，扩展不做手工锚定。
         if (autoInitState.done === key) return;
         autoInitState.running = true;
         // 看门狗：即使插件 API 的 Promise 意外不返回，也强制复位 running，避免后续自动建表被永久跳过
@@ -5900,12 +5449,7 @@ ${DB_INIT_SNIPPET}
             if (!autoInitState.inited) {
                 es.on(et.CHAT_CHANGED, () => {
                     autoInitState.retries = 0;
-                    anyWriteSinceLoad = false;
                     hostWindow.setTimeout(autoInitDatabase, 600);
-                    // 长聊天重进恢复：刷新后插件 v2-replay 未恢复运行时（checkpoint 有行、运行时空）时物化一次
-                    hostWindow.setTimeout(() => { checkReentryRestoreAfterLoad(); }, 600);
-                    // 首楼替换/删除可能带走挂在首楼上的 checkpoint：稍后检测并重锚
-                    scheduleReAnchorCheckpoint();
                     // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
                     syncRuntimeForCurrentCard();
                     activePlaceholderNeeded = detectPlaceholderFor(currentCharacter());
@@ -5917,46 +5461,20 @@ ${DB_INIT_SNIPPET}
                     hostWindow.setTimeout(autoInitDatabase, 600);
                     // 复刻 MVU：AI 回复后追加状态栏占位符，前端注入正则才能命中每条消息
                     ensureWindowStatusPlaceholder();
-                    scheduleReAnchorCheckpoint();
                 });
-                // 开场白切换/首楼换 swipe 会丢掉插件的 full checkpoint：必须立即重建锚点，
-                // 否则捏人 UI 的写库会产生无锚点 artifacts，触发插件 V2 boundary_after_data_mismatch。
-                // CHAT_CHANGED 只在换聊天时触发，swipe 切换不会触发，所以要单独监听。
+                // 开场白切换/首楼换 swipe：只补建表/占位符（锚点由插件自身管理）
                 for (const evName of [et.MESSAGE_SWIPED, et.MESSAGE_UPDATED, et.MESSAGE_EDITED]) {
                     if (evName && typeof evName === 'string') {
                         es.on(evName, () => {
                             hostWindow.setTimeout(autoInitDatabase, 300);
-                            scheduleReAnchorCheckpoint();
                         });
-                    }
-                }
-                // 首楼删除/新增（道渊等卡的开场流程会替换 greeting 楼层）也会带走 checkpoint；
-                // 这些事件不一定会触发 MESSAGE_UPDATED，单独挂钩作为补充。
-                for (const evName of [et.MESSAGE_SENT, et.MESSAGE_DELETED]) {
-                    if (evName && typeof evName === 'string') {
-                        es.on(evName, () => scheduleReAnchorCheckpoint());
                     }
                 }
                 if (et.GENERATION_ENDED) {
                     es.on(et.GENERATION_ENDED, () => {
                         ensureWindowStatusPlaceholder();
                         hostWindow.setTimeout(autoInitDatabase, 100);
-                        scheduleReAnchorCheckpoint();
                     });
-                }
-                // 周期自检兜底：部分卡的开场流程在事件序列之外替换首楼（如道渊替换为 System），
-                // 单靠事件可能错过窗口。开局阶段每 3 秒评估一次，重锚函数内部有廉价门控，
-                // 非转换卡/非开局阶段/有锚点时几乎零开销直接返回。
-                if (!window.__mvu2shujukuAnchorIntervalStarted) {
-                    window.__mvu2shujukuAnchorIntervalStarted = true;
-                    hostWindow.setInterval(() => {
-                        try {
-                            // 廉价门控：非转换卡（activeLayout 未缓存）时零开销直接返回，
-                            // 不做任何 currentCharacter/聊天扫描；只有转换卡才进入重锚评估。
-                            if (!activeLayout) return;
-                            reAnchorCheckpointIfNeeded();
-                        } catch (e) {}
-                    }, 3000);
                 }
                 autoInitState.inited = true;
             }
@@ -6158,1045 +5676,30 @@ ${DB_INIT_SNIPPET}
     // 模板缓存未就绪时写库重试次数（仅由 replaceMvuData 外部入口重置，
     // 避免重试自身把计数清零导致无限循环）
     let overlayFlushRetries = 0;
-    const materializedChats = new Set();
     // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
     // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
     const initializedViaGameSession = new Set();
-
-    // 每个聊天首次写库前，一次性为所有单例/JSON 表物化模板初始行。
-    // 背景：插件 export 可能把 seedRows 合并显示成“有行”，但运行期未物化，导致 updateCell row 1 out of bounds。
-    // 这里只在每个聊天执行一次（行已存在时 UNIQUE 冲突静默），避免每次写入都重复尝试的激进行为。
-    async function ensureSingletonRowsMaterialized(api, tplCached, layoutEntries) {
-        try {
-            let chatKey = '';
-            try { chatKey = String(getContextSafe().chatId || ''); } catch (e) {}
-            if (materializedChats.has(chatKey)) return;
-            materializedChats.add(chatKey);
-            // 幂等化（对齐参考卡）：initGameSession 已用完整模板把单例/JSON 表的初始行物化进
-            // content。这里只在表确实没有任何 content 行时才补一行；绝不无条件 insertRow——
-            // 那会在已有 row_id=1 的表里再插 row_id=2（垫脚行），而 cleanupSingletonDuplicates
-            // 的 deleteRow 在 SQLite 模式会因 JS 视图与运行时索引不一致而失败（实测 系统表/任务表 两行）。
-            let curAll = {};
-            try { curAll = api.exportTableAsJson() || {}; } catch (e) {}
-            const sheetByName = {};
-            for (const k in curAll) {
-                if (k.indexOf('sheet_') === 0 && curAll[k] && typeof curAll[k].name === 'string') sheetByName[String(curAll[k].name)] = curAll[k];
-            }
-            for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-                if (L.kind !== 'singleton' && L.kind !== 'json') continue;
-                try {
-                    const existing = sheetByName[L.table];
-                    if (existing && Array.isArray(existing.content) && existing.content.length > 1) {
-                        dbg(' 单例/JSON表「' + L.table + '」已有 content 行，跳过物化（幂等，不制造重复行）。');
-                        continue;
-                    }
-                    const obj = {};
-                    if (tplCached) {
-                        for (const k in tplCached) {
-                            if (k.indexOf('sheet_') === 0 && tplCached[k] && tplCached[k].name === L.table &&
-                                Array.isArray(tplCached[k].content) && tplCached[k].content[1]) {
-                                const hdr = tplCached[k].content[0] || [];
-                                const row = tplCached[k].content[1];
-                                for (let i = 1; i < hdr.length; i++) {
-                                    obj[hdr[i]] = (row[i] !== undefined && row[i] !== null) ? row[i] : '';
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    if (L.kind === 'json') {
-                        if (!obj[L.keyCol || '名称']) obj[L.keyCol || '名称'] = L.keyValue || 'row1';
-                        // 内容列必须是合法 JSON（模板行可能是空串，SQLite CHECK json_valid 会拒绝）
-                        const jv1 = obj['内容'];
-                        if (jv1 === undefined || jv1 === null || jv1 === '') obj['内容'] = '{}';
-                        else { try { JSON.parse(jv1); } catch (e) { obj['内容'] = '{}'; } }
-                    }
-                    const inserted = await Promise.resolve(api.insertRow(L.table, obj));
-                    // 插件 insertRow 失败时返回 -1 / false / null，不抛异常；必须检查返回值，
-                    // 否则会误报「已物化」而表里其实没有初始行（单例表初始化丢失的根因之一）。
-                    if (inserted === -1 || inserted === false || inserted === null || inserted === undefined) {
-                        dbgWarn(' 物化单例/JSON表初始行失败（insertRow 返回 ' + String(inserted) + '）：' + L.table);
-                    } else {
-                        dbg(' 已物化单例/JSON表初始行：' + L.table + '（新行索引=' + inserted + '）');
-                    }
-                } catch (e) {
-                    // 行已存在（UNIQUE 冲突等）→ 已物化，无需处理
-                    dbg(' 单例/JSON表初始行已存在，跳过物化：' + L.table + '（' + (e && e.message ? e.message : e) + '）');
-                }
-            }
-            // 诊断：物化后输出单例/JSON 表的行数，便于确认初始行是否真的落表
-            try {
-                const allT = api.exportTableAsJson() || {};
-                for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-                    if (L.kind !== 'singleton' && L.kind !== 'json') continue;
-                    for (const k in allT) {
-                        if (k.indexOf('sheet_') === 0 && allT[k] && allT[k].name === L.table) {
-                            const c = Array.isArray(allT[k].content) ? allT[k].content.length - 1 : 0;
-                            const s = Array.isArray(allT[k].seedRows) ? allT[k].seedRows.length : 0;
-                            dbg(' 物化后单例表「' + L.table + '」content 行数=' + c + '，seedRows=' + s);
-                            break;
-                        }
-                    }
-                }
-            } catch (e) {}
-        } catch (e) {}
-    }
-
-    // 单例/JSON 表只允许一行（row_id=1）。我们补行用的是新 row_id（插件 insertRow 自动分配），
-    // 若插件随后把自己的 seedRow（row_id=1）也物化，就会出现两行——这里删掉多余行，保留 row_id=1。
-    async function cleanupSingletonDuplicates(api, layoutEntries) {
-        try {
-            const tables = api.exportTableAsJson() || {};
-            const sheetOf = (name) => {
-                for (const k in tables) {
-                    if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return tables[k];
-                }
-                return null;
-            };
-            for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-                if (L.kind !== 'singleton' && L.kind !== 'json') continue;
-                const sheet = sheetOf(L.table);
-                if (!sheet || !Array.isArray(sheet.content)) continue;
-                const idRows = [];
-                for (let ri = 1; ri < sheet.content.length; ri++) {
-                    const r = sheet.content[ri];
-                    if (r && r[0] !== undefined && r[0] !== null && r[0] !== '') idRows.push({ ri, id: String(r[0]) });
-                }
-                if (idRows.length <= 1) continue;
-                if (!idRows.some(x => x.id === '1')) continue; // 没有 row_id=1 就不删（我们补的行可能是唯一真行）
-                for (const x of idRows) {
-                    if (x.id === '1') continue;
-                    try {
-                        // 删除前按 row_id 重新定位当前 content 索引（插件 deleteRow 的 rowIndex
-                        // 是 content 数组索引，0=表头），避免 JS 快照与 SQLite 运行时在并发
-                        // 物化/回放下索引漂移导致误删或“affected 0 rows”。
-                        const nowAll = api.exportTableAsJson() || {};
-                        let curSheet = null;
-                        for (const k in nowAll) {
-                            if (k.indexOf('sheet_') === 0 && nowAll[k] && nowAll[k].name === L.table) { curSheet = nowAll[k]; break; }
-                        }
-                        let ri = -1;
-                        if (curSheet && Array.isArray(curSheet.content)) {
-                            for (let i = 1; i < curSheet.content.length; i++) {
-                                const r = curSheet.content[i];
-                                if (r && String(r[0]) === x.id) { ri = i; break; }
-                            }
-                        }
-                        if (ri === -1) { dbg(' 单例表多余行已不在当前视图（row_id=' + x.id + '），跳过。'); continue; }
-                        const del = await Promise.resolve(api.deleteRow(L.table, ri));
-                        // 插件 deleteRow 可能返回 false / {success:false} 表示 SQLite 未命中；
-                        // 只有确认命中才算清理成功，避免“已清理”日志掩盖残留。
-                        const delFailed = del === false || del === null || (del && typeof del === 'object' && del.success === false);
-                        if (delFailed) {
-                            dbgWarn(' 清理单例表多余行未命中：' + L.table + '（row_id=' + x.id + '）');
-                        } else {
-                            dbg(' 已清理单例表多余行：' + L.table + '（row_id=' + x.id + '）');
-                        }
-                    } catch (e) {
-                        dbgWarn(' 清理单例表多余行失败:', e);
-                    }
-                }
-            }
-        } catch (e) {}
-    }
-
-    // 把目标 stat_data 还原成完整表格 JSON：以当前导出为基座，覆盖目标值。
-    // 供 importTableAsJson 走插件自己的提交管线——插件自己管理 V2 checkpoint，
-    // 避免裸 updateCell 破坏锚点（实测裸写会触发 boundary_after_data_mismatch）。
-    function buildTableSnapshotFromStat(api, layoutEntries, tplCached, targetStat, baselineTables) {
-        const tables = {};
-        try {
-            // 基线表：默认用运行时 export；刷新后插件回放异步导致运行时为空时，
-            // 调用方可传入持久化 checkpoint 的表格数据，避免把已有数据覆盖成空。
-            const cur = baselineTables || (api.exportTableAsJson() || {});
-            for (const k of Object.keys(cur)) tables[k] = JSON.parse(JSON.stringify(cur[k]));
-        } catch (e) {}
-        const sd = targetStat || {};
-        const sheetOf = (name) => {
-            for (const k in tables) {
-                if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return { key: k, sheet: tables[k] };
-            }
-            return null;
-        };
-        const tplRowOf = (name) => {
-            try {
-                if (!tplCached) return null;
-                for (const k in tplCached) {
-                    if (k.indexOf('sheet_') === 0 && tplCached[k] && tplCached[k].name === name &&
-                        Array.isArray(tplCached[k].content) && tplCached[k].content[1]) {
-                        return tplCached[k].content[1].slice();
-                    }
-                }
-            } catch (e) {}
-            return null;
-        };
-        const text = (v) => (v === undefined || v === null ? '' : String(v));
-        const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-            const found = sheetOf(L.table);
-            if (!found) continue;
-            const sheet = found.sheet;
-            if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0])) continue;
-            const header = sheet.content[0];
-            // 嵌套组（如 主角.气运 / 主角.储物袋）的值在 stat_data 里位于 writePaths 路径下，
-            // 与读侧 statDataFromTables 的 setPath(writePaths) 一一对应；顶层组退回 sd[L.group]。
-            const valueOf = (LE) => {
-                const wp = (LE.writePaths || [])[0];
-                if (Array.isArray(wp) && wp.length) {
-                    let cur = sd;
-                    for (const p of wp) {
-                        if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
-                        cur = cur[p];
-                    }
-                    if (cur !== undefined) return cur;
-                }
-                return sd[LE.group];
-            };
-            const value = valueOf(L);
-            const declared = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
-            // 子表路径（如 世界.动向 / 主角.气运）不是本表的溢出字段，绝不能写进本表 _扩展数据
-            const childGroupKeys = new Set();
-            for (const L2 of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-                if (L2 === L) continue;
-                const wp = (L2.writePaths || [])[0];
-                if (Array.isArray(wp) && wp.length >= 2 && wp[0] === L.group) childGroupKeys.add(wp[1]);
-            }
-            // 已展平为列的嵌套容器（如 主角.炼丹.阶级 → 列「炼丹阶级」）：整容器不重复写进溢出列
-            const flattenedContainers = new Set();
-            for (const c of (L.cols || [])) {
-                const cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                if (Array.isArray(cp) && cp.length > 1 && cp[0] === L.group) flattenedContainers.add(cp[1]);
-            }
-            const mergeOverflow = (row, obj) => {
-                const ovIdx = header.indexOf('_扩展数据');
-                if (ovIdx === -1) return;
-                const overflow = {};
-                for (const k of Object.keys(obj)) {
-                    if (!declared.includes(k) && k !== L.keyCol && !childGroupKeys.has(k) && !flattenedContainers.has(k)) overflow[k] = obj[k];
-                }
-                let cur = {};
-                try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e2) {}
-                // 同步删除：stat_data 中已不存在的动态字段要从溢出列移除，
-                // 否则前端删除操作（如删 _hypnoos 子树）写不进快照，提交后仍残留旧值。
-                for (const k of Object.keys(cur)) {
-                    if (!Object.prototype.hasOwnProperty.call(overflow, k)) delete cur[k];
-                }
-                Object.assign(cur, overflow);
-                row[ovIdx] = JSON.stringify(cur);
-            };
-            if (L.kind === 'array') {
-                const arr = Array.isArray(value) ? value : [];
-                const vCol = header[1] || '内容';
-                sheet.content = [header];
-                for (const item of arr) {
-                    const row = header.map(() => '');
-                    row[0] = sheet.content.length;
-                    row[1] = text(item);
-                    sheet.content.push(row);
-                }
-                continue;
-            }
-            if (L.kind === 'json') {
-                const jIdx = header.indexOf('内容');
-                if (jIdx === -1) continue;
-                if (sheet.content.length < 2) {
-                    const tRow = tplRowOf(L.table) || header.map(() => '');
-                    tRow[0] = 1;
-                    sheet.content.push(tRow);
-                }
-                sheet.content[1][jIdx] = JSON.stringify(value === undefined ? {} : value);
-                continue;
-            }
-            if (L.kind === 'singleton') {
-                const obj = isObj(value) ? value : {};
-                if (sheet.content.length < 2) {
-                    const tRow = tplRowOf(L.table) || header.map(() => '');
-                    if (tRow[0] === undefined || tRow[0] === null || tRow[0] === '') tRow[0] = 1;
-                    sheet.content.push(tRow);
-                }
-                const row = sheet.content[1];
-                // 列值优先按布局列的路径解析（如 主角.炼丹.阶级 → 列「炼丹阶级」）；
-                // 顶层字段直接取 obj[col]。
-                const colPathOf = (zh) => {
-                    for (const c of (L.cols || [])) {
-                        const czh = Array.isArray(c) ? c[0] : (c && c.zh);
-                        if (czh === zh) return Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                    }
-                    return null;
-                };
-                const colValueOf = (zh) => {
-                    const cp = colPathOf(zh);
-                    if (Array.isArray(cp) && cp.length > 1 && cp[0] === L.group) {
-                        let cur = obj;
-                        for (let pi = 1; pi < cp.length; pi++) {
-                            if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
-                            cur = cur[cp[pi]];
-                        }
-                        if (cur !== undefined) return cur;
-                    }
-                    return Object.prototype.hasOwnProperty.call(obj, zh) ? obj[zh] : undefined;
-                };
-                const colTypeOf = (zh) => {
-                    for (const c of (L.cols || [])) {
-                        const czh = Array.isArray(c) ? c[0] : (c && c.zh);
-                        if (czh === zh) return Array.isArray(c) ? String(c[1] || '') : String(c.type || '');
-                    }
-                    return '';
-                };
-                for (let ci = 1; ci < header.length; ci++) {
-                    const col = header[ci];
-                    if (col === '_扩展数据') continue;
-                    const cv = colValueOf(col);
-                    if (cv === undefined) continue;
-                    row[ci] = /object|json/i.test(colTypeOf(col)) ? (typeof cv === 'string' ? cv : JSON.stringify(cv === undefined || cv === null ? '' : cv)) : text(cv);
-                }
-                mergeOverflow(row, obj);
-                continue;
-            }
-            // rows：按 keyCol upsert
-            const dict = isObj(value) ? value : {};
-            const keyIdx = header.indexOf(L.keyCol);
-            if (keyIdx === -1) continue;
-            const existing = new Map();
-            for (let ri = 1; ri < sheet.content.length; ri++) {
-                const r = sheet.content[ri];
-                if (r && r[keyIdx] !== undefined && r[keyIdx] !== null && r[keyIdx] !== '') existing.set(String(r[keyIdx]), ri);
-            }
-            for (const k of Object.keys(dict)) {
-                const item = dict[k];
-                if (!isObj(item)) continue;
-                let ri = existing.get(String(k));
-                if (ri === undefined) {
-                    const tRow = tplRowOf(L.table) || header.map(() => '');
-                    sheet.content.push(tRow);
-                    ri = sheet.content.length - 1;
-                    const r = sheet.content[ri];
-                    r[0] = ri;
-                    if (keyIdx >= 0) r[keyIdx] = text(k);
-                    existing.set(String(k), ri);
-                }
-                const row = sheet.content[ri];
-                for (let ci = 1; ci < header.length; ci++) {
-                    const col = header[ci];
-                    if (col === '_扩展数据') continue;
-                    if (Object.prototype.hasOwnProperty.call(item, col)) {
-                        const iv = item[col];
-                        let colT = '';
-                        for (const c of (L.cols || [])) {
-                            const czh = Array.isArray(c) ? c[0] : (c && c.zh);
-                            if (czh === col) { colT = Array.isArray(c) ? String(c[1] || '') : String(c.type || ''); break; }
-                        }
-                        row[ci] = /object|json/i.test(colT) ? (typeof iv === 'string' ? iv : JSON.stringify(iv === undefined || iv === null ? '' : iv)) : text(iv);
-                    }
-                }
-                mergeOverflow(row, item);
-            }
-            // 同步删除：stat_data 中已不存在的键，对应行必须从快照移除，
-            // 否则前端删除操作（如删气运/删道侣）写不进快照，提交后仍保留旧行。
-            const wanted = new Set(Object.keys(dict));
-            const removeRows = [];
-            for (const [k, ri] of existing) {
-                if (!wanted.has(k)) removeRows.push(ri);
-            }
-            if (removeRows.length) {
-                removeRows.sort((a, b) => b - a);
-                for (const ri of removeRows) sheet.content.splice(ri, 1);
-            }
-            // seedRows 同步：模板种子行（如道渊的「气运」）可能未物化进 content，
-            // statDataFromTables 在 content 无行时会从 seedRows 还原，因此删除时必须
-            // 把 keyCol 不在 stat_data 中的种子行一并清掉，否则 UI/重进后仍显示该条目。
-            if (Array.isArray(sheet.seedRows)) {
-                sheet.seedRows = sheet.seedRows.filter((row) => {
-                    if (!Array.isArray(row) || row[keyIdx] === undefined || row[keyIdx] === null || row[keyIdx] === '') return false;
-                    return wanted.has(String(row[keyIdx]));
-                });
-            }
-        }
-        // 全局 seedRows 去重：插件运行时可能保留与 content 同 row_id 的种子行，
-        // 提交（snap）前统一剔除，避免插件 initGameSession/回放报 row_id 冲突。
-        for (const k of Object.keys(tables)) {
-            if (k.indexOf('sheet_') !== 0) continue;
-            const s = tables[k];
-            if (!s || !Array.isArray(s.seedRows)) continue;
-            const contentIds = new Set();
-            if (Array.isArray(s.content)) {
-                for (const row of s.content.slice(1)) {
-                    if (Array.isArray(row) && row[0] !== undefined && row[0] !== null && row[0] !== '') contentIds.add(String(row[0]));
-                }
-            }
-            s.seedRows = s.seedRows.filter((row) => {
-                if (!Array.isArray(row) || row[0] === undefined || row[0] === null || row[0] === '') return false;
-                return !contentIds.has(String(row[0]));
-            });
-        }
-        return tables;
-    }
-
-    // 把「注入后的表格快照」合并回原始模板：保留模板的 sourceData(DDL/规则)/updateConfig/exportConfig，
-    // 用快照里的 content（含注入数据）替换模板行，生成可供 initGameSession 一次性建表带数据的 templateData。
-    function mergeSnapshotIntoTemplate(tplCached, snapshot) {
-        try {
-            if (!tplCached || typeof tplCached !== 'object' || !snapshot || typeof snapshot !== 'object') return null;
-            // 表集合以「模板」为准（切卡/重锚后重建用当前卡的表），
-            // key 优先用「快照（插件稳定 key）」：快照里有同名表就用稳定 key，
-            // 否则退回模板 key（该表尚未进入运行时身份，纯净聊天由插件 rekey 成稳定 key）。
-            // 绝不能把已进入运行时的表再用原始 key 提交（同一规范表名并存两套 key → 回放冲突）。
-            const snapByName = {};
-            for (const k of Object.keys(snapshot)) {
-                if (k.indexOf('sheet_') !== 0) continue;
-                const s = snapshot[k];
-                if (s && typeof s === 'object' && s.name) snapByName[String(s.name)] = { key: k, sheet: s };
-            }
-            const tplByName = {};
-            for (const k of Object.keys(tplCached)) {
-                if (k.indexOf('sheet_') !== 0) continue;
-                const s = tplCached[k];
-                if (s && typeof s === 'object' && s.name) tplByName[String(s.name)] = s;
-            }
-            const out = {};
-            for (const k of Object.keys(tplCached)) {
-                if (k.indexOf('sheet_') !== 0) continue;
-                const tplSheet = tplCached[k];
-                if (!tplSheet || typeof tplSheet !== 'object') continue;
-                const name = String(tplSheet.name || '');
-                const snapHit = name ? snapByName[name] : null;
-                const stableKey = snapHit ? snapHit.key : k;
-                const dataSheet = snapHit ? snapHit.sheet : tplSheet;
-                const outSheet = JSON.parse(JSON.stringify(dataSheet));
-                if (tplSheet) {
-                    if (tplSheet.sourceData && typeof tplSheet.sourceData === 'object') outSheet.sourceData = JSON.parse(JSON.stringify(tplSheet.sourceData));
-                    if (tplSheet.updateConfig && typeof tplSheet.updateConfig === 'object') outSheet.updateConfig = JSON.parse(JSON.stringify(tplSheet.updateConfig));
-                    if (tplSheet.exportConfig && typeof tplSheet.exportConfig === 'object') outSheet.exportConfig = JSON.parse(JSON.stringify(tplSheet.exportConfig));
-                    if (tplSheet.orderNo !== undefined) outSheet.orderNo = tplSheet.orderNo;
-                    if (tplSheet.uid) outSheet.uid = String(tplSheet.uid);
-                }
-                out[stableKey] = outSheet;
-            }
-            return out;
-        } catch (e) {
-            dbgWarn(' 合并注入模板失败:', e && e.message ? e.message : e);
-            return null;
-        }
-    }
-
-    // 直接用注入后的 stat_data 覆盖模板行（不依赖 export 当前状态）：
-    // 模板的 content 一定带 row_id=1 初始行（转换时写入），我们只需把 target 的值盖上去。
-    // 这样即使 SQLite 运行时 content 是空的（数据在 seedRows），模板行也在，注入数据不会丢。
-    // 这等价于参考卡 buildOpeningTemplateData：在模板 content 里直接替换用户数据。
-    function applyTargetToTemplate(tplCached, layoutEntries, targetStat) {
-        try {
-            if (!tplCached || typeof tplCached !== 'object' || !targetStat) return tplCached;
-            const out = JSON.parse(JSON.stringify(tplCached));
-            const sd = targetStat || {};
-            const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-            const text = (v) => (v === undefined || v === null ? '' : String(v));
-            for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-                const sheet = Object.keys(out)
-                    .filter(k => k.indexOf('sheet_') === 0)
-                    .map(k => out[k])
-                    .find(s => s && s.name === L.table);
-                if (!sheet || !Array.isArray(sheet.content) || !Array.isArray(sheet.content[0])) continue;
-                const header = sheet.content[0];
-                // 嵌套组（如 主角.气运 / 主角.储物袋）的值在 stat_data 里位于 writePaths 路径下，
-                // 与读侧 statDataFromTables 的 setPath(writePaths) 一一对应；顶层组退回 sd[L.group]。
-                const valueOf = (LE) => {
-                    const wp = (LE.writePaths || [])[0];
-                    if (Array.isArray(wp) && wp.length) {
-                        let cur = sd;
-                        for (const p of wp) {
-                            if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
-                            cur = cur[p];
-                        }
-                        if (cur !== undefined) return cur;
-                    }
-                    return sd[LE.group];
-                };
-                const value = valueOf(L);
-                if (L.kind === 'singleton' || L.kind === 'json') {
-                    const obj = isObj(value) ? value : {};
-                    // 模板至少带 row_id=1 的初始行；若没有则补一行
-                    if (sheet.content.length < 2) {
-                        const tRow = header.map(() => '');
-                        tRow[0] = 1;
-                        sheet.content.push(tRow);
-                    }
-                    const row = sheet.content[1];
-                    row[0] = 1;
-                    if (L.kind === 'json') {
-                        const jIdx = header.indexOf('内容');
-                        if (jIdx >= 0) row[jIdx] = JSON.stringify(value === undefined ? {} : value);
-                    }
-                    // 列值优先按布局列的路径解析（如 主角.炼丹.阶级 → 列「炼丹阶级」）；
-                    // 顶层字段直接取 obj[col]。
-                    const colPathOf = (zh) => {
-                        for (const c of (L.cols || [])) {
-                            const czh = Array.isArray(c) ? c[0] : (c && c.zh);
-                            if (czh === zh) return Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                        }
-                        return null;
-                    };
-                    const colValueOf = (zh) => {
-                        const cp = colPathOf(zh);
-                        if (Array.isArray(cp) && cp.length > 1 && cp[0] === L.group) {
-                            let cur = obj;
-                            for (let pi = 1; pi < cp.length; pi++) {
-                                if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
-                                cur = cur[cp[pi]];
-                            }
-                            if (cur !== undefined) return cur;
-                        }
-                        return Object.prototype.hasOwnProperty.call(obj, zh) ? obj[zh] : undefined;
-                    };
-                    const colTypeOf = (zh) => {
-                        for (const c of (L.cols || [])) {
-                            const czh = Array.isArray(c) ? c[0] : (c && c.zh);
-                            if (czh === zh) return Array.isArray(c) ? String(c[1] || '') : String(c.type || '');
-                        }
-                        return '';
-                    };
-                    // 子表路径（如 世界.动向 / 主角.气运）与已展平容器（如 主角.炼丹）都不能进本表溢出列
-                    const childGroupKeys = new Set();
-                    for (const L2 of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-                        if (L2 === L) continue;
-                        const wp2 = (L2.writePaths || [])[0];
-                        if (Array.isArray(wp2) && wp2.length >= 2 && wp2[0] === L.group) childGroupKeys.add(wp2[1]);
-                    }
-                    const flattenedContainers = new Set();
-                    for (const c of (L.cols || [])) {
-                        const cp2 = Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                        if (Array.isArray(cp2) && cp2.length > 1 && cp2[0] === L.group) flattenedContainers.add(cp2[1]);
-                    }
-                    for (let ci = 1; ci < header.length; ci++) {
-                        const col = header[ci];
-                        if (col === '_扩展数据' || col === '内容') continue;
-                        const cv = colValueOf(col);
-                        if (cv === undefined) continue;
-                        row[ci] = /object|json/i.test(colTypeOf(col)) ? (typeof cv === 'string' ? cv : JSON.stringify(cv === undefined || cv === null ? '' : cv)) : text(cv);
-                    }
-                    // 溢出字段合并进 _扩展数据（AI 不应直接修改的内部字段）
-                    const ovIdx = header.indexOf('_扩展数据');
-                    if (ovIdx >= 0) {
-                        const overflow = {};
-                        for (const k of Object.keys(obj)) {
-                            if (!header.includes(k) && k !== L.keyCol && !childGroupKeys.has(k) && !flattenedContainers.has(k)) overflow[k] = obj[k];
-                        }
-                        if (Object.keys(overflow).length) {
-                            let cur = {};
-                            try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e) {}
-                            Object.assign(cur, overflow);
-                            row[ovIdx] = JSON.stringify(cur);
-                        }
-                    }
-                    continue;
-                }
-                if (L.kind === 'array') {
-                    const arr = Array.isArray(value) ? value : [];
-                    const vCol = header[1] || '内容';
-                    sheet.content = [header];
-                    arr.forEach((item, i) => {
-                        const row = header.map(() => '');
-                        row[0] = i + 1;
-                        row[1] = text(item);
-                        sheet.content.push(row);
-                    });
-                    continue;
-                }
-                // rows：按 keyCol upsert
-                if (!isObj(value)) continue;
-                const keyIdx = header.indexOf(L.keyCol);
-                if (keyIdx === -1) continue;
-                for (const k of Object.keys(value)) {
-                    const item = value[k];
-                    if (!isObj(item)) continue;
-                    let ri = -1;
-                    for (let r = 1; r < sheet.content.length; r++) {
-                        const row = sheet.content[r];
-                        if (row && row[keyIdx] !== undefined && row[keyIdx] !== null && String(row[keyIdx]) === String(k)) { ri = r; break; }
-                    }
-                    if (ri === -1) {
-                        const row = header.map(() => '');
-                        row[0] = sheet.content.length;
-                        row[keyIdx] = text(k);
-                        sheet.content.push(row);
-                        ri = sheet.content.length - 1;
-                    }
-                    const row = sheet.content[ri];
-                    for (let ci = 1; ci < header.length; ci++) {
-                        const col = header[ci];
-                        if (col === '_扩展数据' || col === L.keyCol) continue;
-                        if (Object.prototype.hasOwnProperty.call(item, col)) {
-                            const iv = item[col];
-                            let colT = '';
-                            for (const c of (L.cols || [])) {
-                                const czh = Array.isArray(c) ? c[0] : (c && c.zh);
-                                if (czh === col) { colT = Array.isArray(c) ? String(c[1] || '') : String(c.type || ''); break; }
-                            }
-                            row[ci] = /object|json/i.test(colT) ? (typeof iv === 'string' ? iv : JSON.stringify(iv === undefined || iv === null ? '' : iv)) : text(iv);
-                        }
-                    }
-                    const ovIdx = header.indexOf('_扩展数据');
-                    if (ovIdx >= 0) {
-                        const overflow = {};
-                        for (const f of Object.keys(item)) {
-                            if (!header.includes(f) && f !== L.keyCol) overflow[f] = item[f];
-                        }
-                        if (Object.keys(overflow).length) {
-                            let cur = {};
-                            try { cur = JSON.parse(row[ovIdx] || '{}'); } catch (e) {}
-                            Object.assign(cur, overflow);
-                            row[ovIdx] = JSON.stringify(cur);
-                        }
-                    }
-                }
-            }
-            return out;
-        } catch (e) {
-            dbgWarn(' applyTargetToTemplate 失败:', e && e.message ? e.message : e);
-            return tplCached;
-        }
-    }
-
-    // 对齐参考卡 waitForOpeningDatabase：initGameSession 后运行时可能异步物化表格，
-    // 短轮询确认注入数据真的进了 exportTableAsJson；确认不了再由调用方回退快照提交。
-    // 只校验“目标 stat_data 里有非默认值”的表，没有任何注入值视为成功（纯文本开场白等场景）。
-    async function verifyTemplateInjected(api, layoutEntries, targetStat, timeoutMs) {
-        const sd = targetStat || {};
-        const checks = [];
-        const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-            const wp = (L.writePaths || [])[0];
-            let v = undefined;
-            if (Array.isArray(wp) && wp.length) {
-                let cur = sd;
-                for (const p of wp) {
-                    if (cur === null || cur === undefined || typeof cur !== 'object') { v = undefined; break; }
-                    cur = cur[p];
-                    v = cur;
-                }
-            } else {
-                v = sd[L.group];
-            }
-            if (!isObj(v)) continue;
-            if (L.kind === 'rows') {
-                const keys = Object.keys(v).filter(k => isObj(v[k]));
-                if (keys.length) checks.push({ table: L.table, needles: keys.map(k => String(k)) });
-            } else if (L.kind === 'singleton') {
-                const cols = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
-                const needles = [];
-                for (const c of cols) {
-                    const cv = v[c];
-                    if (cv !== undefined && cv !== null && cv !== '') needles.push(String(cv));
-                }
-                if (needles.length) checks.push({ table: L.table, needles });
-            }
-        }
-        if (!checks.length) return true;
+    // 对齐参考卡 waitForOpeningDatabase：等待插件把运行时表格就绪（initGameSession/回放
+    // 后的异步物化）。就绪 = 布局内所有表都已出现在 exportTableAsJson（插件已加载结构）；
+    // 超时未就绪返回 false，调用方延后重试写入。不做任何手工物化。
+    async function waitRuntimeTablesReady(api, layoutEntries, timeoutMs) {
+        const expected = new Set((Array.isArray(layoutEntries) ? layoutEntries : []).map(L => L.table));
+        if (!expected.size) return true;
         const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
         while (Date.now() < deadline) {
             try {
-                const all = api.exportTableAsJson() || {};
-                let allOk = true;
-                for (const chk of checks) {
-                    let sheet = null;
-                    for (const k in all) {
-                        if (k.indexOf('sheet_') === 0 && all[k] && all[k].name === chk.table) { sheet = all[k]; break; }
-                    }
-                    if (!sheet || !Array.isArray(sheet.content)) { allOk = false; break; }
-                    let found = false;
-                    for (let r = 1; r < sheet.content.length; r++) {
-                        const row = sheet.content[r];
-                        if (!Array.isArray(row)) continue;
-                        if (chk.needles.some(n => n && row.some(cell => String(cell == null ? '' : cell) === n))) { found = true; break; }
-                    }
-                    if (!found) { allOk = false; break; }
+                const cur = api.exportTableAsJson() || {};
+                const names = new Set();
+                for (const k in cur) {
+                    if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) names.add(String(cur[k].name));
                 }
-                if (allOk) return true;
+                let allPresent = true;
+                for (const n of expected) { if (!names.has(n)) { allPresent = false; break; } }
+                if (allPresent) return true;
             } catch (e) {}
             await new Promise(res => hostWindow.setTimeout(res, 150));
         }
         return false;
-    }
-
-    // 读取聊天中 full checkpoint 的数据（跨所有消息与隔离标签）。
-    // 与插件 V2 回放语义一致：
-    //   1. checkpoint.kind=full 的帧；
-    //   2. 没有可用 full checkpoint 时，logEntries 里最后一个 data_replace 自带完整后态，
-    //      可作持久化真相（插件 findLastUsableReplacementAnchor_ACU 同款语义）。
-    // 多份候选并存时按 (消息序号, 条目序号) 取最新一份，避免旧锚/模板默认值遮蔽真数据。
-    function readFullCheckpointData() {
-        try {
-            const ctx = getContextSafe();
-            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-            let best = null;
-            let bestPos = Number.NEGATIVE_INFINITY;
-            const consider = (data, pos) => {
-                if (!data || typeof data !== 'object' || Array.isArray(data)) return;
-                let sheets = 0;
-                for (const k in data) { if (k.indexOf('sheet_') === 0) sheets++; }
-                if (!sheets) return;
-                if (pos > bestPos) { best = data; bestPos = pos; }
-            };
-            for (let mi = 0; mi < chat.length; mi++) {
-                const msg = chat[mi];
-                if (!msg || typeof msg !== 'object') continue;
-                let iso = msg.TavernDB_ACU_IsolatedData;
-                // 插件实际按字符串存储；hasFullShujukuCheckpoint 会解析，这里也必须解析，
-                // 否则刷新后读不到持久化 checkpoint，基线缺失导致数据被覆盖成默认。
-                if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
-                if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
-                for (const k of Object.keys(iso)) {
-                    const tag = iso[k];
-                    if (!tag || typeof tag !== 'object' || Array.isArray(tag)) continue;
-                    const sf = tag.storageFrame;
-                    if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
-                    const cp = sf.checkpoint;
-                    // full checkpoint 视为该消息内最早的完整状态
-                    if (cp && typeof cp === 'object' && cp.kind === 'full' && cp.data && typeof cp.data === 'object') {
-                        consider(cp.data, mi * 1e6 - 1);
-                    }
-                    // data_replace 自带完整后态：最新一条即当前持久化状态（对齐插件回放基底）
-                    for (let ei = 0; ei < sf.logEntries.length; ei++) {
-                        const entry = sf.logEntries[ei];
-                        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
-                        const ops = Array.isArray(entry.operations) ? entry.operations : [];
-                        for (let oi = 0; oi < ops.length; oi++) {
-                            const op = ops[oi];
-                            if (op && typeof op === 'object' && op.kind === 'data_replace') {
-                                consider(op.data, mi * 1e6 + ei * 1000 + oi);
-                            }
-                        }
-                    }
-                }
-            }
-            if (best) return best;
-        } catch (e) {}
-        return null;
-    }
-
-    // 重进聊天时校验运行时表是否已按 checkpoint 恢复（SQLite 模式插件可能漏恢复，
-    // 内存表停在模板默认值）。逐表比对内容；任一表不一致即视为未同步。
-    function runtimeSyncedWithCheckpoint(api, cpData) {
-        try {
-            const cur = api.exportTableAsJson() || {};
-            for (const k in cpData) {
-                if (k.indexOf('sheet_') !== 0) continue;
-                const cp = cpData[k];
-                const name = cp && cp.name;
-                if (!name) continue;
-                let rt = null;
-                for (const k2 in cur) {
-                    if (k2.indexOf('sheet_') === 0 && cur[k2] && cur[k2].name === name) { rt = cur[k2]; break; }
-                }
-                if (!rt) return false;
-                if (JSON.stringify(rt.content || []) !== JSON.stringify(cp.content || [])) return false;
-            }
-            return true;
-        } catch (e) { return false; }
-    }
-
-    // checkpoint 数据里是否存在“真实数据行”（任一 sheet content 含表头以外的行）。
-    // 与插件 SqlTableService.loadFromData 的 hasRealDataRows 门禁同义：v2-replay 后插件
-    // 只有在该条件下才会把 mergedData 完整 hydrate 进 SQLite 运行时；否则走
-    // _buildInitialRuntimeTableData_ACU，而该路径在“聊天已有 table data（checkpoint 存在）”
-    // 时不会再物化 seedRows（shouldUseInitialSeedRows 关闭）→ 运行时保持全空。
-    function checkpointHasRealRows(cpData) {
-        try {
-            if (!cpData || typeof cpData !== 'object') return false;
-            for (const k in cpData) {
-                if (k.indexOf('sheet_') !== 0) continue;
-                const s = cpData[k];
-                if (s && typeof s === 'object' && Array.isArray(s.content) && s.content.length > 1) return true;
-            }
-            return false;
-        } catch (e) { return false; }
-    }
-
-    function runtimeHasRealRows(api) {
-        try {
-            const cur = api.exportTableAsJson() || {};
-            for (const k in cur) {
-                if (k.indexOf('sheet_') !== 0) continue;
-                const s = cur[k];
-                if (s && typeof s === 'object' && Array.isArray(s.content) && s.content.length > 1) return true;
-            }
-            return false;
-        } catch (e) { return false; }
-    }
-
-    // 刷新/重进后的完整状态诊断（v2-replay 恢复失败的定位用）：
-    // 输出 checkpoint 与运行时逐表行数、mate、logEntries、判定结论。
-    function logReentryDiagnostics(api, cpData) {
-        try {
-            const ctx = getContextSafe();
-            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-            const sheetSummary = (data) => {
-                const out = [];
-                for (const k in (data || {})) {
-                    if (k.indexOf('sheet_') !== 0) continue;
-                    const s = data[k];
-                    if (!s || typeof s !== 'object') continue;
-                    out.push(k + ':' + (s.name || '?') + ':content=' + (Array.isArray(s.content) ? s.content.length - 1 : -1) + ':seed=' + (Array.isArray(s.seedRows) ? s.seedRows.length : -1));
-                }
-                return out.join(' | ');
-            };
-            let frameInfo = '无';
-            for (let mi = 0; mi < chat.length; mi++) {
-                const msg = chat[mi];
-                if (!msg || typeof msg !== 'object') continue;
-                let iso = msg.TavernDB_ACU_IsolatedData;
-                if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
-                if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
-                for (const tagKey of Object.keys(iso)) {
-                    const tag = iso[tagKey];
-                    if (!tag || typeof tag !== 'object' || Array.isArray(tag)) continue;
-                    const sf = tag.storageFrame;
-                    if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
-                    const cp = sf.checkpoint;
-                    let dataReplaces = 0;
-                    for (const en of sf.logEntries) {
-                        if (en && Array.isArray(en.operations)) {
-                            for (const op of en.operations) if (op && op.kind === 'data_replace') dataReplaces++;
-                        }
-                    }
-                    const cpSheets = cp && cp.data ? Object.keys(cp.data).filter(k => k.indexOf('sheet_') === 0).length : -1;
-                    const cpHasMate = !!(cp && cp.data && cp.data.mate && typeof cp.data.mate === 'object');
-                    frameInfo = 'msgIndex=' + mi + ' | tag=' + tagKey + ' | checkpoint.kind=' + (cp && cp.kind) +
-                        ' | reason=' + (cp && cp.reason) + ' | sheets=' + cpSheets + ' | hasMate=' + cpHasMate +
-                        ' | logEntries=' + sf.logEntries.length + ' | data_replace=' + dataReplaces;
-                    break;
-                }
-                if (frameInfo !== '无') break;
-            }
-            const rtCur = api.exportTableAsJson() || {};
-            // 逐 log 条目 dump 操作（定位回放丢行：row_upsert 被跳过 / row_delete 删行 / sql_sheet_batch 覆盖）
-            try {
-                const opSummaries = [];
-                for (let mi = 0; mi < chat.length; mi++) {
-                    const msg = chat[mi];
-                    if (!msg || typeof msg !== 'object') continue;
-                    let iso = msg.TavernDB_ACU_IsolatedData;
-                    if (typeof iso === 'string') { try { iso = JSON.parse(iso); } catch (e) { continue; } }
-                    if (!iso || typeof iso !== 'object' || Array.isArray(iso)) continue;
-                    for (const tagKey of Object.keys(iso)) {
-                        const tag = iso[tagKey];
-                        if (!tag || typeof tag !== 'object' || Array.isArray(tag)) continue;
-                        const sf = tag.storageFrame;
-                        if (!sf || typeof sf !== 'object' || sf.version !== 2 || !Array.isArray(sf.logEntries)) continue;
-                        for (let ei = 0; ei < sf.logEntries.length; ei++) {
-                            const en = sf.logEntries[ei];
-                            const ops = Array.isArray(en && en.operations) ? en.operations : [];
-                            if (ops.length === 0) { opSummaries.push('msg' + mi + '#e' + ei + ':no-ops'); continue; }
-                            for (let oi = 0; oi < ops.length; oi++) {
-                                const op = ops[oi];
-                                if (!op || typeof op !== 'object') continue;
-                                const kind = op.kind;
-                                const sk = op.sheetKey || '';
-                                const rid = op.rowId !== undefined && op.rowId !== null ? String(op.rowId) : '';
-                                let detail = '';
-                                if (Array.isArray(op.statements)) detail = 'statements=' + op.statements.map(function (st) { return String(st == null ? '' : st).slice(0, 120).replace(/\n/g, ' '); }).join(' ;; ');
-                                else if (Array.isArray(op.cells)) detail = 'cells=' + op.cells.length + ':[' + String(op.cells[0] ?? '') + '|' + String(op.cells[1] ?? '') + ']';
-                                else if (typeof op.sql === 'string') detail = 'sql=' + op.sql.slice(0, 120).replace(/\n/g, ' ');
-                                else if (op.sheet && op.sheet.content && Array.isArray(op.sheet.content)) detail = 'sheetRows=' + (op.sheet.content.length - 1);
-                                opSummaries.push('msg' + mi + '#e' + ei + '#o' + oi + ':' + kind + ':' + (sk || '-') + ':' + (rid || '-') + ':' + detail);
-                            }
-                        }
-                    }
-                }
-                dbg('[重进诊断] logEntries 操作: ' + (opSummaries.length ? opSummaries.join(' | ') : '无'));
-            } catch (eLog) {}
-            // 角色表/持有物品表等有行表：dump checkpoint 原始行（row_id + 前两列），确认 row_id 是否合法
-            try {
-                const rowDumps = [];
-                for (const k in (cpData || {})) {
-                    if (k.indexOf('sheet_') !== 0) continue;
-                    const s = cpData[k];
-                    if (!s || typeof s !== 'object' || !Array.isArray(s.content)) continue;
-                    if (s.content.length <= 1) continue;
-                    const hdr = s.content[0] || [];
-                    const rows = s.content.slice(1, 6).map(r => {
-                        if (!Array.isArray(r)) return 'bad-row';
-                        return '[' + r.length + 'w|' + String(r[0] ?? '') + '|' + String(r[1] ?? '') + '|' + String(r[2] ?? '') + ']';
-                    }).join(',');
-                    rowDumps.push(k + ':' + (s.name || '?') + ':hdrW=' + hdr.length + ':rows=' + rows);
-                }
-                dbg('[重进诊断] checkpoint 行详情: ' + (rowDumps.length ? rowDumps.join(' || ') : '无'));
-            } catch (eRow) {}
-            dbg('[重进诊断] ' + frameInfo);
-            dbg('[重进诊断] checkpoint sheets: ' + sheetSummary(cpData));
-            dbg('[重进诊断] runtime(exportTableAsJson) sheets: ' + sheetSummary(rtCur));
-            dbg('[重进诊断] 判定：checkpointHasRealRows=' + checkpointHasRealRows(cpData) +
-                ' | runtimeHasRealRows=' + runtimeHasRealRows(api) +
-                ' | 插件原生恢复前提（checkpoint content 有行）=' + (checkpointHasRealRows(cpData) ? '满足' : '不满足——v2-replay 恢复后仍会全空'));
-        } catch (e) {
-            dbgWarn('[重进诊断] 输出失败:', e && e.message ? e.message : e);
-        }
-    }
-
-    // 用目标 stat_data 的非默认值作为 needle，检查 full checkpoint 数据里是否真的包含注入值。
-    // 这是持久化层的校验：只读聊天里的 checkpoint，不依赖运行时 exportTableAsJson。
-    // 返回 true = checkpoint 已含注入值（或没有可校验的注入值）；false = checkpoint 缺失/默认值。
-    function checkpointHasStatData(layoutEntries, statData) {
-        try {
-            const sd = statData || {};
-            const checks = [];
-            const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-            for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-                const wp = (L.writePaths || [])[0];
-                let v = undefined;
-                if (Array.isArray(wp) && wp.length) {
-                    let cur = sd;
-                    for (const p of wp) {
-                        if (cur === null || cur === undefined || typeof cur !== 'object') { v = undefined; break; }
-                        cur = cur[p];
-                        v = cur;
-                    }
-                } else {
-                    v = sd[L.group];
-                }
-                if (!isObj(v)) continue;
-                if (L.kind === 'rows') {
-                    const keys = Object.keys(v).filter(k => isObj(v[k]));
-                    if (keys.length) checks.push({ table: L.table, needles: keys.map(k => String(k)) });
-                } else if (L.kind === 'singleton') {
-                    const cols = (L.cols || []).map(c => (Array.isArray(c) ? c[0] : (c && c.zh)));
-                    const needles = [];
-                    for (const c of cols) {
-                        const cv = v[c];
-                        if (cv !== undefined && cv !== null && cv !== '') needles.push(String(cv));
-                    }
-                    if (needles.length) checks.push({ table: L.table, needles });
-                }
-            }
-            if (!checks.length) return true;
-            const cpData = readFullCheckpointData();
-            if (!cpData) return false;
-            for (const chk of checks) {
-                let sheet = null;
-                for (const k in cpData) {
-                    if (k.indexOf('sheet_') === 0 && cpData[k] && cpData[k].name === chk.table) { sheet = cpData[k]; break; }
-                }
-                if (!sheet || !Array.isArray(sheet.content)) return false;
-                let found = false;
-                for (let r = 1; r < sheet.content.length; r++) {
-                    const row = sheet.content[r];
-                    if (!Array.isArray(row)) continue;
-                    if (chk.needles.some(n => n && row.some(cell => String(cell == null ? '' : cell) === n))) { found = true; break; }
-                }
-                if (!found) return false;
-            }
-            return true;
-        } catch (e) { return false; }
-    }
-
-    // 运行时物化唯一允许的数据源：插件规范化后的 full checkpoint 数据（稳定 sheet key）。
-    // 绝不能把转换器原始 key 的模板灌进运行时——否则后续编辑（可视化编辑器/AI 填表）
-    // 的 baseRevision 会带着原始 key，挂在稳定 key 的 checkpoint 上，刷新回放失败、整链回默认。
-    // 返回 true 表示运行时已（重新）用 checkpoint 数据物化。
-    async function materializeRuntimeFromCheckpoint(api) {
-        const dumpAfterRestore = (tag) => {
-            try {
-                const cur = api.exportTableAsJson() || {};
-                const parts = [];
-                for (const k in cur) {
-                    if (k.indexOf('sheet_') !== 0) continue;
-                    const s = cur[k];
-                    if (!s || typeof s !== 'object') continue;
-                    const c = Array.isArray(s.content) ? s.content.length - 1 : -1;
-                    const widths = Array.isArray(s.content) ? s.content.slice(1, 4).map(function (r) { return Array.isArray(r) ? r.length : -1; }).join(',') : '';
-                    parts.push(k + ':' + (s.name || '?') + ':content=' + c + ':w=' + widths);
-                }
-                dbg(' 物化后（' + tag + '）运行时逐表: ' + parts.join(' | '));
-            } catch (eD) {}
-        };
-        const restoreWith = async (payload, tag) => {
-            try {
-                const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(payload), { persist: false, mode: 'restore' }));
-                dbg(' 运行时按 checkpoint 数据物化（' + tag + '，persist:false）=' + (ok ? '成功' : '失败'));
-                if (ok) dumpAfterRestore(tag);
-                return !!ok;
-            } catch (e) {
-                dbgWarn(' 运行时按 checkpoint 物化异常（' + tag + '）:', e && e.message ? e.message : e);
-                return false;
-            }
-        };
-        try {
-            const cpData = readFullCheckpointData();
-            if (!cpData || typeof api.importTableAsJson !== 'function') return false;
-            // 插件 importTableAsJson 要求输入含 {mate, sheet_*}：checkpoint.data 是插件自身
-            // 持久化格式（无 mate）。先补一个空 mate（插件 sanitizeChatSheetsObject 会
-            // ensureMate 补齐结构），避免插件直接拒绝并弹 toastr。深拷贝，不污染聊天里的 checkpoint。
-            const payload = JSON.parse(JSON.stringify(cpData));
-            if (!(payload.mate && typeof payload.mate === 'object')) payload.mate = {};
-            if (await restoreWith(payload, 'checkpoint+mate')) return true;
-            let tpl = null;
-            try { tpl = await Promise.resolve(api.getTableTemplate({ scope: 'chat' })) || null; } catch (e) { tpl = null; }
-            const base = (tpl && typeof tpl === 'object' && tpl.mate) ? JSON.parse(JSON.stringify(tpl)) : null;
-            if (base) {
-                for (const k of Object.keys(cpData)) {
-                    if (k.indexOf('sheet_') === 0) base[k] = JSON.parse(JSON.stringify(cpData[k]));
-                }
-                if (await restoreWith(base, '模板 mate 包装')) return true;
-            }
-            dbg(' 运行时物化回退：initGameSession 重建（用 checkpoint 数据）…');
-            const tplCached = cachedTemplateForCurrentCard();
-            let reTpl = null;
-            if (tplCached && typeof tplCached === 'object') {
-                try { reTpl = mergeSnapshotIntoTemplate(tplCached, cpData); } catch (e) { reTpl = null; }
-            }
-            if (!reTpl) reTpl = cpData;
-            const r = await Promise.resolve(api.initGameSession({}, {
-                injectTemplate: true,
-                loadPreset: false,
-                templateData: reTpl,
-                templatePresetName: String((currentCharacter() && currentCharacter().name) || '') + '模板',
-            }));
-            const ok2 = !(r && r.success === false);
-            dbg(' 运行时物化回退：initGameSession 重建结果=' + (ok2 ? '完成' : ((r && r.message) || '失败')) +
-                ' | runtimeReady=' + (r ? r.runtimeReady : 'N/A'));
-            return ok2;
-        } catch (e) {
-            dbgWarn(' 运行时按 checkpoint 物化异常:', e && e.message ? e.message : e);
-            return false;
-        }
-    }
-
-    // 刷新/重进后的兜底恢复（任意聊天长度）：开局阶段由 reAnchorCheckpointIfNeeded 处理，
-    // 长聊天在此校验“插件是否已把 checkpoint 恢复进运行时”。只在有 full checkpoint 且
-    // 运行时不一致时动作，每聊天一次；cp 无真实行时只输出诊断（下一次写库会提交 data_replace 自动补齐）。
-    async function checkReentryRestoreAfterLoad() {
-        try {
-            const key = autoInitChatId();
-            if (!key || key === reentryCheckedChat) return;
-            const api = getAcuApi();
-            if (!api || !hasFullShujukuCheckpoint()) { reentryCheckedChat = key; return; }
-            // 先等插件异步回放窗口结束（CHAT_CHANGED 后插件 loadFromData 可能还没完成）
-            await new Promise(res => hostWindow.setTimeout(res, 2500));
-            if (!key || key !== autoInitChatId()) return; // 等待期间已切聊天
-            const cpData = readFullCheckpointData();
-            if (!cpData) { reentryCheckedChat = key; return; }
-            if (runtimeSyncedWithCheckpoint(api, cpData)) { reentryCheckedChat = key; return; }
-            lastRuntimeRestoreChat = key;
-            if (anyWriteSinceLoad) {
-                // 已发生过写库：运行时可能已领先 checkpoint，不再按 checkpoint 物化，
-                // 只输出诊断（写库路径已自行以 checkpoint 为基线）。
-                logReentryDiagnostics(api, cpData);
-                reentryCheckedChat = key;
-                return;
-            }
-            if (checkpointHasRealRows(cpData)) {
-                logReentryDiagnostics(api, cpData);
-                dbg('[重进恢复] 长聊天：运行时与 checkpoint 不一致（checkpoint 含真实行），按 checkpoint 物化…');
-                const rtOk = await materializeRuntimeFromCheckpoint(api);
-                dbg('[重进恢复] 长聊天：物化=' + (rtOk ? '成功' : '失败'));
-                if (!rtOk) { lastRuntimeRestoreChat = ''; lastRuntimeRestoreFailAt = Date.now(); }
-            } else {
-                logReentryDiagnostics(api, cpData);
-                dbg('[重进诊断] 长聊天：checkpoint 无真实数据行，插件原生恢复无法带出任何行；若运行时已有行则由写库提交为 data_replace 自动补齐，无需重置。');
-            }
-            reentryCheckedChat = key;
-        } catch (e) {
-            dbgWarn('[重进恢复] 长聊天异常:', e && e.message ? e.message : e);
-        }
     }
 
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
@@ -7223,9 +5726,9 @@ ${DB_INIT_SNIPPET}
                 }
                 const api = getAcuApi();
                 if (api && activeLayout) {
-                    anyWriteSinceLoad = true;
-                    // 写库前保证 full checkpoint 存在：无锚点写入会产生无锚点 artifacts，
-                    // 触发插件 V2 boundary_after_data_mismatch。锚点无法建立则放弃本次写入。
+                    // 插件自己的事务管线负责 checkpoint/落盘；这里只做运行时就绪等待与差异写入。
+                    // 不再手工锚定：initGameSession/插件提交管线自动建立并维护 checkpoint。
+                    
                     const tplCached = cachedTemplateForCurrentCard();
                     // 布局归属校验：切卡空窗期 activeLayout 仍是上一张卡的，写库会按错布局落表；
                     // 与模板缓存一起作为“自动建表就绪”门槛，未就绪时延后重试。
@@ -7259,49 +5762,25 @@ ${DB_INIT_SNIPPET}
                             return;
                         }
                     } catch (e) {}
-                    const anchored = await ensureCheckpointBeforeWrite(api, tplCached);
-                    if (!anchored) {
-                        dbgWarn('[流程] 写库前无法建立 full checkpoint，放弃本次写入，避免产生无锚点 artifacts。');
-                        pendingStatWrite = null;
+                    // 对齐参考卡：不做手工锚定/物化，等待插件把运行时表格就绪
+                    // （initGameSession/回放后的异步物化）。就绪后直接用运行时作基线 diff。
+                    const rtReady = await waitRuntimeTablesReady(api, activeLayout, 5000);
+                    if (!rtReady) {
+                        // 插件运行时尚未就绪（刷新后回放/开局建表异步）：延后重试，不手工物化
+                        if (overlayFlushRetries < 6) {
+                            overlayFlushRetries += 1;
+                            dbg('[流程] 插件运行时未就绪，延后重试写库（#' + overlayFlushRetries + '）。');
+                            hostWindow.setTimeout(() => {
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                            }, 800);
+                            return;
+                        }
+                        dbgWarn('[流程] 插件运行时迟迟未就绪，放弃本次写入。');
+                        if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
                     const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                     let prev = all.stat_data || {};
-                    // 刷新后插件回放是异步的：运行时表格可能暂时为空，但 full checkpoint 里有持久化数据。
-                    // 此时以 checkpoint 表格数据为基线（prev 与快照都从它构建），
-                    // 避免把已有数据覆盖成空/默认（日志表现：checkpoint 33947 → 9307 被冲掉）。
-                    let baselineTables = null;
-                    let hasCp = false;
-                    try {
-                        hasCp = hasFullShujukuCheckpoint();
-                        if (hasCp) {
-                            const cpData = readFullCheckpointData();
-                            // 重进/刷新后运行时可能停在模板默认（SQLite 模式插件漏恢复）：
-                            // 写库前先按 checkpoint 物化，保证本次写入基于完整数据而不是默认值。
-                            if (cpData && !runtimeSyncedWithCheckpoint(api, cpData)) {
-                                const rtOk = await materializeRuntimeFromCheckpoint(api);
-                                dbg('[写库前] 运行时与 checkpoint 不一致，已按 checkpoint 物化=' + (rtOk ? '成功' : '失败'));
-                                const all2 = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                                prev = all2.stat_data || {};
-                            }
-                            const cur = api.exportTableAsJson() || {};
-                            let runtimeRows = 0;
-                            for (const k in cur) {
-                                if (k.indexOf('sheet_') === 0 && cur[k] && Array.isArray(cur[k].content)) {
-                                    runtimeRows += Math.max(0, cur[k].content.length - 1);
-                                }
-                            }
-                            if (runtimeRows === 0) {
-                                baselineTables = cpData;
-                                if (baselineTables) {
-                                    try {
-                                        const cpAll = window.MVU2SHUJUKU_CORE.statDataFromTables(activeLayout, baselineTables);
-                                        if (cpAll && cpAll.stat_data && typeof cpAll.stat_data === 'object') prev = cpAll.stat_data;
-                                    } catch (e) {}
-                                }
-                            }
-                        }
-                    } catch (e) {}
                     // 前端/脚本传来的 target 可能不完整：开场读取时布局未就绪，只拿到部分组
                     // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
                     // 缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
@@ -7334,21 +5813,10 @@ ${DB_INIT_SNIPPET}
                         }
                         return out;
                     })();
-                    // 写入主路径：开局（表格仍是模板初始状态、无真实数据）时，把注入后的
-                    // stat_data 合并进模板，走插件 initGameSession 一次性建表。
-                    // 关键：initGameSession 会同时写入 TavernDB_ACU_IsolatedData +
-                    // InternalSheetGuide + ScopedConfig 三个字段——插件 UI 靠后两个判定
-                    // “已初始化”，刷新后从完整 checkpoint 恢复，数据不丢。
-                    // 之前用 importTableAsJson 只写数据帧，不建 guide/scope，UI 显示
-                    // “未初始/待初始”，刷新后数据消失。
-                    // 参考卡原生路径：写库 = 锚点保障（上方 ensureCheckpointBeforeWrite 已建锚）
-                    // + 差异写入（updateCell/insertRow/deleteRow）。运行时/checkpoint/落盘全部由
-                    // 插件自己的事务管线维护，与原生数据库卡一致；不再整表快照导入
-                    // （raw-key/seedRows/重进丢失的根源）。仅当差异无操作（结构/行缺失）时
-                    // 回退一次 importTableAsJson 快照（稳定 key）。
+                    // 参考卡原生路径：写库 = 差异写入（updateCell/insertRow/deleteRow 原生 CRUD）。
+                    // 运行时/checkpoint/落盘全部由插件自己的事务管线维护，与原生数据库卡一致；
+                    // 不做整表快照导入、不做手动物化/锚定/单例补行（转换器只翻译，不参与运行时）。
                     let n = 0;
-                    let writeOk = false;
-                    let usedSnapshot = false;
                     const chatKeyNow = autoInitChatId();
                     try {
                         // 诊断（保留）：布局组、target/prev 含组、首个非空写入、checkpoint 是否含注入
@@ -7372,7 +5840,7 @@ ${DB_INIT_SNIPPET}
                                 ' | target含组=' + targetGroups.join('、') +
                                 ' | prev含组=' + prevGroups.join('、') +
                                 ' | 首个非空写入=' + (firstWriteField || '无') +
-                                ' | checkpoint含注入=' + checkpointHasStatData(activeLayout, effectiveTarget));
+                                ' | 空组保护=启用');
                             // 诊断：每张行/JSON 表的 prev/target 键集合与 writePaths，定位“DELETE-only 误删”
                             try {
                                 const isObj2 = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -7397,89 +5865,15 @@ ${DB_INIT_SNIPPET}
                                 dbg('[注入合并] 分组诊断: ' + (groupDiags.length ? groupDiags.join(' | ') : '无'));
                             } catch (eGrp) {}
                         } catch (e) {}
-                        await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                         n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget);
                         if (n > 0) {
-                            writeOk = true;
                             initializedViaGameSession.add(chatKeyNow);
-                            dbg(' Mvu 写入完成：差异 ' + n + ' 条（updateCell/insertRow/deleteRow 原生路径，插件自行持久化）');
+                            dbg(' Mvu 写入完成：差异 ' + n + ' 条（原生 CRUD，插件自行持久化）');
                         } else {
-                            dbgWarn(' 差异写入无操作，回退 importTableAsJson 快照提交。');
+                            dbg(' 差异写入无操作（运行时与目标一致），跳过。');
                         }
                     } catch (e) {
-                        dbgWarn(' 差异写入异常，回退快照提交:', e && e.message ? e.message : e);
-                    }
-                    if (!writeOk && typeof api.importTableAsJson === 'function') {
-                        // 快照兜底：只用插件稳定 key（snap），不写原始 key 模板
-                        try {
-                            const snap = buildTableSnapshotFromStat(api, activeLayout, tplCached, effectiveTarget, null);
-                            // importTableAsJson 要求 {mate, sheet_*}：快照构建器只产出 sheet 表，
-                            // 补空 mate（插件 sanitizeChatSheetsObject ensureMate 补齐）避免结构校验拒绝。
-                            if (!(snap.mate && typeof snap.mate === 'object')) snap.mate = {};
-                            const ok = await Promise.resolve(api.importTableAsJson(JSON.stringify(snap), {}));
-                            if (ok) {
-                                writeOk = true;
-                                usedSnapshot = true;
-                                initializedViaGameSession.add(chatKeyNow);
-                                dbg(' Mvu 写入完成（importTableAsJson 快照兜底，插件自身持久化）');
-                            } else {
-                                dbgWarn(' importTableAsJson 快照兜底失败');
-                            }
-                        } catch (e) {
-                            dbgWarn(' importTableAsJson 快照兜底异常:', e && e.message ? e.message : e);
-                        }
-                    }
-                    if (writeOk) {
-                        // 插件内部走酒馆 saveChat 防抖，可能晚于本流程落盘；等待保存完成
-                        try {
-                            const ctx2 = getContextSafe();
-                            const saveFn2 = (typeof ctx2.saveChatConditional === 'function' && ctx2.saveChatConditional.bind(ctx2)) ||
-                                (typeof ctx2.saveChat === 'function' && ctx2.saveChat.bind(ctx2)) ||
-                                (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
-                                (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
-                            if (saveFn2) {
-                                for (let attempt = 0; attempt < 2; attempt++) {
-                                    try {
-                                        await Promise.resolve(saveFn2());
-                                        dbg('[保存] 写库后已等待酒馆保存完成（attempt=' + (attempt + 1) + '）。');
-                                        break;
-                                    } catch (saveErr) {
-                                        dbgWarn('[保存] 等待酒馆保存失败（attempt=' + (attempt + 1) + '）：' + (saveErr && saveErr.message ? saveErr.message : saveErr));
-                                    }
-                                }
-                            }
-                        } catch (e) {}
-                    }
-                    // 诊断：写入后立即检查聊天 checkpoint 里是否包含刚写入的数据。
-                    // 若 checkpoint 仍是初始快照（不含用户注入值），重进聊天时插件会从 checkpoint
-                    // 恢复成初始数据——这就是“重新进入后数据没了”的根因。
-                    try {
-                        const ctx = getContextSafe();
-                        const chatArr = Array.isArray(ctx.chat) ? ctx.chat : [];
-                        for (let mi = 0; mi < chatArr.length && mi < 3; mi++) {
-                            const msg = chatArr[mi];
-                            if (!msg || typeof msg !== 'object') continue;
-                            const iso = msg.TavernDB_ACU_IsolatedData;
-                            if (!iso) continue;
-                            let containsUserData = false;
-                            try {
-                                const s = JSON.stringify(iso);
-                                // 检查主角表首行是否有注入值（姓名等与模板不同的内容）
-                                const sd = window.getAllVariables ? (window.getAllVariables().stat_data || {}) : {};
-                                const heroName = sd.主角 && sd.主角.姓名;
-                                containsUserData = heroName && heroName !== '未知' && s.indexOf(String(heroName)) !== -1;
-                            } catch (e) {}
-                            dbg('[checkpoint] 消息' + mi + ' 有 IsolatedData | json长度=' + (JSON.stringify(iso) || '').length + ' | 含主角姓名=' + containsUserData);
-                            break;
-                        }
-                    } catch (e) {}
-                    if (!hasFullShujukuCheckpoint()) {
-                        dbgWarn('[流程] 写库完成后聊天仍无 full checkpoint！若插件随后自动填表提交，可能出现 V2 boundary_after_data_mismatch。');
-                    }
-                    // 单例/JSON 表去重：仅在降级裸写路径物化过垫底行时需要清理；
-                    // initGameSession/importTableAsJson 成功后表格本身是干净的，无需清理。
-                    if (!usedSnapshot) {
-                        await cleanupSingletonDuplicates(api, activeLayout);
+                        dbgWarn(' 差异写入异常:', e && e.message ? e.message : e);
                     }
                     // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
                     // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
@@ -7640,7 +6034,7 @@ ${DB_INIT_SNIPPET}
         if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
         try {
             api.registerTableUpdateCallback(() => {
-                anyWriteSinceLoad = true;
+                
                 dispatchVariableUpdateEnded();
             });
             return true;
@@ -8908,8 +7302,7 @@ ${DB_INIT_SNIPPET}
             ' | 已注册 mvu2shujukuGetAllVariables=' + typeof (ejs && ejs.defines && ejs.defines.mvu2shujukuGetAllVariables)
         );
         console.log('[mvu2shujuku] 扩展已加载（' + (window.MVU2SHUJUKU_CORE ? window.MVU2SHUJUKU_CORE.VERSION : '核心缺失') +
-            ' | 预写锚点=' + (typeof ensureCheckpointBeforeWrite === 'function' ? '已启用' : '缺失') +
-            ' | 校验锚点=' + (typeof hasFullShujukuCheckpoint === 'function' ? '已启用' : '缺失') + '）');
+            ' | 写路径=原生CRUD diff | 运行时参与=最小（转换器只翻译）');
     }
 
     try {
