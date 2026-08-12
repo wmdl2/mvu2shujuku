@@ -2603,17 +2603,6 @@
         };
         let tables = {};
         try { tables = api.exportTableAsJson() || {}; } catch (e) {}
-        // 前端“渲染回写”抑制的辅助判定：值是否为“全默认/空”（可被前端随时重建）。
-        // 用于识别 schema 默认回声（如 _hypnoos 的初始状态），避免其污染运行时。
-        const isStructurallyDefault = (v) => {
-            if (v === undefined || v === null) return true;
-            if (typeof v === 'string') return v === '';
-            if (typeof v === 'number') return v === 0;
-            if (typeof v === 'boolean') return v === false;
-            if (Array.isArray(v)) return v.length === 0;
-            if (typeof v === 'object') { for (const kk in v) { if (!isStructurallyDefault(v[kk])) return false; } return true; }
-            return false;
-        };
         const sheetOf = (name) => {
             for (const k in tables) {
                 if (k.indexOf('sheet_') === 0 && tables[k] && tables[k].name === name) return { key: k, sheet: tables[k] };
@@ -2686,10 +2675,11 @@
                             }
                             if (!isChildGroup && !isFlattened) {
                                 // 前端渲染回写抑制（通用）：`_` 前缀内部状态字段（如 _hypnoos）
-                                // 当前不存在且新值为“全默认”时，是前端 schema 默认回声（前端每次
-                                // 可重建），跳过不落库；有真实内容再写。避免运行时/checkpoint 分裂。
+                                // 当前运行时/数据库里不存在时，是前端 schema 默认回声（前端每次
+                                // 可重建），整条跳过不落库；字段已存在后的更新照常允许。
+                                // 避免运行时被回声污染、帧未落盘 → 手动追平校验误报。
                                 const mk0 = entry.kind === 'rows' ? rel[1] : rel[0];
-                                if (String(mk0).charAt(0) === '_' && pv === undefined && isStructurallyDefault(nv)) {
+                                if (String(mk0).charAt(0) === '_' && pv === undefined) {
                                     dbg(' [渲染回写抑制] 跳过全默认内部状态字段 ' + np + '（前端回声，不落库）。');
                                     continue;
                                 }
