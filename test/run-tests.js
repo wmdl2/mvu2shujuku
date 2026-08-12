@@ -617,6 +617,11 @@ test('模板结构满足插件最小要求', () => {
     const r = core.convert(card, { mode: 'both' });
     const t = r.template;
     assert.strictEqual(t.mate.type, 'chatSheets');
+    // mate 对齐插件默认（version 2 + 世界书注入配置）：否则预设库与聊天作用域只在 mate 上不一致，
+    // 插件面板会显示“当前生效模板与预设库内容不同”。
+    assert.strictEqual(t.mate.version, 2, 'mate 应为 version 2（插件 init/迁移会升到 2）');
+    assert.strictEqual(t.mate.globalInjectionConfig && t.mate.globalInjectionConfig.readableEntryPlacement && t.mate.globalInjectionConfig.readableEntryPlacement.order, 99981, 'mate 应含 readableEntryPlacement 默认配置');
+    assert.strictEqual(t.mate.globalInjectionConfig && t.mate.globalInjectionConfig.wrapperPlacement && t.mate.globalInjectionConfig.wrapperPlacement.order, 99980, 'mate 应含 wrapperPlacement 默认配置');
     for (const k of Object.keys(t).filter(k => k.startsWith('sheet_'))) {
         const s = t[k];
         assert.ok(s.uid && s.name && s.content && s.sourceData, `sheet ${k} 缺字段`);
