@@ -7357,6 +7357,29 @@ ${DB_INIT_SNIPPET}
                                 ' | prev含组=' + prevGroups.join('、') +
                                 ' | 首个非空写入=' + (firstWriteField || '无') +
                                 ' | checkpoint含注入=' + checkpointHasStatData(activeLayout, effectiveTarget));
+                            // 诊断：每张行/JSON 表的 prev/target 键集合与 writePaths，定位“DELETE-only 误删”
+                            try {
+                                const isObj2 = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+                                const groupDiags = [];
+                                for (const L of (Array.isArray(activeLayout) ? activeLayout : [])) {
+                                    const wp = (L.writePaths || [])[0] || [L.group];
+                                    const dictAt = (obj) => {
+                                        let c = obj;
+                                        for (const p of wp) { if (c === null || c === undefined || typeof c !== 'object') return undefined; c = c[p]; }
+                                        return c;
+                                    };
+                                    const pv = dictAt(prev);
+                                    const tv = dictAt(effectiveTarget);
+                                    const pKeys = isObj2(pv) ? Object.keys(pv) : [];
+                                    const tKeys = isObj2(tv) ? Object.keys(tv) : [];
+                                    if (L.kind === 'rows' || L.kind === 'json') {
+                                        groupDiags.push(L.group + '{' + L.kind + ',wp=' + wp.join('.') + ',prev=[' + pKeys.slice(0, 8).join(',') + '](' + pKeys.length + '),target=[' + tKeys.slice(0, 8).join(',') + '](' + tKeys.length + ')}');
+                                    } else if (L.kind === 'singleton') {
+                                        groupDiags.push(L.group + '{singleton,wp=' + wp.join('.') + ',prev=' + (isObj2(pv) ? JSON.stringify(pv).slice(0, 80) : 'none') + ',target=' + (isObj2(tv) ? JSON.stringify(tv).slice(0, 80) : 'none') + '}');
+                                    }
+                                }
+                                dbg('[注入合并] 分组诊断: ' + (groupDiags.length ? groupDiags.join(' | ') : '无'));
+                            } catch (eGrp) {}
                         } catch (e) {}
                         await ensureSingletonRowsMaterialized(api, tplCached, activeLayout);
                         n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget);
