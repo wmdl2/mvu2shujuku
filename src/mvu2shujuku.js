@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.1.0';
+    const VERSION = '0.2.0';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -2020,7 +2020,8 @@
                 }
                 for (const rule of gc.map(sanitizeCheckRule).filter(Boolean)) L.push(`- ${rule}`);
                 L.push('【更新守卫】');
-                L.push('- 路径中的 <…> 为通配键，必须替换为「内容」列当前 JSON 中实际存在的键名（如 <门牌> → 101）；若「内容」列为 {} 或目标键不存在（对象尚未登场），本轮不得自行编造任何结构，直接不做更新');
+                // 不给 AI 加“<> 是什么”的说明：MVU 原版就是把规则原文交给 AI 理解，
+                // 且不是所有卡都用 <>（也有纯点分路径）。规则原文已在上方【可写路径与约束】保留。
                 L.push('- 只更新当前 JSON 中实际存在的可写路径；未列出的字段一律只读（它们仍存在于同一 JSON 中，由脚本/系统维护，AI 不得改动），严禁新增字段、对象或记录');
                 L.push('- 只更新本轮剧情中明确出现并被影响到的对象；其余对象的数据保持原样');
                 L.push('- 写回时必须完整保留 JSON 中其余全部字段；数值字段保持数字类型、字符串字段保持字符串类型');
@@ -5208,7 +5209,9 @@ ${DB_INIT_SNIPPET}
     // 首楼更新后做幂等修复（仅转换卡）：
     //   1) 首楼缺插件字段 → 从 chat_metadata 权威副本拷回；
     //   2) 模板作用域被冻结（presetName 为旧版标签）→ 恢复为当前卡模板名（templateStr 内容不变）；
-    //   3) 作用域整体缺失 → 用卡内模板重建。
+    // 注意：绝不用转换器自己的模板重建 ScopedConfig——转换器模板是紧凑拼音 key（sheet_shijiebiao），
+    // 插件作用域/聊天数据是插件规范化 key（sheet_shi_jie_biao），混写会造成 V2 重放
+    // “物理表名冲突”并显示“当前生效模板与预设库内容不同”。作用域缺失时交给插件自己迁移。
     function repairChatTemplateScope() {
         try {
             if (!activeLayout) return; // 只处理转换卡
@@ -5245,31 +5248,6 @@ ${DB_INIT_SNIPPET}
                     }
                 }
                 if (nameChanged) { changed = true; first.TavernDB_ACU_ScopedConfig = sc; }
-            }
-            // 3) 作用域整体缺失 → 用卡内模板重建（模板缓存已由 autoInitDatabase 设置）
-            if (!first.TavernDB_ACU_ScopedConfig) {
-                try {
-                    const holder = (typeof window !== 'undefined' ? window : globalThis);
-                    const tplCache = holder && holder.__mvu2shujukuTemplateCache;
-                    const ch2 = currentCharacter();
-                    const properName2 = ch2 ? String(ch2.name || '') + '模板' : '';
-                    if (tplCache && properName2) {
-                        first.TavernDB_ACU_ScopedConfig = {
-                            version: 1,
-                            template: {
-                                '': {
-                                    mode: 'chat_override',
-                                    isolationKey: '',
-                                    presetName: properName2,
-                                    templateStr: JSON.stringify(tplCache),
-                                    updatedAt: Date.now(),
-                                    source: 'ui',
-                                },
-                            },
-                        };
-                        changed = true;
-                    }
-                } catch (e) {}
             }
             // 同步 chat_metadata（插件以 metadata 为权威源），并落盘
             if (changed) {

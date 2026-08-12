@@ -353,8 +353,8 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     assert.ok(hub.sourceData.note.includes('户.<门牌>.妻.好感值（数值范围 0~100；仅本人在场时更新）'), 'JSON 表 note 应列出可写路径与约束');
     assert.ok(!hub.sourceData.note.includes('AI 不应直接修改本表'), 'JSON 表有可写规则时不应再标“AI 不应直接修改”');
     assert.ok(hub.sourceData.note.includes('【更新守卫】'), 'JSON 表有可写规则时应附加更新守卫');
-    assert.ok(hub.sourceData.note.includes('必须替换为「内容」列当前 JSON 中实际存在的键名'), '更新守卫应说明通配键替换');
-    assert.ok(hub.sourceData.note.includes('若「内容」列为 {} 或目标键不存在'), '更新守卫应覆盖空表/目标不存在场景');
+    assert.ok(!hub.sourceData.note.includes('为通配键'), '提示词不应声称 <…> 是“通配键”（MVU 未定义该说法）');
+    assert.ok(!hub.sourceData.note.includes('需替换为「内容」列当前 JSON 中实际存在的键名'), '提示词不应额外解释 <…>（与 MVU 原版一致，规则原文交给 AI 理解）');
     assert.ok(hub.sourceData.note.includes('它们仍存在于同一 JSON 中'), '更新守卫应说明未列出字段仍物理存在于同一 JSON');
     assert.ok(hub.sourceData.note.includes('未列出的字段一律只读'), '更新守卫应包含未列出字段只读');
     assert.ok(hub.sourceData.updateNode.includes('未列出字段一律只读'), 'JSON 表 updateNode 应包含只读守卫');
@@ -5645,6 +5645,105 @@ test('首楼替换丢失插件作用域字段后重进：拷回 InternalSheetGui
     assert.strictEqual(state.presetName, '首楼修复卡模板', '冻结模板名应恢复为 卡名+模板');
     assert.strictEqual(context.chat_metadata.TavernDB_ACU_ScopedConfig.template[''].presetName, '首楼修复卡模板', 'chat_metadata 权威源应同步恢复模板名');
     assert.ok(String(state.source || '').indexOf('legacy') !== 0, 'source 不应再是 legacy 冻结');
+});
+
+test('首楼替换后作用域整体缺失：修复只拷回 InternalSheetGuide，绝不用转换器模板重建 ScopedConfig（防两套 sheet key 冲突）', async () => {
+    const vm2 = require('vm');
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => (e.kind === 'singleton'
+            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
+            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const srcDir = path.join(__dirname, '..', 'src');
+    const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
+    const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
+    const yamlLibsData = fs.readFileSync(path.join(srcDir, 'vendor', 'mvu-yaml-libs.js'), 'utf8');
+    const jsonrepairData = fs.readFileSync(path.join(srcDir, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+    const pinyinInline = pinyinData.replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ').replace(/;\s*$/, ';');
+    const yamlLibsInline = ['(function () {', '  var module = { exports: {} };', '  var exports = module.exports;', yamlLibsData, '  var target = typeof globalThis !== "undefined" ? globalThis : this;', '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;', '})();', ''].join('\n');
+    const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+    const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const converted = {
+        name: '首楼缺失卡',
+        avatar: 'miss.png',
+        data: {
+            extensions: {
+                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
+                regex_scripts: [],
+            },
+            character_book: {
+                entries: [{
+                    keys: ['__ACU_TEMPLATE_DATA__'],
+                    content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
+                }],
+            },
+        },
+    };
+    const guideState = { version: 2, tags: { '': { data: JSON.parse(JSON.stringify(r.template)), templateScopeMode: 'chat_override', reason: 'game_init' } } };
+    const chatMsg = { message_id: 0, mes: '首楼（被替换过）', name: 'System', is_user: false };
+    const fakeApi = applyingApi(tables);
+    const handlers = {};
+    const context = {
+        chatId: 'c-miss', name: '测试', chat: [chatMsg],
+        chat_metadata: { TavernDB_ACU_InternalSheetGuide: JSON.parse(JSON.stringify(guideState)) }, // 无 ScopedConfig
+        characters: [converted], characterId: 0,
+        extensionSettings: { mvu2shujuku: { debug: false } },
+        eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received', MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated', MESSAGE_EDITED: 'edited', MESSAGE_SENT: 'sent', MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {}, saveChatConditional: async () => {}, saveChat: async () => {},
+        updateChatMetadata: async () => {},
+        getRequestHeaders: () => ({}), setChatMessages: () => {},
+    };
+    const fakeEl = () => {
+        const el = {
+            dataset: {}, style: {}, children: [], _listeners: {}, _value: '',
+            addEventListener: (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); },
+            removeEventListener: () => {}, dispatchEvent: () => true,
+            appendChild: (c) => { el.children.push(c); return c; }, removeChild: () => {},
+            querySelector: () => fakeEl(), querySelectorAll: () => [],
+            click: () => {}, focus: () => {}, blur: () => {}, contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(el, 'innerHTML', { get: () => el._html || '', set: (v) => { el._html = v; } });
+        Object.defineProperty(el, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(el, 'value', { get: () => el._value, set: (v) => { el._value = v; } });
+        Object.defineProperty(el, 'checked', { get: () => !!el._checked, set: (v) => { el._checked = v; } });
+        Object.defineProperty(el, 'disabled', { get: () => !!el._disabled, set: (v) => { el._disabled = v; } });
+        return el;
+    };
+    const doc = {
+        querySelector: () => fakeEl(), getElementById: () => fakeEl(), createElement: () => fakeEl(),
+        createTextNode: () => fakeEl(), addEventListener: () => {}, body: fakeEl(),
+    };
+    const win = {
+        top: null, parent: null, document: doc, console,
+        setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t),
+        CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {}, toastr: undefined,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm2.createContext(win);
+    vm2.runInContext(extIndex, win);
+
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 3000));
+    assert.ok(chatMsg.TavernDB_ACU_InternalSheetGuide, '首楼应恢复 InternalSheetGuide（从 chat_metadata 拷回）');
+    assert.strictEqual(chatMsg.TavernDB_ACU_ScopedConfig, undefined, '作用域缺失时不得用转换器模板重建 ScopedConfig（防止两套 sheet key 冲突）');
+    assert.ok(context.chat_metadata.TavernDB_ACU_ScopedConfig === undefined, 'chat_metadata 也不应被写入转换器模板作用域');
+    assert.ok(win.__mvu2shujukuTemplateCache, '模板缓存存在（证明“不重建”是主动守卫而非缺材料）');
 });
 
 runTests();
