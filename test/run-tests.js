@@ -5393,7 +5393,7 @@ test('全新聊天运行时仅表头且无 checkpoint：读侧退回布局默认
         '全新聊天仅表头时主角表应返回布局默认值，实际=' + JSON.stringify(gv.stat_data.主角 && gv.stat_data.主角.姓名));
 });
 
-test('首楼替换清空运行时后开场注入仍完整落库：updateCell 越界时按布局补行并重写（道渊开场部分注入回归）', async () => {
+test('首楼替换清空运行时后开场注入仍完整落库：延迟重跑合并、不产生重复行（道渊开场部分注入回归）', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -5510,11 +5510,12 @@ test('首楼替换清空运行时后开场注入仍完整落库：updateCell 越
     await win.Mvu.replaceMvuData({ stat_data: {
         主角: { 姓名: '斯维姆', 性别: '男', 容貌: '相貌丑陋', 身形: '未知', 衣着: '未知', 境界: '凡人', 宗门: '无', 宗门贡献: 0 },
     } });
-    await new Promise(res => setTimeout(res, 1200));
+    // 等首次合并失败 → 延迟重跑合并（1.5s）→ 补行/重写全部完成
+    await new Promise(res => setTimeout(res, 3500));
     assert.ok(log.indexOf('clear') !== -1, '模拟首楼替换应真的清空过一次运行时');
     const zj = Object.values(tables).find(s => s && s.name === '主角表');
     const hdr = zj.content[0];
-    assert.strictEqual(zj.content.length, 2, '自愈后主角表应恢复单数据行');
+    assert.strictEqual(zj.content.length, 2, '自愈后主角表应恢复单数据行（不得产生多余重复行）');
     assert.strictEqual(zj.content[1][hdr.indexOf('姓名')], '斯维姆', '开场道号应落库');
     assert.strictEqual(zj.content[1][hdr.indexOf('性别')], '男', '开场性别应落库');
     assert.strictEqual(zj.content[1][hdr.indexOf('容貌')], '相貌丑陋', '开场容貌应落库');
