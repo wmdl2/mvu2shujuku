@@ -5919,6 +5919,19 @@ ${DB_INIT_SNIPPET}
                     } catch (e) {
                         dbgWarn(' 差异写入异常:', e && e.message ? e.message : e);
                     }
+                    // 确保本次写入的持久化帧已落盘：插件保存可能防抖/异步，切聊天前不落盘会丢最后写入，
+                    // 回放旧状态 → 前端读旧 → 写回默认值（“切换后还原”的直接来源）。只等待，不手工构造保存内容。
+                    try {
+                        const ctx2 = getContextSafe();
+                        const saveFn2 = (typeof ctx2.saveChatConditional === 'function' && ctx2.saveChatConditional.bind(ctx2)) ||
+                            (typeof ctx2.saveChat === 'function' && ctx2.saveChat.bind(ctx2)) ||
+                            (typeof window.saveChatConditional === 'function' ? window.saveChatConditional.bind(window) : null) ||
+                            (typeof window.saveChat === 'function' ? window.saveChat.bind(window) : null);
+                        if (saveFn2) {
+                            await Promise.resolve(saveFn2());
+                            dbg('[保存] 写库后已等待酒馆保存完成。');
+                        }
+                    } catch (eS) {}
                     // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
                     // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
                     const afterMvu = { stat_data: effectiveTarget, display_data: effectiveTarget, delta_data: {}, initialized_lorebooks: {} };
@@ -6045,9 +6058,8 @@ ${DB_INIT_SNIPPET}
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     return { stat_data: {}, display_data: {} };
                 }
-                // 运行时优先，但与持久化帧交叉校验：插件就绪后运行时即最新（含本次提交）。
-                // 若运行时与持久化帧不一致，且最近没有写入（>1.5s），说明运行时是插件回放未完成的旧值
-                // （切聊天/刷新空窗），此时以持久化帧（数据库真相）为准，防止前端“旧读→默认值→写回”。
+                // 运行时优先：插件就绪后运行时即插件完整回放的权威状态（含全部表与溢出字段）。
+                // 持久化重建只是空/跨卡窗口的兜底（row_upsert 只带单次写入状态，不保证完整，不能覆盖运行时）。
                 const cur = api.exportTableAsJson() || {};
                 let hasTables = false;
                 for (const k in cur) {
@@ -6069,20 +6081,6 @@ ${DB_INIT_SNIPPET}
                         }
                         dbg(' [切卡隔离] 运行时含跨卡残留表且无持久化帧，读取返回空。');
                         return { stat_data: {}, display_data: {} };
-                    }
-                } catch (e) {}
-                // 交叉校验：运行时 vs 持久化帧（按布局表内容指纹）
-                try {
-                    const persisted = readPersistedTableData();
-                    if (persisted) {
-                        const rtData = core.statDataFromTables(activeLayout, cur);
-                        const pdData = core.statDataFromTables(activeLayout, persisted);
-                        const rtFp = JSON.stringify(rtData.stat_data || {});
-                        const pdFp = JSON.stringify(pdData.stat_data || {});
-                        if (rtFp !== pdFp && (Date.now() - lastDbWriteAt > 1500)) {
-                            dbg(' [读侧纠偏] 运行时与持久化帧不一致（最近无写入），以数据库真相为准。');
-                            return pdData;
-                        }
                     }
                 } catch (e) {}
                 return core.statDataFromTables(activeLayout, api.exportTableAsJson());
