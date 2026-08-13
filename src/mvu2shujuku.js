@@ -4940,6 +4940,10 @@
             keptScripts.push(deepClone(s));
         }
         keptScripts.push({
+            // 必须带 type:'script'：酒馆助手（JS-Slash-Runner）用 zod discriminatedUnion
+            // 解析 tavern_helper.scripts，缺 type 会让整组脚本解析失败 → 角色脚本面板
+            // 完全不显示（没有弹窗、没有开关）。原版脚本都带 type:'script'。
+            type: 'script',
             name: opts.bridgeScriptName || `${data.name || '角色'}·数据库数据桥`,
             enabled: true,
             content: bridgeScript,
