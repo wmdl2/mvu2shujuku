@@ -358,6 +358,8 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     assert.ok(hub.sourceData.note.includes('它们仍存在于同一 JSON 中'), '更新守卫应说明未列出字段仍物理存在于同一 JSON');
     assert.ok(hub.sourceData.note.includes('未列出的字段一律只读'), '更新守卫应包含未列出字段只读');
     assert.ok(hub.sourceData.updateNode.includes('未列出字段一律只读'), 'JSON 表 updateNode 应包含只读守卫');
+    assert.ok(hub.sourceData.updateNode.includes('SQL示例: UPDATE'), 'JSON 表有可写规则时 updateNode 应含 SQL 示例');
+    assert.ok(hub.sourceData.updateNode.includes('WHERE row_id=1'), 'JSON 表更新示例应定位 row_id=1');
     assert.ok(hub.sourceData.ddl.includes('CHECK(json_valid(neirong))'), 'JSON 表内容列应有 json_valid CHECK（SQLite 模式生效）');
     const cash = Object.values(r.template).find(s => s && s.name === '现金表');
     assert.ok(cash.sourceData.note.includes('AI 不应直接修改本表'), '无规则的 JSON 表仍应保持只读');
@@ -1821,7 +1823,7 @@ test('空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删
     assert.strictEqual(taskEntry.kind, 'json', '空字典且无字段线索应生成整组 JSON 表');
     assert.strictEqual(opEntry.kind, 'json', '空字典且无字段线索应生成整组 JSON 表');
     const taskSheet = Object.values(r.template).find(s => s && s.name === '任务表');
-    assert.deepStrictEqual(taskSheet.content[0], ['row_id', '键名', '内容'], 'JSON 表头应为 row_id/键名/内容');
+    assert.deepStrictEqual(taskSheet.content[0], ['row_id', '内容'], 'JSON 表头应为 row_id/内容');
     assert.ok(!taskSheet.sourceData.note.includes('【列定义】'), 'JSON 表不应展示列定义');
     assert.ok(!taskSheet.sourceData.note.includes('【强制约束】'), 'JSON 表不应展示强制约束');
     assert.ok(taskSheet.sourceData.note.includes('AI 不应直接修改本表'), 'JSON 表应保留整组说明');
@@ -2021,7 +2023,7 @@ test('表结构校验：旧模板（同名表缺列）会被识别并重新导�
         setTimeout(() => {
             try {
                 assert.ok(initCalls >= 1 || importCalls >= 1, '旧模板缺列时应触发重新建表（initGameSession 或 importTemplateFromData）');
-                assert.deepStrictEqual(tables[taskKey].content[0], ['row_id', '键名', '内容'], '导入后任务表应恢复为键名+内容结构');
+                assert.deepStrictEqual(tables[taskKey].content[0], ['row_id', '内容'], '导入后任务表应恢复为内容+行结构');
                 resolve();
             } catch (e) { reject(e); }
         }, 100);

@@ -1587,17 +1587,10 @@
                         continue;
                     }
                     // 顶层标量（现金: 500 / 胜任度: 80 等）：值不能丢。
-                    // 按整组 JSON 表存（单行 内容 列），读取时原样还原为标量；AI 只允许按需 UPDATE。
+                    // 按整组 JSON 表存（单行 内容 列，无需键列——整组只有一个身份行），
+                    // 读取时原样还原为标量；AI 只允许按需 UPDATE。
                     const usedScalar = new Set(['row_id']);
                     const scalarColumns = [
-                        {
-                            zh: keyCol,
-                            path: [groupName, keyCol],
-                            value: groupName,
-                            desc: '唯一标识',
-                            type: 'TEXT',
-                            ident: toIdent(keyCol, usedScalar, 'column'),
-                        },
                         {
                             zh: '内容',
                             path: [groupName, '内容'],
@@ -1615,10 +1608,10 @@
                         tableName,
                         ident: toIdent(tableName, usedTableIdents, 'table'),
                         kind: 'json',
-                        keyCol,
-                        keyValue: groupName,
+                        keyCol: '',
+                        keyValue: '',
                         columns: scalarColumns,
-                        rows: [[1, groupName, scalarInit]],
+                        rows: [[1, scalarInit]],
                         childTables: [],
                         source: 'top-level-scalar',
                         reminders: ruleReminders[groupName] || [],
@@ -1647,17 +1640,9 @@
             const prefixPath = [groupName];
             if (kind === 'json') {
                 // 空字典组：运行期可能是“字典→对象 / 字典→标量 / 组本身是标量”等任意形状，
-                // 统一存成单行 JSON（内容列），读取时原样还原；不猜列名。
+                // 统一存成单行 JSON（内容列，无需键列——整组只有一个身份行），读取时原样还原；不猜列名。
                 const usedJson = new Set(['row_id']);
                 const columns = [
-                    {
-                        zh: keyCol,
-                        path: [groupName, keyCol],
-                        value: groupName,
-                        desc: '唯一标识',
-                        type: 'TEXT',
-                        ident: toIdent(keyCol, usedJson, 'column'),
-                    },
                     {
                         zh: '内容',
                         path: [groupName, '内容'],
@@ -1675,10 +1660,10 @@
                     tableName,
                     ident: toIdent(tableName, usedTableIdents, 'table'),
                     kind: 'json',
-                    keyCol,
-                    keyValue: groupName,
+                    keyCol: '',
+                    keyValue: '',
                     columns,
-                    rows: [[1, groupName, initial]],
+                    rows: [[1, initial]],
                     childTables: [],
                     source: 'initvar',
                     reminders: ruleReminders[groupName] || [],
@@ -2134,7 +2119,6 @@
         for (let i = 0; i < cols.length; i++) {
             const c = cols[i];
             const isKey = i === 0 && group.kind === 'rows';
-            const isSingletonKey = i === 0 && group.kind === 'json';
             let def = `  ${c.ident} ${c.type}`;
             const range = c.range || null;
             const extras = Array.isArray(group.extraAllowed && group.extraAllowed[c.ident]) ? group.extraAllowed[c.ident] : [];
@@ -2167,9 +2151,6 @@
                     for (const ex of extras) if (!allowed.includes(ex)) allowed.push(ex);
                     def += ` CHECK(${c.ident} IN (${allowed.map(v => `'${sqlQuote(v)}'`).join(', ')}))`;
                 }
-            }
-            if (isSingletonKey && group.keyValue) {
-                def = def.replace(/DEFAULT '[^']*'/, `DEFAULT '${sqlQuote(group.keyValue)}'`);
             }
             // 插件校验要求 DDL 列注释与 content 表头逐字一致，描述只写进 note，不拼进注释；
             // 末列不加逗号，否则 sql.js 拒绝建表（SQLite 运行时回退原生模式）。
@@ -2374,9 +2355,11 @@
     function buildNodeProse(group, kind) {
         if (group.kind === 'json') {
             if (kind === 'update') {
-                return ((group.wildcardRules || []).length || (group.groupChecks || []).length)
-                    ? '只更新当前 JSON 中实际存在的可写路径（见 note 的【可写路径与约束】【更新守卫】）；未列出字段一律只读，目标对象不存在时跳过，其余字段原样保留后整体写回；禁止整列清空或凭空重建。'
-                    : '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
+                if ((group.wildcardRules || []).length || (group.groupChecks || []).length) {
+                    const col = (group.columns || []).find(c => c.zh === '内容') || { ident: 'neirong', zh: '内容' };
+                    return `只允许 UPDATE（整组 JSON 固定 row_id=1，禁止 INSERT / DELETE）；正文明确造成字段变化时，按 note 中【可写路径与约束】只改实际存在的可写字段（未列出字段一律只读）、其余字段原样保留后整体写回。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = '{"可写键名":"新值"}' WHERE row_id=1;`;
+                }
+                return '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
             }
             return '禁止。';
         }
@@ -3093,7 +3076,7 @@
                 if (SE.kind === 'json') {
                     // 整组 JSON 表：身份行 + 内容列必须是合法 JSON（模板行可能为空串，
                     // 插件 SQLite 表带 CHECK json_valid(neirong)，空串/非 JSON 会被拒绝）
-                    if (!sObj[SE0.keyCol]) sObj[SE0.keyCol] = SE0.keyValue || 'row1';
+                    if (SE0.keyCol && !sObj[SE0.keyCol]) sObj[SE0.keyCol] = SE0.keyValue || 'row1';
                     const jv0 = sObj['内容'];
                     if (jv0 === undefined || jv0 === null || jv0 === '') sObj['内容'] = '{}';
                     else { try { JSON.parse(jv0); } catch (e) { sObj['内容'] = '{}'; } }
