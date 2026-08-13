@@ -4652,7 +4652,7 @@ test('diff 路径行表删除：显式空组=删除意图、组缺失才空组�
     assert.ok(n1 > 0, '非空组缺键应有写入');
     assert.strictEqual(deleted.length, 3, '应再调用一次 deleteRow');
     assert.strictEqual(deleted[0][0], '气运表', '删除目标表应为气运表');
-    assert.strictEqual(deleted[0][1], 1, '删除 rowIndex 应为 content 数据行索引 1');
+    assert.strictEqual(deleted[deleted.length - 1][1], 1, '单行删除 rowIndex 应为 content 数据行索引 1');
 });
 
 test('溢出列 _扩展数据 删除同步：stat_data 移除的动态字段不再残留', async () => {
@@ -6098,6 +6098,152 @@ test('运行时仅表头但持久化已有数据行时，补行必须跳过（�
     const next = { 主角: { 姓名: '斯维姆' } };
     await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, toLayout(r.schema), prev, next, persisted);
     assert.strictEqual(insertCalls, 0, '持久化已有主角表行时不得补行（否则造重复行 → 手动追平完整性校验失败）');
+});
+
+/* ---------------- 动态键字典（修仙秘闻式） ---------------- */
+
+test('[mvu_update] 动态键字典（{ [键]: value }）拆成子行表而非固定列，读回保持 {键: 值} 原形', () => {
+    const initvar = {
+        世界系统: {
+            当前时间: '巳时',
+            修仙秘闻: {
+                诡异阵纹: '阵道阁外多了一圈画歪的王八。',
+                半夜声响: '藏经阁半夜传出搓麻将的声音。',
+            },
+        },
+    };
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '动态字典卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: JSON.stringify(initvar) },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '--- 变量更新规则:',
+                            '  世界系统:',
+                            '    修仙秘闻:',
+                            '      type: |-',
+                            '        {',
+                            '          [秘闻简述: string]: string;',
+                            '        }',
+                            '      check:',
+                            '        - "每次生成4条秘闻，replace 整个对象"',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const layout = core.buildLayout(r.schema);
+    const e = layout.entries.find(x => x.table === '修仙秘闻表');
+    assert.ok(e, '应有修仙秘闻表（子行表）');
+    assert.strictEqual(e.kind, 'rows', '修仙秘闻应为行表');
+    assert.strictEqual(e.scalarValueCol, '描述', '标量条目应标记描述列');
+    const ws = layout.entries.find(x => x.table === '世界系统表');
+    assert.ok(ws.cols.every(c => c.zh !== '修仙秘闻诡异阵纹' && c.zh !== '修仙秘闻半夜声响'), '修仙秘闻不得展平成固定列');
+    const t = Object.values(r.template).find(s => s && s.name === '修仙秘闻表');
+    assert.deepStrictEqual(t.content[0], ['row_id', '条目名', '描述', '_扩展数据'], '修仙秘闻表头应为 条目名/描述');
+    // 读回保持 {键: 值} 原形（z.record(z.string(), z.string()) 兼容）
+    const lj = layout.entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        scalarValueCol: e.scalarValueCol || '',
+        cols: (e.cols || []).map(c => [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, e.kind === 'singleton' ? (c.path || []) : null, !!c.isPair, c.desc || '']),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const sd = core.statDataFromTables(lj, r.template).stat_data;
+    assert.deepStrictEqual(sd.世界系统.修仙秘闻, { 诡异阵纹: '阵道阁外多了一圈画歪的王八。', 半夜声响: '藏经阁半夜传出搓麻将的声音。' });
+    // 静态子对象（今日运势式，组内还有标量字段）仍展平为列
+    const card2 = { ...card, data: { ...card.data, name: '静态卡', character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify({ 世界系统: { 当前时间: '巳时', 今日运势: { 宜: '看潮', 忌: '翻地图' } } }) }] } } };
+    const r2 = core.convert(card2, { mode: 'both' });
+    const ws2 = core.buildLayout(r2.schema).entries.find(x => x.table === '世界系统表');
+    assert.ok(ws2.cols.some(c => c.zh === '今日运势宜') && ws2.cols.some(c => c.zh === '今日运势忌'), '固定子对象应展平为列');
+});
+
+test('无规则时按跨分支 <initvar> 键集变化识别动态键字典（兜底）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '分支动态卡',
+            description: '',
+            first_mes: '你好',
+            alternate_greetings: [
+                '<UpdateVariable>\n<initvar>\n世界系统:\n  当前时间: 巳时\n  修仙秘闻:\n    诡异阵纹: 分支A秘闻一\n    半夜声响: 分支A秘闻二\n</initvar>\n</UpdateVariable>',
+                '<UpdateVariable>\n<initvar>\n世界系统:\n  当前时间: 午时\n  修仙秘闻:\n    海图司账本: 分支B秘闻一\n    龙绡渡潮阵: 分支B秘闻二\n</initvar>\n</UpdateVariable>',
+            ],
+            character_book: { entries: [] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const e = core.buildLayout(r.schema).entries.find(x => x.table === '修仙秘闻表');
+    assert.ok(e && e.kind === 'rows', '跨分支键集不同应识别为行表');
+    const ws = core.buildLayout(r.schema).entries.find(x => x.table === '世界系统表');
+    assert.ok(ws.cols.every(c => c.zh.indexOf('修仙秘闻') !== 0), '修仙秘闻不得展平成固定列');
+});
+
+test('切换开场分支：动态字典行表整组替换（旧行删除、新行插入），读回为该分支初始值', async () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '分支替换卡',
+            description: '',
+            first_mes: '你好',
+            alternate_greetings: [
+                '<UpdateVariable>\n<initvar>\n世界系统:\n  当前时间: 巳时\n  修仙秘闻:\n    诡异阵纹: 分支A秘闻一\n    半夜声响: 分支A秘闻二\n</initvar>\n</UpdateVariable>',
+                '<UpdateVariable>\n<initvar>\n世界系统:\n  当前时间: 午时\n  修仙秘闻:\n    海图司账本: 分支B秘闻一\n    龙绡渡潮阵: 分支B秘闻二\n    贝壳风铃: 分支B秘闻三\n</initvar>\n</UpdateVariable>',
+            ],
+            character_book: { entries: [] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const layout = core.buildLayout(r.schema).entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        scalarValueCol: e.scalarValueCol || '',
+        cols: (e.cols || []).map(c => [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, e.kind === 'singleton' ? (c.path || []) : null, !!c.isPair, c.desc || '']),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const prev = core.statDataFromTables(layout, tables).stat_data;
+    const text2 = card.data.alternate_greetings[1];
+    const m = String(text2).match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
+    const parsed = core.parseInitVar(m[1]);
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        updateCell: async (t, ri, col, v) => {
+            const s = Object.values(tables).find(x => x && x.name === t);
+            if (s && s.content[ri]) { const ci = s.content[0].indexOf(col); if (ci >= 0) { s.content[ri][ci] = String(v); return true; } }
+            return false;
+        },
+        insertRow: async (t, obj) => {
+            const s = Object.values(tables).find(x => x && x.name === t);
+            if (!s) return 0;
+            const row = s.content[0].map(h => (obj && obj[h] !== undefined && obj[h] !== null) ? String(obj[h]) : '');
+            row[0] = s.content.length || 1;
+            s.content.push(row);
+            return row[0];
+        },
+        deleteRow: async (t, ri) => {
+            const s = Object.values(tables).find(x => x && x.name === t);
+            if (!s || !s.content[ri]) return false;
+            s.content.splice(ri, 1);
+            return true;
+        },
+    };
+    const n = await core.writeStatDiffToDb(fakeApi, layout, prev, parsed);
+    assert.ok(n > 0, '切换分支应产生差异写入');
+    const mxt = Object.values(tables).find(s => s && s.name === '修仙秘闻表');
+    const names = mxt.content.slice(1).map(r => r[1]).sort();
+    assert.deepStrictEqual(names, ['海图司账本', '贝壳风铃', '龙绡渡潮阵'], '修仙秘闻应整组替换为分支B条目');
+    const sd = core.statDataFromTables(layout, tables).stat_data;
+    assert.deepStrictEqual(sd.世界系统.修仙秘闻, { 海图司账本: '分支B秘闻一', 龙绡渡潮阵: '分支B秘闻二', 贝壳风铃: '分支B秘闻三' }, '读回应为分支B的 {键: 值}');
 });
 
 runTests();
