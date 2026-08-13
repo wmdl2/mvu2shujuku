@@ -4725,27 +4725,38 @@
             }
             report.note(`已解析 ${initEntries.length} 个 [initvar] 条目（合并）：顶层组 ${Object.keys(initvar).join('、') || '（空）'}。`);
         } else {
-            // MVU 规范：额外问候语中的 <initvar> 块会覆盖世界书 [InitVar]，也作为结构来源
+            // MVU 规范：额外问候语中的 <initvar> 块会覆盖世界书 [InitVar]，也作为结构来源。
+            // 注意 MVU 语义是“按分支替换”：每个分支（swipe）的 <initvar> 独立作为该分支的
+            // 初始状态，绝不合并。转换器只以首个含 <initvar> 的问候语为结构与初始值基准，
+            // 其余分支的初始化值由运行时按所选分支注入（见 applyActiveGreetingInitvar），
+            // 避免把多个分支的状态深合并成一张“缝合表”。
             const greetingSources = [data.first_mes, ...(Array.isArray(data.alternate_greetings) ? data.alternate_greetings : [])];
-            const blockRe = /<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/gi;
-            for (const g of greetingSources) {
-                let m;
-                while ((m = blockRe.exec(String(g || '')))) {
+            const branches = greetingSources.filter(g => /<initvar>/i.test(String(g || '')));
+            if (branches.length) {
+                const baseGreeting = branches[0];
+                // 用非全局正则拿捕获组（/g 的 match 只返回整串、不返回 group1）
+                const m = String(baseGreeting).match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
+                if (m) {
                     greetingBlockCount++;
-                    let parsed;
                     try {
-                        parsed = parseInitVar(m[1]);
+                        const parsed = parseInitVar(m[1]);
+                        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                            initvar = parsed;
+                        } else {
+                            report.warn('首个 <initvar> 分支解析结果不是对象，已跳过', 'schema');
+                        }
                     } catch (parseErr) {
-                        report.warn(`<initvar> 块解析失败，已跳过：${parseErr && parseErr.message ? parseErr.message : parseErr}`, 'schema');
-                        continue;
-                    }
-                    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                        initvar = deepMerge(initvar, parsed);
+                        report.warn(`首个 <initvar> 分支解析失败：${parseErr && parseErr.message ? parseErr.message : parseErr}`, 'schema');
                     }
                 }
             }
-            if (greetingBlockCount) {
-                report.note(`角色卡世界书未找到 [InitVar]，已改用额外问候语中的 ${greetingBlockCount} 个 <initvar> 块推导结构。`);
+            if (branches.length) {
+                report.note(
+                    `角色卡世界书未找到 [InitVar]，已改用额外问候语中的 ${branches.length} 个分支 <initvar> 推导结构；` +
+                    `以首个分支为基准（MVU 按分支替换、不合并），各分支初始化值在开局时按所选分支注入。`
+                );
+            } else if (greetingBlockCount) {
+                report.note(`已从额外问候语解析 ${greetingBlockCount} 个 <initvar> 块。`);
             }
         }
         if (!initEntries.length && Object.keys(initvar).length === 0) {
@@ -5624,6 +5635,8 @@ ${DB_INIT_SNIPPET}
                 // 不能立刻广播：插件回放/物化可能尚未完成，此刻 getAllVariables 可能返回空/旧值，
                 // 前端收到后重读会显示默认值并写回。等 stat_data 非空后再派发（见 scheduleDataReadyNotify）。
                 scheduleDataReadyNotify();
+                // 多分支开场：表格就绪后按当前激活分支注入其 <initvar>（MVU 按分支替换语义）
+                hostWindow.setTimeout(applyActiveGreetingInitvar, 300);
             }
         } catch (e) {
             console.warn('[mvu2shujuku] 开局自动建表异常：' + (e && e.message ? e.message : e));
@@ -5742,6 +5755,34 @@ ${DB_INIT_SNIPPET}
         hostWindow.setTimeout(() => { dispatch(); }, 6000);
     }
 
+    // 开场白多分支按所选分支注入初始化（MVU 语义：每个 swipe 的 <initvar> 独立替换初始状态）。
+    // 转换时只以首个分支为模板基准，这里在开局/换 swipe 时把“当前激活分支”的 <initvar>
+    // 写入数据库（覆盖模板初始行），避免多分支状态被合并。
+    let lastGreetingInitKey = '';
+    function applyActiveGreetingInitvar() {
+        try {
+            const ctx = getContextSafe();
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            const first = chat[0];
+            if (!first || first.is_user) return;
+            const text = String(first.mes != null ? first.mes : (first.message || ''));
+            const m = text.match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
+            if (!m) return;
+            const core = window.MVU2SHUJUKU_CORE;
+            if (!core || typeof core.parseInitVar !== 'function') return;
+            const parsed = core.parseInitVar(m[1]);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+            const swipeId = String(first.swipe_id == null ? 0 : first.swipe_id);
+            const key = autoInitChatId() + ':' + swipeId;
+            if (key === lastGreetingInitKey) return;
+            lastGreetingInitKey = key;
+            dbg('[开场分支] 按当前分支注入 <initvar>（swipe=' + swipeId + '，顶层组 ' + Object.keys(parsed).join('、') + '）。');
+            scheduleWindowStatOverlay(parsed);
+        } catch (e) {
+            dbgWarn(' 开场分支 <initvar> 注入失败:', e);
+        }
+    }
+
     function bindAutoInit(context) {
         const es = context && (context.eventSource || context.event_source);
         const et = context && (context.event_types || context.eventTypes);
@@ -5772,6 +5813,7 @@ ${DB_INIT_SNIPPET}
                     if (evName && typeof evName === 'string') {
                         es.on(evName, () => {
                             hostWindow.setTimeout(autoInitDatabase, 300);
+                            hostWindow.setTimeout(applyActiveGreetingInitvar, 1200);
                         });
                     }
                 }
@@ -19401,6 +19443,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 // 不能立刻广播：插件回放/物化可能尚未完成，此刻 getAllVariables 可能返回空/旧值，
                 // 前端收到后重读会显示默认值并写回。等 stat_data 非空后再派发（见 scheduleDataReadyNotify）。
                 scheduleDataReadyNotify();
+                // 多分支开场：表格就绪后按当前激活分支注入其 <initvar>（MVU 按分支替换语义）
+                hostWindow.setTimeout(applyActiveGreetingInitvar, 300);
             }
         } catch (e) {
             console.warn('[mvu2shujuku] 开局自动建表异常：' + (e && e.message ? e.message : e));
@@ -19519,6 +19563,34 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         hostWindow.setTimeout(() => { dispatch(); }, 6000);
     }
 
+    // 开场白多分支按所选分支注入初始化（MVU 语义：每个 swipe 的 <initvar> 独立替换初始状态）。
+    // 转换时只以首个分支为模板基准，这里在开局/换 swipe 时把“当前激活分支”的 <initvar>
+    // 写入数据库（覆盖模板初始行），避免多分支状态被合并。
+    let lastGreetingInitKey = '';
+    function applyActiveGreetingInitvar() {
+        try {
+            const ctx = getContextSafe();
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            const first = chat[0];
+            if (!first || first.is_user) return;
+            const text = String(first.mes != null ? first.mes : (first.message || ''));
+            const m = text.match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
+            if (!m) return;
+            const core = window.MVU2SHUJUKU_CORE;
+            if (!core || typeof core.parseInitVar !== 'function') return;
+            const parsed = core.parseInitVar(m[1]);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+            const swipeId = String(first.swipe_id == null ? 0 : first.swipe_id);
+            const key = autoInitChatId() + ':' + swipeId;
+            if (key === lastGreetingInitKey) return;
+            lastGreetingInitKey = key;
+            dbg('[开场分支] 按当前分支注入 <initvar>（swipe=' + swipeId + '，顶层组 ' + Object.keys(parsed).join('、') + '）。');
+            scheduleWindowStatOverlay(parsed);
+        } catch (e) {
+            dbgWarn(' 开场分支 <initvar> 注入失败:', e);
+        }
+    }
+
     function bindAutoInit(context) {
         const es = context && (context.eventSource || context.event_source);
         const et = context && (context.event_types || context.eventTypes);
@@ -19549,6 +19621,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     if (evName && typeof evName === 'string') {
                         es.on(evName, () => {
                             hostWindow.setTimeout(autoInitDatabase, 300);
+                            hostWindow.setTimeout(applyActiveGreetingInitvar, 1200);
                         });
                     }
                 }
