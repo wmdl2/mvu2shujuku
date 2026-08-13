@@ -1061,6 +1061,77 @@ test('转换后 tavern_helper 脚本必须带 type:script（酒馆助手 discrim
     }
 });
 
+test('多分支开场 <initvar> 只以首个分支为基准，不再合并所有分支状态', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '多分支卡',
+            description: '',
+            first_mes: '开场',
+            alternate_greetings: [
+                '<UpdateVariable>\n<initvar>\n主角:\n  修为: 筑基五层\n</initvar>\n</UpdateVariable>',
+                '<UpdateVariable>\n<initvar>\n主角:\n  修为: 金丹一层\n  灵石: 100\n</initvar>\n</UpdateVariable>',
+                '<UpdateVariable>\n<initvar>\n主角:\n  修为: 筑基九层\n</initvar>\n</UpdateVariable>',
+            ],
+            character_book: { entries: [] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const t = Object.values(r.template).find(s => s && s.name === '主角表');
+    assert.ok(t, '应有主角表');
+    assert.strictEqual(t.content.length - 1, 1, '模板初始行只有一行（不应把各分支合并）');
+    const ki = t.content[0].indexOf('修为');
+    assert.ok(ki >= 0, '应有修为列');
+    assert.strictEqual(t.content[1][ki], '筑基五层', '初始值应来自首个分支');
+});
+
+test('开局按当前分支注入 <initvar>：切到另一分支后表格更新为该分支初始值', async () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '多分支卡2',
+            description: '',
+            first_mes: '开场',
+            alternate_greetings: [
+                '<UpdateVariable>\n<initvar>\n主角:\n  修为: 筑基五层\n</initvar>\n</UpdateVariable>',
+                '<UpdateVariable>\n<initvar>\n主角:\n  修为: 金丹一层\n</initvar>\n</UpdateVariable>',
+            ],
+            character_book: { entries: [] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const byName = (n) => Object.keys(tables).find(k => tables[k].name === n);
+    const zjKey = byName('主角表');
+    const layout = core.buildLayout(r.schema).entries.map(e => ({
+        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    // 解析第二个分支的 <initvar> 并写库（对应 applyActiveGreetingInitvar）
+    const text2 = card.data.alternate_greetings[1];
+    const m = String(text2).match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
+    const parsed = core.parseInitVar(m[1]);
+    const prev = core.statDataFromTables(layout, tables).stat_data;
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        updateCell: async (t, ri, col, v) => {
+            const s = Object.values(tables).find(x => x && x.name === t);
+            if (s && s.content[ri]) { const ci = s.content[0].indexOf(col); if (ci >= 0) s.content[ri][ci] = v; }
+            return true;
+        },
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    const n = await core.writeStatDiffToDb(fakeApi, layout, prev, parsed);
+    assert.ok(n > 0, '应产生差异写入');
+    const zj = tables[zjKey];
+    const ki = zj.content[0].indexOf('修为');
+    assert.strictEqual(zj.content[1][ki], '金丹一层', '分支2注入后修为应为金丹一层');
+});
+
 test('行表条目内的空嵌套对象不再拆出每条目重复子表', () => {
     const card = {
         spec: 'chara_card_v3',
