@@ -5754,7 +5754,7 @@ ${DB_INIT_SNIPPET}
     // 开场白多分支按所选分支注入初始化（MVU 语义：每个 swipe 的 <initvar> 独立替换初始状态）。
     // 转换时只以首个分支为模板基准，这里在开局/换 swipe 时把“当前激活分支”的 <initvar>
     // 写入数据库（覆盖模板初始行），避免多分支状态被合并。
-    let lastGreetingInitKey = '';
+    let lastGreetingInitFp = '';
     function applyActiveGreetingInitvar() {
         try {
             const ctx = getContextSafe();
@@ -5768,18 +5768,62 @@ ${DB_INIT_SNIPPET}
             if (!core || typeof core.parseInitVar !== 'function') return;
             const parsed = core.parseInitVar(m[1]);
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
-            const swipeId = String(first.swipe_id == null ? 0 : first.swipe_id);
-            const key = autoInitChatId() + ':' + swipeId;
-            if (key === lastGreetingInitKey) return;
-            lastGreetingInitKey = key;
-            dbg('[开场分支] 按当前分支注入 <initvar>（swipe=' + swipeId + '，顶层组 ' + Object.keys(parsed).join('、') + '）。');
+            // 按内容指纹去重（不依赖 swipe_id）：前端用 setChatMessages 改写首楼时
+            // swipe_id 可能不变，只要 initvar 内容变了就重新注入。
+            let fp = '';
+            try { fp = JSON.stringify(parsed); } catch (e) { fp = ''; }
+            if (fp && fp === lastGreetingInitFp) return;
+            lastGreetingInitFp = fp;
+            dbg('[开场分支] 按当前分支注入 <initvar>（swipe=' + String(first.swipe_id == null ? 0 : first.swipe_id) + '，顶层组 ' + Object.keys(parsed).join('、') + '）。');
             scheduleWindowStatOverlay(parsed);
         } catch (e) {
             dbgWarn(' 开场分支 <initvar> 注入失败:', e);
         }
     }
 
+    // 前端开场白用 setChatMessages/setChatMessage 切换分支时，可能不触发 MESSAGE_SWIPED。
+    // 包一层这两个接口：首楼内容变化后自动按新分支注入初始化（applyActiveGreetingInitvar
+    // 用内容指纹去重，重复触发无副作用）。
+    let greetingWatcherInstalled = false;
+    function installGreetingSwipeWatcher() {
+        if (greetingWatcherInstalled) return;
+        greetingWatcherInstalled = true;
+        const wrap = (orig, host, key) => {
+            if (typeof orig !== 'function') return orig;
+            if (orig.__mvu2shujukuWrapped) return orig;
+            const wrapped = async function (...args) {
+                try { return await orig.apply(host || this, args); }
+                finally {
+                    hostWindow.setTimeout(applyActiveGreetingInitvar, 250);
+                }
+            };
+            try { wrapped.__mvu2shujukuWrapped = true; } catch (e) {}
+            return wrapped;
+        };
+        try {
+            const ctx = getContextSafe();
+            if (ctx && typeof ctx.setChatMessages === 'function') {
+                ctx.setChatMessages = wrap(ctx.setChatMessages, ctx, 'setChatMessages');
+            }
+        } catch (e) {}
+        try {
+            const ctx = getContextSafe();
+            if (ctx && typeof ctx.setChatMessage === 'function') {
+                ctx.setChatMessage = wrap(ctx.setChatMessage, ctx, 'setChatMessage');
+            }
+        } catch (e) {}
+        for (const w of [window, hostWindow]) {
+            try {
+                if (w && typeof w.setChatMessages === 'function') w.setChatMessages = wrap(w.setChatMessages, w, 'setChatMessages');
+            } catch (e) {}
+            try {
+                if (w && typeof w.setChatMessage === 'function') w.setChatMessage = wrap(w.setChatMessage, w, 'setChatMessage');
+            } catch (e) {}
+        }
+    }
+
     function bindAutoInit(context) {
+        installGreetingSwipeWatcher();
         const es = context && (context.eventSource || context.event_source);
         const et = context && (context.event_types || context.eventTypes);
         if (!es || !et || typeof es.on !== 'function') return;
