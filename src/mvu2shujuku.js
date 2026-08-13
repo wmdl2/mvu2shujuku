@@ -527,7 +527,7 @@
      * 解析 [mvu_update] 条目中的全部 MVU 规则（结构声明 + 数值范围 + 枚举 + 格式 + 强制更新提醒）。
      * 例如（组名与字段均为任意中文/含$名称）：
      *   组A:
-     *     type: "{ [条目名]: { 字段1, 字段2, ... } }"
+     *     type: "{ [键名]: { 字段1, 字段2, ... } }"
      *   组B:
      *     字段X:
      *       type: number
@@ -1557,7 +1557,7 @@
                 // 顶层非对象（数组/标量）：按数组表或行表处理
                 if (raw !== null) {
                     const tableName = makeGroupTableName(groupName);
-                    const keyCol = '条目名';
+                    const keyCol = '键名';
                     const isArray = Array.isArray(raw);
                     if (isArray) {
                         // 数组表的值列用「内容」（数组项本身）
@@ -1633,11 +1633,12 @@
             }
             seenTables.add(tableName);
 
-            // 键列名统一为「条目名」（键列存的是条目键，如 技能1/西园寺爱丽莎；
-            // 标量/JSON 表存的是组名）。不再用「名称」：条目自身也常带「名称」字段
+            // 键列名统一为「键名」（键列存的是 stat_data 对象字典里的键，
+            // 如 技能1/西园寺爱丽莎；标量/JSON 表存的是组名）。
+            // 不再用「名称」：条目自身也常带「名称」字段
             // （如 技能1: { 名称: 未获得 }），键列若叫「名称」会与字段重名导致表头重复。
-            const keyCol = '条目名';
-            let rowsKeyCol = '条目名';
+            const keyCol = '键名';
+            let rowsKeyCol = '键名';
             const childTables = [];
             const prefixPath = [groupName];
             if (kind === 'json') {
@@ -1745,7 +1746,7 @@
                 const shapeFields = (shapes[groupName] || []).filter(f => f !== rowsKeyCol);
                 const allFields = [...new Set([...shapeFields, ...usageFields, ...fieldOrder])];
                 columns.length = 0;
-                columns.push({ zh: rowsKeyCol, path: [groupName], value: '', desc: '条目名称（字典键，如 技能1）', type: 'TEXT', ident: toIdent(rowsKeyCol, new Set(['row_id']), 'column') });
+                columns.push({ zh: rowsKeyCol, path: [groupName], value: '', desc: '', type: 'TEXT', ident: toIdent(rowsKeyCol, new Set(['row_id']), 'column') });
                 const used = new Set(['row_id', columns[0].ident.toLowerCase()]);
                 for (const f of allFields) {
                     columns.push({
@@ -1897,10 +1898,10 @@
         for (const g of groups) {
             for (const ct of g.childTables) {
                 const tableName = makeGroupTableName(ct.key);
-                const rowsKeyCol = '条目名';
+                const rowsKeyCol = '键名';
                 const usageFields = (usage[ct.key] || []).filter(f => f !== rowsKeyCol);
                 const shapeFields = (shapes[ct.key] || []).filter(f => f !== rowsKeyCol);
-                const columns = [{ zh: rowsKeyCol, path: [...ct.path], value: '', desc: '条目名称（字典键）', type: 'TEXT', ident: toIdent(rowsKeyCol, new Set(['row_id']), 'column') }];
+                const columns = [{ zh: rowsKeyCol, path: [...ct.path], value: '', desc: '', type: 'TEXT', ident: toIdent(rowsKeyCol, new Set(['row_id']), 'column') }];
                 const used = new Set(['row_id', columns[0].ident.toLowerCase()]);
                 const fieldOrder = [];
                 const entryRows = [];
@@ -2185,7 +2186,7 @@
         if (group.kind === 'array') {
             return '数组表：每行一个数组元素，行号即数组顺序；新增元素用 INSERT，移除用 DELETE，修改用 UPDATE。';
         }
-        return `条目表，以「${group.keyCol}」为唯一标识；同名记录只存在一行，更新用 UPDATE，新增用 INSERT。`;
+        return `行表，以「${group.keyCol}」为唯一标识；同名记录只存在一行，更新用 UPDATE，新增用 INSERT。`;
     }
 
     function buildNote(group) {
@@ -2250,9 +2251,9 @@
                 if (c.enum) parts.push(`可选值：${c.enum.join(' / ')}`);
                 if (c.format) parts.push(`格式要求：${String(c.format).replace(/\n/g, ' ')}`);
                 if (c.isObject) parts.push('对象以 JSON 存储，读取时还原');
-                // 真实字段说明（如 [值,说明] 的更新条件）；通用描述（唯一标识/条目名称/JSON 提示）不重复
+                // 真实字段说明（如 [值,说明] 的更新条件）；通用描述（唯一标识/键名/JSON 提示）不重复
                 const desc = c.desc ? String(c.desc).replace(/\n/g, ' ').trim() : '';
-                const generic = desc === '唯一标识' || desc === '条目名称' || desc === '对象（JSON 存储，读取时还原）';
+                const generic = desc === '唯一标识' || desc === '对象（JSON 存储，读取时还原）';
                 if (desc && !generic) parts.push(desc);
                 if (parts.length) L.push(`- ${c.zh}：${parts.join('；')}`);
                 for (const rule of (c.check || []).map(sanitizeCheckRule).filter(Boolean)) L.push(`- ${c.zh}：${rule}`);
@@ -2410,7 +2411,7 @@
         };
         const keyValue = (sampleRow && sampleRow[1] !== undefined && String(sampleRow[1]) !== '')
             ? `'${sqlQuote(sampleRow[1])}'`
-            : "'条目名'";
+            : "'键名'";
         // 示例列排除内部溢出列（_扩展数据）与下划线只读字段：AI 不应直接修改
         const exampleCols = group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
         const allIdents = exampleCols.map(c => c.ident);
@@ -2418,7 +2419,7 @@
         if (kind === 'update') {
             const updCol = exampleCols[1] || exampleCols[0];
             const updVal = updCol ? exampleUpdateValue(updCol) : "'新值'";
-            return `正文中对应条目的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${updVal} WHERE ${keyIdent} = ${keyValue};`;
+            return `正文中对应记录的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${updVal} WHERE ${keyIdent} = ${keyValue};`;
         }
         if (kind === 'insert') {
             // 完整列示例：全部列都列出，列数与 VALUES 一一对应；
