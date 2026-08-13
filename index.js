@@ -565,6 +565,12 @@
         const wildcardFields = new Set();
         const wildcardRules = {};
         const numericFields = new Set();
+        // 动态键字典（来自 [mvu_update] type 声明的 { [键: type]: value }，如
+        // 修仙秘闻 / 个人背包 / 修仙八卦论坛）：这类字段的条目键是运行期内容，
+        // 转换时拆成子行表，不能展平成固定列（不同分支的键完全不同，固定列会丢数据）。
+        const dynamicDicts = {};
+        const dynamicPaths = new Set();
+        const dynamicGroups = new Set();
         const allContents = [];
         const allCheckItems = [];
         for (const e of entries) {
@@ -657,7 +663,8 @@
                         if (rangeM) numericFields.add(fn);
                     }
                     const typeLine = block.match(/type\s*:\s*"([\s\S]*?)"\s*$/m);
-                    const typeBlock = block.match(/type\s*:\s*\|-?\s*\n([\s\S]*?)(?=\n\s*\S|$)/);
+                    const typeBlockRaw = extractYamlBlockScalar(block, 'type');
+                    const typeBlock = typeBlockRaw === null ? null : { 1: typeBlockRaw };
                     if (typeLine) {
                         const parsed = parseShapeString(typeLine[1]);
                         if (parsed) {
@@ -673,6 +680,13 @@
                                 objects[group] = objects[group] || {};
                                 objects[group][field] = true;
                             }
+                            // 动态键字典声明（{ [键: type]: value }）：记录 组→字段，
+                            // 供 buildSchema/collectColumns 把该字段拆成子行表。
+                            if (parsed.dynamicTop || (parsed.dynamic && parsed.dynamic.length)) {
+                                dynamicDicts[group] = dynamicDicts[group] || {};
+                                if (parsed.dynamicTop) dynamicDicts[group][field] = true;
+                                for (const df of parsed.dynamic || []) dynamicDicts[group][df] = true;
+                            }
                         }
                     } else if (typeBlock) {
                         const parsed = parseShapeString(typeBlock[1]);
@@ -684,12 +698,18 @@
                                 objects[target] = objects[target] || {};
                                 for (const obj of parsed.objects) objects[target][obj] = true;
                             }
+                            if (parsed.dynamicTop || (parsed.dynamic && parsed.dynamic.length)) {
+                                dynamicDicts[group] = dynamicDicts[group] || {};
+                                if (parsed.dynamicTop) dynamicDicts[group][field] = true;
+                                for (const df of parsed.dynamic || []) dynamicDicts[group][df] = true;
+                            }
                         }
                     }
                     // format 支持三种写法：块标量（|-）、引号单行、无引号单行
                     // （官方参考里有无引号写法，如 format: YYYY年MM月DD日 星期X HH:MM）
                     const formatValue = (() => {
-                        const blk = block.match(/format\s*:\s*[|>]-?\s*\n([\s\S]*?)(?=\n {4}[^ \n-][^\n:]{0,23}?[ \t]*:|\n {2}\S|$)/);
+                        const fmtRaw = extractYamlBlockScalar(block, 'format');
+                        const blk = fmtRaw === null ? null : { 1: fmtRaw };
                         if (blk) {
                             const lines = String(blk[1]).split('\n');
                             const ind = lines.filter(l => l.trim()).reduce((min, l) => {
@@ -760,6 +780,9 @@
                     for (const f2 of parsed.fields) if (!shapes[group].includes(f2)) shapes[group].push(f2);
                     if (parsed.objects.length) objects[group] = objects[group] || {};
                     for (const objField of parsed.objects) objects[group][objField] = true;
+                    // 组本身声明为动态键字典（组 type: { [键: type]: {...} }）：
+                    // 顶层组按条目行表转换，不能当单例/固定字段表。
+                    if (parsed.dynamicTop) dynamicGroups.add(group);
                 }
             }
         }
@@ -823,7 +846,55 @@
                 }
             }
         }
-        return { shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, wildcardFields, wildcardRules, numericFields };
+        return { shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups };
+    }
+
+    /**
+     * 扫描所有开场分支的 <initvar> 键集变化，识别“动态键字典”：
+     * 同一个嵌套路径在不同分支里键完全不同（如 世界系统.修仙秘闻 分支 A 是
+     * 诡异阵纹/半夜声响，分支 B 是 海图司账本会游泳/龙绡渡潮阵认鞋），说明该路径是
+     * 条目字典而非固定字段，展平成固定列会在按分支注入时丢数据。作为 [mvu_update]
+     * 动态声明之外的通用兜底（无规则/规则未声明动态键的卡也能正确转换）。
+     */
+    function scanGreetingShapeVariation(data) {
+        const dynamicPaths = new Set();
+        const dynamicGroups = new Set();
+        const sources = [data.first_mes, ...(Array.isArray(data.alternate_greetings) ? data.alternate_greetings : [])];
+        const parsedList = [];
+        for (const g of sources) {
+            const m = String(g || '').match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
+            if (!m) continue;
+            try {
+                const p = parseInitVar(m[1]);
+                if (p && typeof p === 'object' && !Array.isArray(p)) parsedList.push(p);
+            } catch (e) {}
+        }
+        if (parsedList.length < 2) return { dynamicPaths, dynamicGroups };
+        const keySets = new Map(); // path -> Map<keySetStr, count>
+        const walk = (obj, path) => {
+            for (const k of Object.keys(obj)) {
+                const v = obj[k];
+                if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+                const p = path.concat([k]);
+                const keyStr = Object.keys(v).sort().join('\u0000');
+                const pStr = p.join('.');
+                if (!keySets.has(pStr)) keySets.set(pStr, new Map());
+                const m2 = keySets.get(pStr);
+                m2.set(keyStr, (m2.get(keyStr) || 0) + 1);
+                walk(v, p);
+            }
+        };
+        for (const p of parsedList) walk(p, []);
+        for (const [pStr, m2] of keySets) {
+            if (m2.size > 1) {
+                // 只标记嵌套路径（深度≥2）为动态键字典：顶层组的键集差异更可能是
+                // “可选字段”（如 主角.{修为, 灵石?} 分支间字段略不同），而不是条目字典，
+                // 误判成行表会破坏单例结构。顶层动态组由 [mvu_update] 的 { [键]: value }
+                // 声明负责（见 parseMvuShapes 的 dynamicGroups）。
+                if (pStr.indexOf('.') >= 0) dynamicPaths.add(pStr);
+            }
+        }
+        return { dynamicPaths, dynamicGroups };
     }
 
     // 从 YAML 片段提取 “- xxx” 列表项
@@ -981,10 +1052,16 @@
         let depth = 0;
         const fields = [];
         const objects = [];
+        const dynamic = [];
         let i = 0;
         let buf = '';
         let inBracket = false;
         let hasDynamicKey = false;
+        // 当前正在解析其值对象的 depth-1 字段（如 世界系统 类型里的 修仙秘闻）；
+        // 若该值对象内部以动态键 [xxx: type] 开头，则该字段本身是动态键字典，
+        // 不能展平成固定列，应由 collectColumns 拆成子行表。
+        let pendingField = null;
+        let pendingFieldDynamic = false;
         const collectDepth = () => (hasDynamicKey ? 2 : 1);
         function flushField() {
             const t = buf.trim();
@@ -1006,14 +1083,33 @@
                     } else if (key && /^[\u4e00-\u9fff]{1,12}$/.test(key) && depth >= collectDepth()) {
                         if (!fields.includes(key)) fields.push(key);
                         if (!objects.includes(key)) objects.push(key);
+                        if (depth === 1) {
+                            pendingField = key;
+                            pendingFieldDynamic = false;
+                        }
                     }
                     buf = '';
+                } else {
+                    pendingField = null;
+                    pendingFieldDynamic = false;
                 }
                 depth++;
                 continue;
             }
             if (ch === '}') {
+                const inner = buf.trim();
                 if (depth === collectDepth()) flushField();
+                // 离开某个值对象时判定它是否为动态键字典（{ [键: type]: value }）：
+                //  - depth 2：字段的值对象内部（如 修仙秘闻: { [秘闻简述: string]: string; }）
+                //  - depth 1：整个 shape 字符串顶层（如 组 type: { [道具名: string]: {...} }）
+                if (depth === 2) {
+                    if (/^\[.*?\]\s*:/.test(inner)) pendingFieldDynamic = true;
+                } else if (depth === 1) {
+                    if (pendingField && pendingFieldDynamic && !dynamic.includes(pendingField)) dynamic.push(pendingField);
+                    pendingField = null;
+                    pendingFieldDynamic = false;
+                    if (!hasDynamicKey && /^\[.*?\]\s*:/.test(inner)) hasDynamicKey = true;
+                }
                 depth = Math.max(0, depth - 1);
                 if (depth === 0) {
                     break;
@@ -1030,7 +1126,28 @@
             buf += ch;
         }
         if (depth === collectDepth()) flushField();
-        return { fields, objects };
+        return { fields, objects, dynamic, dynamicTop: hasDynamicKey };
+    }
+
+    // 从字段块中提取 YAML 块标量（type: |- / format: |）的内容。
+    // 旧正则遇到缩进块会在第一行内容（如 "        {"）处被 (?=\n\s*\S) 提前截断，
+    // 导致动态键声明（{ [x: string]: ... }）的内容丢失。这里按行缩进正确截断：
+    // 内容行必须比 type/format 行缩进更深；遇到同级或更浅的 YAML 键行
+    // （如 check:/format:/下一字段）即结束。
+    function extractYamlBlockScalar(text, key) {
+        const re = new RegExp('(?:^|\\n)([ \\t]*)' + String(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*[|>]-?\\s*\\n');
+        const m = re.exec(String(text || ''));
+        if (!m) return null;
+        const indent = m[1].length;
+        const rest = String(text).slice(m.index + m[0].length);
+        const lines = rest.split('\n');
+        const out = [];
+        for (const ln of lines) {
+            const km = ln.match(/^([ \t]*)([^\s:][^\n:]*)\s*:/);
+            if (km && km[1].length <= indent) break;
+            out.push(ln);
+        }
+        return out.join('\n');
     }
 
     function cardTextBlobs(card) {
@@ -1248,6 +1365,21 @@
             const values = Object.values(v);
             const allLeaf = values.length > 0 && values.every(x => isLeaf(x));
             const allObject = values.length > 0 && values.every(x => isPlainObject(x));
+            // 动态键字典（[mvu_update] 声明 { [键]: value }，或跨分支键集不同）：
+            // 条目键是运行期内容，不能展平成固定列（如 世界系统.修仙秘闻 每分支键完全不同，
+            // 固定列会在按分支注入时丢数据）→ 子行表，读回时保持 {键: 值} 原形。
+            const dyn = opts.isDynamicPath ? opts.isDynamicPath(path) : false;
+            if (dyn) {
+                if (String(key).startsWith('_')) {
+                    const jcol = jsonColumnFromObject(key, v, path, usedIdents);
+                    if (jcol) cols.push(jcol);
+                } else if (opts.childTables) {
+                    opts.childTables.push({ key, value: v, path, dynamic: true });
+                } else {
+                    report.warn(`发现动态键字典「${key}」，需拆分为子行表（当前未启用子表提取）`, 'schema');
+                }
+                continue;
+            }
             if (allLeaf) {
                 // 固定子对象 → 展平：key+子键
                 for (const subKey of Object.keys(v)) {
@@ -1349,13 +1481,30 @@
         const ruleChecks = (shapeInfo && shapeInfo.checks) || {};
         const ruleReminders = (shapeInfo && shapeInfo.reminders) || {};
         const ruleNumeric = (shapeInfo && shapeInfo.numericFields) || new Set();
+        // 动态键字典：来自 [mvu_update] 的 { [键: type]: value } 声明（dynamicDicts），
+        // 或跨分支 <initvar> 键集变化（dynamicPaths/dynamicGroups）。
+        const dynamicDicts = (shapeInfo && shapeInfo.dynamicDicts) || {};
+        const dynamicPaths = (shapeInfo && shapeInfo.dynamicPaths) || new Set();
+        const dynamicGroups = (shapeInfo && shapeInfo.dynamicGroups) || new Set();
+        const isDynamicPath = (pathArr) => {
+            if (!Array.isArray(pathArr) || !pathArr.length) return false;
+            if (dynamicPaths.has(pathArr.join('.'))) return true;
+            if (pathArr.length >= 2 && dynamicDicts[pathArr[0]] && dynamicDicts[pathArr[0]][pathArr[1]]) return true;
+            return false;
+        };
         const groupNameSet = new Set(Object.keys(initvar));
 
         // 通用表种类推导：
         //  - 组自身有直接标量字段 → 单例（嵌套对象是子对象字段，如 主角.炼丹.阶级）
         //  - 无直接标量字段且全部为对象 → 条目字典 → 行表（如 道侣.{林若悠:{亲密:88}}）
         //  - 空字典 / 数组 → 行表 / 数组表
+        //  - 动态键字典（声明的 { [键]: value } 或跨分支键集不同）→ 行表：条目键是
+        //    运行期内容，固定列会丢数据（如 修仙秘闻 每分支键完全不同）。
         function deriveKind(groupName, raw) {
+            if (dynamicGroups.has(groupName) || isDynamicPath([groupName])) {
+                report.note(`顶层组「${groupName}」为动态键字典（键是运行期条目），按条目行表转换。`);
+                return 'rows';
+            }
             const values = Object.values(raw);
             if (values.length === 0) {
                 // 状态栏/规则扫描到字段 → 仍可按字段建行表；完全无字段信息 → 整组 JSON（任意形状还原）
@@ -1370,7 +1519,22 @@
             }
             const leaves = values.filter(v => isLeaf(v)).length;
             if (leaves > 0) return 'singleton';
-            if (values.every(v => isPlainObject(v))) return 'rows';
+            if (values.every(v => isPlainObject(v))) {
+                // 全对象：区分“条目字典”（行表）与“固定子对象”（单例嵌套字段）。
+                // 条目字典：各条目共享至少一个字段（如 道侣.{林若悠:{亲密,种族},
+                // 苏媚:{…}}；条目字段可有可选缺省，如 林若悠 只有亲密）；
+                // 固定子对象：各子对象字段完全不同（如 主角状态.{修为:{…},
+                // 灵石钱包:{…}}——修为/灵石钱包应是单例的嵌套字段列，而不是行条目）。
+                let common = null;
+                for (const v of values) {
+                    const ks = new Set(Object.keys(v));
+                    if (common === null) common = new Set(ks);
+                    else { for (const k of [...common]) if (!ks.has(k)) common.delete(k); }
+                }
+                if (common !== null && common.size > 0) return 'rows';
+                report.note(`顶层组「${groupName}」为多个不同结构的子对象，按单例处理（子对象展平/拆子表，修为/灵石钱包类字段不再变成行）。`);
+                return 'singleton';
+            }
             return 'singleton';
         }
 
@@ -1524,9 +1688,12 @@
             // 不从顶层收集子表，避免“每角色一张字段相同的重复表”。
             const columns = kind === 'rows'
                 ? []
-                : collectColumns(raw, prefixPath, report, { childTables });
+                : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath });
 
             let rows = [];
+            // 标量条目（如 修仙秘闻: { 标题: 内容 }）的行表标记：读回时还原为 {键: 标量}，
+            // 写入时标量落在「描述/数值」列而不是被当成列名查找。
+            let rowsScalarValueCol = '';
             if (kind === 'rows') {
                 // 条目字典 → 每条目一行
                 const fieldOrder = [];
@@ -1599,6 +1766,12 @@
                 }
                 if (sawScalarEntries) {
                     const scalarZh = scalarIsNumber ? '数值' : '描述';
+                    rowsScalarValueCol = scalarZh;
+                    // 标量条目的值补进「描述/数值」列（此前 r.value 只挂在内存里，
+                    // 建行时取 r[列名] 取不到，值会静默丢失）。
+                    for (const r of entryRows) {
+                        if (r.__scalar) r[scalarZh] = r.value;
+                    }
                     if (!columns.some(c => c.zh === scalarZh)) {
                         columns.push({
                             zh: scalarZh,
@@ -1720,6 +1893,7 @@
                 childTables,
                 source: 'initvar',
                 reminders: ruleReminders[groupName] || [],
+                scalarValueCol: kind === 'rows' ? rowsScalarValueCol : '',
             });
         }
 
@@ -1736,6 +1910,9 @@
                 const entryRows = [];
                 let sawScalarEntries = false;
                 let scalarIsNumber = false;
+                // 标量条目（如 世界系统.修仙秘闻: { 标题: 内容 }）的行表标记：
+                // 读回时还原为 {键: 标量}，写入时标量落在「描述/数值」列。
+                let ctScalarValueCol = '';
                 if (isPlainObject(ct.value)) {
                     for (const entryName of Object.keys(ct.value)) {
                         const entry = ct.value[entryName];
@@ -1778,6 +1955,12 @@
                 });
                 if (sawScalarEntries) {
                     const scalarZh = scalarIsNumber ? '数值' : '描述';
+                    ctScalarValueCol = scalarZh;
+                    // 标量条目的值补进「描述/数值」列（此前只挂在 r.value 上，
+                    // 建行时取 r[列名] 取不到，值会静默丢失）。
+                    for (const r of entryRows) {
+                        if (r.__scalar) r[scalarZh] = r.value;
+                    }
                     if (!columns.some(c => c.zh === scalarZh)) {
                         columns.push({
                             zh: scalarZh,
@@ -1828,6 +2011,7 @@
                     source: 'child-table',
                     parentGroup: g.name,
                     reminders: ruleReminders[ct.key] || [],
+                    scalarValueCol: ctScalarValueCol,
                 });
             }
         }
@@ -2431,6 +2615,7 @@
                     desc: c.desc || '',
                 })),
                 writePaths,
+                scalarValueCol: g.scalarValueCol || '',
             };
             entries.push(entry);
             const colNames = g.columns.map(c => c.zh);
@@ -2465,6 +2650,7 @@
             table: e.table,
             keyCol: e.keyCol || '',
             keyValue: e.keyValue || '',
+            scalarValueCol: e.scalarValueCol || '',
             cols: (e.cols || []).map(c => e.kind === 'singleton'
                 ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
                 : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || '']),
@@ -2558,6 +2744,15 @@
                     if (!rw2) continue;
                     const kv = keyIdx >= 0 ? rw2[keyIdx] : undefined;
                     if (kv === undefined || kv === null || kv === '') continue;
+                    // 标量条目行表（如 修仙秘闻: { 标题: 内容 }）：读回 {键: 标量}，
+                    // 保持与 MVU 原 shape 一致（前端 zod 声明 z.record(z.string(), z.string())）。
+                    if (L.scalarValueCol) {
+                        const svc = (L.cols || []).find(c => c[0] === L.scalarValueCol);
+                        const svIdx = svc ? header.indexOf(svc[0]) : -1;
+                        const sv = svIdx >= 0 ? rw2[svIdx] : undefined;
+                        dict[text(kv)] = svc ? convertCell(svc[1], sv, svc[2], svc[5]) : (sv === undefined || sv === null ? '' : String(sv));
+                        continue;
+                    }
                     const item = {};
                     for (let j2 = 0; j2 < (L.cols || []).length; j2++) {
                         const c2 = L.cols[j2];
@@ -3047,7 +3242,11 @@
                     // 会按业务键去重，不会重复；快照兜底已删，跳过 = 永远落不了库）
                     // 同一新行的多个字段合并为一条 INSERT，避免重复 INSERT 撞 UNIQUE
                     let colZh = parts[parts.length - 1];
-                    if (header.indexOf(colZh) === -1) {
+                    if (L.scalarValueCol && parts.length === E.prefix.length + 1) {
+                        // 标量条目（如 修仙秘闻 的 {标题: 内容}）：值落在「描述/数值」列，
+                        // 而不是把条目键当成列名。
+                        colZh = L.scalarValueCol;
+                    } else if (header.indexOf(colZh) === -1) {
                         // 展平容器路径（如 主角.炼丹.熟练度 → 炼丹熟练度 列）
                         for (const c of (L.cols || [])) {
                             const cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
@@ -3067,6 +3266,12 @@
             if (rowIndex < 0 && !newRowArr) continue;
             let colZh = parts[parts.length - 1];
             let colIdx = header.indexOf(colZh);
+            if (L.scalarValueCol && parts.length === E.prefix.length + 1) {
+                // 标量条目（如 修仙秘闻 的 {标题: 内容}）：值落在「描述/数值」列，
+                // 而不是把条目键当成列名。
+                colZh = L.scalarValueCol;
+                colIdx = header.indexOf(colZh);
+            }
             if (colIdx === -1) {
                 // 展平容器路径（如 主角.炼丹.熟练度 → 炼丹熟练度 列）
                 for (const c of (L.cols || [])) {
@@ -3106,6 +3311,12 @@
             resolved.push({ kind: 'cell', key: nr.table, sheet: null, header: nr.header, layout: nr.layout, rowIndex: -1, colIdx: -1, colZh: '', value: undefined, newRowArr: arr, newRowObj: obj });
         }
         if (resolved.length === 0 && directOps.length === 0) return 0;
+        // 多行删除时，先删的行会让后续行索引前移：按行索引降序执行删除，
+        // 避免整组替换行表（如切换开场分支）时误删其他行。
+        resolved.sort((a, b) => {
+            if (a.kind === 'row-delete' && b.kind === 'row-delete') return (b.rowIndex || 0) - (a.rowIndex || 0);
+            return 0;
+        });
 
         // 逐条写入（对齐参考卡原生 CRUD）：updateCell/insertRow/deleteRow → 插件持久化为
         // row_upsert/row_delete 操作，回放确定性恢复。不使用 executeSqlBatch——那会存成
@@ -4782,6 +4993,21 @@
         report.note(`状态栏/脚本字段扫描：${Object.keys(usage).map(g => `${g}(${usage[g].length})`).join('、') || '无'}。`);
 
         const shapeInfo = parseMvuShapes(card);
+        // 多分支兜底：即使 [mvu_update] 未声明动态键，也按各分支 <initvar> 的键集差异
+        // 识别动态键字典（如 世界系统.修仙秘闻），避免固定列在按分支注入时丢数据。
+        try {
+            const gv = scanGreetingShapeVariation(data);
+            for (const dp of gv.dynamicPaths) shapeInfo.dynamicPaths.add(dp);
+            for (const dg of gv.dynamicGroups) shapeInfo.dynamicGroups.add(dg);
+            if (shapeInfo.dynamicPaths.size || Object.keys(shapeInfo.dynamicDicts || {}).length) {
+                const dynDescs = [];
+                for (const g of Object.keys(shapeInfo.dynamicDicts || {})) {
+                    for (const f of Object.keys(shapeInfo.dynamicDicts[g])) dynDescs.push(`${g}.${f}`);
+                }
+                for (const p of shapeInfo.dynamicPaths) if (!dynDescs.includes(p)) dynDescs.push(p);
+                report.note(`已识别动态键字典（条目键为运行期内容，按子行表转换）：${dynDescs.join('、')}。`);
+            }
+        } catch (e) {}
         if (Object.keys(shapeInfo.shapes).length) {
             report.note(`已从 [mvu_update] 结构声明解析列：${Object.keys(shapeInfo.shapes).map(g => `${g}(${shapeInfo.shapes[g].length})`).join('、')}。`);
         }
@@ -5637,6 +5863,7 @@ ${DB_INIT_SNIPPET}
                 scheduleDataReadyNotify();
                 // 多分支开场：表格就绪后按当前激活分支注入其 <initvar>（MVU 按分支替换语义）
                 hostWindow.setTimeout(applyActiveGreetingInitvar, 300);
+                startGreetingInitvarPoll();
             }
         } catch (e) {
             console.warn('[mvu2shujuku] 开局自动建表异常：' + (e && e.message ? e.message : e));
@@ -5774,12 +6001,16 @@ ${DB_INIT_SNIPPET}
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
             // 按内容指纹去重（不依赖 swipe_id）：前端用 setChatMessages 改写首楼时
             // swipe_id 可能不变，只要 initvar 内容变了就重新注入。
+            // 指纹只在写入真正落定后提交：若写入被丢弃/失败（如表格未就绪、运行时被清空），
+            // 保留旧指纹让 2s 轮询继续重试，避免“分支值永远不注入”。
             let fp = '';
             try { fp = JSON.stringify(parsed); } catch (e) { fp = ''; }
             if (fp && fp === lastGreetingInitFp) return;
-            lastGreetingInitFp = fp;
             dbg('[开场分支] 按当前分支注入 <initvar>（swipe=' + String(first.swipe_id == null ? 0 : first.swipe_id) + '，顶层组 ' + Object.keys(parsed).join('、') + '）。');
-            scheduleWindowStatOverlay(parsed);
+            scheduleWindowStatOverlay(parsed, (ok) => {
+                if (ok) lastGreetingInitFp = fp;
+                else dbgWarn(' 开场分支 <initvar> 注入未落定（写入被丢弃或失败），保留指纹待轮询重试。');
+            });
         } catch (e) {
             dbgWarn(' 开场分支 <initvar> 注入失败:', e);
         }
@@ -5824,6 +6055,19 @@ ${DB_INIT_SNIPPET}
                 if (w && typeof w.setChatMessage === 'function') w.setChatMessage = wrap(w.setChatMessage, w, 'setChatMessage');
             } catch (e) {}
         }
+    }
+
+    // 兜底：前端开场白可能在任何 iframe/窗口里改写首楼（不一定走我们包装的 setChatMessages）。
+    // 轻量轮询首楼 <initvar> 内容指纹，变化即重新注入（applyActiveGreetingInitvar 幂等）。
+    let greetingPollTimer = null;
+    function startGreetingInitvarPoll() {
+        if (greetingPollTimer) return;
+        greetingPollTimer = hostWindow.setInterval(() => {
+            try {
+                if (!activeLayout) return;
+                applyActiveGreetingInitvar();
+            } catch (e) {}
+        }, 2000);
     }
 
     function bindAutoInit(context) {
@@ -6103,7 +6347,7 @@ ${DB_INIT_SNIPPET}
 
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
-    function scheduleWindowStatOverlay(next) {
+    function scheduleWindowStatOverlay(next, onSettled) {
         let writeChatKey = '';
         try { writeChatKey = autoInitChatId(); } catch (e) {}
         statWriteOverlayGen += 1;
@@ -6118,8 +6362,15 @@ ${DB_INIT_SNIPPET}
         statWriteTimer = hostWindow.setTimeout(async () => {
             statWriteTimer = null;
             const target = pendingStatWrite;
-            if (target === null || target === undefined) return;
+            if (target === null || target === undefined) {
+                if (typeof onSettled === 'function') hostWindow.setTimeout(() => onSettled(false), 0);
+                return;
+            }
             const gen = statWriteOverlayGen;
+            // settledOk：本次写入是否真正落定（成功或与目标一致）；retryScheduled：
+            // 是否已安排重试（重试会携带同一回调，最终落定时才通知调用方）。
+            let settledOk = false;
+            let retryScheduled = false;
             try {
                 // 归属校验：150ms 合并窗口内若已切换聊天/角色，丢弃本次待写，
                 // 避免把上一张卡/上一个聊天的数据写进当前会话。
@@ -6147,8 +6398,9 @@ ${DB_INIT_SNIPPET}
                             dbg('[流程] 模板缓存/布局未就绪' + (tplCached ? '（布局未匹配）' : '') + '，延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
                                 // 仅当期间没有更新的写入时才重试，避免旧快照覆盖新状态
-                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
                             }, 500);
+                            retryScheduled = true;
                             return;
                         }
                         dbgWarn('[流程] 写库前模板缓存/布局未就绪且重试次数用尽，放弃本次写入（等待自动建表）。');
@@ -6176,8 +6428,9 @@ ${DB_INIT_SNIPPET}
                             overlayFlushRetries += 1;
                             dbg('[流程] 插件运行时未就绪，延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
-                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
                             }, 800);
+                            retryScheduled = true;
                             return;
                         }
                         dbgWarn('[流程] 插件运行时迟迟未就绪，放弃本次写入。');
@@ -6200,8 +6453,9 @@ ${DB_INIT_SNIPPET}
                             overlayFlushRetries += 1;
                             dbg('[流程] 插件 SQLite 运行时未完整发布（切换/重载窗口），延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
-                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
                             }, 800);
+                            retryScheduled = true;
                             return;
                         }
                         dbgWarn('[流程] 插件 SQLite 运行时迟迟未完整发布，放弃本次写入。');
@@ -6411,8 +6665,9 @@ ${DB_INIT_SNIPPET}
                                 overlayFlushRetries += 1;
                                 dbg(' 写入存在失败（运行时被清空/行缺失），稍后重试合并（#' + overlayFlushRetries + '）。');
                                 hostWindow.setTimeout(() => {
-                                    if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                                    if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
                                 }, 1500);
+                                retryScheduled = true;
                             }
                         } catch (eR) {}
                     } catch (e) {
@@ -6438,6 +6693,8 @@ ${DB_INIT_SNIPPET}
                     try { if (effectiveTarget && typeof effectiveTarget === 'object' && effectiveTarget.$internal === undefined) { effectiveTarget.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
                     dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
                     try { if (hadInternal) delete effectiveTarget.$internal; } catch (e) {}
+                    // 写入已落定（含“差异无操作”）：调用方（如开场分支注入）可在此时提交指纹
+                    settledOk = true;
                 } else {
                     dbgWarn(' Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
                 }
@@ -6450,6 +6707,10 @@ ${DB_INIT_SNIPPET}
                         const ph = (typeof window !== 'undefined' ? window : root);
                         if (ph && ph.__mvu2shujukuPendingStat === target) ph.__mvu2shujukuPendingStat = null;
                     } catch (e) {}
+                    // 通知调用方本次写入是否落定；已安排重试时不通知（重试最终会通知）
+                    if (!retryScheduled && typeof onSettled === 'function') {
+                        hostWindow.setTimeout(() => onSettled(settledOk), 0);
+                    }
                 }
             }
         }, 150);
@@ -19489,6 +19750,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 scheduleDataReadyNotify();
                 // 多分支开场：表格就绪后按当前激活分支注入其 <initvar>（MVU 按分支替换语义）
                 hostWindow.setTimeout(applyActiveGreetingInitvar, 300);
+                startGreetingInitvarPoll();
             }
         } catch (e) {
             console.warn('[mvu2shujuku] 开局自动建表异常：' + (e && e.message ? e.message : e));
@@ -19626,12 +19888,16 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
             // 按内容指纹去重（不依赖 swipe_id）：前端用 setChatMessages 改写首楼时
             // swipe_id 可能不变，只要 initvar 内容变了就重新注入。
+            // 指纹只在写入真正落定后提交：若写入被丢弃/失败（如表格未就绪、运行时被清空），
+            // 保留旧指纹让 2s 轮询继续重试，避免“分支值永远不注入”。
             let fp = '';
             try { fp = JSON.stringify(parsed); } catch (e) { fp = ''; }
             if (fp && fp === lastGreetingInitFp) return;
-            lastGreetingInitFp = fp;
             dbg('[开场分支] 按当前分支注入 <initvar>（swipe=' + String(first.swipe_id == null ? 0 : first.swipe_id) + '，顶层组 ' + Object.keys(parsed).join('、') + '）。');
-            scheduleWindowStatOverlay(parsed);
+            scheduleWindowStatOverlay(parsed, (ok) => {
+                if (ok) lastGreetingInitFp = fp;
+                else dbgWarn(' 开场分支 <initvar> 注入未落定（写入被丢弃或失败），保留指纹待轮询重试。');
+            });
         } catch (e) {
             dbgWarn(' 开场分支 <initvar> 注入失败:', e);
         }
@@ -19676,6 +19942,19 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (w && typeof w.setChatMessage === 'function') w.setChatMessage = wrap(w.setChatMessage, w, 'setChatMessage');
             } catch (e) {}
         }
+    }
+
+    // 兜底：前端开场白可能在任何 iframe/窗口里改写首楼（不一定走我们包装的 setChatMessages）。
+    // 轻量轮询首楼 <initvar> 内容指纹，变化即重新注入（applyActiveGreetingInitvar 幂等）。
+    let greetingPollTimer = null;
+    function startGreetingInitvarPoll() {
+        if (greetingPollTimer) return;
+        greetingPollTimer = hostWindow.setInterval(() => {
+            try {
+                if (!activeLayout) return;
+                applyActiveGreetingInitvar();
+            } catch (e) {}
+        }, 2000);
     }
 
     function bindAutoInit(context) {
@@ -19955,7 +20234,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
 
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
-    function scheduleWindowStatOverlay(next) {
+    function scheduleWindowStatOverlay(next, onSettled) {
         let writeChatKey = '';
         try { writeChatKey = autoInitChatId(); } catch (e) {}
         statWriteOverlayGen += 1;
@@ -19970,8 +20249,15 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         statWriteTimer = hostWindow.setTimeout(async () => {
             statWriteTimer = null;
             const target = pendingStatWrite;
-            if (target === null || target === undefined) return;
+            if (target === null || target === undefined) {
+                if (typeof onSettled === 'function') hostWindow.setTimeout(() => onSettled(false), 0);
+                return;
+            }
             const gen = statWriteOverlayGen;
+            // settledOk：本次写入是否真正落定（成功或与目标一致）；retryScheduled：
+            // 是否已安排重试（重试会携带同一回调，最终落定时才通知调用方）。
+            let settledOk = false;
+            let retryScheduled = false;
             try {
                 // 归属校验：150ms 合并窗口内若已切换聊天/角色，丢弃本次待写，
                 // 避免把上一张卡/上一个聊天的数据写进当前会话。
@@ -19999,8 +20285,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             dbg('[流程] 模板缓存/布局未就绪' + (tplCached ? '（布局未匹配）' : '') + '，延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
                                 // 仅当期间没有更新的写入时才重试，避免旧快照覆盖新状态
-                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
                             }, 500);
+                            retryScheduled = true;
                             return;
                         }
                         dbgWarn('[流程] 写库前模板缓存/布局未就绪且重试次数用尽，放弃本次写入（等待自动建表）。');
@@ -20028,8 +20315,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             overlayFlushRetries += 1;
                             dbg('[流程] 插件运行时未就绪，延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
-                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
                             }, 800);
+                            retryScheduled = true;
                             return;
                         }
                         dbgWarn('[流程] 插件运行时迟迟未就绪，放弃本次写入。');
@@ -20052,8 +20340,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                             overlayFlushRetries += 1;
                             dbg('[流程] 插件 SQLite 运行时未完整发布（切换/重载窗口），延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
-                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
                             }, 800);
+                            retryScheduled = true;
                             return;
                         }
                         dbgWarn('[流程] 插件 SQLite 运行时迟迟未完整发布，放弃本次写入。');
@@ -20263,8 +20552,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 overlayFlushRetries += 1;
                                 dbg(' 写入存在失败（运行时被清空/行缺失），稍后重试合并（#' + overlayFlushRetries + '）。');
                                 hostWindow.setTimeout(() => {
-                                    if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target);
+                                    if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
                                 }, 1500);
+                                retryScheduled = true;
                             }
                         } catch (eR) {}
                     } catch (e) {
@@ -20290,6 +20580,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     try { if (effectiveTarget && typeof effectiveTarget === 'object' && effectiveTarget.$internal === undefined) { effectiveTarget.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
                     dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
                     try { if (hadInternal) delete effectiveTarget.$internal; } catch (e) {}
+                    // 写入已落定（含“差异无操作”）：调用方（如开场分支注入）可在此时提交指纹
+                    settledOk = true;
                 } else {
                     dbgWarn(' Mvu 合并写库被跳过：api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空'));
                 }
@@ -20302,6 +20594,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         const ph = (typeof window !== 'undefined' ? window : root);
                         if (ph && ph.__mvu2shujukuPendingStat === target) ph.__mvu2shujukuPendingStat = null;
                     } catch (e) {}
+                    // 通知调用方本次写入是否落定；已安排重试时不通知（重试最终会通知）
+                    if (!retryScheduled && typeof onSettled === 'function') {
+                        hostWindow.setTimeout(() => onSettled(settledOk), 0);
+                    }
                 }
             }
         }, 150);
