@@ -632,6 +632,7 @@ test('相邻顶层组不被跳过 + check 机制词清洗（op/delta/replace/分
     const worldNote = byName('世界表').sourceData.note;
     assert.ok(worldNote.includes('遭遇冷却：如果当前遭遇冷却大于0，每推进一次剧情/回合就减1'), '括号机制注释应删除、业务规则保留');
     assert.ok(!worldNote.includes('op:') && !worldNote.includes('（op:'), 'note 不应残留 op 机制词');
+    assert.ok(worldNote.includes('更新以正文和规则为依据，不得为凑表而虚构数据。'), '通用约束应改为“以正文和规则为依据”，不与每轮强制规则冲突');
     const heroNote = byName('主角表').sourceData.note;
     assert.ok(!heroNote.includes('防崩') && !heroNote.includes('replace') && !heroNote.includes('delta') && !heroNote.includes('指令'), '纯机制句与机制词应被清洗');
     assert.ok(heroNote.includes('满100时阶级提升；熟练度为0'), '“分两条指令”应改写为业务语义');
