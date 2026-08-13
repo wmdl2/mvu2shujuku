@@ -1749,7 +1749,7 @@
                 const shapeFields = (shapes[groupName] || []).filter(f => f !== rowsKeyCol);
                 const allFields = [...new Set([...shapeFields, ...usageFields, ...fieldOrder])];
                 columns.length = 0;
-                columns.push({ zh: rowsKeyCol, path: [groupName], value: '', desc: '条目名称（字典键，如 技能1）', type: 'TEXT', ident: toIdent(rowsKeyCol, new Set(['row_id']), 'column') });
+                columns.push({ zh: rowsKeyCol, path: [groupName], value: '', desc: '条目名称', type: 'TEXT', ident: toIdent(rowsKeyCol, new Set(['row_id']), 'column') });
                 const used = new Set(['row_id', columns[0].ident.toLowerCase()]);
                 for (const f of allFields) {
                     columns.push({
