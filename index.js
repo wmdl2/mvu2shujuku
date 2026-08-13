@@ -2288,8 +2288,9 @@
                 : '开局为空表；剧情出现首个元素时，按 insertNode 规则 INSERT 新行。';
         }
         if (group.rows.length) {
-            const names = group.rows.slice(0, 5).map(r => r[1]).filter(Boolean).join('、');
-            return `开局模板已初始化 ${group.rows.length} 条记录${names ? `（${names}${group.rows.length > 5 ? '…' : ''}）` : ''}；自动填表阶段如有新条目，按 insertNode 规则 INSERT 新记录。`;
+            // 不写死具体记录名：多开场白按分支注入初始值（applyActiveGreetingInitvar），
+            // 实际初始记录随所选分支变化，把首个分支的名字写进提示词会在切分支后误导 AI。
+            return `开局模板已初始化 ${group.rows.length} 条记录；自动填表阶段如有新条目，按 insertNode 规则 INSERT 新记录。`;
         }
         return '开局为空表；正文首次出现应记录的对象时，按 insertNode 规则 INSERT 首条记录。';
     }
@@ -3695,6 +3696,17 @@
             `          if(!rw2)continue;`,
             `          var kv=keyIdx>=0?rw2[keyIdx]:undefined;`,
             `          if(kv===undefined||kv===null||kv==='')continue;`,
+            `          // 标量条目行表（如 修仙秘闻: { 标题: 内容 }）：读回 {键: 标量}，`,
+            `          // 保持与 MVU 原 shape 一致（前端 zod 声明 z.record(z.string(), z.string())），`,
+            `          // 绝不能变成 {键名, 描述} 对象（否则状态栏 typeof==='string' 过滤全丢）。`,
+            `          if(L.scalarValueCol){`,
+            `            var svcE=null;`,
+            `            for(var sc=0;sc<L.cols.length;sc++){if(L.cols[sc][0]===L.scalarValueCol){svcE=L.cols[sc];break;}}`,
+            `            var svIdx=svcE?header.indexOf(svcE[0]):-1;`,
+            `            var sv=svIdx>=0?rw2[svIdx]:undefined;`,
+            `            dict[text(kv)]=svcE?convertCell(svcE[1],sv,svcE[2],svcE[5]):(sv===undefined||sv===null?'':text(sv));`,
+            `            continue;`,
+            `          }`,
             `          var item={};`,
             `          for(var j2=0;j2<L.cols.length;j2++){`,
             `            var cj2=L.cols[j2];`,
@@ -4021,7 +4033,10 @@
             `          var cc=L.cols[nc];`,
             `          if(cc[0]===L.keyCol){newRow[cc[0]]=String(keyVal);continue;}`,
             `          var cp=parts.slice(E.prefix.length+1);`,
-            `          if(cp.length===1&&cp[0]===cc[0])newRow[cc[0]]=String(op.value);`,
+            `          // 标量条目行表（如 修仙秘闻.标题=内容）：值落在「描述/数值」列，`,
+            `          // 而不是把条目键当成列名（否则新条目会带空描述插入）。`,
+            `          if(L.scalarValueCol&&cp.length===1){ if(cc[0]===L.scalarValueCol)newRow[cc[0]]=String(op.value); }`,
+            `          else if(cp.length===1&&cp[0]===cc[0])newRow[cc[0]]=String(op.value);`,
             `        }`,
             `        try{await Promise.resolve(API.insertRow(L.table,newRow));}catch(e){console.warn('['+BRIDGE_NAME+'] insertRow 失败:',e);}`,
             `        continue;`,
@@ -4029,6 +4044,7 @@
             `    }`,
             `    if(rowIndex<0)continue;`,
             `    var colZh=parts[parts.length-1];`,
+            `    if(L.scalarValueCol&&parts.length===E.prefix.length+1){colZh=L.scalarValueCol;}`,
             `    var colIdx=header.indexOf(colZh);`,
             `    if(colIdx===-1){`,
             `      // 展平容器路径（如 主角.炼丹.熟练度 → 炼丹熟练度 列）`,
@@ -5960,18 +5976,38 @@ ${DB_INIT_SNIPPET}
     //   - VARIABLE_UPDATE_ENDED：刷新主页时钟/成就列表。
     // 用 stat_data 指纹去重：同一份数据只广播一次，数据变化（如回放完成）后再广播。
     function scheduleDataReadyNotify() {
-        reentryNotifyFingerprint = '';
         const dispatch = async () => {
             try {
                 if (!activeLayout) return;
                 const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                 const sdR = allR.stat_data || {};
+                // “有真实数据”判定：必须存在至少一个非空叶子值。
+                // 空壳快照（回放窗口里行表全 {}、单例缺字段）顶层组也有键，
+                // 若按“组有键”判定会把它当就绪广播 → 前端反复重读成“暂无/默认值”，
+                // 与随后全量快照来回横跳（用户反馈“一直刷然后读不到”）。
+                const hasMeaningfulData = (v) => {
+                    if (v === undefined || v === null) return false;
+                    if (typeof v === 'string') return v !== '';
+                    if (typeof v === 'number') return v !== 0;
+                    if (typeof v === 'boolean') return v !== false;
+                    if (Array.isArray(v)) return v.length > 0;
+                    if (typeof v === 'object') {
+                        for (const k in v) { if (hasMeaningfulData(v[k])) return true; }
+                        return false;
+                    }
+                    return false;
+                };
                 let hasData = false;
                 for (const g in sdR) {
-                    if (sdR[g] && typeof sdR[g] === 'object' && Object.keys(sdR[g]).length) { hasData = true; break; }
+                    if (hasMeaningfulData(sdR[g])) { hasData = true; break; }
                 }
                 if (!hasData) return; // 空 stat_data 不广播（避免前端读到空显示默认值）
-                const fp = JSON.stringify(sdR);
+                // 指纹带聊天标识：进新聊天必广播一次，同聊天内同一份数据不重复广播。
+                // 不再在每次调用时重置指纹——CHAT_CHANGED + 建表成功会连续多次调用
+                // scheduleDataReadyNotify，旧实现导致同一份数据被反复广播、前端反复重置。
+                let chatKey = '';
+                try { chatKey = autoInitChatId(); } catch (e) {}
+                const fp = chatKey + '|' + JSON.stringify(sdR);
                 if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
                 reentryNotifyFingerprint = fp;
                 dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
@@ -6086,6 +6122,11 @@ ${DB_INIT_SNIPPET}
                     // 刷新/重进/切聊天后：前端可能已读旧数据，而插件加载完成不主动通知前端；
                     // 等数据就绪后派发 VARIABLE_INITIALIZED（前端会重读 userData）+
                     // VARIABLE_UPDATE_ENDED（刷新时钟），覆盖插件异步加载时序。
+                    // 每次进入/切换聊天重置指纹：状态栏 iframe 会重建并先读一次（可能赶上
+                    // 插件回放窗口读到空），若数据与上次进入相同且指纹不清零，这次进入将
+                    // 不再广播、前端永远停在空读。重置后本进入内首次真实数据必广播一次，
+                    // 同一次进入内的多次 scheduleDataReadyNotify 调用仍靠指纹去重（不刷屏）。
+                    reentryNotifyFingerprint = '';
                     scheduleDataReadyNotify();
                     // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
                     syncRuntimeForCurrentCard();
@@ -6371,6 +6412,7 @@ ${DB_INIT_SNIPPET}
                 return;
             }
             const gen = statWriteOverlayGen;
+            const chatKeyNow = autoInitChatId();
             // settledOk：本次写入是否真正落定（成功或与目标一致）；retryScheduled：
             // 是否已安排重试（重试会携带同一回调，最终落定时才通知调用方）。
             let settledOk = false;
@@ -6599,7 +6641,6 @@ ${DB_INIT_SNIPPET}
                     // 运行时/checkpoint/落盘全部由插件自己的事务管线维护，与原生数据库卡一致；
                     // 不做整表快照导入、不做手动物化/锚定/单例补行（转换器只翻译，不参与运行时）。
                     let n = 0;
-                    const chatKeyNow = autoInitChatId();
                     try {
                         // 诊断（保留）：布局组、target/prev 含组、首个非空写入、checkpoint 是否含注入
                         try {
@@ -6922,7 +6963,6 @@ ${DB_INIT_SNIPPET}
 
     function installWindowGetAllVariables() {
         const core = window.MVU2SHUJUKU_CORE;
-        if (typeof window.getAllVariables === 'function') return;
         if (!core || typeof core.statDataFromTables !== 'function') return;
         if (!installedGetAllVariables) {
             originalGetAllVariables = window.getAllVariables;
@@ -20113,18 +20153,38 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     //   - VARIABLE_UPDATE_ENDED：刷新主页时钟/成就列表。
     // 用 stat_data 指纹去重：同一份数据只广播一次，数据变化（如回放完成）后再广播。
     function scheduleDataReadyNotify() {
-        reentryNotifyFingerprint = '';
         const dispatch = async () => {
             try {
                 if (!activeLayout) return;
                 const allR = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                 const sdR = allR.stat_data || {};
+                // “有真实数据”判定：必须存在至少一个非空叶子值。
+                // 空壳快照（回放窗口里行表全 {}、单例缺字段）顶层组也有键，
+                // 若按“组有键”判定会把它当就绪广播 → 前端反复重读成“暂无/默认值”，
+                // 与随后全量快照来回横跳（用户反馈“一直刷然后读不到”）。
+                const hasMeaningfulData = (v) => {
+                    if (v === undefined || v === null) return false;
+                    if (typeof v === 'string') return v !== '';
+                    if (typeof v === 'number') return v !== 0;
+                    if (typeof v === 'boolean') return v !== false;
+                    if (Array.isArray(v)) return v.length > 0;
+                    if (typeof v === 'object') {
+                        for (const k in v) { if (hasMeaningfulData(v[k])) return true; }
+                        return false;
+                    }
+                    return false;
+                };
                 let hasData = false;
                 for (const g in sdR) {
-                    if (sdR[g] && typeof sdR[g] === 'object' && Object.keys(sdR[g]).length) { hasData = true; break; }
+                    if (hasMeaningfulData(sdR[g])) { hasData = true; break; }
                 }
                 if (!hasData) return; // 空 stat_data 不广播（避免前端读到空显示默认值）
-                const fp = JSON.stringify(sdR);
+                // 指纹带聊天标识：进新聊天必广播一次，同聊天内同一份数据不重复广播。
+                // 不再在每次调用时重置指纹——CHAT_CHANGED + 建表成功会连续多次调用
+                // scheduleDataReadyNotify，旧实现导致同一份数据被反复广播、前端反复重置。
+                let chatKey = '';
+                try { chatKey = autoInitChatId(); } catch (e) {}
+                const fp = chatKey + '|' + JSON.stringify(sdR);
                 if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
                 reentryNotifyFingerprint = fp;
                 dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
@@ -20239,6 +20299,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     // 刷新/重进/切聊天后：前端可能已读旧数据，而插件加载完成不主动通知前端；
                     // 等数据就绪后派发 VARIABLE_INITIALIZED（前端会重读 userData）+
                     // VARIABLE_UPDATE_ENDED（刷新时钟），覆盖插件异步加载时序。
+                    // 每次进入/切换聊天重置指纹：状态栏 iframe 会重建并先读一次（可能赶上
+                    // 插件回放窗口读到空），若数据与上次进入相同且指纹不清零，这次进入将
+                    // 不再广播、前端永远停在空读。重置后本进入内首次真实数据必广播一次，
+                    // 同一次进入内的多次 scheduleDataReadyNotify 调用仍靠指纹去重（不刷屏）。
+                    reentryNotifyFingerprint = '';
                     scheduleDataReadyNotify();
                     // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
                     syncRuntimeForCurrentCard();
@@ -20524,6 +20589,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 return;
             }
             const gen = statWriteOverlayGen;
+            const chatKeyNow = autoInitChatId();
             // settledOk：本次写入是否真正落定（成功或与目标一致）；retryScheduled：
             // 是否已安排重试（重试会携带同一回调，最终落定时才通知调用方）。
             let settledOk = false;
@@ -20752,7 +20818,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     // 运行时/checkpoint/落盘全部由插件自己的事务管线维护，与原生数据库卡一致；
                     // 不做整表快照导入、不做手动物化/锚定/单例补行（转换器只翻译，不参与运行时）。
                     let n = 0;
-                    const chatKeyNow = autoInitChatId();
                     try {
                         // 诊断（保留）：布局组、target/prev 含组、首个非空写入、checkpoint 是否含注入
                         try {
@@ -21075,7 +21140,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
 
     function installWindowGetAllVariables() {
         const core = window.MVU2SHUJUKU_CORE;
-        if (typeof window.getAllVariables === 'function') return;
         if (!core || typeof core.statDataFromTables !== 'function') return;
         if (!installedGetAllVariables) {
             originalGetAllVariables = window.getAllVariables;

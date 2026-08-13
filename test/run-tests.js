@@ -2331,6 +2331,26 @@ test('数组表提示词按行增删改，不再“整体替换/禁止增删”'
     assert.ok(!sheet.sourceData.initNode.includes('无（开局'), 'initNode 不应出现“无（…）”矛盾表述');
 });
 
+test('行表 initNode 不写死首个开场分支的初始记录名（多开场白分支注入后不误导）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '多开场卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{ comment: '[InitVar]', content: '结识道友录:\n  潮听澜:\n    关系: 道友\n  林晚:\n    关系: 点头之交' }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const sheet = Object.values(r.template).find(s => s && s.name === '结识道友录表');
+    assert.ok(sheet, '应生成结识道友录表');
+    assert.ok(sheet.sourceData.initNode.includes('开局模板已初始化 2 条记录'), 'initNode 应说明记录条数');
+    assert.ok(!sheet.sourceData.initNode.includes('潮听澜') && !sheet.sourceData.initNode.includes('林晚'), 'initNode 不应写死具体记录名（首个开场分支）');
+});
+
 test('全只读单例不生成 UPDATE 示例，note/init/update 自洽', () => {
     const card = {
         spec: 'chara_card_v3',
@@ -2818,6 +2838,30 @@ test('扩展文件齐全且 index.js 语法正确', () => {
     const manifest = JSON.parse(files['manifest.json']);
     assert.strictEqual(manifest.js, 'index.js');
     new Function(files['index.js']);
+});
+
+test('写库合并路径无 chatKeyNow TDZ（const 声明必须先于首次使用）', () => {
+    const coreSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
+    const files = core.assembleExtension({ coreSource });
+    const index = files['index.js'];
+    const decl = index.indexOf('const chatKeyNow = autoInitChatId();');
+    const use = index.indexOf('lastForeignWriteDropChat !== chatKeyNow');
+    assert.ok(decl !== -1 && use !== -1, 'index.js 应包含 chatKeyNow 的声明与使用');
+    assert.ok(decl < use, 'chatKeyNow 的 const 声明必须先于首次使用（TDZ 回归：曾导致每次带布局外组的 Mvu.replaceMvuData 写库崩溃）');
+});
+
+test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、写入落描述列）且扩展不跳过安装', () => {
+    const coreSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
+    const files = core.assembleExtension({ coreSource });
+    const index = files['index.js'];
+    // 桥 getAllVariables 行表分支：读回必须是 {键: 标量}（状态栏 typeof==='string' 才能命中）
+    assert.ok(index.includes('if(L.scalarValueCol){'), '桥 getAllVariables 应含 scalarValueCol 读回分支');
+    assert.ok(index.includes('dict[text(kv)]=svcE?convertCell(svcE[1],sv,svcE[2],svcE[5])'), '桥读回应为 {键: 标量}');
+    // 桥 writeDiffToDb：新行值落 scalarValueCol 列、已有行 colZh 指向 scalarValueCol
+    assert.ok(index.includes('if(L.scalarValueCol&&cp.length===1)'), '桥新行插入应把标量值落到 scalarValueCol 列');
+    assert.ok(index.includes('if(L.scalarValueCol&&parts.length===E.prefix.length+1){colZh=L.scalarValueCol;}'), '桥已有行更新应把 colZh 指到 scalarValueCol 列');
+    // 扩展侧应覆盖桥先定义的 getAllVariables（核心 statDataFromTables 才含 scalarValueCol + 持久化兜底）
+    assert.ok(!index.includes("if (typeof window.getAllVariables === 'function') return;"), '扩展 installWindowGetAllVariables 不应因桥已定义而跳过安装');
 });
 
 /* ---------------- 对照金标准 ---------------- */
