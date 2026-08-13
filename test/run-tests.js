@@ -1050,6 +1050,17 @@ test('行表条目自带「名称」字段时键列改名，表头不得重复�
     assert.strictEqual(t3.content[0][1], '条目名', `名字型字典键列也应为「条目名」：${JSON.stringify(t3.content[0])}`);
 });
 
+test('转换后 tavern_helper 脚本必须带 type:script（酒馆助手 discriminatedUnion 解析，缺 type 整组脚本不显示）', () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const inner = r.card.data || r.card;
+    const scripts = ((inner.extensions || {}).tavern_helper || {}).scripts || [];
+    assert.ok(scripts.some(s => /数据桥/.test(String(s.name || ''))), '应包含数据桥脚本');
+    for (const s of scripts) {
+        assert.strictEqual(s.type, 'script', `脚本「${s.name}」必须带 type:'script'`);
+    }
+});
+
 test('行表条目内的空嵌套对象不再拆出每条目重复子表', () => {
     const card = {
         spec: 'chara_card_v3',
