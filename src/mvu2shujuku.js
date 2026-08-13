@@ -3604,8 +3604,9 @@
             `      // 对齐参考卡：写库直接 diff 落表，不做锚点重建/表重置（运行时保持最小）`,
             `      try{API=getApi();}catch(e){}`,
             `      var prev=currentStat();`,
-            `      await writeDiffToDb(prev,target);`,
-            `      broadcastBridgeEvent(mvuWrap(target),mvuWrap(prev));`,
+            `      var n2=await writeDiffToDb(prev,target);`,
+            `      // 只有真正有差异操作才广播：无差异回声写广播会让前端重渲染后再回声，形成循环`,
+            `      if(n2>0)broadcastBridgeEvent(mvuWrap(target),mvuWrap(prev));`,
             `    }catch(e){console.warn('['+BRIDGE_NAME+'] 合并写库异常:',e);}`,
             `    finally{if(statOverlayGen===gen)pendingStatOverlay=null;}`,
             `  })();`,
@@ -3901,7 +3902,8 @@
             `      ops.push({np:dnp,entry:dentry,overflowRemove:true,mergeKey:dfld,rowKey:dentry.kind==='rows'?drel[0]:undefined});`,
             `    }`,
             `  })(prev,next,'');`,
-            `  console.log('['+BRIDGE_NAME+'] writeDiffToDb: 差异操作 '+ops.length+' 条');`,
+            `  var diffOpCount=ops.length;`,
+            `  console.log('['+BRIDGE_NAME+'] writeDiffToDb: 差异操作 '+diffOpCount+' 条');`,
             `  // 一次导出全表快照（exportTableAsJson 仅返回引用，开销可忽略；写入后插件可能重建数据对象，循环内每操作前刷新）`,
             `  var tablesAll={};`,
             `  try{tablesAll=API.exportTableAsJson()||{};}catch(e){}`,
@@ -4066,6 +4068,7 @@
             `    if(String(curCell)===String(op.value))continue;`,
             `    try{await Promise.resolve(API.updateCell(L.table,rowIndex,colZh,op.value));}catch(e){console.warn('['+BRIDGE_NAME+'] updateCell 失败:',e);}`,
             `  }`,
+            `  return diffOpCount;`,
             `}`,
             '',
             `// 完整的 Mvu 兼容层：按 MVU 官方全局 API（createMvu）实现数据库读写，`,
@@ -6122,7 +6125,16 @@ ${DB_INIT_SNIPPET}
                     // 插件回放窗口读到空），若数据与上次进入相同且指纹不清零，这次进入将
                     // 不再广播、前端永远停在空读。重置后本进入内首次真实数据必广播一次，
                     // 同一次进入内的多次 scheduleDataReadyNotify 调用仍靠指纹去重（不刷屏）。
-                    reentryNotifyFingerprint = '';
+                    // 防抖：同一聊天 5 秒内的重复 CHAT_CHANGED（第三方/卡脚本误触发假切换）
+                    // 不再重置指纹——否则每次假切换都重发重读通知 → 状态栏反复重渲染（一直刷）。
+                    let chatIdNow2 = '';
+                    try { chatIdNow2 = autoInitChatId(); } catch (e) {}
+                    const chatChangedAt = Date.now();
+                    if (lastNotifyResetChat !== chatIdNow2 || chatChangedAt - lastNotifyResetAt > 5000) {
+                        reentryNotifyFingerprint = '';
+                        lastNotifyResetChat = chatIdNow2;
+                        lastNotifyResetAt = chatChangedAt;
+                    }
                     scheduleDataReadyNotify();
                     // 切卡后按新卡同步运行时：转换卡接管，其他卡撤销，确保不影响别的卡
                     syncRuntimeForCurrentCard();
@@ -6344,6 +6356,10 @@ ${DB_INIT_SNIPPET}
     let activePlaceholderNeeded = false;
     // 重读通知去重：同一份运行时数据只广播一次（数据变化后再次广播）
     let reentryNotifyFingerprint = '';
+    // 重读通知指纹重置的防抖记录：同一聊天短时间内的重复 CHAT_CHANGED
+    // （第三方扩展/卡内脚本误触发“假切换”）不再重置指纹重发通知，避免状态栏反复重渲染。
+    let lastNotifyResetChat = '';
+    let lastNotifyResetAt = 0;
     // 最近一次数据库写入时间：写入后 ~1.5s 内运行时可能领先持久化帧，读侧优先信任运行时；
     // 之后若运行时与持久化帧不一致，视为插件回放未完成/旧值，读侧以持久化帧（数据库真相）为准。
     let lastDbWriteAt = 0;
@@ -6727,13 +6743,19 @@ ${DB_INIT_SNIPPET}
                             dbg('[保存] 写库后已等待酒馆保存完成。');
                         }
                     } catch (eS) {}
-                    // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
-                    // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
-                    const afterMvu = { stat_data: effectiveTarget, display_data: effectiveTarget, delta_data: {}, initialized_lorebooks: {} };
-                    let hadInternal = false;
-                    try { if (effectiveTarget && typeof effectiveTarget === 'object' && effectiveTarget.$internal === undefined) { effectiveTarget.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
-                    dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
-                    try { if (hadInternal) delete effectiveTarget.$internal; } catch (e) {}
+                    // 只有真正写了差异（n>0）才广播 VARIABLE_UPDATE_ENDED：
+                    // 无差异回声写（前端把整份 stat_data 原样写回）此前也会触发广播 →
+                    // 前端收到后重渲染 → 再回声 → 再广播，形成“一直刷”循环。
+                    // 与官方语义一致：状态没变就不发更新事件。
+                    if (n > 0) {
+                        // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
+                        // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
+                        const afterMvu = { stat_data: effectiveTarget, display_data: effectiveTarget, delta_data: {}, initialized_lorebooks: {} };
+                        let hadInternal = false;
+                        try { if (effectiveTarget && typeof effectiveTarget === 'object' && effectiveTarget.$internal === undefined) { effectiveTarget.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
+                        dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
+                        try { if (hadInternal) delete effectiveTarget.$internal; } catch (e) {}
+                    }
                     // 写入已落定（含“差异无操作”）：调用方（如开场分支注入）可在此时提交指纹
                     settledOk = true;
                 } else {
