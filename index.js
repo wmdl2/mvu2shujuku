@@ -625,7 +625,12 @@
     function collectRulesFromYaml(content, acc) {
         try {
             const libs = getMvuYamlLibs();
-            const v = libs.YAML.parseDocument(String(content || ''), { merge: true }).toJS();
+            const doc = libs.YAML.parseDocument(String(content || ''), { merge: true });
+            // 作者自由发挥常产生非法 YAML（如 format: '稀薄'|'普通'|'浓郁'|'极浓' 的裸 |），
+            // parseDocument 不抛错但会在 errors 里记录，toJS() 返回残缺树——用残缺树会
+            // 丢整组规则。只要有 error 就回退正则（正则对这类怪癖更宽容）。
+            if (doc.errors && doc.errors.length) return false;
+            const v = doc.toJS();
             if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
             let rules = null;
             if (v['变量更新规则'] && typeof v['变量更新规则'] === 'object' && !Array.isArray(v['变量更新规则'])) {
@@ -674,7 +679,7 @@
                     }
                     // 通配/点路径（户.<门牌>.妻.好感值、人物.角色名.亲密）
                     if (/[.<>]/.test(key) && !/^[\u4e00-\u9fff$]{1,12}$/.test(key)) {
-                        registerYamlWildcard(key, val, acc);
+                        registerYamlWildcard(key, val, acc, group);
                         continue;
                     }
                     if (!/^[\u4e00-\u9fff$]{1,12}$/.test(key)) continue; // rule/format 等 ASCII 键跳过
@@ -726,7 +731,7 @@
         return m ? [Number(m[1]), Number(m[2])] : null;
     }
 
-    function registerYamlWildcard(key, val, acc) {
+    function registerYamlWildcard(key, val, acc, enclosingGroup) {
         acc.wildcardFields.add(key);
         const group0 = String(key).split('.')[0].trim();
         const rec = { path: key };
@@ -736,10 +741,19 @@
                 if (r) rec.range = r;
             }
             if (val.check !== undefined) rec.checks = yamlCheckItems(val.check);
+            if (val.format !== undefined) {
+                const fv = String(val.format);
+                rec.format = fv.indexOf('\n') !== -1 ? fv.replace(/\s+/g, ' ').trim() : fv.trim();
+            }
         }
         if (group0 && /^[\u4e00-\u9fff$]{1,12}$/.test(group0)) {
             acc.wildcardRules[group0] = acc.wildcardRules[group0] || [];
             acc.wildcardRules[group0].push(rec);
+        }
+        // 与正则路径一致：组内子字段通配同时挂到所在组
+        if (enclosingGroup && enclosingGroup !== group0) {
+            acc.wildcardRules[enclosingGroup] = acc.wildcardRules[enclosingGroup] || [];
+            acc.wildcardRules[enclosingGroup].push(rec);
         }
     }
 
@@ -883,6 +897,7 @@
                     if (!group0 || !/^[\u4e00-\u9fff$]{1,12}$/.test(group0)) continue;
                     const rangeM = block.match(/range\s*:\s*([\d.]+)\s*[~-]\s*([\d.]+)/);
                     const checkM = block.match(/check\s*:\s*("?[\s\S]*?)(?=\n {4}[^ \n-][^\n:]{0,23}?:\s*|\n {2}\S|$)/);
+                    const fmtM = block.match(/format\s*:\s*([^\n]+)$/m);
                     let checks = [];
                     if (checkM) {
                         let raw = String(checkM[1]).trim();
@@ -891,8 +906,15 @@
                     }
                     const rec = { path: wk0.key, checks };
                     if (rangeM) rec.range = [Number(rangeM[1]), Number(rangeM[2])];
+                    if (fmtM) rec.format = String(fmtM[1]).trim().replace(/^["']|["']$/g, '');
                     wildcardRules[group0] = wildcardRules[group0] || [];
                     wildcardRules[group0].push(rec);
+                    // 组内子字段通配（首段不是组名，如 主角 下的 生理.欲望槽 / 技艺.${…}）：
+                    // 同时挂到所在组，避免规则孤儿（大荒回归：这类规则此前全丢，format 更甚）。
+                    if (group && group !== group0) {
+                        wildcardRules[group] = wildcardRules[group] || [];
+                        wildcardRules[group].push(rec);
+                    }
                 }
                 for (let fi = 0; fi < fieldStarts.length; fi++) {
                     const { field, index, inline } = fieldStarts[fi];
@@ -2155,6 +2177,31 @@
         }
 
         // 处理单例/行表内部的嵌套字典 → 子行表
+        // 预扫：同一子表键出现在多个父组（如 行囊.背包 / 宗门.背包）时，冲突方统一
+        // 都用父组限定表名（行囊背包表 / 宗门背包表），而不是一个带前缀一个不带——
+        // 插件导入校验“表名规范化后重复”会拒绝整个模板（大荒实测）。
+        const childKeyParents = new Map();
+        for (const g of groups) {
+            for (const ct of g.childTables) {
+                const pk = ct.path && ct.path.length ? String(ct.path[0]) : String(g.name || '');
+                if (!childKeyParents.has(ct.key)) childKeyParents.set(ct.key, new Set());
+                childKeyParents.get(ct.key).add(pk);
+            }
+            // 预判后续会按规则声明补建的空子表（initvar 无数据、dynamicDicts 声明），
+            // 否则这类子表在预扫之后才加入，冲突判断漏掉（大荒 宗门.背包 实测）。
+            const declaredDynPre = (shapeInfo && shapeInfo.dynamicDicts && shapeInfo.dynamicDicts[g.name]) || {};
+            for (const f of Object.keys(declaredDynPre)) {
+                if (!declaredDynPre[f]) continue;
+                const alreadyChild = g.childTables.some(ct => ct.key === f);
+                const alreadyColumn = Array.isArray(g.columns) && g.columns.some(c => c.zh === f);
+                if (!alreadyChild && !alreadyColumn) {
+                    if (!childKeyParents.has(f)) childKeyParents.set(f, new Set());
+                    childKeyParents.get(f).add(g.name);
+                }
+            }
+        }
+        const multiParentChildKeys = new Set();
+        for (const [key, parents] of childKeyParents) if (parents.size > 1) multiParentChildKeys.add(key);
         for (const g of groups) {
             // 规则声明了动态键字典但 initvar 无数据（如 路遇道友录）：不给表的话
             // AI 写入无处落、整组 check 规则孤儿。补一个空子表，列由 type 声明字段
@@ -2170,7 +2217,20 @@
                 }
             }
             for (const ct of g.childTables) {
-                const tableName = makeGroupTableName(ct.key);
+                let tableName = makeGroupTableName(ct.key);
+                const parentName = ct.path && ct.path.length ? String(ct.path[0]) : String(g.name || '');
+                if (multiParentChildKeys.has(ct.key) || seenTables.has(tableName)) {
+                    // 冲突时统一用父组限定（多父组重名的两个子表都加前缀，保持一致）
+                    let alt = makeGroupTableName(parentName + ct.key);
+                    if (seenTables.has(alt)) {
+                        let n = 2;
+                        while (seenTables.has(alt + n)) n++;
+                        alt = alt + n;
+                    }
+                    report.note(`子表「${ct.key}」与其他表重名（父组 ${parentName}），统一用父组限定表名「${alt}」。`);
+                    tableName = alt;
+                }
+                seenTables.add(tableName);
                 const rowsKeyCol = '键名';
                 const usageFields = (usage[ct.key] || []).filter(f => f !== rowsKeyCol);
                 const shapeFields = (shapes[ct.key] || []).filter(f => f !== rowsKeyCol);
@@ -2537,6 +2597,7 @@
             for (const wr of (group.wildcardRules || [])) {
                 const parts = [];
                 if (wr.range) parts.push(`数值范围 ${wr.range[0]}~${wr.range[1]}`);
+                if (wr.format) parts.push(`格式：${wr.format}`);
                 parts.push(...(wr.checks || []));
                 if (parts.length) L.push(`- ${wr.path}（${parts.join('；')}）`);
             }
