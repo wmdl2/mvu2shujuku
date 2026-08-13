@@ -6469,6 +6469,119 @@ test('YAML 优先：flow mapping 单行组（正则解析不了的写法）也�
     assert.ok(sheet && sheet.sourceData.note.includes('归零则走火入魔'), 'flow 写法规则应落到 note');
 });
 
+test('非法 YAML（format 带裸 | 联合）时回退正则，功法式动态字典仍正确拆表（大荒回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '非法yaml卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '主角:\n  功法: {}\n  灵气浓度: 普通' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  世界:',
+                            '    灵气浓度:',
+                            "      format: '稀薄'|'普通'|'浓郁'|'极浓'",
+                            '  主角:',
+                            '    功法:',
+                            '      type: |-',
+                            '        {',
+                            '          [功法键名: string]: {',
+                            '            名称: string;',
+                            '            品阶: string;',
+                            '            修炼层数: string;',
+                            '            效果: string;',
+                            '          }',
+                            '        }',
+                            '      check:',
+                            '        - 习得新功法时insert完整四字段',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.strictEqual(si.dynamicDicts['主角']['功法'], true, '非法 YAML 时应回退正则，功法动态字典仍被识别');
+    assert.deepStrictEqual(si.shapes['功法'], ['名称', '品阶', '修炼层数', '效果'], '功法条目字段应来自 type 声明');
+    const r = core.convert(card, { mode: 'both' });
+    const gf = Object.values(r.template).find(s => s && s.name === '功法表');
+    assert.deepStrictEqual(gf && gf.content[0], ['row_id', '键名', '名称', '品阶', '修炼层数', '效果', '_扩展数据'], '功法表列应为 type 声明字段，而非只剩 _扩展数据');
+});
+
+test('组内子字段通配（首段非组名）挂到所在组，format 一并带出（大荒回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '组内通配卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '主角:\n  生理:\n    欲望槽: 0\n  技艺:\n    炼丹: 未入门' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  主角:',
+                            '    生理.欲望槽:',
+                            '      type: number',
+                            '      range: 0~100',
+                            '      format: 数值',
+                            '      check:',
+                            '        - 遭遇媚药时上涨',
+                            '    技艺.${炼丹|炼器}:',
+                            '      type: string',
+                            "      format: '未入门'|'黄'|'玄'",
+                            '      check:',
+                            '        - 获得传承后提升',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    const wrs = si.wildcardRules['主角'] || [];
+    assert.ok(wrs.some(w => w.path === '生理.欲望槽' && w.range && w.range[0] === 0 && w.range[1] === 100), '组内通配应挂到所在组 主角');
+    assert.ok(wrs.some(w => w.path === '技艺.${炼丹|炼器}' && w.format), '组内通配应带出 format');
+    const r = core.convert(card, { mode: 'both' });
+    const zj = Object.values(r.template).find(x => x && x.name === '主角表');
+    const note = zj.sourceData.note || '';
+    assert.ok(note.includes('生理.欲望槽'), '主角表 note 应含组内通配规则');
+    assert.ok(note.includes('技艺.${炼丹|炼器}（格式：'), '主角表 note 应带出 format');
+    assert.ok(note.includes('获得传承后提升'), '主角表 note 应含通配 check');
+});
+
+test('不同组下同名子表（行囊.背包 / 宗门.背包）用父组限定表名，避免插件导入校验失败（大荒回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '重名子表卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{ comment: '[InitVar]', content: '行囊:\n  背包: {}\n宗门:\n  背包: {}' }],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const names = Object.keys(r.template).filter(k => k.startsWith('sheet_')).map(k => r.template[k].name);
+    assert.strictEqual(names.filter((n, i) => names.indexOf(n) !== i).length, 0, '表名不得重复');
+    assert.ok(names.includes('行囊背包表') && names.includes('宗门背包表'), '同名子表应统一用父组限定表名（两个都带前缀）');
+    // 模拟插件 canonicalizeDisplayName：NFKC + 去空白 + 小写，规范化后也不得重复
+    const norm = s => String(s).normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+    const canon = names.map(norm);
+    assert.strictEqual(canon.filter((c, i) => canon.indexOf(c) !== i).length, 0, '规范化后表名不得重复（插件导入校验）');
+});
+
 test('切换开场分支：动态字典行表整组替换（旧行删除、新行插入），读回为该分支初始值', async () => {
     const card = {
         spec: 'chara_card_v3',

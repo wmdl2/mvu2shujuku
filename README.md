@@ -15,7 +15,7 @@
 
    `https://github.com/wmdl2/mvu2shujuku`
 
-   或把整个仓库目录放入 `data/<user>/extensions/` 后刷新页面。
+   后刷新页面。
 3. 重启 / 刷新 SillyTavern，设置面板出现「MVU转数据库」。
 
 转换器**不会自动安装数据库插件**，默认你在已有插件的情况下使用。
