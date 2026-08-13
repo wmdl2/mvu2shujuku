@@ -2112,7 +2112,9 @@
         return String(v == null ? '' : v).replace(/'/g, "''");
     }
 
-    function buildDdl(group) {
+    function buildDdl(group, opts = {}) {
+        // 用户可关掉 DDL 里的 CHECK（数值范围/枚举/json_valid），只保留列类型与默认值。
+        const includeCheck = opts.includeCheck !== false;
         const L = [`CREATE TABLE ${group.ident} ( -- ${group.tableName}`];
         L.push(`  row_id INTEGER PRIMARY KEY, -- 行号`);
         const cols = group.columns || [];
@@ -2129,7 +2131,7 @@
                 const num = dv === undefined || dv === null || dv === '' ? 0 : Number(dv);
                 def += ` NOT NULL DEFAULT ${Number.isFinite(num) ? num : 0}`;
                 if (isKey) def += ' UNIQUE';
-                if (range) {
+                if (range && includeCheck) {
                     def += ` CHECK(${c.ident} BETWEEN ${range[0]} AND ${range[1]}`;
                     if (extras.length) def += ` OR ${c.ident} IN (${extras.join(', ')})`;
                     def += ')';
@@ -2141,11 +2143,11 @@
                 if (isKey) def += ' UNIQUE';
                 // 整组 JSON 表的内容列：SQLite 模式下用 json_valid CHECK 保证整列 JSON 合法
                 // （updateCell/insertRow 的 SQL 由 SQLite 执行时会真正校验；native 模式不生效，见报告）
-                if (group.kind === 'json' && c.zh === '内容') {
+                if (includeCheck && group.kind === 'json' && c.zh === '内容') {
                     def += ` CHECK(json_valid(${c.ident}))`;
                 }
                 // 枚举 CHECK：把默认值和越界初始值一并放行，避免初始行/默认值被拒绝
-                if (c.enum && c.enum.length <= 8 && c.enum.every(v => !/['"]/.test(v))) {
+                if (includeCheck && c.enum && c.enum.length <= 8 && c.enum.every(v => !/['"]/.test(v))) {
                     const allowed = [...c.enum];
                     if (dvs !== '' && !allowed.includes(dvs)) allowed.push(dvs);
                     for (const ex of extras) if (!allowed.includes(ex)) allowed.push(ex);
@@ -2428,6 +2430,7 @@
      */
     function generateTemplate(schema, opts = {}) {
         const mode = opts.mode || 'both';
+        const includeCheck = opts.ddlIncludeCheck !== false;
         const report = opts.report || createReport();
         const template = {
             mate: {
@@ -2480,9 +2483,11 @@
                 }
                 content.push(row);
             });
-            for (const c of g.columns) {
-                if (extraAllowed[c.ident] && extraAllowed[c.ident].length) {
-                    report.note(`「${g.tableName}」列「${c.zh}」初始值 ${extraAllowed[c.ident].map(v => JSON.stringify(v)).join('、')} 超出规则范围，CHECK 约束已放行这些初始值（数值/枚举规则仍写入 note）。`);
+            if (includeCheck) {
+                for (const c of g.columns) {
+                    if (extraAllowed[c.ident] && extraAllowed[c.ident].length) {
+                        report.note(`「${g.tableName}」列「${c.zh}」初始值 ${extraAllowed[c.ident].map(v => JSON.stringify(v)).join('、')} 超出规则范围，CHECK 约束已放行这些初始值（数值/枚举规则仍写入 note）。`);
+                    }
                 }
             }
             const uid = 'sheet_' + g.ident;
@@ -2495,7 +2500,7 @@
                     deleteNode: buildNodeProse(g, 'delete'),
                     updateNode: buildNodeProse(g, 'update'),
                     insertNode: buildNodeProse(g, 'insert'),
-                    ddl: buildDdl(g),
+                    ddl: buildDdl(g, { includeCheck }),
                 },
                 content,
                 updateConfig: { skipFloors: -1 },
@@ -5003,7 +5008,7 @@
         }
         const schema = buildSchema(initvar, usage, report, shapeInfo);
         const layout = buildLayout(schema);
-        const template = opts.template || generateTemplate(schema, { mode, report });
+        const template = opts.template || generateTemplate(schema, { mode, report, ddlIncludeCheck: opts.ddlIncludeCheck });
 
         // 2. 检测卡内是否依赖 MVU API
         // 静态扫描只能看到卡内文本；tavern_helper 里 `import 'https://…'` 的外部脚本
@@ -5422,6 +5427,20 @@
             '#mvu2shujuku-settings #mvu2shujuku-actions { flex-wrap: wrap; }',
             '#mvu2shujuku-settings #mvu2shujuku-downloads { flex: 1 1 100%; flex-wrap: wrap; }',
             '#mvu2shujuku-settings .mvu2shujuku-hint { font-size: 12px; opacity: 0.75; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-editor { margin: 10px 0; padding: 8px 10px; border: 1px dashed var(--SmartThemeBorderColor, #666); border-radius: 6px; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-grid { display: grid; grid-template-columns: minmax(90px, 1.2fr) minmax(110px, 1fr) 76px; gap: 6px 8px; align-items: center; margin: 6px 0; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-head { font-weight: 600; font-size: 12px; opacity: 0.8; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-name { word-break: break-all; font-size: 13px; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-cell { min-width: 0; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-grid .mvu2shujuku-param-select, #mvu2shujuku-settings .mvu2shujuku-param-grid .mvu2shujuku-param-value { width: 100%; box-sizing: border-box; min-width: 0; }',
+            // 批量行在 flex 行里不能用 100% 宽（会被撑出界面），给固定窄宽
+            '#mvu2shujuku-settings .mvu2shujuku-param-bulk .mvu2shujuku-param-select { width: 150px; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-bulk .mvu2shujuku-param-value { width: 76px; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-select { color: var(--SmartThemeBodyColor, #ddd); }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-value { color: #222; text-align: right; }',
+            '#mvu2shujuku-settings .mvu2shujuku-check-label { flex: 1 1 auto; min-width: 0; word-break: break-word; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-bulk { padding-top: 6px; border-top: 1px solid var(--SmartThemeBorderColor, #666); }',
+            '#mvu2shujuku-settings .mvu2shujuku-merge-section { margin: 10px 0; padding: 8px 10px; border: 1px dashed var(--SmartThemeBorderColor, #666); border-radius: 6px; }',
         ].join('\n');
     }
 
@@ -6141,6 +6160,7 @@ ${DB_INIT_SNIPPET}
                 installMvuShim: 'auto',
                 appendPlaceholder: true,
                 asPng: 'auto',
+                ddlIncludeCheck: true,
                 debug: false,
             };
         }
@@ -6277,7 +6297,7 @@ ${DB_INIT_SNIPPET}
 
     let lastResult = null;
     let lastInput = null;
-    const mergeState = { sourceTemplate: null };
+    const mergeState = { sourceTemplate: null, source: '' };
     let activeLayout = null;
     // activeLayout 归属的卡（卡名|头像）：切卡空窗期用旧卡布局读新卡表格会产生错形状数据，
     // 读路径与写路径都以它为门槛，布局未就绪时返回空/重试
@@ -7649,6 +7669,7 @@ ${DB_INIT_SNIPPET}
             mode,
             asPng: settings.asPng === 'auto' ? sourceIsPng : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
+            ddlIncludeCheck: settings.ddlIncludeCheck !== false,
         };
         if (settings.installMvuShim !== 'auto') {
             opts.installMvuShim = settings.installMvuShim === 'yes';
@@ -7722,8 +7743,10 @@ ${DB_INIT_SNIPPET}
         if (!sel || !box) return;
         // 每次点击都重新拉取来源列表（预设可能刚导入）
         await populateMergeSource(panel);
-        const v = sel.value;
+        // 重渲染后下拉可能暂时为空：回退到上次加载成功的来源（合并后的自动刷新不会误报）
+        const v = sel.value || mergeState.source || '';
         if (!v) { toast('请先选择模板来源', 'error'); return; }
+        mergeState.source = v;
         const api = getAcuApi();
         dbg(' loadMergeTables: 来源=' + v + ' | api=' + !!api + ' | 有 getTableTemplate=' + !!(api && typeof api.getTableTemplate === 'function'));
         if (!api || typeof api.getTableTemplate !== 'function') {
@@ -7795,7 +7818,7 @@ ${DB_INIT_SNIPPET}
 
     async function applyMergeTables(panel) {
         if (!lastResult || !lastInput) { toast('请先转换角色卡', 'error'); return; }
-        if (!mergeState.sourceTemplate) { toast('请先加载模板来源', 'error'); return; }
+        if (!mergeState.sourceTemplate) { toast('请先选择模板来源并点「加载表列表」，再勾选要并入的表', 'error'); return; }
         const box = panel.querySelector('#mvu2shujuku-merge-tables');
         const status = panel.querySelector('#mvu2shujuku-merge-status');
         const checked = box ? [...box.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.value) : [];
@@ -7815,6 +7838,7 @@ ${DB_INIT_SNIPPET}
             template: merged.template,
             asPng: settings.asPng === 'auto' ? (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
+            ddlIncludeCheck: settings.ddlIncludeCheck !== false,
         };
         if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
         toast('正在合并并重新转换…');
@@ -7855,6 +7879,14 @@ ${DB_INIT_SNIPPET}
         if (!lastResult) {
             toast('请先转换', 'error');
             return false;
+        }
+        // 参数有实时改动时，先按当前模板重新生成角色卡（内嵌 base64 模板），再保存
+        if (updateParamsDirty) {
+            try {
+                refreshConvertedResult();
+            } catch (e) {
+                toast('保存前刷新参数失败：' + (e && e.message ? e.message : e), 'error');
+            }
         }
         const panel = hostDocument.getElementById(PANEL_ID);
         const context = getContextSafe();
@@ -7988,16 +8020,253 @@ ${DB_INIT_SNIPPET}
         toast(title + '：' + body, 'info');
     }
 
+    // 表格“自动化更新参数”快速编辑器（只改转换结果模板 JSON，不走插件 API）
+    // 字段与 SP·数据库 插件「自动化更新参数」面板一一对应；缺省 -1 = 沿用插件全局设置。
+    const UPDATE_PARAM_OPTIONS = [
+        { key: 'updateFrequency', label: '更新频率', hint: '-1=沿用全局；0=停用该表自动更新' },
+        { key: 'groupId', label: '分组编号', hint: '-1=沿用全局' },
+        { key: 'contextDepth', label: '上下文层数', hint: '-1=沿用全局' },
+        { key: 'batchSize', label: '批处理大小', hint: '-1=沿用全局' },
+        { key: 'skipFloors', label: '跳过楼层', hint: '-1=沿用全局' },
+        { key: 'sendLatestRows', label: '发送最新行数', hint: '-1=沿用全局' },
+    ];
+    // 每行当前选择的参数（uid -> key），重渲染后保持下拉选择不变
+    const updateParamState = {};
+    // 参数是否有未落盘的改动：下载/保存时据此重新生成转换结果（模板 JSON 改动本身是实时的）
+    let updateParamsDirty = false;
+
+    function refreshConvertedResult() {
+        // 用当前模板（含参数改动）重新跑一遍转换，刷新 角色卡（内嵌 base64 模板）/下载文件/报告。
+        // 模板对象引用保持不变，编辑器行内实时修改不会丢。
+        if (!lastInput || !lastResult) return null;
+        const settings = getSettings();
+        const core = window.MVU2SHUJUKU_CORE;
+        if (!core || typeof core.convert !== 'function') throw new Error('转换核心不可用');
+        const opts = {
+            mode: 'both',
+            template: lastResult.template,
+            asPng: settings.asPng === 'auto' ? (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) : settings.asPng === 'png',
+            appendPlaceholder: settings.appendPlaceholder !== false,
+            ddlIncludeCheck: settings.ddlIncludeCheck !== false,
+        };
+        if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
+        const result = core.convert(lastInput, opts);
+        if (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) {
+            result.meta.avatarBytes = lastInput;
+            result.meta.avatarMime = lastInput instanceof Uint8Array && lastInput.length > 8 && lastInput[0] === 0x89 ? 'image/png' : 'application/json';
+        }
+        lastResult = result;
+        updateParamsDirty = false;
+        return result;
+    }
+
+    function updateConfigOf(sheet) {
+        if (!sheet || typeof sheet !== 'object') return {};
+        if (!sheet.updateConfig || typeof sheet.updateConfig !== 'object') sheet.updateConfig = {};
+        return sheet.updateConfig;
+    }
+
+    function getUpdateParam(sheet, key) {
+        const v = updateConfigOf(sheet)[key];
+        return Number.isFinite(Number(v)) ? Number(v) : -1;
+    }
+
+    function normalizeUpdateParamValue(value) {
+        const raw = String(value == null ? '' : value).trim();
+        const n = raw === '' ? -1 : Math.trunc(Number(raw));
+        return Number.isFinite(n) ? n : -1;
+    }
+
+    function setUpdateParam(sheet, key, value) {
+        const cfg = updateConfigOf(sheet);
+        cfg.uiSentinel = -1; // 与插件 UI 一致：标记已由用户显式设置
+        cfg[key] = normalizeUpdateParamValue(value);
+        return cfg[key];
+    }
+
+    function updateParamSheetRows(result) {
+        return Object.keys(result.template || {})
+            .filter(k => k.startsWith('sheet_'))
+            .map(k => ({ uid: k, sheet: result.template[k] }))
+            .filter(x => x.sheet && typeof x.sheet === 'object' && !Array.isArray(x.sheet))
+            .sort((a, b) => {
+                const ao = Number.isFinite(a.sheet.orderNo) ? a.sheet.orderNo : 999999;
+                const bo = Number.isFinite(b.sheet.orderNo) ? b.sheet.orderNo : 999999;
+                return ao - bo || String(a.sheet.name || a.uid).localeCompare(String(b.sheet.name || b.uid), 'zh-CN');
+            });
+    }
+
+    function paramOptionHtml(selectedKey) {
+        return UPDATE_PARAM_OPTIONS.map(o =>
+            '<option value="' + o.key + '"' + (o.key === selectedKey ? ' selected' : '') + '>' + o.label + '</option>'
+        ).join('');
+    }
+
+    function renderUpdateConfigEditor(box, result) {
+        const rows = updateParamSheetRows(result);
+        if (!rows.length) return;
+        const wrap = hostDocument.createElement('div');
+        wrap.className = 'mvu2shujuku-param-editor';
+        const head = hostDocument.createElement('div');
+        head.className = 'mvu2shujuku-row';
+        head.innerHTML = '<b>表格自动化更新参数</b>';
+        wrap.appendChild(head);
+        const help = hostDocument.createElement('div');
+        help.className = 'mvu2shujuku-help';
+        help.innerHTML = '直接修改转换结果模板 JSON，改动实时写入（下载/保存时自动带上，无需再点确定）。' +
+            '参数 -1 = 沿用插件全局设置；更新频率 0 = 停用该表自动更新。' +
+            '已创建聊天中的表格不会自动变更（聊天作用域持有自己的模板副本），如需同步请重新导入模板或在新聊天中建表。';
+        wrap.appendChild(help);
+
+        // 整体编辑：一个参数+数值应用到全部表格（始终可用，不另设开关）
+        const bulk = hostDocument.createElement('div');
+        bulk.className = 'mvu2shujuku-row mvu2shujuku-param-bulk';
+        const bulkLabel = hostDocument.createElement('span');
+        bulkLabel.className = 'mvu2shujuku-label';
+        bulkLabel.textContent = '整体编辑';
+        const bulkSel = hostDocument.createElement('select');
+        bulkSel.className = 'mvu2shujuku-param-select';
+        bulkSel.innerHTML = paramOptionHtml('updateFrequency');
+        const bulkInput = hostDocument.createElement('input');
+        bulkInput.type = 'number';
+        bulkInput.min = '-1';
+        bulkInput.step = '1';
+        bulkInput.value = '-1';
+        bulkInput.className = 'mvu2shujuku-param-value';
+        const bulkBtn = hostDocument.createElement('button');
+        bulkBtn.className = 'menu_button';
+        bulkBtn.textContent = '应用到全部表格';
+        bulkBtn.addEventListener('click', () => {
+            const key = bulkSel.value;
+            const v = normalizeUpdateParamValue(bulkInput.value);
+            let count = 0;
+            for (const r of rowEls) {
+                setUpdateParam(r.sheet, key, v);
+                updateParamState[r.uid] = key;
+                r.sel.value = key;
+                r.sel.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
+                r.input.value = String(v);
+                r.input.title = r.sel.title;
+                count++;
+            }
+            updateParamsDirty = true;
+            const label = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).label || key;
+            toast('已把「' + label + '」设为 ' + v + '，应用到全部 ' + count + ' 张表', 'info');
+            dbg(' 整体应用: ' + key + ' = ' + v + ' → ' + count + ' 张表');
+        });
+        bulk.appendChild(bulkLabel);
+        bulk.appendChild(bulkSel);
+        bulk.appendChild(bulkInput);
+        bulk.appendChild(bulkBtn);
+        wrap.appendChild(bulk);
+
+        // 逐表编辑：表名 | 参数 | 数值（实时写入模板 JSON）
+        const grid = hostDocument.createElement('div');
+        grid.className = 'mvu2shujuku-param-grid';
+        const mkCell = (cls, text) => {
+            const cell = hostDocument.createElement('div');
+            cell.className = cls;
+            cell.textContent = text;
+            return cell;
+        };
+        grid.appendChild(mkCell('mvu2shujuku-param-head', '表名'));
+        grid.appendChild(mkCell('mvu2shujuku-param-head', '参数'));
+        grid.appendChild(mkCell('mvu2shujuku-param-head', '数值'));
+        const rowEls = [];
+        for (const { uid, sheet } of rows) {
+            const key = updateParamState[uid] && UPDATE_PARAM_OPTIONS.some(o => o.key === updateParamState[uid])
+                ? updateParamState[uid]
+                : 'updateFrequency';
+            const nameEl = mkCell('mvu2shujuku-param-name', String(sheet.name || uid));
+            const sel = hostDocument.createElement('select');
+            sel.className = 'mvu2shujuku-param-select';
+            sel.innerHTML = paramOptionHtml(key);
+            sel.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
+            const input = hostDocument.createElement('input');
+            input.type = 'number';
+            input.min = '-1';
+            input.step = '1';
+            input.className = 'mvu2shujuku-param-value';
+            input.value = String(getUpdateParam(sheet, key));
+            input.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
+            sel.addEventListener('change', () => {
+                updateParamState[uid] = sel.value;
+                input.value = String(getUpdateParam(sheet, sel.value));
+                input.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === sel.value) || {}).hint || '';
+                sel.title = input.title;
+                dbg(' 参数行切换: ' + String(sheet.name || uid) + ' → ' + sel.value + ' = ' + input.value);
+            });
+            input.addEventListener('input', () => {
+                const v = setUpdateParam(sheet, sel.value, input.value);
+                input.value = String(v);
+                updateParamsDirty = true;
+                dbg(' 参数行修改: ' + String(sheet.name || uid) + '.' + sel.value + ' = ' + v);
+            });
+            const cellSel = hostDocument.createElement('div');
+            cellSel.className = 'mvu2shujuku-param-cell';
+            cellSel.appendChild(sel);
+            const cellVal = hostDocument.createElement('div');
+            cellVal.className = 'mvu2shujuku-param-cell';
+            cellVal.appendChild(input);
+            grid.appendChild(nameEl);
+            grid.appendChild(cellSel);
+            grid.appendChild(cellVal);
+            rowEls.push({ uid, sheet, sel, input });
+        }
+        wrap.appendChild(grid);
+        box.appendChild(wrap);
+    }
+
+    // 合并数据库插件现有模板区块：放在参数编辑器与转换报告之间，转换后边改边并更方便
+    function renderMergeSection(box, panel) {
+        const sec = hostDocument.createElement('div');
+        sec.className = 'mvu2shujuku-merge-section';
+        sec.innerHTML =
+            '<div class="mvu2shujuku-row">' +
+            '  <label class="mvu2shujuku-label" for="mvu2shujuku-merge-source">合并数据库现有表格模板（转换完成后可用）</label>' +
+            '  <select id="mvu2shujuku-merge-source" title="选择模板来源：当前聊天模板 / 全局模板 / 全局预设"></select>' +
+            '  <button id="mvu2shujuku-merge-load" class="menu_button">加载表列表</button>' +
+            '</div>' +
+            '<div id="mvu2shujuku-merge-tables" class="mvu2shujuku-hint">选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。</div>' +
+            '<div class="mvu2shujuku-row">' +
+            '  <button id="mvu2shujuku-merge-apply" class="menu_button" style="display:none">合并到转换结果</button>' +
+            '  <span id="mvu2shujuku-merge-status" class="mvu2shujuku-hint"></span>' +
+            '</div>';
+        box.appendChild(sec);
+        const loadBtn = sec.querySelector('#mvu2shujuku-merge-load');
+        if (loadBtn && loadBtn.dataset.bound !== 'true') {
+            loadBtn.dataset.bound = 'true';
+            loadBtn.addEventListener('click', () => loadMergeTables(panel));
+        }
+        const applyBtn = sec.querySelector('#mvu2shujuku-merge-apply');
+        if (applyBtn && applyBtn.dataset.bound !== 'true') {
+            applyBtn.dataset.bound = 'true';
+            applyBtn.addEventListener('click', () => applyMergeTables(panel));
+        }
+        // 恢复上次加载成功的来源（首次默认「全局模板」），减少一次手选；
+        // 加载成功后「合并到转换结果」按钮才会出现
+        const srcSel = sec.querySelector('#mvu2shujuku-merge-source');
+        if (srcSel) srcSel.value = mergeState.source || 'global';
+        // 每次渲染都刷新来源下拉（预设可能刚导入）；内部有 2.5s 未就绪重试
+        populateMergeSource(panel);
+    }
+
     function renderResult(result) {
         const panel = hostDocument.getElementById(PANEL_ID);
         if (!panel) return;
         const box = panel.querySelector('.mvu2shujuku-result');
         if (!box) return;
         box.innerHTML = '';
+        // 每次渲染出的转换结果都是最新状态（含刚合并/刚改完参数），重置“待刷新”标记
+        updateParamsDirty = false;
         const head = hostDocument.createElement('div');
         head.className = 'mvu2shujuku-row';
-        head.innerHTML = '<b>转换完成</b>：' + result.meta.tableCount + ' 张表（' + result.meta.tableNames.join('、') + '）';
+        head.innerHTML = '<b>转换完成</b>：' + result.meta.tableCount + ' 张表';
         box.appendChild(head);
+        // 自动化更新参数快速编辑器（只改转换结果模板 JSON）
+        renderUpdateConfigEditor(box, result);
+        // 合并数据库现有表格（参数编辑器与报告之间）
+        renderMergeSection(box, panel);
         // 第一步：先看报告
         const report = hostDocument.createElement('textarea');
         report.className = 'mvu2shujuku-report';
@@ -8012,14 +8281,28 @@ ${DB_INIT_SNIPPET}
                 const btn = hostDocument.createElement('button');
                 btn.className = 'menu_button';
                 btn.textContent = '下载 ' + f.name;
-                btn.addEventListener('click', () => download(f.name, f.mime, f.data));
+                btn.addEventListener('click', () => {
+                    // 下载时用最新模板重新生成，保证参数改动一定带进文件
+                    try {
+                        if (f.kind === 'template') {
+                            download(f.name, f.mime, JSON.stringify(lastResult.template, null, 2));
+                        } else if (f.kind === 'card') {
+                            refreshConvertedResult();
+                            const fresh = (lastResult.files || []).find(x => x.kind === 'card');
+                            download(f.name, f.mime, (fresh && fresh.data) || f.data);
+                        } else {
+                            download(f.name, f.mime, lastResult.reportText || f.data);
+                        }
+                    } catch (e) {
+                        toast('下载内容刷新失败，已使用转换时的版本：' + (e && e.message ? e.message : e), 'error');
+                        download(f.name, f.mime, f.data);
+                    }
+                });
                 downloadsBox.appendChild(btn);
             }
         }
         const saveBtn = panel.querySelector('#mvu2shujuku-save-card');
         if (saveBtn) saveBtn.style.display = '';
-        const mergeBtn = panel.querySelector('#mvu2shujuku-merge-apply');
-        if (mergeBtn) mergeBtn.style.display = '';
         toast('转换完成，共 ' + result.meta.tableCount + ' 张表');
     }
 
@@ -8072,6 +8355,9 @@ ${DB_INIT_SNIPPET}
             '        <span class="mvu2shujuku-hint">双模式（跟随插件当前设置）</span>',
             '      </div>',
             '      <div class="mvu2shujuku-row">',
+            '        <label class="mvu2shujuku-check-label" title="控制生成的表格 DDL 是否带 CHECK 约束（数值范围、枚举、JSON 表 json_valid）。关闭后仅保留列类型与默认值，新建聊天时 SQLite 不再做这些校验；改动需重新转换生效"><input type="checkbox" id="mvu2shujuku-ddl-check" ' + (settings.ddlIncludeCheck !== false ? 'checked' : '') + ' /> 转换时在表格 DDL 中加入 CHECK 约束（数值范围/枚举/json_valid）</label>',
+            '      </div>',
+            '      <div class="mvu2shujuku-row">',
             '        <label class="mvu2shujuku-label" for="mvu2shujuku-shim">MVU 兼容层</label>',
             '        <select id="mvu2shujuku-shim">',
             '          <option value="auto" ' + (settings.installMvuShim === 'auto' ? 'selected' : '') + '>自动（检测到 MVU API 才装）</option>',
@@ -8109,16 +8395,6 @@ ${DB_INIT_SNIPPET}
             '        <button id="mvu2shujuku-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2shujuku-result"></div>',
-            '      <div class="mvu2shujuku-row">',
-            '        <label class="mvu2shujuku-label" for="mvu2shujuku-merge-source">合并数据库现有表格模板（转换完成后可用）</label>',
-            '        <select id="mvu2shujuku-merge-source" title="选择模板来源：当前聊天模板 / 全局模板 / 全局预设"></select>',
-            '        <button id="mvu2shujuku-merge-load" class="menu_button">加载表列表</button>',
-            '      </div>',
-            '      <div id="mvu2shujuku-merge-tables" class="mvu2shujuku-hint">选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。</div>',
-            '      <div class="mvu2shujuku-row">',
-            '        <button id="mvu2shujuku-merge-apply" class="menu_button" style="display:none">合并到转换结果</button>',
-            '        <span id="mvu2shujuku-merge-status" class="mvu2shujuku-hint"></span>',
-            '      </div>',
             '      <div id="mvu2shujuku-actions" class="mvu2shujuku-row">',
             '        <div id="mvu2shujuku-downloads" class="mvu2shujuku-downloads mvu2shujuku-row"></div>',
             '        <button id="mvu2shujuku-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
@@ -8226,8 +8502,6 @@ ${DB_INIT_SNIPPET}
             const statusEl = panel.querySelector('#mvu2shujuku-merge-status');
             if (statusEl) statusEl.textContent = '';
         });
-        bind('#mvu2shujuku-merge-load', () => loadMergeTables(panel));
-        bind('#mvu2shujuku-merge-apply', () => applyMergeTables(panel));
         bind('#mvu2shujuku-save-card', async () => {
             await saveCardToSillyTavern();
         });
@@ -8256,6 +8530,17 @@ ${DB_INIT_SNIPPET}
                     if (typeof window !== 'undefined') window.__mvu2shujukuDebug = debugBox.checked;
                 } catch (e) {}
                 saveSettings();
+            });
+        }
+        const ddlCheckBox = panel.querySelector('#mvu2shujuku-ddl-check');
+        if (ddlCheckBox && ddlCheckBox.dataset.bound !== 'true') {
+            ddlCheckBox.dataset.bound = 'true';
+            ddlCheckBox.addEventListener('change', () => {
+                getSettings().ddlIncludeCheck = ddlCheckBox.checked;
+                saveSettings();
+                if (lastResult) {
+                    toast('DDL CHECK 开关已保存；重新转换后生效（现有转换结果不变）', 'info');
+                }
             });
         }
         const pngSel = panel.querySelector('#mvu2shujuku-png');
@@ -20028,6 +20313,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 installMvuShim: 'auto',
                 appendPlaceholder: true,
                 asPng: 'auto',
+                ddlIncludeCheck: true,
                 debug: false,
             };
         }
@@ -20164,7 +20450,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
 
     let lastResult = null;
     let lastInput = null;
-    const mergeState = { sourceTemplate: null };
+    const mergeState = { sourceTemplate: null, source: '' };
     let activeLayout = null;
     // activeLayout 归属的卡（卡名|头像）：切卡空窗期用旧卡布局读新卡表格会产生错形状数据，
     // 读路径与写路径都以它为门槛，布局未就绪时返回空/重试
@@ -21536,6 +21822,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             mode,
             asPng: settings.asPng === 'auto' ? sourceIsPng : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
+            ddlIncludeCheck: settings.ddlIncludeCheck !== false,
         };
         if (settings.installMvuShim !== 'auto') {
             opts.installMvuShim = settings.installMvuShim === 'yes';
@@ -21609,8 +21896,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         if (!sel || !box) return;
         // 每次点击都重新拉取来源列表（预设可能刚导入）
         await populateMergeSource(panel);
-        const v = sel.value;
+        // 重渲染后下拉可能暂时为空：回退到上次加载成功的来源（合并后的自动刷新不会误报）
+        const v = sel.value || mergeState.source || '';
         if (!v) { toast('请先选择模板来源', 'error'); return; }
+        mergeState.source = v;
         const api = getAcuApi();
         dbg(' loadMergeTables: 来源=' + v + ' | api=' + !!api + ' | 有 getTableTemplate=' + !!(api && typeof api.getTableTemplate === 'function'));
         if (!api || typeof api.getTableTemplate !== 'function') {
@@ -21682,7 +21971,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
 
     async function applyMergeTables(panel) {
         if (!lastResult || !lastInput) { toast('请先转换角色卡', 'error'); return; }
-        if (!mergeState.sourceTemplate) { toast('请先加载模板来源', 'error'); return; }
+        if (!mergeState.sourceTemplate) { toast('请先选择模板来源并点「加载表列表」，再勾选要并入的表', 'error'); return; }
         const box = panel.querySelector('#mvu2shujuku-merge-tables');
         const status = panel.querySelector('#mvu2shujuku-merge-status');
         const checked = box ? [...box.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.value) : [];
@@ -21702,6 +21991,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             template: merged.template,
             asPng: settings.asPng === 'auto' ? (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
+            ddlIncludeCheck: settings.ddlIncludeCheck !== false,
         };
         if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
         toast('正在合并并重新转换…');
@@ -21742,6 +22032,14 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         if (!lastResult) {
             toast('请先转换', 'error');
             return false;
+        }
+        // 参数有实时改动时，先按当前模板重新生成角色卡（内嵌 base64 模板），再保存
+        if (updateParamsDirty) {
+            try {
+                refreshConvertedResult();
+            } catch (e) {
+                toast('保存前刷新参数失败：' + (e && e.message ? e.message : e), 'error');
+            }
         }
         const panel = hostDocument.getElementById(PANEL_ID);
         const context = getContextSafe();
@@ -21875,16 +22173,253 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         toast(title + '：' + body, 'info');
     }
 
+    // 表格“自动化更新参数”快速编辑器（只改转换结果模板 JSON，不走插件 API）
+    // 字段与 SP·数据库 插件「自动化更新参数」面板一一对应；缺省 -1 = 沿用插件全局设置。
+    const UPDATE_PARAM_OPTIONS = [
+        { key: 'updateFrequency', label: '更新频率', hint: '-1=沿用全局；0=停用该表自动更新' },
+        { key: 'groupId', label: '分组编号', hint: '-1=沿用全局' },
+        { key: 'contextDepth', label: '上下文层数', hint: '-1=沿用全局' },
+        { key: 'batchSize', label: '批处理大小', hint: '-1=沿用全局' },
+        { key: 'skipFloors', label: '跳过楼层', hint: '-1=沿用全局' },
+        { key: 'sendLatestRows', label: '发送最新行数', hint: '-1=沿用全局' },
+    ];
+    // 每行当前选择的参数（uid -> key），重渲染后保持下拉选择不变
+    const updateParamState = {};
+    // 参数是否有未落盘的改动：下载/保存时据此重新生成转换结果（模板 JSON 改动本身是实时的）
+    let updateParamsDirty = false;
+
+    function refreshConvertedResult() {
+        // 用当前模板（含参数改动）重新跑一遍转换，刷新 角色卡（内嵌 base64 模板）/下载文件/报告。
+        // 模板对象引用保持不变，编辑器行内实时修改不会丢。
+        if (!lastInput || !lastResult) return null;
+        const settings = getSettings();
+        const core = window.MVU2SHUJUKU_CORE;
+        if (!core || typeof core.convert !== 'function') throw new Error('转换核心不可用');
+        const opts = {
+            mode: 'both',
+            template: lastResult.template,
+            asPng: settings.asPng === 'auto' ? (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) : settings.asPng === 'png',
+            appendPlaceholder: settings.appendPlaceholder !== false,
+            ddlIncludeCheck: settings.ddlIncludeCheck !== false,
+        };
+        if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
+        const result = core.convert(lastInput, opts);
+        if (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) {
+            result.meta.avatarBytes = lastInput;
+            result.meta.avatarMime = lastInput instanceof Uint8Array && lastInput.length > 8 && lastInput[0] === 0x89 ? 'image/png' : 'application/json';
+        }
+        lastResult = result;
+        updateParamsDirty = false;
+        return result;
+    }
+
+    function updateConfigOf(sheet) {
+        if (!sheet || typeof sheet !== 'object') return {};
+        if (!sheet.updateConfig || typeof sheet.updateConfig !== 'object') sheet.updateConfig = {};
+        return sheet.updateConfig;
+    }
+
+    function getUpdateParam(sheet, key) {
+        const v = updateConfigOf(sheet)[key];
+        return Number.isFinite(Number(v)) ? Number(v) : -1;
+    }
+
+    function normalizeUpdateParamValue(value) {
+        const raw = String(value == null ? '' : value).trim();
+        const n = raw === '' ? -1 : Math.trunc(Number(raw));
+        return Number.isFinite(n) ? n : -1;
+    }
+
+    function setUpdateParam(sheet, key, value) {
+        const cfg = updateConfigOf(sheet);
+        cfg.uiSentinel = -1; // 与插件 UI 一致：标记已由用户显式设置
+        cfg[key] = normalizeUpdateParamValue(value);
+        return cfg[key];
+    }
+
+    function updateParamSheetRows(result) {
+        return Object.keys(result.template || {})
+            .filter(k => k.startsWith('sheet_'))
+            .map(k => ({ uid: k, sheet: result.template[k] }))
+            .filter(x => x.sheet && typeof x.sheet === 'object' && !Array.isArray(x.sheet))
+            .sort((a, b) => {
+                const ao = Number.isFinite(a.sheet.orderNo) ? a.sheet.orderNo : 999999;
+                const bo = Number.isFinite(b.sheet.orderNo) ? b.sheet.orderNo : 999999;
+                return ao - bo || String(a.sheet.name || a.uid).localeCompare(String(b.sheet.name || b.uid), 'zh-CN');
+            });
+    }
+
+    function paramOptionHtml(selectedKey) {
+        return UPDATE_PARAM_OPTIONS.map(o =>
+            '<option value="' + o.key + '"' + (o.key === selectedKey ? ' selected' : '') + '>' + o.label + '</option>'
+        ).join('');
+    }
+
+    function renderUpdateConfigEditor(box, result) {
+        const rows = updateParamSheetRows(result);
+        if (!rows.length) return;
+        const wrap = hostDocument.createElement('div');
+        wrap.className = 'mvu2shujuku-param-editor';
+        const head = hostDocument.createElement('div');
+        head.className = 'mvu2shujuku-row';
+        head.innerHTML = '<b>表格自动化更新参数</b>';
+        wrap.appendChild(head);
+        const help = hostDocument.createElement('div');
+        help.className = 'mvu2shujuku-help';
+        help.innerHTML = '直接修改转换结果模板 JSON，改动实时写入（下载/保存时自动带上，无需再点确定）。' +
+            '参数 -1 = 沿用插件全局设置；更新频率 0 = 停用该表自动更新。' +
+            '已创建聊天中的表格不会自动变更（聊天作用域持有自己的模板副本），如需同步请重新导入模板或在新聊天中建表。';
+        wrap.appendChild(help);
+
+        // 整体编辑：一个参数+数值应用到全部表格（始终可用，不另设开关）
+        const bulk = hostDocument.createElement('div');
+        bulk.className = 'mvu2shujuku-row mvu2shujuku-param-bulk';
+        const bulkLabel = hostDocument.createElement('span');
+        bulkLabel.className = 'mvu2shujuku-label';
+        bulkLabel.textContent = '整体编辑';
+        const bulkSel = hostDocument.createElement('select');
+        bulkSel.className = 'mvu2shujuku-param-select';
+        bulkSel.innerHTML = paramOptionHtml('updateFrequency');
+        const bulkInput = hostDocument.createElement('input');
+        bulkInput.type = 'number';
+        bulkInput.min = '-1';
+        bulkInput.step = '1';
+        bulkInput.value = '-1';
+        bulkInput.className = 'mvu2shujuku-param-value';
+        const bulkBtn = hostDocument.createElement('button');
+        bulkBtn.className = 'menu_button';
+        bulkBtn.textContent = '应用到全部表格';
+        bulkBtn.addEventListener('click', () => {
+            const key = bulkSel.value;
+            const v = normalizeUpdateParamValue(bulkInput.value);
+            let count = 0;
+            for (const r of rowEls) {
+                setUpdateParam(r.sheet, key, v);
+                updateParamState[r.uid] = key;
+                r.sel.value = key;
+                r.sel.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
+                r.input.value = String(v);
+                r.input.title = r.sel.title;
+                count++;
+            }
+            updateParamsDirty = true;
+            const label = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).label || key;
+            toast('已把「' + label + '」设为 ' + v + '，应用到全部 ' + count + ' 张表', 'info');
+            dbg(' 整体应用: ' + key + ' = ' + v + ' → ' + count + ' 张表');
+        });
+        bulk.appendChild(bulkLabel);
+        bulk.appendChild(bulkSel);
+        bulk.appendChild(bulkInput);
+        bulk.appendChild(bulkBtn);
+        wrap.appendChild(bulk);
+
+        // 逐表编辑：表名 | 参数 | 数值（实时写入模板 JSON）
+        const grid = hostDocument.createElement('div');
+        grid.className = 'mvu2shujuku-param-grid';
+        const mkCell = (cls, text) => {
+            const cell = hostDocument.createElement('div');
+            cell.className = cls;
+            cell.textContent = text;
+            return cell;
+        };
+        grid.appendChild(mkCell('mvu2shujuku-param-head', '表名'));
+        grid.appendChild(mkCell('mvu2shujuku-param-head', '参数'));
+        grid.appendChild(mkCell('mvu2shujuku-param-head', '数值'));
+        const rowEls = [];
+        for (const { uid, sheet } of rows) {
+            const key = updateParamState[uid] && UPDATE_PARAM_OPTIONS.some(o => o.key === updateParamState[uid])
+                ? updateParamState[uid]
+                : 'updateFrequency';
+            const nameEl = mkCell('mvu2shujuku-param-name', String(sheet.name || uid));
+            const sel = hostDocument.createElement('select');
+            sel.className = 'mvu2shujuku-param-select';
+            sel.innerHTML = paramOptionHtml(key);
+            sel.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
+            const input = hostDocument.createElement('input');
+            input.type = 'number';
+            input.min = '-1';
+            input.step = '1';
+            input.className = 'mvu2shujuku-param-value';
+            input.value = String(getUpdateParam(sheet, key));
+            input.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
+            sel.addEventListener('change', () => {
+                updateParamState[uid] = sel.value;
+                input.value = String(getUpdateParam(sheet, sel.value));
+                input.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === sel.value) || {}).hint || '';
+                sel.title = input.title;
+                dbg(' 参数行切换: ' + String(sheet.name || uid) + ' → ' + sel.value + ' = ' + input.value);
+            });
+            input.addEventListener('input', () => {
+                const v = setUpdateParam(sheet, sel.value, input.value);
+                input.value = String(v);
+                updateParamsDirty = true;
+                dbg(' 参数行修改: ' + String(sheet.name || uid) + '.' + sel.value + ' = ' + v);
+            });
+            const cellSel = hostDocument.createElement('div');
+            cellSel.className = 'mvu2shujuku-param-cell';
+            cellSel.appendChild(sel);
+            const cellVal = hostDocument.createElement('div');
+            cellVal.className = 'mvu2shujuku-param-cell';
+            cellVal.appendChild(input);
+            grid.appendChild(nameEl);
+            grid.appendChild(cellSel);
+            grid.appendChild(cellVal);
+            rowEls.push({ uid, sheet, sel, input });
+        }
+        wrap.appendChild(grid);
+        box.appendChild(wrap);
+    }
+
+    // 合并数据库插件现有模板区块：放在参数编辑器与转换报告之间，转换后边改边并更方便
+    function renderMergeSection(box, panel) {
+        const sec = hostDocument.createElement('div');
+        sec.className = 'mvu2shujuku-merge-section';
+        sec.innerHTML =
+            '<div class="mvu2shujuku-row">' +
+            '  <label class="mvu2shujuku-label" for="mvu2shujuku-merge-source">合并数据库现有表格模板（转换完成后可用）</label>' +
+            '  <select id="mvu2shujuku-merge-source" title="选择模板来源：当前聊天模板 / 全局模板 / 全局预设"></select>' +
+            '  <button id="mvu2shujuku-merge-load" class="menu_button">加载表列表</button>' +
+            '</div>' +
+            '<div id="mvu2shujuku-merge-tables" class="mvu2shujuku-hint">选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。</div>' +
+            '<div class="mvu2shujuku-row">' +
+            '  <button id="mvu2shujuku-merge-apply" class="menu_button" style="display:none">合并到转换结果</button>' +
+            '  <span id="mvu2shujuku-merge-status" class="mvu2shujuku-hint"></span>' +
+            '</div>';
+        box.appendChild(sec);
+        const loadBtn = sec.querySelector('#mvu2shujuku-merge-load');
+        if (loadBtn && loadBtn.dataset.bound !== 'true') {
+            loadBtn.dataset.bound = 'true';
+            loadBtn.addEventListener('click', () => loadMergeTables(panel));
+        }
+        const applyBtn = sec.querySelector('#mvu2shujuku-merge-apply');
+        if (applyBtn && applyBtn.dataset.bound !== 'true') {
+            applyBtn.dataset.bound = 'true';
+            applyBtn.addEventListener('click', () => applyMergeTables(panel));
+        }
+        // 恢复上次加载成功的来源（首次默认「全局模板」），减少一次手选；
+        // 加载成功后「合并到转换结果」按钮才会出现
+        const srcSel = sec.querySelector('#mvu2shujuku-merge-source');
+        if (srcSel) srcSel.value = mergeState.source || 'global';
+        // 每次渲染都刷新来源下拉（预设可能刚导入）；内部有 2.5s 未就绪重试
+        populateMergeSource(panel);
+    }
+
     function renderResult(result) {
         const panel = hostDocument.getElementById(PANEL_ID);
         if (!panel) return;
         const box = panel.querySelector('.mvu2shujuku-result');
         if (!box) return;
         box.innerHTML = '';
+        // 每次渲染出的转换结果都是最新状态（含刚合并/刚改完参数），重置“待刷新”标记
+        updateParamsDirty = false;
         const head = hostDocument.createElement('div');
         head.className = 'mvu2shujuku-row';
-        head.innerHTML = '<b>转换完成</b>：' + result.meta.tableCount + ' 张表（' + result.meta.tableNames.join('、') + '）';
+        head.innerHTML = '<b>转换完成</b>：' + result.meta.tableCount + ' 张表';
         box.appendChild(head);
+        // 自动化更新参数快速编辑器（只改转换结果模板 JSON）
+        renderUpdateConfigEditor(box, result);
+        // 合并数据库现有表格（参数编辑器与报告之间）
+        renderMergeSection(box, panel);
         // 第一步：先看报告
         const report = hostDocument.createElement('textarea');
         report.className = 'mvu2shujuku-report';
@@ -21899,14 +22434,28 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 const btn = hostDocument.createElement('button');
                 btn.className = 'menu_button';
                 btn.textContent = '下载 ' + f.name;
-                btn.addEventListener('click', () => download(f.name, f.mime, f.data));
+                btn.addEventListener('click', () => {
+                    // 下载时用最新模板重新生成，保证参数改动一定带进文件
+                    try {
+                        if (f.kind === 'template') {
+                            download(f.name, f.mime, JSON.stringify(lastResult.template, null, 2));
+                        } else if (f.kind === 'card') {
+                            refreshConvertedResult();
+                            const fresh = (lastResult.files || []).find(x => x.kind === 'card');
+                            download(f.name, f.mime, (fresh && fresh.data) || f.data);
+                        } else {
+                            download(f.name, f.mime, lastResult.reportText || f.data);
+                        }
+                    } catch (e) {
+                        toast('下载内容刷新失败，已使用转换时的版本：' + (e && e.message ? e.message : e), 'error');
+                        download(f.name, f.mime, f.data);
+                    }
+                });
                 downloadsBox.appendChild(btn);
             }
         }
         const saveBtn = panel.querySelector('#mvu2shujuku-save-card');
         if (saveBtn) saveBtn.style.display = '';
-        const mergeBtn = panel.querySelector('#mvu2shujuku-merge-apply');
-        if (mergeBtn) mergeBtn.style.display = '';
         toast('转换完成，共 ' + result.meta.tableCount + ' 张表');
     }
 
@@ -21959,6 +22508,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             '        <span class="mvu2shujuku-hint">双模式（跟随插件当前设置）</span>',
             '      </div>',
             '      <div class="mvu2shujuku-row">',
+            '        <label class="mvu2shujuku-check-label" title="控制生成的表格 DDL 是否带 CHECK 约束（数值范围、枚举、JSON 表 json_valid）。关闭后仅保留列类型与默认值，新建聊天时 SQLite 不再做这些校验；改动需重新转换生效"><input type="checkbox" id="mvu2shujuku-ddl-check" ' + (settings.ddlIncludeCheck !== false ? 'checked' : '') + ' /> 转换时在表格 DDL 中加入 CHECK 约束（数值范围/枚举/json_valid）</label>',
+            '      </div>',
+            '      <div class="mvu2shujuku-row">',
             '        <label class="mvu2shujuku-label" for="mvu2shujuku-shim">MVU 兼容层</label>',
             '        <select id="mvu2shujuku-shim">',
             '          <option value="auto" ' + (settings.installMvuShim === 'auto' ? 'selected' : '') + '>自动（检测到 MVU API 才装）</option>',
@@ -21996,16 +22548,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             '        <button id="mvu2shujuku-clear" class="menu_button">清空结果</button>',
             '      </div>',
             '      <div class="mvu2shujuku-result"></div>',
-            '      <div class="mvu2shujuku-row">',
-            '        <label class="mvu2shujuku-label" for="mvu2shujuku-merge-source">合并数据库现有表格模板（转换完成后可用）</label>',
-            '        <select id="mvu2shujuku-merge-source" title="选择模板来源：当前聊天模板 / 全局模板 / 全局预设"></select>',
-            '        <button id="mvu2shujuku-merge-load" class="menu_button">加载表列表</button>',
-            '      </div>',
-            '      <div id="mvu2shujuku-merge-tables" class="mvu2shujuku-hint">选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。</div>',
-            '      <div class="mvu2shujuku-row">',
-            '        <button id="mvu2shujuku-merge-apply" class="menu_button" style="display:none">合并到转换结果</button>',
-            '        <span id="mvu2shujuku-merge-status" class="mvu2shujuku-hint"></span>',
-            '      </div>',
             '      <div id="mvu2shujuku-actions" class="mvu2shujuku-row">',
             '        <div id="mvu2shujuku-downloads" class="mvu2shujuku-downloads mvu2shujuku-row"></div>',
             '        <button id="mvu2shujuku-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
@@ -22113,8 +22655,6 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const statusEl = panel.querySelector('#mvu2shujuku-merge-status');
             if (statusEl) statusEl.textContent = '';
         });
-        bind('#mvu2shujuku-merge-load', () => loadMergeTables(panel));
-        bind('#mvu2shujuku-merge-apply', () => applyMergeTables(panel));
         bind('#mvu2shujuku-save-card', async () => {
             await saveCardToSillyTavern();
         });
@@ -22143,6 +22683,17 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     if (typeof window !== 'undefined') window.__mvu2shujukuDebug = debugBox.checked;
                 } catch (e) {}
                 saveSettings();
+            });
+        }
+        const ddlCheckBox = panel.querySelector('#mvu2shujuku-ddl-check');
+        if (ddlCheckBox && ddlCheckBox.dataset.bound !== 'true') {
+            ddlCheckBox.dataset.bound = 'true';
+            ddlCheckBox.addEventListener('change', () => {
+                getSettings().ddlIncludeCheck = ddlCheckBox.checked;
+                saveSettings();
+                if (lastResult) {
+                    toast('DDL CHECK 开关已保存；重新转换后生效（现有转换结果不变）', 'info');
+                }
             });
         }
         const pngSel = panel.querySelector('#mvu2shujuku-png');

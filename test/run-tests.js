@@ -463,6 +463,93 @@ test('zod/TS 替代写法：z.object 结构 + /** check: */ 注释应被解析',
     assert.ok(bya.sourceData.note.includes('依存度：根据白娅对{{user}}行为的感知和反应调整 ±(3~6)'), 'zod check 应进入填表提示词');
 });
 
+test('DDL CHECK 开关：默认带约束，ddlIncludeCheck:false 时全部去掉（范围/枚举/json_valid）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'DDL开关卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: '世界: { 名称: 世界, 时间: 未知, 遭遇冷却: 20 }\n白娅: { 依存度: 0, 称谓: 仙子 }\n背包: {}',
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则: |-',
+                            '  z.object({',
+                            '    世界: z.object({',
+                            '      遭遇冷却: z.number().min(0).max(15),',
+                            '    }),',
+                            '    白娅: z.object({',
+                            '      依存度: z.number().min(0).max(100),',
+                            '      称谓: z.enum(["仙子", "道友"]),',
+                            '    }),',
+                            '  })',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const withCheck = core.convert(card, { mode: 'both' });
+    const allDdl = Object.values(withCheck.template)
+        .filter(s => s && s.sourceData && s.sourceData.ddl)
+        .map(s => s.sourceData.ddl)
+        .join('\n');
+    assert.ok(allDdl.includes('CHECK('), '默认应带 CHECK 约束');
+    assert.ok(allDdl.includes('CHECK(json_valid(neirong))'), 'JSON 表默认应有 json_valid CHECK');
+    assert.ok(allDdl.includes('CHECK(yicundu BETWEEN 0 AND 100)'), '数值范围默认应有 CHECK');
+    const noCheck = core.convert(card, { mode: 'both', ddlIncludeCheck: false });
+    const allDdl2 = Object.values(noCheck.template)
+        .filter(s => s && s.sourceData && s.sourceData.ddl)
+        .map(s => s.sourceData.ddl)
+        .join('\n');
+    assert.ok(!allDdl2.includes('CHECK('), 'ddlIncludeCheck:false 时 DDL 不应包含任何 CHECK');
+    assert.ok(allDdl2.includes('NOT NULL DEFAULT'), '关闭 CHECK 不影响列类型与默认值');
+    assert.ok(!noCheck.report.toMarkdown().includes('CHECK 约束已放行'), '关闭 CHECK 时报告不应再提“CHECK 约束已放行”');
+});
+
+test('自动化更新参数：模板每表带 updateConfig，改 JSON 后重转换保留并写入卡内模板 base64', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '参数卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '世界: { 名称: 世界, 时间: 未知 }' },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r1 = core.convert(card, { mode: 'both' });
+    const sheets = Object.keys(r1.template).filter(k => k.startsWith('sheet_'));
+    assert.ok(sheets.length >= 1, '模板应有表');
+    for (const k of sheets) {
+        assert.ok(r1.template[k].updateConfig && typeof r1.template[k].updateConfig === 'object', `${k} 应带 updateConfig（自动化更新参数）`);
+    }
+    // 模拟前端编辑器：直接改模板 JSON 的 updateConfig（更新频率=2、分组编号=3），再走“应用修改”重新转换
+    const world = Object.values(r1.template).find(s => s && s.name === '世界表');
+    world.updateConfig = { uiSentinel: -1, updateFrequency: 2, groupId: 3, skipFloors: -1 };
+    const r2 = core.convert(card, { mode: 'both', template: r1.template });
+    const world2 = Object.values(r2.template).find(s => s && s.name === '世界表');
+    assert.strictEqual(world2.updateConfig.updateFrequency, 2, '重转换应保留改后的 updateFrequency');
+    assert.strictEqual(world2.updateConfig.groupId, 3, '重转换应保留改后的 groupId');
+    // 卡内世界书 __ACU_TEMPLATE_DATA__ 应带新参数（新建聊天建表读它）
+    const tplEntry = (r2.card.data || r2.card).character_book.entries.find(e => Array.isArray(e.keys) && e.keys.includes('__ACU_TEMPLATE_DATA__'));
+    assert.ok(tplEntry, '转换卡应带 __ACU_TEMPLATE_DATA__ 模板条目');
+    const embedded = JSON.parse(Buffer.from(tplEntry.content, 'base64').toString('utf8'));
+    const worldEmbed = Object.values(embedded).find(s => s && s.name === '世界表');
+    assert.strictEqual(worldEmbed.updateConfig.updateFrequency, 2, '卡内模板 base64 应同步新参数');
+});
+
 test('SQL 示例优先用默认值，TEXT 无默认才用“列名示例”', () => {
     const card = {
         spec: 'chara_card_v3',

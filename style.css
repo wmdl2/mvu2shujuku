@@ -50,3 +50,16 @@
 #mvu2shujuku-settings #mvu2shujuku-actions { flex-wrap: wrap; }
 #mvu2shujuku-settings #mvu2shujuku-downloads { flex: 1 1 100%; flex-wrap: wrap; }
 #mvu2shujuku-settings .mvu2shujuku-hint { font-size: 12px; opacity: 0.75; }
+#mvu2shujuku-settings .mvu2shujuku-param-editor { margin: 10px 0; padding: 8px 10px; border: 1px dashed var(--SmartThemeBorderColor, #666); border-radius: 6px; }
+#mvu2shujuku-settings .mvu2shujuku-param-grid { display: grid; grid-template-columns: minmax(90px, 1.2fr) minmax(110px, 1fr) 76px; gap: 6px 8px; align-items: center; margin: 6px 0; }
+#mvu2shujuku-settings .mvu2shujuku-param-head { font-weight: 600; font-size: 12px; opacity: 0.8; }
+#mvu2shujuku-settings .mvu2shujuku-param-name { word-break: break-all; font-size: 13px; }
+#mvu2shujuku-settings .mvu2shujuku-param-cell { min-width: 0; }
+#mvu2shujuku-settings .mvu2shujuku-param-grid .mvu2shujuku-param-select, #mvu2shujuku-settings .mvu2shujuku-param-grid .mvu2shujuku-param-value { width: 100%; box-sizing: border-box; min-width: 0; }
+#mvu2shujuku-settings .mvu2shujuku-param-bulk .mvu2shujuku-param-select { width: 150px; }
+#mvu2shujuku-settings .mvu2shujuku-param-bulk .mvu2shujuku-param-value { width: 76px; }
+#mvu2shujuku-settings .mvu2shujuku-param-select { color: var(--SmartThemeBodyColor, #ddd); }
+#mvu2shujuku-settings .mvu2shujuku-param-value { color: #222; text-align: right; }
+#mvu2shujuku-settings .mvu2shujuku-check-label { flex: 1 1 auto; min-width: 0; word-break: break-word; }
+#mvu2shujuku-settings .mvu2shujuku-param-bulk { padding-top: 6px; border-top: 1px solid var(--SmartThemeBorderColor, #666); }
+#mvu2shujuku-settings .mvu2shujuku-merge-section { margin: 10px 0; padding: 8px 10px; border: 1px dashed var(--SmartThemeBorderColor, #666); border-radius: 6px; }
