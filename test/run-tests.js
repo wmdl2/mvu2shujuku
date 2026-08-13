@@ -6321,6 +6321,153 @@ test('无规则时按跨分支 <initvar> 键集变化识别动态键字典（兜
     assert.ok(ws.cols.every(c => c.zh.indexOf('修仙秘闻') !== 0), '修仙秘闻不得展平成固定列');
 });
 
+test('type 块标量内含中文键（标签/描述等）时不得截断父字段、不得误解析枚举（V4.1 回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '块标量中文键卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: '主角状态:\n  个人背包:\n    物品A: { 描述: x, 数量: 1 }\n世界系统:\n  修仙八卦论坛:\n    标题A: { 标签: 热, 详情描述: y }\n  修仙秘闻:\n    秘闻A: z',
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  主角状态:',
+                            '    个人背包:',
+                            '      type: |-',
+                            '        {',
+                            '          [物品名: string]: {',
+                            '            描述: string;',
+                            '            数量: number;',
+                            '          }',
+                            '        }',
+                            '      check:',
+                            '        - 获得具体物品时写入完整对象',
+                            '        - 使用物品时即使描述模糊，也要优先匹配已有背包条目',
+                            '  世界系统:',
+                            '    修仙八卦论坛:',
+                            '      type: |-',
+                            '        {',
+                            '          [热搜标题: string]: {',
+                            '            标签: "热" | "新" | "荐" | "爆" | "普通";',
+                            '            详情描述: string;',
+                            '          }',
+                            '        }',
+                            '      check:',
+                            '        - 每次回复必须 replace 整个对象',
+                            '        - 标签只能使用热、新、荐、爆、普通',
+                            '    修仙秘闻:',
+                            '      type: |-',
+                            '        {',
+                            '          [秘闻简述: string]: string;',
+                            '        }',
+                            '      check:',
+                            '        - 每次生成4条秘闻',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    // 整表 check 不被 type 块内容截断（块内 描述/标签/数量 等中文键行不得成为假字段）
+    assert.deepStrictEqual(
+        (si.checks['主角状态'] || {}).个人背包,
+        ['获得具体物品时写入完整对象', '使用物品时即使描述模糊，也要优先匹配已有背包条目'],
+        '个人背包整表 check 应保留（type 块内中文键不得截断）'
+    );
+    assert.ok(
+        (si.checks['世界系统'] || {}).修仙八卦论坛 && (si.checks['世界系统'] || {}).修仙八卦论坛.some(c => c.includes('每次回复必须 replace 整个对象')),
+        '修仙八卦论坛整表 check 应保留'
+    );
+    assert.ok(!si.enums['标签'], 'TS 联合类型（"热" | "新" | ...）不应被误当成行内枚举');
+    assert.ok(!si.enums['分类'], '分类联合类型不应被误解析');
+    // 落到模板 note
+    const r = core.convert(card, { mode: 'both' });
+    const bj = Object.values(r.template).find(s => s && s.name === '修仙八卦论坛表');
+    assert.ok(bj && bj.sourceData.note.includes('标签只能使用热、新、荐、爆、普通'), '修仙八卦论坛表 note 应含标签约束');
+    const mw = Object.values(r.template).find(s => s && s.name === '修仙秘闻表');
+    assert.ok(mw && mw.sourceData.note.includes('每次生成4条秘闻'), '修仙秘闻表 note 应含整表 check');
+});
+
+test('规则声明但 initvar 无数据的动态键字典（路遇道友录式）也建空子表，列与规则来自 type 声明', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '空动态字典卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: '人际交往:\n  最新传讯:\n    发送者: 无\n    内容: 暂无',
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  人际交往:',
+                            '    路遇道友录:',
+                            '      type: |-',
+                            '        {',
+                            '          [NPC名字: string]: {',
+                            '            好感度数值: number;',
+                            '            关系标签: string;',
+                            '          }',
+                            '        }',
+                            '      check:',
+                            '        - 已正式见面、互通姓名并发生交易的 NPC 可写入',
+                            '        - 好感度数值用 delta，普通互动 ±1~3',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const s = Object.values(r.template).find(x => x && x.name === '路遇道友录表');
+    assert.ok(s, '应生成路遇道友录空子表（initvar 无数据但有规则声明）');
+    assert.deepStrictEqual(s.content[0], ['row_id', '键名', '好感度数值', '关系标签', '_扩展数据'], '空子表列应来自 type 声明的条目字段');
+    assert.ok(s.sourceData.note.includes('好感度数值用 delta'), '空子表 note 应含整表 check');
+    assert.ok(s.sourceData.note.includes('已正式见面'), '空子表 note 应含规则全文');
+});
+
+test('YAML 优先：flow mapping 单行组（正则解析不了的写法）也能提取 check/range', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'flow卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '主角: { 道心: 50 }' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: '变量更新规则:\n  主角: { 道心: { type: number, range: 0~100, check: ["归零则走火入魔"] } }',
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.deepStrictEqual((si.checks['主角'] || {}).道心, ['归零则走火入魔'], 'flow 写法的 check 应被提取（正则解析不了，YAML 优先覆盖）');
+    assert.deepStrictEqual(si.ranges['道心'], [0, 100], 'flow 写法的 range 应被提取');
+    const r = core.convert(card, { mode: 'both' });
+    const sheet = Object.values(r.template).find(s => s && s.name === '主角表');
+    assert.ok(sheet && sheet.sourceData.note.includes('归零则走火入魔'), 'flow 写法规则应落到 note');
+});
+
 test('切换开场分支：动态字典行表整组替换（旧行删除、新行插入），读回为该分支初始值', async () => {
     const card = {
         spec: 'chara_card_v3',

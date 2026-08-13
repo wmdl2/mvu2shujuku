@@ -550,6 +550,250 @@
      *   reminders: { 组名: [行...] }
      *   numericFields: Set<字段名>
      */
+    // 把 YAML 块标量（type:/format:/check: 等 `key: |-` / `key: >-`）的内容体打空格屏蔽，
+    // 用于“只找字段键行”的扫描：块内容里更深缩进的中文键行（TS 类型声明内部的
+    // 标签/描述/宜/忌 等）一旦被当成字段，会截断父字段 block 导致 check 丢失。
+    // 只替换非换行字符为空格，行列结构不变 → 返回文本与原文等长、偏移一一对应。
+    function maskYamlBlockScalarBodies(text) {
+        const lines = String(text || '').split('\n');
+        let blockIndent = -1;
+        const out = lines.map((line) => {
+            if (blockIndent !== -1) {
+                const m = line.match(/^ */);
+                if (m && m[0].length > blockIndent) return line.replace(/[^\n]/g, ' ');
+                blockIndent = -1;
+            }
+            const km = line.match(/^([ \t]*)(?:type|format|check|enum|range)\s*:\s*[|>]-?\s*$/);
+            if (km) blockIndent = km[1].length;
+            return line;
+        });
+        return out.join('\n');
+    }
+
+    // ── YAML 优先解析 [mvu_update] 规则 ─────────────────────────────────────
+    // 规则正文是作者自定义的 YAML（MVU 官方不解析它，只当提示词），不同卡写法差异大：
+    // 平铺 check/format/range、type 块标量 + TS 动态键、通配/点路径、zod、flow 写法、
+    // 引号键……手写正则只能覆盖见过的方言；这里先用真 YAML 树遍历（能覆盖正则盲区，
+    // 如 flow 写法、引号键、深层嵌套），解析失败或结构不是纯映射（zod 块、散文）时
+    // 回退到原正则路径，行为不变。
+    function yamlStripQuotes(s) {
+        let t = String(s == null ? '' : s).trim();
+        if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) t = t.slice(1, -1).trim();
+        return t;
+    }
+
+    function yamlCheckItems(v) {
+        const list = Array.isArray(v) ? v : (v === undefined || v === null ? [] : [v]);
+        return list.map(x => {
+            // check 项里含 “冒号+空格”（如 减1（op: delta, value: -1））时，YAML 会把整项
+            // 解析成嵌套映射（plain scalar 规则）。递归还原成原始文本，保持字符串语义。
+            if (x && typeof x === 'object' && !Array.isArray(x)) {
+                const lines = [];
+                const rec = (o, prefix) => {
+                    for (const k of Object.keys(o)) {
+                        const kv = o[k];
+                        const p = prefix ? prefix + ': ' + k : k;
+                        if (kv && typeof kv === 'object' && !Array.isArray(kv)) rec(kv, p);
+                        else if (Array.isArray(kv)) lines.push(p + ': ' + kv.map(yamlStripQuotes).join(', '));
+                        else lines.push(p + (kv === undefined || kv === null ? '' : ': ' + yamlStripQuotes(kv)));
+                    }
+                };
+                rec(x, '');
+                return lines.join('，');
+            }
+            return yamlStripQuotes(x);
+        }).filter(Boolean);
+    }
+
+    function yamlExpandTemplateKeys(s) {
+        return String(s).replace(/\$\{([^}]+)\}/g, (m, inner) => (
+            inner.split('|').map(p => p.trim()).filter(Boolean).join('/')
+        ));
+    }
+
+    // 与正则路径一致：从 check 文本提取 “字段(0~100)” 式范围
+    function yamlCollectCheckRanges(allCheckItems, ranges, numericFields) {
+        for (const line of allCheckItems) {
+            const rm = String(line || '').match(/([\u4e00-\u9fff]{1,8})\((\d+)~(\d+)\)/);
+            if (rm && !ranges[rm[1]]) {
+                ranges[rm[1]] = [Number(rm[2]), Number(rm[3])];
+                numericFields.add(rm[1]);
+            }
+        }
+    }
+
+    function collectRulesFromYaml(content, acc) {
+        try {
+            const libs = getMvuYamlLibs();
+            const v = libs.YAML.parseDocument(String(content || ''), { merge: true }).toJS();
+            if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+            let rules = null;
+            if (v['变量更新规则'] && typeof v['变量更新规则'] === 'object' && !Array.isArray(v['变量更新规则'])) {
+                rules = v['变量更新规则'];
+            } else if (Object.keys(v).some(k => /^[\u4e00-\u9fff$]{1,12}$/.test(k) && v[k] && typeof v[k] === 'object' && !Array.isArray(v[k]))) {
+                rules = v; // 没有 变量更新规则 壳，直接是顶层组
+            }
+            if (!rules || typeof rules !== 'object' || Array.isArray(rules)) return false;
+
+            const walkGroup = (group, node) => {
+                if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+                // 组级 type 声明（道渊式：道侣: type: "{ [角色名]: {...} }"）：
+                // 顶层组按条目行表转换（dynamicGroups），字段进 shapes/objects。
+                if (node.type !== undefined) {
+                    const gts = String(node.type).trim();
+                    if (/[\[{]/.test(gts)) {
+                        const gparsed = parseShapeString(gts);
+                        if (gparsed) {
+                            acc.shapes[group] = acc.shapes[group] || [];
+                            for (const f2 of gparsed.fields) if (!acc.shapes[group].includes(f2)) acc.shapes[group].push(f2);
+                            if (gparsed.objects.length) {
+                                acc.objects[group] = acc.objects[group] || {};
+                                for (const obj of gparsed.objects) acc.objects[group][obj] = true;
+                            }
+                            if (gparsed.dynamicTop) acc.dynamicGroups.add(group);
+                        }
+                    }
+                }
+                // 组级 check（整表规则）：组节点直接带 check（YAML 里等价于 4 空格 check:）
+                if (node.check !== undefined) {
+                    const items = yamlCheckItems(node.check);
+                    acc.allCheckItems.push(...items);
+                    if (items.length) acc.groupChecks[group] = items;
+                }
+                for (const key of Object.keys(node)) {
+                    if (key === 'check' || key === 'type' || key === 'format' || key === 'range' || key === 'enum') continue;
+                    const val = node[key];
+                    // _强制更新提醒
+                    if (/^_?强制更新/.test(key)) {
+                        const items = yamlCheckItems(Array.isArray(val) ? val : (typeof val === 'string' ? val.split('\n') : [val])).map(yamlExpandTemplateKeys);
+                        if (items.length) {
+                            acc.reminders[group] = acc.reminders[group] || [];
+                            acc.reminders[group].push(...items);
+                        }
+                        continue;
+                    }
+                    // 通配/点路径（户.<门牌>.妻.好感值、人物.角色名.亲密）
+                    if (/[.<>]/.test(key) && !/^[\u4e00-\u9fff$]{1,12}$/.test(key)) {
+                        registerYamlWildcard(key, val, acc);
+                        continue;
+                    }
+                    if (!/^[\u4e00-\u9fff$]{1,12}$/.test(key)) continue; // rule/format 等 ASCII 键跳过
+                    if (typeof val === 'string') {
+                        // 叶子字段的行内值：枚举 a/b/c
+                        const vals = String(val).replace(/^["']|["']$/g, '').split(/[/|]/).map(s => s.trim()).filter(Boolean);
+                        if (vals.length >= 2 && vals.length <= 12) acc.enums[key] = vals;
+                        continue;
+                    }
+                    if (val && typeof val === 'object' && !Array.isArray(val)) {
+                        const isDef = ['type', 'check', 'format', 'range', 'enum'].some(k => Object.prototype.hasOwnProperty.call(val, k));
+                        if (isDef) {
+                            registerYamlField(group, key, val, acc);
+                        } else {
+                            walkGroup(group, val); // 容器（修为:{进度百分比:{…}}）→ 拍平递归
+                        }
+                    }
+                }
+            };
+            for (const group of Object.keys(rules)) {
+                // 顶层 _强制更新提醒：按 “组.字段” 前缀归属组（正则同款语义）
+                if (/^_?强制更新/.test(group)) {
+                    const items = yamlCheckItems(Array.isArray(rules[group]) ? rules[group] : [rules[group]]).map(yamlExpandTemplateKeys);
+                    for (const it of items) {
+                        const m = String(it).match(/^([\u4e00-\u9fff$]{1,12})\./);
+                        const g0 = m ? m[1] : group.replace(/^_?/, '');
+                        acc.reminders[g0] = acc.reminders[g0] || [];
+                        acc.reminders[g0].push(it);
+                    }
+                    continue;
+                }
+                // 顶层通配路径（变量更新规则 下直接写 户.<门牌>.妻.好感值:）
+                if (/[.<>]/.test(group) && !/^[\u4e00-\u9fff$]{1,12}$/.test(group)) {
+                    registerYamlWildcard(group, rules[group], acc);
+                    continue;
+                }
+                if (!/^[\u4e00-\u9fff$]{1,12}$/.test(group)) continue;
+                walkGroup(group, rules[group]);
+            }
+            return true;
+        } catch (e) {
+            return false; // YAML 失败 → 回退正则
+        }
+    }
+
+    function yamlParseRange(v) {
+        if (Array.isArray(v) && v.length >= 2) return [Number(v[0]), Number(v[1])];
+        const m = String(v).match(/([\d.]+)\s*[~-]\s*([\d.]+)/);
+        return m ? [Number(m[1]), Number(m[2])] : null;
+    }
+
+    function registerYamlWildcard(key, val, acc) {
+        acc.wildcardFields.add(key);
+        const group0 = String(key).split('.')[0].trim();
+        const rec = { path: key };
+        if (val && typeof val === 'object' && !Array.isArray(val)) {
+            if (val.range !== undefined) {
+                const r = yamlParseRange(val.range);
+                if (r) rec.range = r;
+            }
+            if (val.check !== undefined) rec.checks = yamlCheckItems(val.check);
+        }
+        if (group0 && /^[\u4e00-\u9fff$]{1,12}$/.test(group0)) {
+            acc.wildcardRules[group0] = acc.wildcardRules[group0] || [];
+            acc.wildcardRules[group0].push(rec);
+        }
+    }
+
+    function registerYamlField(group, field, def, acc) {
+        if (def.type !== undefined) {
+            const ts = String(def.type).trim();
+            if (/type\s*:\s*number/.test(ts) || /^number$/.test(ts) || ts.indexOf('number') !== -1) acc.numericFields.add(field);
+            if (/[\[{]/.test(ts)) {
+                const parsed = parseShapeString(ts);
+                if (parsed) {
+                    const t0 = String(ts).trim();
+                    const isDyn = /^\[.*?\]\s*:/.test(t0) || /^\{[^}]*:\s*\{/.test(t0);
+                    const target = isDyn ? field : group;
+                    acc.shapes[target] = acc.shapes[target] || [];
+                    for (const f2 of parsed.fields) if (!acc.shapes[target].includes(f2)) acc.shapes[target].push(f2);
+                    if (parsed.objects.length) {
+                        acc.objects[target] = acc.objects[target] || {};
+                        for (const obj of parsed.objects) acc.objects[target][obj] = true;
+                    }
+                    if (parsed.dynamicTop || (parsed.dynamic && parsed.dynamic.length)) {
+                        acc.dynamicDicts[group] = acc.dynamicDicts[group] || {};
+                        if (parsed.dynamicTop) acc.dynamicDicts[group][field] = true;
+                        for (const df of parsed.dynamic || []) acc.dynamicDicts[group][df] = true;
+                    }
+                }
+            }
+        }
+        if (def.range !== undefined) {
+            const r = yamlParseRange(def.range);
+            if (r) {
+                acc.ranges[field] = r;
+                acc.numericFields.add(field);
+            }
+        }
+        if (def.check !== undefined) {
+            const items = yamlCheckItems(def.check);
+            if (items.length) {
+                acc.checks[group] = acc.checks[group] || {};
+                acc.checks[group][field] = items;
+                acc.allCheckItems.push(...items);
+            }
+        }
+        if (def.format !== undefined) {
+            const fv = String(def.format);
+            acc.formats[group] = acc.formats[group] || {};
+            acc.formats[group][field] = fv.indexOf('\n') !== -1 ? fv.replace(/\s+/g, ' ').trim() : fv.trim();
+        }
+        if (def.enum !== undefined) {
+            const ev = Array.isArray(def.enum) ? def.enum : String(def.enum).replace(/^["']|["']$/g, '').split(/[/|]/);
+            const vals = ev.map(yamlStripQuotes).filter(Boolean);
+            if (vals.length >= 2 && vals.length <= 12) acc.enums[field] = vals;
+        }
+    }
+
     function parseMvuShapes(card) {
         const d = card.data || card;
         const entries = (d.character_book && d.character_book.entries) || [];
@@ -578,6 +822,13 @@
             const content = String(e.content || '');
             if (!/\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment) && !/变量更新规则|变量输出格式/.test(comment) && !/mvu/i.test(comment)) continue;
             allContents.push(content);
+            // YAML 优先：规则是作者自定义 YAML，真 YAML 树能覆盖正则盲区
+            // （flow 写法、引号键、深层嵌套）；失败或结构是字符串（zod/散文）回退正则。
+            if (collectRulesFromYaml(content, {
+                shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs,
+                wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups,
+                allCheckItems,
+            })) continue;
             // 顶层组：缩进 ≤2 的中文/含$组名
             // 注意：结尾必须用 (?=\n) 前瞻而不是消费 \n——否则紧跟上一组行的组会被跳过
             // （如 “变量更新规则:\n  世界:” 中 世界: 前面的换行已被上一组匹配吃掉）。
@@ -593,11 +844,19 @@
                 const end = mi + 1 < matches.length ? matches[mi + 1].index - 1 : content.length;
                 const section = content.slice(start, end);
 
-                // 字段级规则：缩进 4 的 key 行开始，直到下一个同级 key
+                // 字段级规则：缩进 4 的 key 行开始，直到下一个同级 key。
+                // 先屏蔽块标量（type:/format:/check: 等 |- 块）的内容体，再扫描字段——
+                // 否则块内容里更深缩进的中文键行（如 标签: "热" | ...、描述: string;）
+                // 会被当成“下一个字段”，截断父字段的 block，导致父字段 type 块之后的
+                // check: 整组丢失（苍玄界 V4.1 的 个人背包/修仙八卦论坛/今日运势/
+                // 最新传讯 等全中招），顺带把 标签/分类 这类 TS 联合类型误当行内枚举解析坏。
+                // 屏蔽法不依赖具体缩进档位：任意深度的合法字段仍会命中，块内容一律排除
+                // （比“只认 4/6 空格”更通用，也不会漏掉更深层的合法子字段）。
+                const maskedSection = maskYamlBlockScalarBodies(section);
                 const fieldRe = /(?:^|\n)( {4})([^\n:]{1,24}?)[ \t]*:[ \t]*([^\n]*)$/gm;
                 const fieldStarts = [];
                 let fm;
-                while ((fm = fieldRe.exec(section))) {
+                while ((fm = fieldRe.exec(maskedSection))) {
                     const field = fm[2].trim().replace(/^["']|["']$/g, '');
                     if (!/^[\u4e00-\u9fff$]{1,12}$/.test(field) && !/^\$\{[^}]+\}$/.test(field)) continue;
                     fieldStarts.push({ field, index: fm.index + fm[0].length, inline: fm[3].trim(), at: fm.index });
@@ -608,7 +867,7 @@
                 const wildRe = /(?:^|\n)( {0,4})([^\n:]{1,40}?)[ \t]*:[ \t]*([^\n]*)$/gm;
                 const wildKeys = [];
                 let wm;
-                while ((wm = wildRe.exec(section))) {
+                while ((wm = wildRe.exec(maskedSection))) {
                     const k = wm[2].trim().replace(/^["']|["']$/g, '');
                     if (!k) continue;
                     if (/<[^>]+>|\./.test(k) && !/^[\u4e00-\u9fff$]{1,12}$/.test(k) && !/^\$\{[^}]+\}$/.test(k)) {
@@ -668,7 +927,8 @@
                     if (typeLine) {
                         const parsed = parseShapeString(typeLine[1]);
                         if (parsed) {
-                            const target = /^\[.*?\]\s*:/.test(typeLine[1]) || /^\{[^}]*:\s*\{/.test(typeLine[1]) ? field : group;
+                            const t0 = String(typeLine[1]).trim();
+                            const target = /^\[.*?\]\s*:/.test(t0) || /^\{[^}]*:\s*\{/.test(t0) ? field : group;
                             shapes[target] = shapes[target] || [];
                             for (const f2 of parsed.fields) if (!shapes[target].includes(f2)) shapes[target].push(f2);
                             if (parsed.objects.length) {
@@ -691,7 +951,8 @@
                     } else if (typeBlock) {
                         const parsed = parseShapeString(typeBlock[1]);
                         if (parsed) {
-                            const target = /^\{[^}]*:\s*\{/.test(typeBlock[1]) || /^\[.*?\]\s*:/.test(typeBlock[1]) ? field : group;
+                            const t0 = String(typeBlock[1]).trim();
+                            const target = /^\{[^}]*:\s*\{/.test(t0) || /^\[.*?\]\s*:/.test(t0) ? field : group;
                             shapes[target] = shapes[target] || [];
                             for (const f2 of parsed.fields) if (!shapes[target].includes(f2)) shapes[target].push(f2);
                             if (parsed.objects.length) {
@@ -1067,9 +1328,14 @@
             const t = buf.trim();
             buf = '';
             if (!t) return;
-            let name = t.replace(/^\[.*?\]\s*:\s*/, '').trim();
-            name = name.split(':')[0].replace(/^["']|["']$/g, '').trim();
-            if (name && /^[\u4e00-\u9fff]{1,12}$/.test(name) && !fields.includes(name)) fields.push(name);
+            // 缓冲可能含多个字段（TS 声明用 ; 或 , 分隔，如 宗门: string; 境界: string;）：
+            // 逐段提取，不能只取第一段（否则对象值动态字典的条目字段只建出第一列）。
+            const segments = String(t).split(/[;,]/).map(s => s.trim()).filter(Boolean);
+            for (const seg of segments) {
+                let name = seg.replace(/^\[.*?\]\s*:\s*/, '').trim();
+                name = name.split(':')[0].replace(/^["']|["']$/g, '').trim();
+                if (name && /^[\u4e00-\u9fff]{1,12}$/.test(name) && !fields.includes(name)) fields.push(name);
+            }
         }
         for (; i < s.length; i++) {
             const ch = s[i];
@@ -1078,8 +1344,13 @@
                     // 嵌套对象字段：buf 末尾的 key 记为对象字段
                     const rawKey = buf.trim();
                     const key = rawKey.replace(/^["']|["']$/g, '').split(':')[0].trim();
-                    if (depth === 1 && /^\[.*\]$/.test(key)) {
-                        hasDynamicKey = true; // { [动态键]: { ... } }
+                    if (depth === 1 && (/^\[.*\]$/.test(key) || /^\[.*?\]\s*:/.test(rawKey))) {
+                        // { [动态键]: { ... } }：对象值动态字典。旧实现只在顶层 } 用残留
+                        // 缓冲区判断，但对象值字典的残留是条目字段（宗门/描述…）而不是
+                        // [键] 前缀 → dynamicTop 恒 false → dynamicDicts 漏标 → 无初始数据
+                        // 的组（路遇道友录）不建表、规则孤儿。这里在进入值对象时用原始键
+                        // 提前判定动态键（兼容 key 被 split(':') 截断的问题）。
+                        hasDynamicKey = true;
                     } else if (key && /^[\u4e00-\u9fff]{1,12}$/.test(key) && depth >= collectDepth()) {
                         if (!fields.includes(key)) fields.push(key);
                         if (!objects.includes(key)) objects.push(key);
@@ -1885,6 +2156,19 @@
 
         // 处理单例/行表内部的嵌套字典 → 子行表
         for (const g of groups) {
+            // 规则声明了动态键字典但 initvar 无数据（如 路遇道友录）：不给表的话
+            // AI 写入无处落、整组 check 规则孤儿。补一个空子表，列由 type 声明字段
+            // （shapes[字段]）构造；已有子表/列的不重复添加。
+            const declaredDyn = (shapeInfo && shapeInfo.dynamicDicts && shapeInfo.dynamicDicts[g.name]) || {};
+            for (const f of Object.keys(declaredDyn)) {
+                if (!declaredDyn[f]) continue;
+                const alreadyChild = g.childTables.some(ct => ct.key === f);
+                const alreadyColumn = Array.isArray(g.columns) && g.columns.some(c => c.zh === f);
+                if (!alreadyChild && !alreadyColumn) {
+                    g.childTables.push({ key: f, value: {}, path: [g.name, f], dynamic: true, declaredOnly: true });
+                    report.note(`动态键字典「${g.name}.${f}」初始无数据，按规则声明建空子表（键名/字段列来自 type 声明）。`);
+                }
+            }
             for (const ct of g.childTables) {
                 const tableName = makeGroupTableName(ct.key);
                 const rowsKeyCol = '键名';
