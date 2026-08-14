@@ -683,9 +683,14 @@
                     }
                     if (!/^[\u4e00-\u9fff$]{1,12}$/.test(key)) continue; // rule/format 等 ASCII 键跳过
                     if (typeof val === 'string') {
-                        // 叶子字段的行内值：枚举 a/b/c
-                        const vals = String(val).replace(/^["']|["']$/g, '').split(/[/|]/).map(s => s.trim()).filter(Boolean);
-                        if (vals.length >= 2 && vals.length <= 12) acc.enums[key] = vals;
+                        // 叶子字段的行内值：枚举 a/b/c。块标量/长文本（如 [mvu_plot]
+                        // 战斗系统.说明: |- 一整段战斗判定）不是行内枚举——按 /| 切开会
+                        // 把长文切碎成伪枚举，塞进列 CHECK 导致 DDL 校验失败。
+                        const sv = String(val);
+                        if (sv.indexOf('\n') === -1 && sv.length <= 60) {
+                            const vals = sv.replace(/^["']|["']$/g, '').split(/[/|]/).map(s => s.trim()).filter(Boolean);
+                            if (vals.length >= 2 && vals.length <= 12) acc.enums[key] = vals;
+                        }
                         continue;
                     }
                     if (val && typeof val === 'object' && !Array.isArray(val)) {
@@ -852,6 +857,10 @@
         for (const e of entries) {
             const comment = String(e.comment || '');
             const content = String(e.content || '');
+            // 只解析规则条目：明确 [mvu_update]/变量更新规则/变量输出格式，或注释含 mvu 的
+            // 兜底写法；[mvu_plot] 是剧情条目（AI 提示词，保留给角色），绝不能当规则解析——
+            // 否则其正文 YAML（如 战斗系统.说明: |- 一整段战斗判定）会被误当行内枚举/规则。
+            if (/\[mvu[ _-]?plot\]|\[mvuplot\]/i.test(comment)) continue;
             if (!/\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment) && !/变量更新规则|变量输出格式/.test(comment) && !/mvu/i.test(comment)) continue;
             allContents.push(content);
             // YAML 优先：规则是作者自定义 YAML，真 YAML 树能覆盖正则盲区
@@ -1094,9 +1103,13 @@
                     }
                     // 行内枚举值（危机程度: "无/低/中/高/致命"）
                     if (inline && !block.includes('type') && !block.includes('range') && !block.includes('format') && !block.includes('check')) {
-                        const vals = String(inline).replace(/^["']|["']$/g, '').split(/[/|]/).map(s => s.trim()).filter(Boolean);
-                        if (vals.length >= 2 && vals.length <= 12) {
-                            for (const fn of fieldNames) enums[fn] = vals;
+                        const sv = String(inline);
+                        // 与 YAML 路径一致：超长/多行文本不当行内枚举（防长文被 /| 切碎成伪枚举）
+                        if (sv.indexOf('\n') === -1 && sv.length <= 60) {
+                            const vals = sv.replace(/^["']|["']$/g, '').split(/[/|]/).map(s => s.trim()).filter(Boolean);
+                            if (vals.length >= 2 && vals.length <= 12) {
+                                for (const fn of fieldNames) enums[fn] = vals;
+                            }
                         }
                     }
                 }
@@ -1192,16 +1205,20 @@
     }
 
     /**
-     * 扫描所有开场分支的 <initvar> 键集变化，识别“动态键字典”：
+     * 扫描所有分支（问候语 + 其他世界书条目里的 <initvar>）的键集变化，识别“动态键字典”：
      * 同一个嵌套路径在不同分支里键完全不同（如 世界系统.修仙秘闻 分支 A 是
      * 诡异阵纹/半夜声响，分支 B 是 海图司账本会游泳/龙绡渡潮阵认鞋），说明该路径是
      * 条目字典而非固定字段，展平成固定列会在按分支注入时丢数据。作为 [mvu_update]
      * 动态声明之外的通用兜底（无规则/规则未声明动态键的卡也能正确转换）。
      */
-    function scanGreetingShapeVariation(data) {
+    function scanGreetingShapeVariation(data, extraBranchSources = []) {
         const dynamicPaths = new Set();
         const dynamicGroups = new Set();
-        const sources = [data.first_mes, ...(Array.isArray(data.alternate_greetings) ? data.alternate_greetings : [])];
+        const sources = [
+            data.first_mes,
+            ...(Array.isArray(data.alternate_greetings) ? data.alternate_greetings : []),
+            ...extraBranchSources,
+        ];
         const parsedList = [];
         for (const g of sources) {
             const m = String(g || '').match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
@@ -1883,6 +1900,14 @@
                     if (common === null) common = new Set(ks);
                     else { for (const k of [...common]) if (!ks.has(k)) common.delete(k); }
                 }
+                // 含动态键字典子对象（如 天下地图.地区态势 = {地区: 态势}，跨分支键集
+                // 不同）时，子对象会被拆成子行表；组本身不应再判成“条目字典行表”把
+                // 子对象键展平成列（否则与子表重复、还会把 山西/陕西 这类拼音相同的
+                // 地区名变成列，插件导入校验按表头 slug 判冲突而拒绝）。
+                if (Object.keys(raw).some(k => isDynamicPath([groupName, k]))) {
+                    report.note(`顶层组「${groupName}」含动态键字典子对象，按单例处理（子对象拆子表，不展平为行条目）。`);
+                    return 'singleton';
+                }
                 if (common !== null && common.size > 0) return 'rows';
                 report.note(`顶层组「${groupName}」为多个不同结构的子对象，按单例处理（子对象展平/拆子表，修为/灵石钱包类字段不再变成行）。`);
                 return 'singleton';
@@ -2405,7 +2430,9 @@
                 });
             }
         }
-        return attachFieldRules(groups, shapeInfo);
+        const attached = attachFieldRules(groups, shapeInfo);
+        disambiguateColumnSlugs(attached, report);
+        return attached;
     }
 
     function rowFirstValue(entryRows, field) {
@@ -2517,6 +2544,55 @@
             }
         }
         return groups;
+    }
+
+    // SP·数据库 导入校验会按“表头中文”重新生成物理列名候选（pinyin 字间 _、去声调），
+    // 同一张表两列拼音相同即硬拒（如 山西/陕西 → shan_xi），且不读 DDL 里的自定义
+    // ident、也没有消歧机制。转换器在生成模板前做同款消歧：后出现的冲突列名追加
+    // 数字后缀（山西→山西2），读回路径（c.path）保持原中文 → stat_data 形状不变；
+    // 桥写库与 AI 填表按新列名流转，DDL 注释与表头保持逐字一致。
+    function disambiguateColumnSlugs(groups, report) {
+        const pluginSlug = (zh) => {
+            let out = '';
+            for (const ch of String(zh == null ? '' : zh)) {
+                const code = ch.codePointAt(0);
+                if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3400 && code <= 0x4dbf)) {
+                    if (out && !out.endsWith('_')) out += '_';
+                    out += pinyinOf(ch);
+                } else {
+                    out += ch;
+                }
+            }
+            return out.normalize('NFKD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '_')
+                .replace(/^_+|_+$/g, '')
+                .replace(/_+$/g, '');
+        };
+        for (const g of groups) {
+            const used = new Set(['row_id']);
+            for (const c of g.columns || []) {
+                let zh = String(c.zh == null ? '' : c.zh);
+                if (!zh) { c.zh = '列'; zh = '列'; }
+                const slug = pluginSlug(zh);
+                if (!used.has(slug)) {
+                    used.add(slug);
+                    continue;
+                }
+                let n = 2;
+                let next = `${zh}${n}`;
+                while (used.has(pluginSlug(next))) { n += 1; next = `${zh}${n}`; }
+                report.warn(
+                    `表「${g.tableName || g.name}」列「${zh}」与同表其他列映射为相同物理列名候选「${slug}」` +
+                    `（如 山西/陕西 拼音相同），已把该列名改为「${next}」；` +
+                    `读取路径与 stat_data 形状不变，AI 填表与桥按新列名流转。`,
+                    'schema'
+                );
+                c.zh = next;
+                used.add(pluginSlug(next));
+            }
+        }
     }
 
     /* ================================================================
@@ -3227,7 +3303,11 @@
                         if (c2[0] === '_扩展数据') continue;
                         if (c2[0] === L.keyCol) { item[c2[0]] = text(kv); continue; }
                         const vj2 = idxs[j2] >= 0 ? rw2[idxs[j2]] : undefined;
-                        item[c2[0]] = convertCell(c2[1], vj2, c2[2], c2[5]);
+                        // 条目对象键优先用列 path 末尾的原始中文：列名因拼音冲突被
+                        // 消歧改名（山西→山西2）时，读回仍还原 stat_data.<组>.<山西>，
+                        // 不破坏 MVU 原 shape（普通行表列 path 末尾即字段名，行为不变）。
+                        const cp2 = c2 && c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : null;
+                        item[cp2 ? String(cp2[cp2.length - 1]) : c2[0]] = convertCell(c2[1], vj2, c2[2], c2[5]);
                     }
                     const ovIdx = header.indexOf('_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) {
@@ -4201,7 +4281,10 @@
             `            if(cj2[0]==='_扩展数据')continue;`,
             `            if(cj2[0]===L.keyCol){item[cj2[0]]=text(kv);continue;}`,
             `            var vj2=idxs[j2]>=0?rw2[idxs[j2]]:undefined;`,
-            `            item[cj2[0]]=convertCell(cj2[1],vj2,cj2[2],cj2[5]);`,
+            `            // 与核心 statDataFromTables 一致：条目对象键优先用列 path 末尾`,
+            `            // 的原始中文（拼音冲突消歧改名如 山西→山西2 时读回形状不变）。`,
+            `            var cjPath=cj2&&cj2.length>3&&Array.isArray(cj2[3])&&cj2[3].length?cj2[3]:null;`,
+            `            item[cjPath?String(cjPath[cjPath.length-1]):cj2[0]]=convertCell(cj2[1],vj2,cj2[2],cj2[5]);`,
             `          }`,
             `          // 溢出列合并：模板未声明的动态字段`,
             `          var ovIdx=header.indexOf('_扩展数据');`,
@@ -5510,10 +5593,36 @@
         const cb = data.character_book || {};
         const entries = Array.isArray(cb.entries) ? cb.entries : [];
 
-        // 1. initvar（支持多个 [initvar] 条目，按出现顺序合并）
+        // 1. initvar。MVU 语义（源码 initCheck/loadInitVarData）：
+        //    - 世界书 comment 含 [InitVar] 的条目是“基础初始化”（合并多个条目）；
+        //    - 首条消息（swipe）里的 <initvar> 块按分支独立覆盖，以块内容为基准，
+        //      分支之间绝不合并；有块时忽略世界书 [InitVar]。
+        //    部分卡把 initvar 写在“别的世界书”条目末尾的 <initvar> 标签里
+        //    （如 [scenario_builtin] 多个开局：残明余烬 1.8.1 街头魂穿/云际寺夺银/
+        //    凤阳惊变，前端把选中开局写进首楼后由 MVU 读取）——这些条目与问候语一样
+        //    是分支初始状态，参与结构推导与动态键识别（运行时仍按首楼 <initvar> 注入）。
         const initEntries = entries.filter(e => /\[initvar\]/i.test(String(e.comment || '')));
+        // 其他世界书条目内容里的 <initvar> 块（排除 [InitVar] 条目本身）
+        const branchEntrySources = entries.filter(e =>
+            !/\[initvar\]/i.test(String(e.comment || '')) && /<initvar>/i.test(String(e.content || ''))
+        );
         let initvar = {};
         let greetingBlockCount = 0;
+        let firstBranchDesc = '';
+        // 全部分支的解析结果：问候语分支 + 世界书条目分支（供动态键差异识别）
+        const branchParsed = [];
+        const pushBranch = (text, desc) => {
+            const m = String(text).match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
+            if (!m) return;
+            try {
+                const parsed = parseInitVar(m[1]);
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    branchParsed.push(parsed);
+                    greetingBlockCount++;
+                    if (!firstBranchDesc) firstBranchDesc = desc;
+                }
+            } catch (e) {}
+        };
         if (initEntries.length) {
             for (const initEntry of initEntries) {
                 let content = String(initEntry.content || '');
@@ -5535,58 +5644,39 @@
                     report.warn(`[InitVar] 条目解析结果不是对象，已跳过该条目`, 'schema');
                 }
             }
-            report.note(`已解析 ${initEntries.length} 个 [initvar] 条目（合并）：顶层组 ${Object.keys(initvar).join('、') || '（空）'}。`);
-        } else {
-            // MVU 规范：额外问候语中的 <initvar> 块会覆盖世界书 [InitVar]，也作为结构来源。
-            // 注意 MVU 语义是“按分支替换”：每个分支（swipe）的 <initvar> 独立作为该分支的
-            // 初始状态，绝不合并。转换器只以首个含 <initvar> 的问候语为结构与初始值基准，
-            // 其余分支的初始化值由运行时按所选分支注入（见 applyActiveGreetingInitvar），
-            // 避免把多个分支的状态深合并成一张“缝合表”。
-            const greetingSources = [data.first_mes, ...(Array.isArray(data.alternate_greetings) ? data.alternate_greetings : [])];
-            const branches = greetingSources.filter(g => /<initvar>/i.test(String(g || '')));
-            if (branches.length) {
-                const baseGreeting = branches[0];
-                // 用非全局正则拿捕获组（/g 的 match 只返回整串、不返回 group1）
-                const m = String(baseGreeting).match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
-                if (m) {
-                    greetingBlockCount++;
-                    try {
-                        const parsed = parseInitVar(m[1]);
-                        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                            initvar = parsed;
-                        } else {
-                            report.warn('首个 <initvar> 分支解析结果不是对象，已跳过', 'schema');
-                        }
-                    } catch (parseErr) {
-                        report.warn(`首个 <initvar> 分支解析失败：${parseErr && parseErr.message ? parseErr.message : parseErr}`, 'schema');
-                    }
-                }
-            }
-            if (branches.length) {
-                report.note(
-                    `角色卡世界书未找到 [InitVar]，已改用额外问候语中的 ${branches.length} 个分支 <initvar> 推导结构；` +
-                    `以首个分支为基准（MVU 按分支替换、不合并），各分支初始化值在开局时按所选分支注入。`
-                );
-            } else if (greetingBlockCount) {
-                report.note(`已从额外问候语解析 ${greetingBlockCount} 个 <initvar> 块。`);
+            if (Object.keys(initvar).length) {
+                report.note(`已解析 ${initEntries.length} 个 [initvar] 条目（合并）：顶层组 ${Object.keys(initvar).join('、')}。`);
+            } else {
+                report.warn('世界书 [InitVar] 条目存在但解析后为空（占位/已迁移），尝试从分支 <initvar> 推导结构。', 'schema');
             }
         }
-        if (!initEntries.length && Object.keys(initvar).length === 0) {
+        // 分支层来源：问候语（first_mes / alternate_greetings）优先，其次其他世界书条目
+        const greetingSources = [data.first_mes, ...(Array.isArray(data.alternate_greetings) ? data.alternate_greetings : [])];
+        for (const g of greetingSources) pushBranch(g, '问候语');
+        for (const be of branchEntrySources) {
+            pushBranch(String(be.content || ''), `世界书条目「${String(be.comment || (be.id != null ? be.id : '未命名'))}」`);
+        }
+        if (!Object.keys(initvar).length && branchParsed.length) {
+            initvar = branchParsed[0];
+            report.note(
+                `角色卡世界书 [InitVar] 为空，已改用分支 <initvar> 推导结构：共 ${branchParsed.length} 个分支` +
+                (firstBranchDesc ? `，首个来自 ${firstBranchDesc}` : '') +
+                `；以首个分支为基准（MVU 按分支替换、不合并），各分支初始化值在开局时按所选分支注入。`
+            );
+        }
+        if (Object.keys(initvar).length === 0) {
             const msg =
-                `未找到 [InitVar] 世界书条目，无法识别为 MVU 变量卡。` +
+                `未找到可用的 [InitVar] 或分支 <initvar>，无法识别为 MVU 变量卡。` +
                 `（当前角色卡：${data.name || '未知'}；世界书条目数=${entries.length}；` +
-                `first_mes/额外问候语中 <initvar> 块数=${greetingBlockCount}。）` +
-                `MVU 变量卡必须在世界书条目 comment 中含 [InitVar]（可禁用状态），或在问候语中用 <initvar> 声明初始结构。` +
+                `first_mes/额外问候语中 <initvar> 块数=${greetingBlockCount}；` +
+                `其他世界书条目含 <initvar> 块数=${branchEntrySources.length}。）` +
+                `MVU 变量卡必须在世界书条目 comment 中含 [InitVar]（可禁用状态），` +
+                `在问候语中用 <initvar> 声明初始结构，或把 initvar 写在其他世界书条目（如 [scenario_builtin]）的 <initvar> 标签中。` +
                 (entries.length === 0 ? `若角色列表里的对象不包含世界书数据，请改用「选择文件」导入卡文件后转换。` : `若 [InitVar] 写在全局世界书/联动世界书中，请将其并入卡内后重试。`) +
                 `已中止转换，卡未被修改。`;
             console.error('[mvu2shujuku] ' + msg);
             const e = new Error(msg);
             e.code = 'NOT_MVU_CARD';
-            throw e;
-        }
-        if (Object.keys(initvar).length === 0) {
-            const e = new Error('已找到 [InitVar] 条目但解析后为空，无法推导表格结构。已中止转换，卡未被修改。');
-            e.code = 'EMPTY_INITVAR';
             throw e;
         }
 
@@ -5597,7 +5687,7 @@
         // 多分支兜底：即使 [mvu_update] 未声明动态键，也按各分支 <initvar> 的键集差异
         // 识别动态键字典（如 世界系统.修仙秘闻），避免固定列在按分支注入时丢数据。
         try {
-            const gv = scanGreetingShapeVariation(data);
+            const gv = scanGreetingShapeVariation(data, branchEntrySources.map(e => String(e.content || '')));
             for (const dp of gv.dynamicPaths) shapeInfo.dynamicPaths.add(dp);
             for (const dg of gv.dynamicGroups) shapeInfo.dynamicGroups.add(dg);
             if (shapeInfo.dynamicPaths.size || Object.keys(shapeInfo.dynamicDicts || {}).length) {
