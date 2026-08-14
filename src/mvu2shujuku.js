@@ -95,6 +95,24 @@
         throw new Error('缺少 MVU 解析库（src/vendor/mvu-yaml-libs.js 未内联/未安装）');
     }
 
+    // JSON 容错解析：AI/前端常写尾逗号、单引号、注释等非严格 JSON（尤其 JSON 表内容列、
+    // _扩展数据 溢出列）。严格 JSON.parse 失败会静默丢整组数据——表格里能看到原始 JSON
+    // 文本，读回 stat_data 却是空对象，前端面板自然不显示。用 jsonrepair 兜底修复。
+    function safeParseJson(v) {
+        try {
+            if (!v) return {};
+            if (typeof v === 'object') return v;
+            const s = String(v);
+            try { return JSON.parse(s); } catch (e) {}
+            try {
+                const libs = getMvuYamlLibs();
+                const repaired = libs && typeof libs.jsonrepair === 'function' ? libs.jsonrepair(s) : null;
+                if (repaired) return JSON.parse(repaired);
+            } catch (e2) {}
+            return {};
+        } catch (e) { return {}; }
+    }
+
     // jsonrepair 源码（用于把容错解析内联进卡内桥）：Node 端读 vendor 文件，浏览器端由构建内联。
     function getJsonrepairSource() {
         if (root.__MVU2SHUJUKU_JSONREPAIR_SRC__) return root.__MVU2SHUJUKU_JSONREPAIR_SRC__;
@@ -3221,7 +3239,7 @@
         };
         const text = (v, fb) => (v === undefined || v === null || v === '' ? (fb === undefined ? '' : fb) : String(v));
         const number = (v, fb) => { const n = parseFloat(v); return isNaN(n) ? (fb === undefined ? 0 : fb) : n; };
-        const parseObject = (v) => { try { if (!v) return {}; if (typeof v === 'object') return v; return JSON.parse(String(v)); } catch (e) { return {}; } };
+        const parseObject = (v) => safeParseJson(v);
         const convertCell = (type, v, fb, desc) => {
             if (type === 'number') return number(v, fb);
             if (type === 'object') return parseObject(v);
@@ -3663,7 +3681,7 @@
         const resolved = [];
         const directOps = [];
         const newRows = new Map();
-        const parseObj = (v) => { try { if (!v) return {}; if (typeof v === 'object') return v; return JSON.parse(String(v)); } catch (e) { return {}; } };
+        const parseObj = (v) => safeParseJson(v);
         for (const op of ops) {
             const E = op.entry;
             if (!E) continue;
@@ -4131,7 +4149,12 @@
             `  try{`,
             `    if(!v)return {};`,
             `    if(typeof v==='object')return v;`,
-            `    return JSON.parse(String(v));`,
+            `    var s=String(v);`,
+            `    try{return JSON.parse(s);}catch(e){}`,
+            `    // 容错：AI/前端常写尾逗号、单引号、注释等非严格 JSON，`,
+            `    // 严格解析失败会丢整组（表格有 JSON、面板读空）。jsonrepair 兜底修复。`,
+            `    try{return JSON.parse(mvuBridgeJsonrepair(s));}catch(e2){}`,
+            `    return {};`,
             `  }catch(e){return {};}`,
             `}`,
             `function convertCell(type,v,fb){`,
