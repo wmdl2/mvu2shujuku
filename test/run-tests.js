@@ -1,103 +1,19 @@
 #!/usr/bin/env node
 /*
  * MVU→数据库 转换器测试
- * 用法：node run-tests.js
+ * 用法：
+ *   node test/run-tests.js                     # 全量
+ *   node test/run-tests.js --grep 桥           # 只跑名称含“桥”的测试
+ *   node test/run-tests.js --list [--grep 扩展] # 列出测试名
+ *   环境变量 TEST_FILTER 等价于 --grep
  */
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const assert = require('assert');
-
-const core = require('../src/mvu2shujuku.js');
-
-const FIXTURE = path.join(__dirname, 'fixtures', '道渊-MVU.json');
-const PNG = path.join(__dirname, '..', '..', '参考资料', '参考角色卡', 'v5.2_1-MVU版.png');
-const HAS_FIXTURE = fs.existsSync(FIXTURE);
-
-function requireFixture() {
-    if (!HAS_FIXTURE) {
-        const e = new Error('SKIP_NO_FIXTURE');
-        e.code = 'SKIP_NO_FIXTURE';
-        throw e;
-    }
-    return require(FIXTURE);
-}
-
-// 模拟真实插件行为的 fake API：updateCell/insertRow/deleteRow 真实落表，
-// importTableAsJson 记录并替换表数据（与原生数据库卡的写路径一致）。
-function applyingApi(tables, opts = {}) {
-    return {
-        getTemplatePresetNames: () => [],
-        exportTableAsJson: () => tables,
-        initGameSession: async () => {
-            if (opts.onInit) await opts.onInit();
-            return { success: true, runtimeReady: true };
-        },
-        importTemplateFromData: async () => ({ success: true }),
-        importTableAsJson: async (jsonStr, o) => {
-            const parsed = JSON.parse(jsonStr);
-            if (opts.onImport) opts.onImport(parsed, o);
-            for (const k of Object.keys(tables)) delete tables[k];
-            Object.assign(tables, parsed);
-            return true;
-        },
-        updateCell: async (tableName, rowIndex, col, value) => {
-            const s = Object.values(tables).find(x => x && x.name === tableName);
-            if (!s || !s.content[rowIndex]) return false;
-            const ci = s.content[0].indexOf(col);
-            if (ci === -1) return false;
-            s.content[rowIndex][ci] = String(value);
-            return true;
-        },
-        insertRow: async (tableName, obj) => {
-            const s = Object.values(tables).find(x => x && x.name === tableName);
-            if (!s) return 0;
-            const row = s.content[0].map(h => (obj && obj[h] !== undefined && obj[h] !== null) ? String(obj[h]) : '');
-            row[0] = s.content.length || 1;
-            s.content.push(row);
-            return row[0];
-        },
-        deleteRow: async (tableName, rowIndex) => {
-            const s = Object.values(tables).find(x => x && x.name === tableName);
-            if (!s || !s.content[rowIndex]) return false;
-            s.content.splice(rowIndex, 1);
-            return true;
-        },
-        registerTableUpdateCallback: () => true,
-    };
-}
-
-let passed = 0;
-let failed = 0;
-const pendingTests = [];
-
-function test(name, fn) {
-    pendingTests.push({ name, fn });
-}
-
-async function runTests() {
-    for (const t of pendingTests) {
-        const { name, fn } = t;
-    try {
-            await fn();
-            passed++;
-            console.log('  ✓', name);
-    } catch (e) {
-        if (e && e.code === 'SKIP_NO_FIXTURE') {
-            console.log('  - 跳过（无参考卡 fixture，仅保留通用性测试）', name);
-                continue;
-        }
-        failed++;
-        console.error('  ✗', name);
-            console.error('    ', e && e.message ? e.message : e);
-    }
-    }
-    console.log(`\n结果：${passed} 通过，${failed} 失败`);
-    // VM 内桥使用真实定时器（合并写入/重试），测试结束后直接退出，避免未清理定时器拖住进程
-    process.exit(failed ? 1 : 0);
-}
+const { test, runTests, parseArgs } = require('./runner');
+const {
+    fs, path, os, assert, core, PNG, FIXTURE, HAS_FIXTURE,
+    requireFixture, applyingApi, parseSqlValue, splitSqlValues, applySqlToTables, bridgeSandbox, waitBridgeFlush,
+} = require('./helpers');
 
 console.log('MVU→数据库 转换器测试\n');
 
@@ -803,75 +719,6 @@ test('writeStatDiffToDb：stat_data 差异写回数据库（单例更新/行表�
     assert.strictEqual(tables.sheet_2.content.length, 3, '新条目应插入');
     assert.deepStrictEqual(tables.sheet_3.content.slice(1).map(r => r[1]), ['新1', '新2'], '数组应整体替换');
 });
-
-function parseSqlValue(v) {
-    if (/^'/.test(v)) return v.replace(/^'|'$/g, '').replace(/''/g, "'");
-    const n = Number(v);
-    return isNaN(n) ? v : n;
-}
-
-function splitSqlValues(str) {
-    const out = [];
-    let cur = '';
-    let inQ = false;
-    for (let i = 0; i < str.length; i++) {
-        const ch = str[i];
-        if (inQ) {
-            if (ch === "'") {
-                if (str[i + 1] === "'") { cur += "'"; i++; }
-                else inQ = false;
-            } else cur += ch;
-        } else if (ch === "'") {
-            inQ = true;
-        } else if (ch === ',') {
-            out.push(parseSqlValue(cur.trim()));
-            cur = '';
-            continue;
-        } else cur += ch;
-    }
-    if (cur.trim()) out.push(parseSqlValue(cur.trim()));
-    return out;
-}
-
-function applySqlToTables(tables, sql) {
-    for (const stmt of sql.split(';').map(s => s.trim()).filter(Boolean)) {
-        let m = stmt.match(/^UPDATE\s+(\S+)\s+SET\s+(\S+)\s*=\s*(.+?)\s+WHERE\s+row_id\s*=\s*(\d+)$/);
-        if (m) {
-            const tn = m[1], col = m[2], raw = m[3], rid = m[4];
-            const s = Object.values(tables).find(x => x.name === tn);
-            const ci = s.content[0].indexOf(col);
-            const row = s.content.find(r => String(r[0]) === rid);
-            row[ci] = parseSqlValue(raw);
-            continue;
-        }
-        m = stmt.match(/^INSERT INTO\s+(\S+)\s+\(([^)]+)\)\s+VALUES\s+\((.+)\)$/);
-        if (m) {
-            const tn = m[1];
-            const cols = m[2].split(',').map(s => s.trim());
-            const vals = splitSqlValues(m[3]);
-            const s = Object.values(tables).find(x => x.name === tn);
-            let maxId = 0;
-            for (let i = 1; i < s.content.length; i++) {
-                const rid = Number(s.content[i] && s.content[i][0]);
-                if (!isNaN(rid) && rid > maxId) maxId = rid;
-            }
-            const row = new Array(s.content[0].length).fill('');
-            row[0] = maxId + 1;
-            cols.forEach((c, i) => { row[s.content[0].indexOf(c)] = vals[i]; });
-            s.content.push(row);
-            continue;
-        }
-        m = stmt.match(/^DELETE FROM\s+(\S+)\s+WHERE\s+row_id\s*=\s*(\d+)$/);
-        if (m) {
-            const tn = m[1], rid = m[2];
-            const s = Object.values(tables).find(x => x.name === tn);
-            const idx = s.content.findIndex(r => String(r[0]) === rid);
-            if (idx >= 0) s.content.splice(idx, 1);
-            continue;
-        }
-        throw new Error('无法解析测试 SQL: ' + stmt);
-    }
-}
 
 test('writeStatDiffToDb：多操作走逐条原生 CRUD（不再用 executeSqlBatch），row_id 不冲突', async () => {
     const layout = [
@@ -1721,57 +1568,6 @@ test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
 
 /* ---------------- Mvu 兼容层（通用 API 面，不依赖任何具体卡） ---------------- */
 console.log('Mvu 兼容层');
-
-function bridgeSandbox(r, opts = {}) {
-    const vm = require('vm');
-    const tables = JSON.parse(JSON.stringify(r.template));
-    const chat = [];
-    const addCheckpoint = () => {
-        // 模拟插件提交成功后真的建立 full checkpoint
-        chat.push({ message_id: chat.length, is_user: false, mes: '模拟消息',
-            TavernDB_ACU_IsolatedData: JSON.stringify({ 系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: Date.now() } } } }) });
-    };
-    const fakeApi = {
-        exportTableAsJson: () => tables,
-        importTemplateFromData: async () => ({ success: true }),
-        initGameSession: async () => { addCheckpoint(); return { success: true, runtimeReady: true }; },
-        importTableAsJson: async () => { addCheckpoint(); return true; },
-        registerTableUpdateCallback: () => {},
-        updateCell: async (tableName, rowIndex, col, value) => {
-            const sheet = Object.values(tables).find(s => s && s.name === tableName);
-            if (!sheet) return false;
-            const ci = sheet.content[0].indexOf(col);
-            if (ci === -1) return false;
-            sheet.content[rowIndex][ci] = value;
-            return true;
-        },
-        insertRow: async () => 1,
-        deleteRow: async () => true,
-    };
-    const win = {
-        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t), console,
-        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
-        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
-        getContext: () => ({
-            chatId: 'c1',
-            name: '测试角色',
-            chat,
-            eventSource: { on: () => {}, emit: () => {} },
-            event_types: { MESSAGE_RECEIVED: 'message_received' },
-        }),
-        ...(opts.extra || {}),
-    };
-    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
-    win.AutoCardUpdaterAPI = fakeApi;
-    vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
-    return { win, tables, fakeApi };
-}
-
-// 等待桥/扩展侧的合并写入定时器（150ms）完成落库
-async function waitBridgeFlush(ms = 300) {
-    await new Promise(resolve => setTimeout(resolve, ms));
-}
 
 test('Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessage/事件名）', () => {
     const card = requireFixture();
@@ -4222,6 +4018,56 @@ test('拼音相同列消歧兜底：同表 山西/陕西 两列时后列改名�
     assert.strictEqual(Number(sd['统计']['省份']['山西']), 1, '读回 山西 应保持原键名');
     assert.strictEqual(Number(sd['统计']['省份']['陕西']), 2, '读回 陕西 应保持原键名（path 优先于改名列）');
     assert.strictEqual(sd['统计']['省份']['陕西2'], undefined, '不得出现 陕西2 键');
+});
+
+test('JSON 表内容列为非严格 JSON（尾逗号/单引号/注释）时读回不丢数据（大荒 宗门/寻缘蝶/灵兽栏 面板不显示回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'JSON容错卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '宗门: {}\n寻缘蝶: {}' },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const byName = (n) => Object.values(tables).find(x => x && x.name === n);
+    // AI/前端写入的常见非严格 JSON：尾逗号、单引号、行注释
+    byName('宗门表').content[1][1] = "{'掌门':'张三',}";
+    byName('寻缘蝶表').content[1][1] = '{"NPC甲":{"好感度":50} // 行注释\n}';
+    const layout = core.buildLayout(r.schema).entries.map(e => {
+        const g = r.schema.find(x => x.tableName === e.table) || { name: e.group, columns: [] };
+        return {
+            kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+            cols: (e.cols || []).map((c, i) => {
+                const sc = (g.columns || [])[i] || {};
+                return [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, sc.path || [e.group, c.zh], !!c.isPair, c.desc || ''];
+            }),
+            writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+        };
+    });
+    // 核心读回（扩展 getAllVariables 走这里）
+    const sd = core.statDataFromTables(layout, tables).stat_data;
+    assert.strictEqual(sd['宗门']['掌门'], '张三', '核心读回：尾逗号/单引号 JSON 不应丢（jsonrepair 兜底）');
+    assert.strictEqual(sd['寻缘蝶']['NPC甲']['好感度'], 50, '核心读回：带注释 JSON 不应丢');
+    // 卡内桥读回（无扩展时前端走桥的 getAllVariables）
+    const tables2 = JSON.parse(JSON.stringify(r.template));
+    Object.values(tables2).find(x => x && x.name === '宗门表').content[1][1] = "{'掌门':'李四',}";
+    const bridgeR = core.convert({
+        ...card,
+        data: { ...card.data, character_book: { entries: [{ comment: '[InitVar]', content: '宗门: {}' }] } },
+    }, { mode: 'both' });
+    const { win, tables: bTables } = bridgeSandbox(bridgeR, {});
+    // 桥沙箱使用自己的表格副本，替换为带非严格 JSON 的表格
+    Object.values(bTables).find(x => x && x.name === '宗门表').content[1][1] = "{'掌门':'李四',}";
+    const sdBridge = win.getAllVariables().stat_data;
+    assert.strictEqual(sdBridge['宗门']['掌门'], '李四', '桥读回：非严格 JSON 不应丢（mvuBridgeJsonrepair 兜底）');
 });
 
 test('懒加载角色：缓存键用列表对象（带 avatar），开场写入不被“无模板缓存”丢弃', async () => {
@@ -7341,4 +7187,4 @@ test('切换开场分支：动态字典行表整组替换（旧行删除、新�
     assert.deepStrictEqual(sd.世界系统.修仙秘闻, { 海图司账本: '分支B秘闻一', 龙绡渡潮阵: '分支B秘闻二', 贝壳风铃: '分支B秘闻三' }, '读回应为分支B的 {键: 值}');
 });
 
-runTests();
+runTests(parseArgs());
