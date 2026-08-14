@@ -640,7 +640,10 @@
             }
             if (!rules || typeof rules !== 'object' || Array.isArray(rules)) return false;
 
-            const walkGroup = (group, node) => {
+            // pathArr：从顶层组名往下拼的变量树路径（组.容器…字段）。规则分组与
+            // initvar 结构不一致（如规则把 修为 写在根目录、initvar 在 主角.修为）
+            // 时，靠完整路径才能在转换时把 check/range/format 附着到正确的列/表。
+            const walkGroup = (group, node, pathArr) => {
                 if (!node || typeof node !== 'object' || Array.isArray(node)) return;
                 // 组级 type 声明（道渊式：道侣: type: "{ [角色名]: {...} }"）：
                 // 顶层组按条目行表转换（dynamicGroups），字段进 shapes/objects。
@@ -692,9 +695,9 @@
                     if (val && typeof val === 'object' && !Array.isArray(val)) {
                         const isDef = ['type', 'check', 'format', 'range', 'enum'].some(k => Object.prototype.hasOwnProperty.call(val, k));
                         if (isDef) {
-                            registerYamlField(group, key, val, acc);
+                            registerYamlField(group, key, val, acc, [...(pathArr || [group]), key]);
                         } else {
-                            walkGroup(group, val); // 容器（修为:{进度百分比:{…}}）→ 拍平递归
+                            walkGroup(group, val, [...(pathArr || [group]), key]); // 容器（修为:{进度百分比:{…}}）→ 拍平递归
                         }
                     }
                 }
@@ -717,7 +720,7 @@
                     continue;
                 }
                 if (!/^[\u4e00-\u9fff$]{1,12}$/.test(group)) continue;
-                walkGroup(group, rules[group]);
+                walkGroup(group, rules[group], [group]);
             }
             return true;
         } catch (e) {
@@ -757,7 +760,12 @@
         }
     }
 
-    function registerYamlField(group, field, def, acc) {
+    function registerYamlField(group, field, def, acc, fieldPath) {
+        let rangeVal = null;
+        let formatVal = '';
+        // type 含 { / [ 的对象/字典声明：check 描述的是整块结构（容器/子表/JSON 列），
+        // 不是某个标量列，路径化附着时跳过列级匹配（表级规则仍经 groupChecks 保留）。
+        const tableLevel = def.type !== undefined && /[\[{]/.test(String(def.type).trim());
         if (def.type !== undefined) {
             const ts = String(def.type).trim();
             if (/type\s*:\s*number/.test(ts) || /^number$/.test(ts) || ts.indexOf('number') !== -1) acc.numericFields.add(field);
@@ -784,9 +792,16 @@
         if (def.range !== undefined) {
             const r = yamlParseRange(def.range);
             if (r) {
+                rangeVal = r;
                 acc.ranges[field] = r;
                 acc.numericFields.add(field);
             }
+        }
+        if (def.format !== undefined) {
+            const fv = String(def.format);
+            formatVal = fv.indexOf('\n') !== -1 ? fv.replace(/\s+/g, ' ').trim() : fv.trim();
+            acc.formats[group] = acc.formats[group] || {};
+            acc.formats[group][field] = formatVal;
         }
         if (def.check !== undefined) {
             const items = yamlCheckItems(def.check);
@@ -794,12 +809,16 @@
                 acc.checks[group] = acc.checks[group] || {};
                 acc.checks[group][field] = items;
                 acc.allCheckItems.push(...items);
+                // 路径化附着：记录规则书写时的完整路径（组.容器…字段），供
+                // attachFieldRules 在规则分组与 initvar 结构不一致时按路径匹配列。
+                acc.checkPaths.push({
+                    path: fieldPath || [group, field],
+                    list: items,
+                    range: rangeVal,
+                    format: formatVal,
+                    tableLevel,
+                });
             }
-        }
-        if (def.format !== undefined) {
-            const fv = String(def.format);
-            acc.formats[group] = acc.formats[group] || {};
-            acc.formats[group][field] = fv.indexOf('\n') !== -1 ? fv.replace(/\s+/g, ' ').trim() : fv.trim();
         }
         if (def.enum !== undefined) {
             const ev = Array.isArray(def.enum) ? def.enum : String(def.enum).replace(/^["']|["']$/g, '').split(/[/|]/);
@@ -831,6 +850,9 @@
         const dynamicGroups = new Set();
         const allContents = [];
         const allCheckItems = [];
+        // 记录每条字段级 check 的完整规则路径（组.容器…字段），供“initvar 优先”的
+        // 路径化附着：规则分组与 initvar 结构不一致、但路径能对上时也能挂到对应列/表。
+        const checkPaths = [];
         for (const e of entries) {
             const comment = String(e.comment || '');
             const content = String(e.content || '');
@@ -841,7 +863,7 @@
             if (collectRulesFromYaml(content, {
                 shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs,
                 wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups,
-                allCheckItems,
+                allCheckItems, checkPaths,
             })) continue;
             // 顶层组：缩进 ≤2 的中文/含$组名
             // 注意：结尾必须用 (?=\n) 前瞻而不是消费 \n——否则紧跟上一组行的组会被跳过
@@ -867,13 +889,15 @@
                 // 屏蔽法不依赖具体缩进档位：任意深度的合法字段仍会命中，块内容一律排除
                 // （比“只认 4/6 空格”更通用，也不会漏掉更深层的合法子字段）。
                 const maskedSection = maskYamlBlockScalarBodies(section);
-                const fieldRe = /(?:^|\n)( {4})([^\n:]{1,24}?)[ \t]*:[ \t]*([^\n]*)$/gm;
+                // 缩进 4~6 空格都算字段行：6 空格是 3 层嵌套子字段（修为:{ 进度百分比:… }），
+                // 记录 indent 供路径化附着拼出 组.容器.子字段 完整路径（展平列需要）。
+                const fieldRe = /(?:^|\n)( {4,6})([^\n:]{1,24}?)[ \t]*:[ \t]*([^\n]*)$/gm;
                 const fieldStarts = [];
                 let fm;
                 while ((fm = fieldRe.exec(maskedSection))) {
                     const field = fm[2].trim().replace(/^["']|["']$/g, '');
                     if (!/^[\u4e00-\u9fff$]{1,12}$/.test(field) && !/^\$\{[^}]+\}$/.test(field)) continue;
-                    fieldStarts.push({ field, index: fm.index + fm[0].length, inline: fm[3].trim(), at: fm.index });
+                    fieldStarts.push({ field, indent: fm[1].length, fieldPath: [group, field], index: fm.index + fm[0].length, inline: fm[3].trim(), at: fm.index });
                 }
                 // 通配路径字段（如 户.<门牌>.妻.好感值 / 人物.角色名.亲密）：字段名含 <…> 或 .，
                 // 不是静态列，无法逐字段迁移；识别出来并在转换报告中显式警告，避免静默丢弃。
@@ -894,7 +918,9 @@
                     const nextAt = wi + 1 < wildKeys.length ? wildKeys[wi + 1].at : section.length;
                     const block = section.slice(wk0.end, nextAt);
                     const group0 = String(wk0.key).split('.')[0].trim();
-                    if (!group0 || !/^[\u4e00-\u9fff$]{1,12}$/.test(group0)) continue;
+                    // 首段可能是 ${A|B} 模板键（如 ${小宅仙|小御仙}.当前阶段）：不满足纯组名
+                    // 时不能 continue 丢弃，应挂到所在组（天道娘面板）——否则这些规则全丢。
+                    const isPlainGroup0 = /^[\u4e00-\u9fff$]{1,12}$/.test(group0);
                     const rangeM = block.match(/range\s*:\s*([\d.]+)\s*[~-]\s*([\d.]+)/);
                     const checkM = block.match(/check\s*:\s*("?[\s\S]*?)(?=\n {4}[^ \n-][^\n:]{0,23}?:\s*|\n {2}\S|$)/);
                     const fmtM = block.match(/format\s*:\s*([^\n]+)$/m);
@@ -907,17 +933,19 @@
                     const rec = { path: wk0.key, checks };
                     if (rangeM) rec.range = [Number(rangeM[1]), Number(rangeM[2])];
                     if (fmtM) rec.format = String(fmtM[1]).trim().replace(/^["']|["']$/g, '');
-                    wildcardRules[group0] = wildcardRules[group0] || [];
-                    wildcardRules[group0].push(rec);
-                    // 组内子字段通配（首段不是组名，如 主角 下的 生理.欲望槽 / 技艺.${…}）：
-                    // 同时挂到所在组，避免规则孤儿（大荒回归：这类规则此前全丢，format 更甚）。
-                    if (group && group !== group0) {
+                    if (isPlainGroup0) {
+                        wildcardRules[group0] = wildcardRules[group0] || [];
+                        wildcardRules[group0].push(rec);
+                    }
+                    // 组内子字段通配（首段不是组名，如 主角 下的 生理.欲望槽 / 技艺.${…}）
+                    // 或首段是模板键（${小宅仙|小御仙}.当前阶段）：挂到所在组，避免规则孤儿。
+                    if (group && (!isPlainGroup0 || group !== group0)) {
                         wildcardRules[group] = wildcardRules[group] || [];
                         wildcardRules[group].push(rec);
                     }
                 }
                 for (let fi = 0; fi < fieldStarts.length; fi++) {
-                    const { field, index, inline } = fieldStarts[fi];
+                    const { field, indent, index, inline } = fieldStarts[fi];
                     const next = fi + 1 < fieldStarts.length ? fieldStarts[fi + 1].at : section.length;
                     const block = section.slice(index, next);
                     if (field === '_强制更新提醒' || field === '_强制更新') {
@@ -946,6 +974,10 @@
                     const typeLine = block.match(/type\s*:\s*"([\s\S]*?)"\s*$/m);
                     const typeBlockRaw = extractYamlBlockScalar(block, 'type');
                     const typeBlock = typeBlockRaw === null ? null : { 1: typeBlockRaw };
+                    // type 含 { / [ 的对象/字典声明：check 描述整块结构（容器/子表/JSON 列），
+                    // 路径化附着时跳过列级匹配（表级规则仍经 groupChecks/parentList 保留）。
+                    const fieldTypeRaw = typeLine ? typeLine[1] : (typeBlock ? typeBlock[1] : '');
+                    const fieldTableLevel = /[\[{]/.test(String(fieldTypeRaw).trim());
                     if (typeLine) {
                         const parsed = parseShapeString(typeLine[1]);
                         if (parsed) {
@@ -1030,7 +1062,38 @@
                         const list = items.length ? items : (raw ? [raw] : []);
                         if (list.length) {
                             checks[group] = checks[group] || {};
-                            for (const fn of fieldNames) checks[group][fn] = list;
+                            for (const fn of fieldNames) {
+                                checks[group][fn] = list;
+                                // 路径化附着：记录 4 空格（2 层）字段的书写路径（组.字段）。
+                                checkPaths.push({
+                                    path: [group, fn],
+                                    list,
+                                    range: rangeM ? [Number(rangeM[1]), Number(rangeM[2])] : null,
+                                    format: formatValue || '',
+                                    tableLevel: fieldTableLevel,
+                                });
+                                // 6 空格（3 层）嵌套子字段（修为: { 进度百分比: check: … }）：
+                                // 上面的 2 层路径会丢容器层，补记 组.父字段.子字段 完整路径，
+                                // 供展平列（修为进度百分比，path=[主角,修为,进度百分比]）精确附着。
+                                if (indent === 6 && fieldNames.length === 1) {
+                                    let parentField = '';
+                                    for (let j = fi - 1; j >= 0; j--) {
+                                        if (fieldStarts[j].indent === 4) {
+                                            parentField = fieldStarts[j].field;
+                                            break;
+                                        }
+                                    }
+                                    if (parentField) {
+                                        checkPaths.push({
+                                            path: [group, parentField, fn],
+                                            list,
+                                            range: rangeM ? [Number(rangeM[1]), Number(rangeM[2])] : null,
+                                            format: formatValue || '',
+                                            tableLevel: false,
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                     // 行内枚举值（危机程度: "无/低/中/高/致命"）
@@ -1129,7 +1192,7 @@
                 }
             }
         }
-        return { shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups };
+        return { shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, checkPaths };
     }
 
     /**
@@ -2328,6 +2391,7 @@
                     }
                     return rowArr;
                 });
+                ct.tableName = tableName; // 供父组 note 提示子表用（含重命名后的表名）
                 groups.push({
                     name: ct.key,
                     tableName,
@@ -2365,6 +2429,51 @@
         const ruleGroupChecks = (shapeInfo && shapeInfo.groupChecks) || {};
         const ruleZodDescs = (shapeInfo && shapeInfo.zodDescs) || {};
         const ruleWildcardRules = (shapeInfo && shapeInfo.wildcardRules) || {};
+        const ruleCheckPaths = (shapeInfo && shapeInfo.checkPaths) || [];
+
+        // 路径化附着（initvar 优先）：规则分组与 initvar 结构不一致（如规则把 修为
+        // 写在根目录、initvar 在 主角.修为）时，按变量树路径匹配列：
+        //  - 展平列（修为进度百分比，path=[主角,修为,进度百分比]）↔ 规则路径 修为.进度百分比
+        //  - 通配路径（生理.欲望槽）↔ 列路径 主角.生理.欲望槽
+        // 规则路径取列路径的后缀（从叶子往回逐段相等）；模板段 ${A|B} 展开后匹配任一候选项。
+        function rulePathMatch(rulePath, columnPath) {
+            const rp = Array.isArray(rulePath)
+                ? rulePath
+                : String(rulePath == null ? '' : rulePath).split('.').map(s => s.trim()).filter(Boolean);
+            if (!Array.isArray(columnPath) || !rp.length) return null;
+            if (rp.length > columnPath.length) return null;
+            for (let i = 0; i < rp.length; i++) {
+                const seg = String(rp[rp.length - 1 - i]);
+                const col = columnPath[columnPath.length - 1 - i];
+                const segVals = seg.startsWith('${') && seg.endsWith('}')
+                    ? seg.slice(2, -1).split('|').map(s => s.trim())
+                    : [seg];
+                if (!segVals.includes(String(col))) return null;
+            }
+            return {
+                exact: rp.length === columnPath.length,
+                sameRoot: String(rp[0]) === String(columnPath[0]),
+                len: rp.length,
+            };
+        }
+        function pickBestPathRule(columnPath, entries, pickList) {
+            let best = null;
+            let bestScore = -1;
+            for (let i = 0; i < entries.length; i++) {
+                const e = entries[i];
+                const list = pickList(e);
+                if (!list || !list.length) continue;
+                const m = rulePathMatch(e.path, columnPath);
+                if (!m) continue;
+                // 完整路径 > 后缀；更长后缀 > 更短；同顶层组加分；先声明者优先（稳定）
+                const score = (m.exact ? 100000 : 0) + m.len * 100 + (m.sameRoot ? 1000 : 0) - i;
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = e;
+                }
+            }
+            return best;
+        }
         for (const g of groups) {
             // 通配路径规则（如 户.<门牌>.妻.好感值）与组级 check 都按组归到本表（含 JSON 表），
             // 供 buildNote/buildNodeProse 决定“AI 可写”还是“AI 不应修改”
@@ -2392,6 +2501,23 @@
                 }
                 if (!c.range && (ruleRanges[c.zh] || ruleRanges[last])) c.range = ruleRanges[c.zh] || ruleRanges[last];
                 if (c.type !== 'INTEGER' && (ruleNumeric.has(c.zh) || ruleNumeric.has(last))) c.type = 'INTEGER';
+                // 兜底：按字段名直接命中为空时，用规则书写路径匹配 initvar 列路径
+                // （字段级 checkPaths 优先于通配路径）。tableLevel 规则（容器/子表/JSON
+                // 列的整体约束）不做列级附着，仍经 groupChecks 表级保留。
+                if (!c.check || !c.check.length) {
+                    const colPath = c.path || [g.name, c.zh];
+                    const pRule = pickBestPathRule(colPath, ruleCheckPaths.filter(e => !e.tableLevel), e => e.list);
+                    const wRule = pRule ? null : pickBestPathRule(colPath, g.wildcardRules || [], e => e.checks);
+                    const r = pRule || wRule;
+                    if (r) {
+                        c.check = (r.list || r.checks || []).slice();
+                        if (!c.range && r.range) {
+                            c.range = r.range;
+                            if (c.type !== 'INTEGER') c.type = 'INTEGER';
+                        }
+                        if (!c.format && r.format) c.format = r.format;
+                    }
+                }
             }
         }
         return groups;
@@ -2534,7 +2660,7 @@
             if (wr.length || gc.length) {
                 // 规则声明了 AI 可写路径（如 户.<门牌>.妻.好感值）：JSON 表不再一刀切只读，
                 // 而是列出可写路径与约束，AI 读取现有 JSON 仅改对应路径后整体写回「内容」列。
-                L.push('整组 JSON 存储表（row_id=1）：本表以 JSON 保存动态结构。AI 可更新「内容」列——读取当前 JSON，只改变目标路径的值，其余字段保持原样，再把整个 JSON 写回；禁止新增/删除记录。');
+                L.push('整组 JSON 存储表（row_id=1，全表固定一行）：本表以 JSON 保存动态结构。AI 可更新「内容」列——读取当前 JSON，只改变【可写路径与约束】中列出的路径，其余字段保持原样，再把整个 JSON 写回；禁止新增/删除行。');
                 L.push('【可写路径与约束】');
                 for (const r of wr) {
                     const parts = [];
@@ -2546,18 +2672,27 @@
                 L.push('【更新守卫】');
                 // 不给 AI 加“<> 是什么”的说明：MVU 原版就是把规则原文交给 AI 理解，
                 // 且不是所有卡都用 <>（也有纯点分路径）。规则原文已在上方【可写路径与约束】保留。
-                L.push('- 只更新当前 JSON 中实际存在的可写路径；未列出的字段一律只读（它们仍存在于同一 JSON 中，由脚本/系统维护，AI 不得改动），严禁新增字段、对象或记录');
+                // 守卫统一放宽：只限制“未声明路径”，不堵死“规则声明可 insert/初始化/新增”
+                // 的路径（否则空 JSON 表永远无法初始化，如大荒 宗门表）。不做关键词检测。
+                L.push('- 只更新【可写路径与约束】中列出的路径；未列出的字段一律只读（它们仍存在于同一 JSON 中，由脚本/系统维护，AI 不得改动）。规则要求 insert/初始化/新增 的路径允许创建对应字段、对象或记录；严禁新增未声明的字段、对象或记录');
                 L.push('- 只更新本轮剧情中明确出现并被影响到的对象；其余对象的数据保持原样');
                 L.push('- 写回时必须完整保留 JSON 中其余全部字段；数值字段保持数字类型、字符串字段保持字符串类型');
             } else {
-                L.push(`整组 JSON 存储表（row_id=1）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除记录。`);
+                L.push(`整组 JSON 存储表（row_id=1，全表固定一行）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除行。`);
             }
         } else if (group.kind === 'singleton') {
             // 单例表不重复描述（“全表固定一条记录”等），直接给出开局记录说明；
             // 全只读单例（全部为 _ 字段）不写“只允许 UPDATE”，避免与“AI 无需填表”冲突
-            L.push(aiCols.length
-                ? `本表唯一记录已由开局模板初始化（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`
-                : `本表唯一记录已由开局模板初始化（row_id=1）；全部字段由脚本/系统维护，AI 无需填表。`);
+            if (aiCols.length) {
+                L.push(`本表唯一记录已由开局模板初始化（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。`);
+            } else {
+                // 纯容器单例（如 行囊 只有子表 背包、自身无 AI 字段）：提示数据在子表，
+                // 避免“AI 无需填表”让人以为整组数据都不存在。
+                const childNames = (group.childTables || []).map(ct => ct.tableName || (ct.key + '表'));
+                L.push(childNames.length
+                    ? `本表为容器（row_id=1 占位），数据在子表「${childNames.join('、')}」中；本表自身无 AI 可填字段，全部字段由脚本/系统维护，AI 无需填表。`
+                    : `本表唯一记录已由开局模板初始化（row_id=1）；全部字段由脚本/系统维护，AI 无需填表。`);
+            }
         } else {
             // 与插件默认模板一致：note 不重复表名（插件会在表头显示表名），直接给表类型说明
             L.push(describeGroup(group));

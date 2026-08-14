@@ -357,6 +357,8 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     assert.ok(!hub.sourceData.note.includes('需替换为「内容」列当前 JSON 中实际存在的键名'), '提示词不应额外解释 <…>（与 MVU 原版一致，规则原文交给 AI 理解）');
     assert.ok(hub.sourceData.note.includes('它们仍存在于同一 JSON 中'), '更新守卫应说明未列出字段仍物理存在于同一 JSON');
     assert.ok(hub.sourceData.note.includes('未列出的字段一律只读'), '更新守卫应包含未列出字段只读');
+    assert.ok(hub.sourceData.note.includes('规则要求 insert/初始化/新增 的路径允许创建对应字段、对象或记录'), 'JSON 表守卫应允许规则声明可新增的路径（初始化 insert 不被堵死）');
+    assert.ok(hub.sourceData.note.includes('禁止新增/删除行'), 'JSON 表顶部应说“行”而非“记录”');
     assert.ok(hub.sourceData.updateNode.includes('未列出字段一律只读'), 'JSON 表 updateNode 应包含只读守卫');
     assert.ok(hub.sourceData.updateNode.includes('SQL示例: UPDATE'), 'JSON 表有可写规则时 updateNode 应含 SQL 示例');
     assert.ok(hub.sourceData.updateNode.includes('WHERE row_id=1'), 'JSON 表更新示例应定位 row_id=1');
@@ -6580,6 +6582,213 @@ test('不同组下同名子表（行囊.背包 / 宗门.背包）用父组限定
     const norm = s => String(s).normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
     const canon = names.map(norm);
     assert.strictEqual(canon.filter((c, i) => canon.indexOf(c) !== i).length, 0, '规范化后表名不得重复（插件导入校验）');
+});
+
+test('首段为 ${A|B} 模板键的通配规则（${小宅仙|小御仙}.当前阶段）挂到所在组，不丢失（大荒回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '模板键通配卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '天道娘面板:\n  激活状态: 小宅仙\n  小宅仙:\n    当前阶段: 数据残影\n    性格: 怕死' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  天道娘面板:',
+                            '    激活状态:',
+                            '      check:',
+                            '        - 开局仅小宅仙',
+                            '    ${小宅仙|小御仙}.当前阶段:',
+                            '      check:',
+                            '        - 小宅仙阶段序列：数据残影(0)>幼态凝实(1)',
+                            '    ${小宅仙|小御仙}.性格:',
+                            '      check:',
+                            '        - 怕死/利己主义',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    const wrs = si.wildcardRules['天道娘面板'] || [];
+    assert.ok(wrs.some(w => w.path === '${小宅仙|小御仙}.当前阶段'), '模板键通配应挂到所在组 天道娘面板');
+    assert.ok(wrs.some(w => w.path === '${小宅仙|小御仙}.性格'), '多个模板键通配都应保留');
+    const r = core.convert(card, { mode: 'both' });
+    const t = Object.values(r.template).find(x => x && x.name === '天道娘面板表');
+    const note = t.sourceData.note || '';
+    assert.ok(note.includes('小宅仙阶段序列'), '天道娘面板表 note 应含模板键通配的 check');
+    assert.ok(note.includes('怕死/利己主义'), 'note 应含第二个模板键通配的 check');
+});
+
+test('路径化附着：规则分组与 initvar 结构不一致（修为 写在根目录、initvar 在 主角.修为）时，check/range 按路径挂到展平列（修为进度百分比）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '路径附着卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '主角:\n  修为:\n    进度百分比: 20\n    灵气浓度: 稀薄\n  灵石钱包:\n    上品灵石: 5' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  修为:',
+                            '    进度百分比:',
+                            '      type: number',
+                            '      range: 0~100',
+                            '      check:',
+                            '        - 突破时更新',
+                            '        - 仅正文明确修炼时变动',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.ok(
+        si.checkPaths.some(e => JSON.stringify(e.path) === JSON.stringify(['修为', '进度百分比']) && e.list.length === 2),
+        'checkPaths 应记录规则书写路径 修为.进度百分比'
+    );
+    const r = core.convert(card, { mode: 'both' });
+    const g = r.schema.find(x => x.name === '主角');
+    const c = g.columns.find(x => x.zh === '修为进度百分比');
+    assert.ok(c, '应有展平列 修为进度百分比');
+    assert.deepStrictEqual(c.check, ['突破时更新', '仅正文明确修炼时变动'], '展平列应附着规则 check');
+    assert.deepStrictEqual(c.range, [0, 100], '展平列应附着规则 range');
+    assert.strictEqual(c.type, 'INTEGER', '带 range 的列应为 INTEGER');
+});
+
+test('路径化附着：6 空格嵌套写法（主角.修为.进度百分比）在 YAML 失败回退正则时也能记录完整路径并附着', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '6空格路径卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '主角:\n  修为:\n    进度百分比: 20\n  灵石钱包:\n    上品灵石: 5' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  主角:',
+                            '    修为:',
+                            '      进度百分比:',
+                            '        check:',
+                            '          - 突破时更新',
+                            '  世界:',
+                            '    灵气浓度:',
+                            '      format: \'稀薄\'|\'普通\'',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.ok(
+        si.checkPaths.some(e => JSON.stringify(e.path) === JSON.stringify(['主角', '修为', '进度百分比'])),
+        '正则回退也应记录 3 层路径 主角.修为.进度百分比'
+    );
+    const r = core.convert(card, { mode: 'both' });
+    const g = r.schema.find(x => x.name === '主角');
+    const c = g.columns.find(x => x.zh === '修为进度百分比');
+    assert.deepStrictEqual(c.check, ['突破时更新'], '6 空格子字段的 check 应附着到展平列');
+});
+
+test('路径化附着：通配路径（生理.欲望槽）按 initvar 列路径（主角.生理.欲望槽）挂 check/range（大荒回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '通配路径附着卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '主角:\n  生理:\n    欲望槽: 0\n    体香: 冷香\n  灵石钱包:\n    上品灵石: 5' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  主角:',
+                            '    生理.欲望槽:',
+                            '      type: number',
+                            '      range: 0~100',
+                            '      check:',
+                            '        - 遭遇媚药或双修时上涨',
+                            '        - >80 强制进入欲望失控状态',
+                            '    生理.体香:',
+                            '      check:',
+                            '        - 功法大成或服奇药后更新',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const g = r.schema.find(x => x.name === '主角');
+    const c = g.columns.find(x => x.zh === '生理欲望槽');
+    assert.ok(c && c.check && c.check.length === 2, '生理欲望槽 列应附着通配 check');
+    assert.deepStrictEqual(c.range, [0, 100], '生理欲望槽 列应附着通配 range');
+    const b = g.columns.find(x => x.zh === '生理体香');
+    assert.ok(b && b.check && b.check.length === 1, '生理体香 列应附着通配 check');
+});
+
+test('路径化附着：容器/子表级（tableLevel）check 不挂到键名列，仍保留在表级 groupChecks（行囊.背包 / 宗门.背包 回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '表级check卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '宗门:\n  背包: {}\n行囊:\n  背包: {}' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  宗门:',
+                            '    背包:',
+                            '      type: |-',
+                            '        {',
+                            '          [物品标识: string]: {',
+                            '            名称: string;',
+                            '            数量: number;',
+                            '          }',
+                            '        }',
+                            '      check:',
+                            '        - 获得物品时 insert 或 delta 增加数量',
+                            '        - 分类必须从 13 类中严格选取',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const bg = r.schema.find(x => x.tableName === '宗门背包表');
+    assert.ok(bg, '应有宗门背包表');
+    const keyCol = bg.columns[0];
+    assert.ok(!(keyCol.check && keyCol.check.length), '子表级 check 不应挂到键名列');
+    assert.ok(bg.groupChecks.length === 2, '子表级 check 应保留在表级 groupChecks');
+    const xl = r.schema.find(x => x.tableName === '行囊背包表');
+    assert.ok(xl && xl.groupChecks.length === 0, '行囊背包表无对应规则时不得误挂宗门.背包 的表级 check');
 });
 
 test('切换开场分支：动态字典行表整组替换（旧行删除、新行插入），读回为该分支初始值', async () => {
