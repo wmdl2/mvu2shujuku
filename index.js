@@ -1,5 +1,5 @@
 // MVU转数据库 · SillyTavern 原生扩展
-// 生成自 转换器/src/mvu2shujuku.js（0.2.0），核心源码内联如下
+// 生成自 转换器/src/mvu2shujuku.js（0.2.1），核心源码内联如下
 // @ts-nocheck
 (function (root) {
 /*
@@ -17,7 +17,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.2.0';
+    const VERSION = '0.2.1';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -600,6 +600,20 @@
         return t;
     }
 
+    // 仅把真正的“值1/值2”或“值1 | 值2”识别为行内枚举。规则作者也常用竖线
+    // 分隔 TS 类型与字段说明（如 `描述: string; | 外观、材质、来历…`）；旧逻辑只要
+    // 看见 / 或 | 就生成 CHECK IN，结果任意真实描述都无法写入 SQLite。
+    function parseInlineEnumValues(value) {
+        const sv = String(value == null ? '' : value).trim();
+        if (!sv || sv.indexOf('\n') !== -1 || sv.length > 60 || !/[/|]/.test(sv)) return null;
+        // 分号/括号是类型或结构声明的强信号；裸 string/number 等即使没写分号也不是枚举值。
+        if (/[;{}\[\]]/.test(sv)) return null;
+        const vals = yamlStripQuotes(sv).split(/[/|]/).map(yamlStripQuotes).filter(Boolean);
+        if (vals.length < 2 || vals.length > 12) return null;
+        if (vals.some(v => /^(?:string|number|boolean|object|unknown|any|never|void|null|undefined)$/i.test(v))) return null;
+        return vals;
+    }
+
     function yamlCheckItems(v) {
         const list = Array.isArray(v) ? v : (v === undefined || v === null ? [] : [v]);
         return list.map(x => {
@@ -625,7 +639,7 @@
 
     function yamlExpandTemplateKeys(s) {
         return String(s).replace(/\$\{([^}]+)\}/g, (m, inner) => (
-            inner.split('|').map(p => p.trim()).filter(Boolean).join('/')
+            inner.includes('|') ? inner.split('|').map(p => p.trim()).filter(Boolean).join('/') : m
         ));
     }
 
@@ -676,6 +690,7 @@
                                 acc.objects[group] = acc.objects[group] || {};
                                 for (const obj of gparsed.objects) acc.objects[group][obj] = true;
                             }
+                            mergeShapeMetadata(group, gparsed, acc.fieldTypes, acc.objectSchemas);
                             if (gparsed.dynamicTop) acc.dynamicGroups.add(group);
                         }
                     }
@@ -684,7 +699,7 @@
                 if (node.check !== undefined) {
                     const items = yamlCheckItems(node.check);
                     acc.allCheckItems.push(...items);
-                    if (items.length) acc.groupChecks[group] = items;
+                    if (items.length) acc.groupChecks[group] = [...new Set([...(acc.groupChecks[group] || []), ...items])];
                 }
                 for (const key of Object.keys(node)) {
                     if (key === 'check' || key === 'type' || key === 'format' || key === 'range' || key === 'enum') continue;
@@ -708,11 +723,8 @@
                         // 叶子字段的行内值：枚举 a/b/c。块标量/长文本（如 [mvu_plot]
                         // 战斗系统.说明: |- 一整段战斗判定）不是行内枚举——按 /| 切开会
                         // 把长文切碎成伪枚举，塞进列 CHECK 导致 DDL 校验失败。
-                        const sv = String(val);
-                        if (sv.indexOf('\n') === -1 && sv.length <= 60) {
-                            const vals = sv.replace(/^["']|["']$/g, '').split(/[/|]/).map(s => s.trim()).filter(Boolean);
-                            if (vals.length >= 2 && vals.length <= 12) acc.enums[key] = vals;
-                        }
+                        const vals = parseInlineEnumValues(val);
+                        if (vals) acc.enums[key] = vals;
                         continue;
                     }
                     if (val && typeof val === 'object' && !Array.isArray(val)) {
@@ -752,9 +764,19 @@
     }
 
     function yamlParseRange(v) {
-        if (Array.isArray(v) && v.length >= 2) return [Number(v[0]), Number(v[1])];
-        const m = String(v).match(/([\d.]+)\s*[~-]\s*([\d.]+)/);
-        return m ? [Number(m[1]), Number(m[2])] : null;
+        if (Array.isArray(v) && v.length >= 2) {
+            const out = [Number(v[0]), Number(v[1])];
+            return out.every(Number.isFinite) ? out : null;
+        }
+        const text = String(v);
+        const num = '-?(?:\\d+(?:\\.\\d+)?|\\.\\d+)';
+        // 优先处理无歧义的 ~ / ～ / 至；再兼容 0-100 式旧写法。
+        // 数值本身必须允许负号，否则 -1000~1000 会被误读为 1000~1000。
+        let m = text.match(new RegExp(`(${num})\\s*(?:~|～|至)\\s*(${num})`));
+        if (!m) m = text.match(new RegExp(`(${num})\\s*-\\s*(${num})`));
+        if (!m) return null;
+        const out = [Number(m[1]), Number(m[2])];
+        return out.every(Number.isFinite) ? out : null;
     }
 
     function registerYamlWildcard(key, val, acc, enclosingGroup) {
@@ -762,6 +784,7 @@
         const group0 = String(key).split('.')[0].trim();
         const rec = { path: key };
         if (val && typeof val === 'object' && !Array.isArray(val)) {
+            if (val.type !== undefined) registerWildcardTypeShape(key, val.type, acc, enclosingGroup);
             if (val.range !== undefined) {
                 const r = yamlParseRange(val.range);
                 if (r) rec.range = r;
@@ -783,6 +806,40 @@
         }
     }
 
+    // 点路径/模板路径也可能直接声明一个条目字典，而不写成普通“字段”节点：
+    //   装备.固定部位.${主手|副手|...}: type: { 名称, 品质, ... }
+    //   装备.饰品: type: { [饰品键名]: { 名称, 品质, ... } }
+    // 这两种都应按完整 stat_data 路径拆子行表；只把规则挂进 note 会让上层“装备”
+    // 被误判成行表，固定部位的对象再退化成 JSON 字符串，前端读取 主手.名称 失败。
+    function registerWildcardTypeShape(key, typeValue, acc, enclosingGroup) {
+        const ts = String(typeValue == null ? '' : typeValue).trim();
+        if (!ts || !/[\[{]/.test(ts)) return;
+        const parsed = parseShapeString(ts);
+        if (!parsed) return;
+        const rawParts = String(key).split('.').map(s => s.trim()).filter(Boolean);
+        if (!rawParts.length) return;
+        const lastIsTemplateKey = /^\$\{[^}]+\}$|^<[^>]+>$/.test(rawParts[rawParts.length - 1]);
+        const tableParts = lastIsTemplateKey ? rawParts.slice(0, -1) : rawParts.slice();
+        if (!tableParts.length) return;
+        // 正则回退会把标准外壳「变量更新规则:」也扫描成 group；其下的
+        // 世界.当前对手 / 主角.物品栏 已是绝对路径，不得再冠上外壳名。
+        const effectiveGroup = enclosingGroup === '变量更新规则' ? '' : enclosingGroup;
+        const fullParts = effectiveGroup && tableParts[0] !== effectiveGroup
+            ? [effectiveGroup, ...tableParts]
+            : tableParts;
+        const tableKey = tableParts[tableParts.length - 1];
+        if (!/^[\u4e00-\u9fff$]{1,12}$/.test(tableKey)) return;
+        acc.shapes[tableKey] = acc.shapes[tableKey] || [];
+        for (const f of parsed.fields || []) if (!acc.shapes[tableKey].includes(f)) acc.shapes[tableKey].push(f);
+        if (parsed.objects && parsed.objects.length) {
+            acc.objects[tableKey] = acc.objects[tableKey] || {};
+            for (const f of parsed.objects) acc.objects[tableKey][f] = true;
+        }
+        mergeShapeMetadata(tableKey, parsed, acc.fieldTypes, acc.objectSchemas);
+        // ${槽位} 本身就是条目键；dynamicTop 则是显式 [动态键] 字典。
+        if (lastIsTemplateKey || parsed.dynamicTop) acc.dynamicPaths.add(fullParts.join('.'));
+    }
+
     function registerYamlField(group, field, def, acc, fieldPath) {
         let rangeVal = null;
         let formatVal = '';
@@ -791,7 +848,10 @@
         const tableLevel = def.type !== undefined && /[\[{]/.test(String(def.type).trim());
         if (def.type !== undefined) {
             const ts = String(def.type).trim();
-            if (/type\s*:\s*number/.test(ts) || /^number$/.test(ts) || ts.indexOf('number') !== -1) acc.numericFields.add(field);
+            // 只有字段自身声明为 number 才能标成数值。对象 type 内部通常包含若干
+            // `子字段: number`；按 substring 判断会把整个对象列误标成 INTEGER，JSON
+            // 读回随即退化成字符串（收益明细/粮秣流水等均会中招）。
+            if (/^(?:number|integer)\s*;?$/i.test(ts)) acc.numericFields.add(field);
             if (/[\[{]/.test(ts)) {
                 const parsed = parseShapeString(ts);
                 if (parsed) {
@@ -804,6 +864,7 @@
                         acc.objects[target] = acc.objects[target] || {};
                         for (const obj of parsed.objects) acc.objects[target][obj] = true;
                     }
+                    mergeShapeMetadata(target, parsed, acc.fieldTypes, acc.objectSchemas);
                     if (parsed.dynamicTop || (parsed.dynamic && parsed.dynamic.length)) {
                         acc.dynamicDicts[group] = acc.dynamicDicts[group] || {};
                         if (parsed.dynamicTop) acc.dynamicDicts[group][field] = true;
@@ -830,7 +891,7 @@
             const items = yamlCheckItems(def.check);
             if (items.length) {
                 acc.checks[group] = acc.checks[group] || {};
-                acc.checks[group][field] = items;
+                acc.checks[group][field] = [...new Set([...(acc.checks[group][field] || []), ...items])];
                 acc.allCheckItems.push(...items);
                 // 路径化附着：记录规则书写时的完整路径（组.容器…字段），供
                 // attachFieldRules 在规则分组与 initvar 结构不一致时按路径匹配列。
@@ -850,11 +911,13 @@
         }
     }
 
-    function parseMvuShapes(card) {
+    function parseMvuShapes(card, report) {
         const d = card.data || card;
         const entries = (d.character_book && d.character_book.entries) || [];
         const shapes = {};
         const objects = {};
+        const fieldTypes = {};
+        const objectSchemas = {};
         const ranges = {};
         const enums = {};
         const formats = {};
@@ -888,10 +951,18 @@
             // YAML 优先：规则是作者自定义 YAML，真 YAML 树能覆盖正则盲区
             // （flow 写法、引号键、深层嵌套）；失败或结构是字符串（zod/散文）回退正则。
             if (collectRulesFromYaml(content, {
-                shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs,
+                shapes, objects, fieldTypes, objectSchemas, ranges, enums, formats, checks, reminders, groupChecks, zodDescs,
                 wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups,
                 allCheckItems, checkPaths,
             })) continue;
+            // YAML 失败回退正则：注明原因，便于发现“回退后个别声明丢失”（如大荒组级 type）。
+            if (report && (/\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment) || /变量更新规则|变量输出格式/.test(comment))) {
+                report.warn(
+                    `规则条目「${String(comment).slice(0, 30)}」的 YAML 解析失败（非法语法/多文档），` +
+                    `已回退正则路径；组级与深层声明按缩进正则提取，若解析异常请人工核对。`,
+                    'schema'
+                );
+            }
             // 顶层组：缩进 ≤2 的中文/含$组名
             // 注意：结尾必须用 (?=\n) 前瞻而不是消费 \n——否则紧跟上一组行的组会被跳过
             // （如 “变量更新规则:\n  世界:” 中 世界: 前面的换行已被上一组匹配吃掉）。
@@ -936,19 +1007,28 @@
                     const k = wm[2].trim().replace(/^["']|["']$/g, '');
                     if (!k) continue;
                     if (/<[^>]+>|\./.test(k) && !/^[\u4e00-\u9fff$]{1,12}$/.test(k) && !/^\$\{[^}]+\}$/.test(k)) {
-                        wildKeys.push({ key: k, at: wm.index, end: wm.index + wm[0].length });
+                        wildKeys.push({ key: k, indent: wm[1].length, at: wm.index, end: wm.index + wm[0].length });
                         wildcardFields.add(k);
                     }
                 }
+                // 普通字段和点/通配路径互为 block 边界。旧逻辑只让“普通字段”彼此截断、
+                // “通配路径”彼此截断，导致 外貌 的 block 吞进后续 装备.* type，进而把
+                // 内层「已装备」误登记成 主角.已装备 动态字典；最后凭空生成 已装备表。
+                const ruleStarts = [...fieldStarts.map(x => x.at), ...wildKeys.map(x => x.at)].sort((a, b) => a - b);
+                const nextRuleStart = at => {
+                    const n = ruleStarts.find(x => x > at);
+                    return n === undefined ? section.length : n;
+                };
                 for (let wi = 0; wi < wildKeys.length; wi++) {
                     const wk0 = wildKeys[wi];
-                    const nextAt = wi + 1 < wildKeys.length ? wildKeys[wi + 1].at : section.length;
+                    const nextAt = nextRuleStart(wk0.at);
                     const block = section.slice(wk0.end, nextAt);
                     const group0 = String(wk0.key).split('.')[0].trim();
                     // 首段可能是 ${A|B} 模板键（如 ${小宅仙|小御仙}.当前阶段）：不满足纯组名
                     // 时不能 continue 丢弃，应挂到所在组（天道娘面板）——否则这些规则全丢。
                     const isPlainGroup0 = /^[\u4e00-\u9fff$]{1,12}$/.test(group0);
-                    const rangeM = block.match(/range\s*:\s*([\d.]+)\s*[~-]\s*([\d.]+)/);
+                    const rangeLine = block.match(/range\s*:\s*([^\n]+)/);
+                    const rangeValue = rangeLine ? yamlParseRange(rangeLine[1]) : null;
                     const checkM = block.match(/check\s*:\s*("?[\s\S]*?)(?=\n {4}[^ \n-][^\n:]{0,23}?:\s*|\n {2}\S|$)/);
                     const fmtM = block.match(/format\s*:\s*([^\n]+)$/m);
                     let checks = [];
@@ -958,7 +1038,15 @@
                         checks = extractListItems(raw).map(stripRuleQuotes);
                     }
                     const rec = { path: wk0.key, checks };
-                    if (rangeM) rec.range = [Number(rangeM[1]), Number(rangeM[2])];
+                    const wildTypeBlock = extractYamlBlockScalar(block, 'type');
+                    const wildTypeQuoted = block.match(/type\s*:\s*["']([\s\S]*?)["']\s*$/m);
+                    const wildType = wildTypeBlock !== null ? wildTypeBlock : (wildTypeQuoted ? wildTypeQuoted[1] : '');
+                    if (wildType) {
+                        registerWildcardTypeShape(wk0.key, wildType, {
+                            shapes, objects, fieldTypes, objectSchemas, dynamicPaths,
+                        }, wk0.indent <= 2 ? undefined : group);
+                    }
+                    if (rangeValue) rec.range = rangeValue;
                     if (fmtM) rec.format = String(fmtM[1]).trim().replace(/^["']|["']$/g, '');
                     if (isPlainGroup0) {
                         wildcardRules[group0] = wildcardRules[group0] || [];
@@ -966,19 +1054,19 @@
                     }
                     // 组内子字段通配（首段不是组名，如 主角 下的 生理.欲望槽 / 技艺.${…}）
                     // 或首段是模板键（${小宅仙|小御仙}.当前阶段）：挂到所在组，避免规则孤儿。
-                    if (group && (!isPlainGroup0 || group !== group0)) {
+                    if (wk0.indent > 2 && group && (!isPlainGroup0 || group !== group0)) {
                         wildcardRules[group] = wildcardRules[group] || [];
                         wildcardRules[group].push(rec);
                     }
                 }
                 for (let fi = 0; fi < fieldStarts.length; fi++) {
                     const { field, indent, index, inline } = fieldStarts[fi];
-                    const next = fi + 1 < fieldStarts.length ? fieldStarts[fi + 1].at : section.length;
+                    const next = nextRuleStart(fieldStarts[fi].at);
                     const block = section.slice(index, next);
                     if (field === '_强制更新提醒' || field === '_强制更新') {
                         // 展开 ${生命|精血|灵力|神识} 这类模板键，提示词里更易读
                         const expandKeys = (s) => String(s).replace(/\$\{([^}]+)\}/g, (m, inner) => (
-                            inner.split('|').map(p => p.trim()).filter(Boolean).join('/')
+                            inner.includes('|') ? inner.split('|').map(p => p.trim()).filter(Boolean).join('/') : m
                         ));
                         reminders[group] = extractListItems(block).map(expandKeys);
                         continue;
@@ -992,11 +1080,14 @@
                         }
                     }
                     if (!fieldNames.length) fieldNames.push(field);
-                    const rangeM = block.match(/range\s*:\s*([\d.]+)\s*[~-]\s*([\d.]+)/);
+                    const rangeLine = block.match(/range\s*:\s*([^\n]+)/);
+                    const rangeValue = rangeLine ? yamlParseRange(rangeLine[1]) : null;
                     for (const fn of fieldNames) {
-                        if (rangeM) ranges[fn] = [Number(rangeM[1]), Number(rangeM[2])];
-                        if (/type\s*:\s*number/.test(block)) numericFields.add(fn);
-                        if (rangeM) numericFields.add(fn);
+                        if (rangeValue) ranges[fn] = rangeValue;
+                        // 只匹配该字段直属的标量 type 行；对象/数组 type 内部出现 number
+                        // 不代表外层字段是数字。
+                        if (/(?:^|\n)[ \t]*type\s*:\s*(?:number|integer)\s*;?[ \t]*(?:\n|$)/i.test(block)) numericFields.add(fn);
+                        if (rangeValue) numericFields.add(fn);
                     }
                     const typeLine = block.match(/type\s*:\s*"([\s\S]*?)"\s*$/m);
                     const typeBlockRaw = extractYamlBlockScalar(block, 'type');
@@ -1016,6 +1107,7 @@
                                 objects[target] = objects[target] || {};
                                 for (const obj of parsed.objects) objects[target][obj] = true;
                             }
+                            mergeShapeMetadata(target, parsed, fieldTypes, objectSchemas);
                             if (target === group) {
                                 if (!shapes[group].includes(field)) shapes[group].push(field);
                                 objects[group] = objects[group] || {};
@@ -1040,6 +1132,7 @@
                                 objects[target] = objects[target] || {};
                                 for (const obj of parsed.objects) objects[target][obj] = true;
                             }
+                            mergeShapeMetadata(target, parsed, fieldTypes, objectSchemas);
                             if (parsed.dynamicTop || (parsed.dynamic && parsed.dynamic.length)) {
                                 dynamicDicts[group] = dynamicDicts[group] || {};
                                 if (parsed.dynamicTop) dynamicDicts[group][field] = true;
@@ -1090,12 +1183,12 @@
                         if (list.length) {
                             checks[group] = checks[group] || {};
                             for (const fn of fieldNames) {
-                                checks[group][fn] = list;
+                                checks[group][fn] = [...new Set([...(checks[group][fn] || []), ...list])];
                                 // 路径化附着：记录 4 空格（2 层）字段的书写路径（组.字段）。
                                 checkPaths.push({
                                     path: [group, fn],
                                     list,
-                                    range: rangeM ? [Number(rangeM[1]), Number(rangeM[2])] : null,
+                                    range: rangeValue,
                                     format: formatValue || '',
                                     tableLevel: fieldTableLevel,
                                 });
@@ -1114,7 +1207,7 @@
                                         checkPaths.push({
                                             path: [group, parentField, fn],
                                             list,
-                                            range: rangeM ? [Number(rangeM[1]), Number(rangeM[2])] : null,
+                                            range: rangeValue,
                                             format: formatValue || '',
                                             tableLevel: false,
                                         });
@@ -1125,13 +1218,9 @@
                     }
                     // 行内枚举值（危机程度: "无/低/中/高/致命"）
                     if (inline && !block.includes('type') && !block.includes('range') && !block.includes('format') && !block.includes('check')) {
-                        const sv = String(inline);
-                        // 与 YAML 路径一致：超长/多行文本不当行内枚举（防长文被 /| 切碎成伪枚举）
-                        if (sv.indexOf('\n') === -1 && sv.length <= 60) {
-                            const vals = sv.replace(/^["']|["']$/g, '').split(/[/|]/).map(s => s.trim()).filter(Boolean);
-                            if (vals.length >= 2 && vals.length <= 12) {
-                                for (const fn of fieldNames) enums[fn] = vals;
-                            }
+                        const vals = parseInlineEnumValues(inline);
+                        if (vals) {
+                            for (const fn of fieldNames) enums[fn] = vals;
                         }
                     }
                 }
@@ -1147,9 +1236,14 @@
                 let shapeStr = null;
                 if (!/^\s*type\s*:/.test(section)) continue; // 该组没有直接 type 声明（字段由 initvar 提供）
                 const q = section.match(/type\s*:\s*"([\s\S]*?)"\s*$/m);
-                const b = section.match(/type\s*:\s*\|-?\s*\n([\s\S]*?)(?=\n\s*\S|$)/);
+                // 组级 type 块标量必须用 extractYamlBlockScalar：旧正则的 lookahead
+                // `(?=\n\s*\S)` 会在块内容第一行（如 `{`）就终止，把整个结构截断成空，
+                // 导致 宗门/灵兽栏/寻缘蝶 这类 `type: |- { [键: string]: {...} }` 的
+                // 动态键字典声明全部丢失 → 组退化成整组 JSON 表 → AI 写入平铺数据，
+                // 与前端 EJS 期望的嵌套结构（{宗门名: {主角职务,…}}）对不上而“不显示”。
+                const b = extractYamlBlockScalar(section, 'type');
                 if (q) shapeStr = q[1];
-                else if (b) shapeStr = b[1];
+                else if (b !== null) shapeStr = b;
                 if (!shapeStr) continue;
                 const parsed = parseShapeString(shapeStr);
                 if (parsed) {
@@ -1157,6 +1251,7 @@
                     for (const f2 of parsed.fields) if (!shapes[group].includes(f2)) shapes[group].push(f2);
                     if (parsed.objects.length) objects[group] = objects[group] || {};
                     for (const objField of parsed.objects) objects[group][objField] = true;
+                    mergeShapeMetadata(group, parsed, fieldTypes, objectSchemas);
                     // 组本身声明为动态键字典（组 type: { [键: type]: {...} }）：
                     // 顶层组按条目行表转换，不能当单例/固定字段表。
                     if (parsed.dynamicTop) dynamicGroups.add(group);
@@ -1182,7 +1277,7 @@
         if (rmM) {
             // 展开 ${生命|精血|灵力|神识} 这类模板键，提示词里更易读
             const expandKeys = (s) => String(s).replace(/\$\{([^}]+)\}/g, (m, inner) => (
-                inner.split('|').map(p => p.trim()).filter(Boolean).join('/')
+                inner.includes('|') ? inner.split('|').map(p => p.trim()).filter(Boolean).join('/') : m
             ));
             for (const item of extractListItems(rmM[1]).map(expandKeys)) {
                 const prefix = item.match(/^([\u4e00-\u9fff$]{1,12})\./);
@@ -1208,7 +1303,16 @@
                 }
                 for (const f of Object.keys(g.checks)) {
                     checks[group] = checks[group] || {};
-                    checks[group][f] = g.checks[f];
+                    checks[group][f] = [...new Set([...(checks[group][f] || []), ...g.checks[f]])];
+                }
+                for (const rec of (g.pathRules || [])) {
+                    checkPaths.push({
+                        path: rec.path.slice(),
+                        list: rec.list.slice(),
+                        range: null,
+                        format: '',
+                        tableLevel: !!rec.tableLevel,
+                    });
                 }
                 for (const f of Object.keys(g.ranges || {})) {
                     const rr = g.ranges[f];
@@ -1223,7 +1327,7 @@
                 }
             }
         }
-        return { shapes, objects, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, checkPaths };
+        return { shapes, objects, fieldTypes, objectSchemas, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, checkPaths };
     }
 
     /**
@@ -1411,6 +1515,18 @@
             const gRanges = {};
             const gEnums = {};
             const gDescs = {};
+            const pathRules = [];
+            const collectPathRules = (node, prefix) => {
+                for (const key of Object.keys(node || {})) {
+                    const fv = node[key];
+                    const path = [g, ...(prefix || []), key];
+                    if (fv && fv.checks && fv.checks.length) {
+                        pathRules.push({ path, list: fv.checks.slice(), tableLevel: !!fv.object });
+                    }
+                    if (fv && fv.object) collectPathRules(fv.object, [...(prefix || []), key]);
+                }
+            };
+            collectPathRules(gv.object, []);
             for (const f of Object.keys(gv.object)) {
                 fields.push(f);
                 const fv = gv.object[f];
@@ -1420,16 +1536,125 @@
                 if (fv && fv.desc) gDescs[f] = fv.desc;
             }
             if (fields.length || Object.keys(gChecks).length || Object.keys(gRanges).length || Object.keys(gEnums).length || Object.keys(gDescs).length) {
-                out[g] = { fields: [...new Set(fields)], checks: gChecks, ranges: gRanges, enums: gEnums, descs: gDescs };
+                out[g] = { fields: [...new Set(fields)], checks: gChecks, ranges: gRanges, enums: gEnums, descs: gDescs, pathRules };
             }
         }
         return out;
+    }
+
+    function isSchemaFieldName(name) {
+        return /^[\u3400-\u9fffA-Za-z_$][\u3400-\u9fffA-Za-z0-9_$]{0,31}$/.test(String(name || ''));
+    }
+
+    function mergeShapeMetadata(target, parsed, fieldTypes, objectSchemas) {
+        if (!target || !parsed) return;
+        fieldTypes[target] = fieldTypes[target] || {};
+        objectSchemas[target] = objectSchemas[target] || {};
+        for (const [field, kind] of Object.entries(parsed.fieldTypes || {})) fieldTypes[target][field] = kind;
+        for (const [field, schema] of Object.entries(parsed.objectSchemas || {})) objectSchemas[target][field] = schema;
+    }
+
+    // 把 TypeScript 风格对象声明解析成保留类型的树。它不是 TS 编译器，只处理 MVU 规则
+    // 使用的对象成员、动态键、标量、联合类型和 T[]/Array<T>；失败时旧形状扫描仍兜底。
+    function parseTypeSchema(shapeStr) {
+        const s = String(shapeStr || '')
+            .replace(/\/\*[\s\S]*?\*\//g, ' ')
+            .replace(/\/\/[^\n]*/g, ' ')
+            .replace(/\n\s*(?=[\u3400-\u9fffA-Za-z_$][\u3400-\u9fffA-Za-z0-9_$]{0,31}\s*:)/g, ';');
+        let i = 0;
+        const skip = () => { while (i < s.length && /\s/.test(s[i])) i++; };
+        const scalarNode = raw => {
+            const t = String(raw || '').trim().replace(/[;,]+$/, '').trim();
+            if (/^(?:number|integer)\b/i.test(t)) return { kind: 'number', raw: t };
+            if (/^boolean\b/i.test(t)) return { kind: 'boolean', raw: t };
+            if (/\[\]\s*$/.test(t) || /^Array\s*</i.test(t)) return { kind: 'array', raw: t };
+            return { kind: 'text', raw: t };
+        };
+        const parseValue = () => {
+            skip();
+            if (s[i] === '{') return parseObject();
+            const start = i;
+            let angle = 0;
+            let quote = '';
+            while (i < s.length) {
+                const ch = s[i];
+                if (quote) {
+                    if (ch === '\\') { i += 2; continue; }
+                    if (ch === quote) quote = '';
+                    i++;
+                    continue;
+                }
+                if (ch === '"' || ch === "'") { quote = ch; i++; continue; }
+                if (ch === '<') angle++;
+                else if (ch === '>' && angle) angle--;
+                if (angle === 0 && (ch === ';' || ch === ',' || ch === '}')) break;
+                i++;
+            }
+            return scalarNode(s.slice(start, i));
+        };
+        const parseObject = () => {
+            if (s[i] !== '{') return null;
+            i++;
+            const node = { kind: 'object', fields: {}, dynamic: false, value: null };
+            while (i < s.length) {
+                skip();
+                while (s[i] === ';' || s[i] === ',') { i++; skip(); }
+                if (s[i] === '}') { i++; break; }
+                if (s[i] === '[') {
+                    let depth = 1;
+                    i++;
+                    while (i < s.length && depth) {
+                        if (s[i] === '[') depth++;
+                        else if (s[i] === ']') depth--;
+                        i++;
+                    }
+                    skip();
+                    if (s[i] === ':') i++;
+                    node.dynamic = true;
+                    node.value = parseValue();
+                } else {
+                    const start = i;
+                    let quote = '';
+                    while (i < s.length) {
+                        const ch = s[i];
+                        if (quote) {
+                            if (ch === '\\') { i += 2; continue; }
+                            if (ch === quote) quote = '';
+                            i++;
+                            continue;
+                        }
+                        if (ch === '"' || ch === "'") { quote = ch; i++; continue; }
+                        if (ch === ':' || ch === '}' || ch === ';' || ch === ',') break;
+                        i++;
+                    }
+                    let key = s.slice(start, i).trim().replace(/^['"]|['"]$/g, '').replace(/\?$/, '').trim();
+                    if (s[i] !== ':') {
+                        if (s[i] === '}') { i++; break; }
+                        i++;
+                        continue;
+                    }
+                    i++;
+                    const value = parseValue();
+                    if (isSchemaFieldName(key)) node.fields[key] = value;
+                }
+                skip();
+                if (s[i] === ';' || s[i] === ',') i++;
+            }
+            return node;
+        };
+        skip();
+        try { return s[i] === '{' ? parseObject() : null; } catch (e) { return null; }
     }
 
     // 解析 "{ [动态键]: { 字段, 字段, 嵌套: { ... } } }" 形状字符串
     function parseShapeString(shapeStr) {
         let s = String(shapeStr || '').trim();
         if (!/^\{/.test(s)) return null;
+        // TS 结构声明常在每个字段后写 `// 说明`。这些注释若留在字符流里会与下一个
+        // 字段一起进入 buf，使「品质/描述/作用/已装备」等字段名全部解析失败。
+        s = s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+        // 联合类型行有时不写分号，下一字段直接换行开始；把这种字段边界补成分隔符。
+        s = s.replace(/\n\s*(?=[\u4e00-\u9fff]{1,12}\s*:)/g, ';');
         let depth = 0;
         const fields = [];
         const objects = [];
@@ -1454,7 +1679,7 @@
             for (const seg of segments) {
                 let name = seg.replace(/^\[.*?\]\s*:\s*/, '').trim();
                 name = name.split(':')[0].replace(/^["']|["']$/g, '').trim();
-                if (name && /^[\u4e00-\u9fff]{1,12}$/.test(name) && !fields.includes(name)) fields.push(name);
+                if (name && isSchemaFieldName(name) && !fields.includes(name)) fields.push(name);
             }
         }
         for (; i < s.length; i++) {
@@ -1463,7 +1688,15 @@
                 if (depth > 0) {
                     // 嵌套对象字段：buf 末尾的 key 记为对象字段
                     const rawKey = buf.trim();
-                    const key = rawKey.replace(/^["']|["']$/g, '').split(':')[0].trim();
+                    // 先提取 buf 里累积的多个标量字段（如 名称: string; 等级: number; …），
+                    // 旧实现只取 split(':')[0] 的第一个 key，其余字段全部丢失
+                    // （大荒 宗门 type：等级/阵营/宗旨/声望/风气/通缉 全丢，只剩 名称）。
+                    flushField();
+                    // 嵌套键名取“最后一段”（如 …通缉: number; 资源: 的 资源）：
+                    // 旧实现取第一个冒号前（名称），把标量字段名误当嵌套对象键。
+                    const rawSegs = rawKey.split(/[;,]/).map(s => s.trim()).filter(Boolean);
+                    const lastSeg = rawSegs.length ? rawSegs[rawSegs.length - 1] : rawKey;
+                    const key = lastSeg.replace(/^["']|["']$/g, '').split(':')[0].trim();
                     if (depth === 1 && (/^\[.*\]$/.test(key) || /^\[.*?\]\s*:/.test(rawKey))) {
                         // { [动态键]: { ... } }：对象值动态字典。旧实现只在顶层 } 用残留
                         // 缓冲区判断，但对象值字典的残留是条目字段（宗门/描述…）而不是
@@ -1471,7 +1704,7 @@
                         // 的组（路遇道友录）不建表、规则孤儿。这里在进入值对象时用原始键
                         // 提前判定动态键（兼容 key 被 split(':') 截断的问题）。
                         hasDynamicKey = true;
-                    } else if (key && /^[\u4e00-\u9fff]{1,12}$/.test(key) && depth >= collectDepth()) {
+                    } else if (key && isSchemaFieldName(key) && depth >= collectDepth()) {
                         if (!fields.includes(key)) fields.push(key);
                         if (!objects.includes(key)) objects.push(key);
                         if (depth === 1) {
@@ -1490,6 +1723,7 @@
             if (ch === '}') {
                 const inner = buf.trim();
                 if (depth === collectDepth()) flushField();
+                else if (depth > collectDepth()) buf = ''; // 嵌套子对象内部字段不提取为列，清空避免串扰下一入口
                 // 离开某个值对象时判定它是否为动态键字典（{ [键: type]: value }）：
                 //  - depth 2：字段的值对象内部（如 修仙秘闻: { [秘闻简述: string]: string; }）
                 //  - depth 1：整个 shape 字符串顶层（如 组 type: { [道具名: string]: {...} }）
@@ -1517,7 +1751,24 @@
             buf += ch;
         }
         if (depth === collectDepth()) flushField();
-        return { fields, objects, dynamic, dynamicTop: hasDynamicKey };
+        const schema = parseTypeSchema(s);
+        const rowSchema = schema && schema.dynamic && schema.value && schema.value.kind === 'object' ? schema.value : schema;
+        const fieldTypes = {};
+        const objectSchemas = {};
+        if (rowSchema && rowSchema.kind === 'object') {
+            for (const name of Object.keys(rowSchema.fields || {})) {
+                const child = rowSchema.fields[name];
+                if (!fields.includes(name)) fields.push(name);
+                fieldTypes[name] = child && child.kind ? child.kind : 'text';
+                if (child && (child.kind === 'object' || child.kind === 'array')) {
+                    if (!objects.includes(name)) objects.push(name);
+                    objectSchemas[name] = child;
+                }
+                if (child && child.kind === 'object' && child.dynamic && !dynamic.includes(name)) dynamic.push(name);
+            }
+        }
+        if (schema && schema.dynamic) hasDynamicKey = true;
+        return { fields, objects, dynamic, dynamicTop: hasDynamicKey, fieldTypes, objectSchemas, schema };
     }
 
     // 从字段块中提取 YAML 块标量（type: |- / format: |）的内容。
@@ -1568,10 +1819,16 @@
      */
     function scanStatusUsage(card, groupNames) {
         const usage = {};
-        const addField = (group, field) => {
-            if (!field || !/^[\u4e00-\u9fff]{1,12}$/.test(field)) return;
+        const usageTypes = {};
+        Object.defineProperty(usage, '__types', { value: usageTypes, enumerable: false });
+        const addField = (group, field, kind) => {
+            if (!field || !isSchemaFieldName(field)) return;
             if (!usage[group]) usage[group] = [];
             if (!usage[group].includes(field)) usage[group].push(field);
+            if (kind) {
+                usageTypes[group] = usageTypes[group] || {};
+                usageTypes[group][field] = kind;
+            }
         };
 
         // 已知组名来自 initvar 顶层键（扫描只针对这些组做归属）
@@ -1629,6 +1886,65 @@
                     varToGroup[m[1]] = srcGroup;
                     entriesArrayVars.add(m[1]);
                 }
+            }
+        }
+
+        // Tavern Helper/EJS 前端常用 get/list/val 封装而不直接读 stat_data：
+        //   rootSect=get(d,'宗门'); s=rootSect[key]; val(s,'师尊')
+        // 旧扫描只认 stat.组.字段，因而漏掉这些真正被前端消费的列。
+        // 按每个前端 render 方法建立局部别名图，避免同一大段 HTML 里
+        // sect/social/inventory 都用 item/s/n 时串组。
+        for (const { text } of blobs) {
+            const scopes = String(text).split(/(?=\b[A-Za-z_$][\w$]*\s*:\s*function\s*\(\s*d\s*\))/);
+            for (const scopeText of scopes) {
+              const aliases = {};
+              let m;
+              const rootRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:get|list)\s*\(\s*d\s*,\s*['"]([^'"]+)['"]/g;
+              while ((m = rootRe.exec(scopeText))) {
+                const path = m[2].split(/[.]/).filter(Boolean);
+                const group = path[path.length - 1];
+                if (knownGroups.has(group)) aliases[m[1]] = { group, level: 0 };
+              }
+              let changed = true;
+              let rounds = 0;
+              while (changed && rounds++ < 6) {
+                changed = false;
+                const aliasRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)/g;
+                while ((m = aliasRe.exec(scopeText))) {
+                    if (aliases[m[1]]) continue;
+                    const rhs = m[2];
+                    for (const [src, info] of Object.entries(aliases)) {
+                        const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        const indexed = new RegExp('\\b' + escaped + '\\b\\s*\\[[^\\]]+\\]').test(rhs);
+                        const copied = new RegExp('\\b' + escaped + '\\b\\s*\\.(?:slice|filter|map)\\s*\\(').test(rhs);
+                        if (indexed || copied) {
+                            aliases[m[1]] = { group: info.group, level: indexed ? info.level + 1 : info.level };
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+                for (const [src, info] of Object.entries({ ...aliases })) {
+                    const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const callbackRe = new RegExp('\\b' + escaped + '\\s*\\.(?:forEach|map|filter|find|some|every)\\s*\\(\\s*(?:function\\s*\\(\\s*|\\(?\\s*)([A-Za-z_$][\\w$]*)', 'g');
+                    let cm;
+                    while ((cm = callbackRe.exec(scopeText))) {
+                        if (!aliases[cm[1]]) { aliases[cm[1]] = { group: info.group, level: info.level + 1 }; changed = true; }
+                    }
+                }
+              }
+              for (const [alias, info] of Object.entries(aliases)) {
+                if (info.level > 1) continue; // 如 s['人口'] 的 pop：其键属于 JSON 对象内部，不是宗门表列
+                const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const valRe = new RegExp('val\\s*\\(\\s*' + escaped + '\\s*,\\s*[\'"]([^\'"]+)[\'"]', 'g');
+                let vm;
+                while ((vm = valRe.exec(scopeText))) {
+                    const before = scopeText.slice(Math.max(0, vm.index - 24), vm.index);
+                    const after = scopeText.slice(vm.index + vm[0].length, vm.index + vm[0].length + 32);
+                    const numeric = /parseInt\s*\(\s*$|Number\s*\(\s*$/.test(before) || /^\s*,\s*-?\d+(?:\.\d+)?\s*\)/.test(after);
+                    addField(info.group, vm[1], numeric ? 'number' : '');
+                }
+              }
             }
         }
 
@@ -1723,8 +2039,14 @@
      * Schema 生成：变量树 → 表/列/行
      * ================================================================ */
 
+    // MVU 用二元数组 [value, desc] 表示带说明的叶子；普通业务数组也合法，不能一概
+    // 当成 pair。保守识别二元且第二项为说明字符串的写法，其余数组按 JSON 对象保存。
+    function isPairLeaf(v) {
+        return Array.isArray(v) && v.length === 2 && typeof v[1] === 'string';
+    }
+
     function isLeaf(v) {
-        return v === null || typeof v !== 'object' || Array.isArray(v);
+        return v === null || typeof v !== 'object' || isPairLeaf(v);
     }
 
     /**
@@ -1739,6 +2061,39 @@
             const v = obj[key];
             const li = leafInfo(v);
             const path = [...prefixPath, key];
+            // 普通数组是明确的值形状（日志/勋章列表等），优先按 JSON 单元格保留；
+            // 不能被宽泛的动态字典规则改造成行对象。二元 [value, desc] 仍走叶子分支。
+            if (Array.isArray(v) && (!isPairLeaf(v) || (opts.isArrayPath && opts.isArrayPath(path)))) {
+                if (!String(key).startsWith('_') && opts.childTables) {
+                    opts.childTables.push({ key, value: v, path, array: true });
+                } else {
+                    const jcol = jsonColumnFromObject(key, v, path, usedIdents);
+                    if (jcol) cols.push(jcol);
+                }
+                continue;
+            }
+            // 规则明确声明的动态字典优先于 InitVar 当前值。动态容器常以 null/空值
+            // 占位；若先走叶子判断，就会固化成 TEXT 列，运行期新增条目无处写入。
+            const dyn = opts.isDynamicPath ? opts.isDynamicPath(path) : false;
+            if (dyn) {
+                if (String(key).startsWith('_')) {
+                    const jcol = jsonColumnFromObject(key, isPlainObject(v) || Array.isArray(v) ? v : {}, path, usedIdents);
+                    if (jcol) cols.push(jcol);
+                } else if (opts.childTables) {
+                    opts.childTables.push({
+                        key,
+                        value: isPlainObject(v) ? v : {},
+                        path,
+                        dynamic: true,
+                        // null 常用作“尚未产生任何动态条目”的初始占位；空表读回时
+                        // 保持 null，出现首条记录后自然变为对象字典。
+                        emptyValue: v === null ? null : undefined,
+                    });
+                } else {
+                    report.warn(`发现动态键字典「${key}」，需拆分为子行表（当前未启用子表提取）`, 'schema');
+                }
+                continue;
+            }
             if (isLeaf(v)) {
                 cols.push({
                     zh: key,
@@ -1759,15 +2114,47 @@
             // 动态键字典（[mvu_update] 声明 { [键]: value }，或跨分支键集不同）：
             // 条目键是运行期内容，不能展平成固定列（如 世界系统.修仙秘闻 每分支键完全不同，
             // 固定列会在按分支注入时丢数据）→ 子行表，读回时保持 {键: 值} 原形。
-            const dyn = opts.isDynamicPath ? opts.isDynamicPath(path) : false;
-            if (dyn) {
-                if (String(key).startsWith('_')) {
-                    const jcol = jsonColumnFromObject(key, v, path, usedIdents);
-                    if (jcol) cols.push(jcol);
-                } else if (opts.childTables) {
-                    opts.childTables.push({ key, value: v, path, dynamic: true });
-                } else {
-                    report.warn(`发现动态键字典「${key}」，需拆分为子行表（当前未启用子表提取）`, 'schema');
+            // 纯容器本身不是条目表；若其后代路径被规则明确声明为动态字典，继续向下找
+            // 真正的子表。例如 主角.装备 只是容器，实际子表是
+            // 主角.装备.固定部位 与 主角.装备.饰品。
+            const hasDynamicDescendant = opts.hasDynamicDescendant ? opts.hasDynamicDescendant(path) : false;
+            if (hasDynamicDescendant) {
+                const nested = collectColumns(v, path, report, opts);
+                // 容器内若还混有静态叶子，仍展平成父表列并保留完整 path；动态子表本身
+                // 已经由共享 childTables 收集，不会出现在 nested 中。
+                for (const c of nested) {
+                    c.zh = key + c.zh;
+                    c.ident = toIdent(c.zh, usedIdents, 'column');
+                    cols.push(c);
+                }
+                continue;
+            }
+            // 固定对象树与「动态条目字典」的区分不能只看子值是否为对象。
+            // 多个子对象共享条目字段（例如每个道侣都有亲密/种族）才像字典；
+            // 异构分支（例如修炼体系/战斗与能力/资源与物品）是固定 schema，应递归展开。
+            let sharedChildFields = null;
+            if (allObject) {
+                for (const child of values) {
+                    const ks = new Set(Object.keys(child));
+                    if (sharedChildFields === null) sharedChildFields = ks;
+                    else for (const k of [...sharedChildFields]) if (!ks.has(k)) sharedChildFields.delete(k);
+                }
+            }
+            const looksLikeEntryDict = allObject && sharedChildFields && sharedChildFields.size > 0;
+            if (fixedObjectFromValue(v) && !looksLikeEntryDict) {
+                const fixedCols = flattenFixedObjectColumns(key, v, null, { rootPath: prefixPath, relativeRoot: [key] });
+                for (const c of fixedCols) {
+                    c.ident = toIdent(c.zh, usedIdents, 'column');
+                    cols.push(c);
+                }
+                continue;
+            }
+            if (allObject && !looksLikeEntryDict) {
+                const nested = collectColumns(v, path, report, opts);
+                for (const c of nested) {
+                    c.zh = `${key}_${c.zh}`;
+                    c.ident = toIdent(c.zh, usedIdents, 'column');
+                    cols.push(c);
                 }
                 continue;
             }
@@ -1801,10 +2188,23 @@
                     report.warn(`发现嵌套对象「${key}」，需拆分为子行表（当前未启用子表提取）`, 'schema');
                 }
             } else {
-                // 混合结构对象（标量字段 + 嵌套对象，如 系统._管理考核）：不是条目字典，
-                // 拆子表会破坏结构；整对象存 JSON 列，读取时原样还原，脚本可整体读写。
-                const jcol = jsonColumnFromObject(key, v, path, usedIdents);
-                if (jcol) cols.push(jcol);
+                // 混合结构仍是可以递归建模的固定对象：标量变列，数组/动态字典进子表。
+                // 只有下划线前缀的脚本私有状态保留 JSON 逃生舱。
+                if (String(key).startsWith('_')) {
+                    const jcol = jsonColumnFromObject(key, v, path, usedIdents);
+                    if (jcol) cols.push(jcol);
+                } else {
+                    const nested = collectColumns(v, path, report, opts);
+                    for (const c of nested) {
+                        c.zh = `${key}_${c.zh}`;
+                        c.ident = toIdent(c.zh, usedIdents, 'column');
+                        cols.push(c);
+                    }
+                    if (!nested.length) {
+                        const jcol = jsonColumnFromObject(key, v, path, usedIdents);
+                        if (jcol) cols.push(jcol);
+                    }
+                }
             }
         }
         return cols;
@@ -1820,7 +2220,7 @@
     function jsonColumnFromObject(key, obj, path, usedIdents) {
         let value = obj;
         let desc = '';
-        if (Array.isArray(obj)) {
+        if (isPairLeaf(obj)) {
             const li = leafInfo(obj);
             value = li.value;
             desc = li.desc || '';
@@ -1853,7 +2253,96 @@
             range: null,
             ident: toIdent(key, usedIdents, 'column'),
             isObject: true,
+            jsonKind: Array.isArray(obj) ? 'array' : 'object',
         };
+    }
+
+    function schemaTypeLabel(node) {
+        if (!node) return '文本';
+        return ({ number: '数字', boolean: '布尔值', array: '数组', object: '对象', text: '文本' })[node.kind] || '文本';
+    }
+
+    function schemaExample(node, depth = 0) {
+        if (!node || depth > 3) return '';
+        if (node.kind === 'number') return 0;
+        if (node.kind === 'boolean') return false;
+        if (node.kind === 'array') return [];
+        if (node.kind !== 'object') return '';
+        const out = {};
+        for (const [key, child] of Object.entries(node.fields || {})) out[key] = schemaExample(child, depth + 1);
+        return out;
+    }
+
+    function describeObjectSchema(node) {
+        if (!node) return '';
+        if (node.kind === 'array') return 'JSON 数组；示例：[]';
+        if (node.kind !== 'object') return '';
+        const fields = Object.entries(node.fields || {});
+        const allowed = fields.map(([key, child]) => `${key}(${schemaTypeLabel(child)})`).join('、');
+        const parts = ['JSON 对象'];
+        if (allowed) parts.push(`允许键：${allowed}`);
+        if (node.dynamic) parts.push('可使用运行期动态键');
+        if (fields.length) parts.push(`示例：${JSON.stringify(schemaExample(node))}`);
+        return parts.join('；');
+    }
+
+    function fixedObjectFromValue(value) {
+        if (!isPlainObject(value) || Object.keys(value).length === 0) return false;
+        for (const child of Object.values(value)) {
+            if (Array.isArray(child)) return false;
+            if (isPlainObject(child) && !fixedObjectFromValue(child)) return false;
+        }
+        return true;
+    }
+
+    function fixedObjectSchema(node) {
+        return !!(node && node.kind === 'object' && node.dynamic !== true && Object.keys(node.fields || {}).length > 0);
+    }
+
+    // 固定对象在物理表中递归展平，显示列名用 `_` 表示层级；
+    // 逻辑路径单独保存，读写绝不靠拆列名猜测（原字段可自带下划线）。
+    function flattenFixedObjectColumns(rootName, value, schema, opts = {}) {
+        const out = [];
+        const rootPath = Array.isArray(opts.rootPath) ? opts.rootPath : [];
+        const relativeRoot = Array.isArray(opts.relativeRoot) ? opts.relativeRoot : [rootName];
+        const walk = (displayParts, pathParts, relativeParts, currentValue, currentSchema) => {
+            const schemaFields = fixedObjectSchema(currentSchema) ? currentSchema.fields : null;
+            const valueFields = fixedObjectFromValue(currentValue) ? currentValue : null;
+            const keys = schemaFields ? Object.keys(schemaFields) : (valueFields ? Object.keys(valueFields) : []);
+            for (const key of keys) {
+                const childSchema = schemaFields ? schemaFields[key] : null;
+                const childValue = valueFields && Object.prototype.hasOwnProperty.call(valueFields, key) ? valueFields[key] : undefined;
+                const childFixed = fixedObjectSchema(childSchema) || (!childSchema && fixedObjectFromValue(childValue));
+                if (childFixed) {
+                    walk([...displayParts, key], [...pathParts, key], [...relativeParts, key], childValue, childSchema);
+                    continue;
+                }
+                // 动态字典/数组/结构未知的子节点不伪装成固定列；
+                // 它们仍作为类型明确的 JSON 逃生口，后续可升级为父子关系表。
+                const kind = childSchema && childSchema.kind;
+                const isJson = kind === 'object' || kind === 'array' || Array.isArray(childValue) || isPlainObject(childValue);
+                let v = childValue;
+                if (v === undefined) v = kind === 'array' ? [] : (kind === 'object' ? {} : (kind === 'number' || kind === 'boolean' ? 0 : ''));
+                if (isJson) {
+                    try { v = JSON.stringify(v); } catch (e) { v = kind === 'array' ? '[]' : '{}'; }
+                }
+                out.push({
+                    zh: [...displayParts, key].join('_'),
+                    path: [...pathParts, key],
+                    itemPath: [...relativeParts, key],
+                    value: v,
+                    desc: isJson ? (describeObjectSchema(childSchema) || '动态/未知结构（JSON 存储）') : '',
+                    type: kind === 'number' || kind === 'boolean' || typeof childValue === 'number' || typeof childValue === 'boolean' ? 'INTEGER' : 'TEXT',
+                    logicalType: kind || (typeof childValue === 'boolean' ? 'boolean' : (typeof childValue === 'number' ? 'number' : '')),
+                    range: null,
+                    isObject: isJson,
+                    jsonKind: kind === 'array' || Array.isArray(childValue) ? 'array' : (isJson ? 'object' : undefined),
+                    objectSchema: isJson ? (childSchema || null) : null,
+                });
+            }
+        };
+        walk([rootName], [...rootPath, rootName], relativeRoot, value, schema);
+        return out;
     }
 
     /**
@@ -1866,12 +2355,15 @@
         const usedTableIdents = new Set();
         const shapes = (shapeInfo && shapeInfo.shapes) || {};
         const shapeObjects = (shapeInfo && shapeInfo.objects) || {};
+        const shapeFieldTypes = (shapeInfo && shapeInfo.fieldTypes) || {};
+        const shapeObjectSchemas = (shapeInfo && shapeInfo.objectSchemas) || {};
         const ruleRanges = (shapeInfo && shapeInfo.ranges) || {};
         const ruleEnums = (shapeInfo && shapeInfo.enums) || {};
         const ruleFormats = (shapeInfo && shapeInfo.formats) || {};
         const ruleChecks = (shapeInfo && shapeInfo.checks) || {};
         const ruleReminders = (shapeInfo && shapeInfo.reminders) || {};
         const ruleNumeric = (shapeInfo && shapeInfo.numericFields) || new Set();
+        const usageTypes = (usage && usage.__types) || {};
         // 动态键字典：来自 [mvu_update] 的 { [键: type]: value } 声明（dynamicDicts），
         // 或跨分支 <initvar> 键集变化（dynamicPaths/dynamicGroups）。
         const dynamicDicts = (shapeInfo && shapeInfo.dynamicDicts) || {};
@@ -1881,7 +2373,21 @@
             if (!Array.isArray(pathArr) || !pathArr.length) return false;
             if (dynamicPaths.has(pathArr.join('.'))) return true;
             if (pathArr.length >= 2 && dynamicDicts[pathArr[0]] && dynamicDicts[pathArr[0]][pathArr[1]]) return true;
+            if (pathArr.length >= 2) {
+                const declared = (shapeObjectSchemas[pathArr[0]] || {})[pathArr[1]];
+                if (declared && declared.kind === 'object' && declared.dynamic) return true;
+            }
             return false;
+        };
+        const hasDynamicDescendant = (pathArr) => {
+            if (!Array.isArray(pathArr) || !pathArr.length) return false;
+            const prefix = pathArr.join('.') + '.';
+            for (const p of dynamicPaths) if (String(p).startsWith(prefix)) return true;
+            return false;
+        };
+        const isArrayPath = (pathArr) => {
+            if (!Array.isArray(pathArr) || pathArr.length < 2) return false;
+            return ((shapeFieldTypes[pathArr[0]] || {})[pathArr[1]] === 'array');
         };
         const groupNameSet = new Set(Object.keys(initvar));
 
@@ -1926,7 +2432,9 @@
                 // 不同）时，子对象会被拆成子行表；组本身不应再判成“条目字典行表”把
                 // 子对象键展平成列（否则与子表重复、还会把 山西/陕西 这类拼音相同的
                 // 地区名变成列，插件导入校验按表头 slug 判冲突而拒绝）。
-                if (Object.keys(raw).some(k => isDynamicPath([groupName, k]))) {
+                const declaredNestedDynamic = Object.keys(dynamicDicts[groupName] || {}).some(k => dynamicDicts[groupName][k]) ||
+                    Object.values(shapeObjectSchemas[groupName] || {}).some(node => node && node.kind === 'object' && node.dynamic);
+                if (declaredNestedDynamic || Object.keys(raw).some(k => isDynamicPath([groupName, k]))) {
                     report.note(`顶层组「${groupName}」含动态键字典子对象，按单例处理（子对象拆子表，不展平为行条目）。`);
                     return 'singleton';
                 }
@@ -1941,13 +2449,45 @@
             return ruleRanges[field] || null;
         }
 
-        function fieldIsNumeric(field, value) {
+        function fieldIsNumeric(field, value, group) {
+            if (group && usageTypes[group] && usageTypes[group][field] === 'number') return true;
             if (ruleNumeric.has(field)) return true;
             return typeof value === 'number';
         }
 
+        function declaredFieldKind(group, field) {
+            return (shapeFieldTypes[group] || {})[field] || '';
+        }
+
+        function applyDeclaredShape(column, group, field) {
+            const kind = declaredFieldKind(group, field);
+            const schema = (shapeObjectSchemas[group] || {})[field];
+            if (kind === 'number' || kind === 'boolean') {
+                column.type = 'INTEGER';
+                column.logicalType = kind;
+            }
+            if (kind === 'object' || kind === 'array') {
+                column.type = 'TEXT';
+                column.isObject = true;
+                column.jsonKind = kind;
+                column.objectSchema = schema || null;
+                const schemaDesc = describeObjectSchema(schema);
+                if (schemaDesc) column.desc = schemaDesc;
+            }
+            return column;
+        }
+
         function makeGroupTableName(groupName) {
             return `${groupName}表`;
+        }
+
+        // 从嵌套路径派生的表统一保留完整来源路径。除了避免同名子表碰撞，
+        // 「寻缘蝶_功法表」也比只写「功法表」更直接地表达数据归属。
+        function makePathTableName(path, fallback) {
+            const parts = (Array.isArray(path) ? path : [])
+                .map(x => String(x == null ? '' : x).trim())
+                .filter(Boolean);
+            return makeGroupTableName(parts.length ? parts.join('_') : fallback);
         }
 
         for (const groupName of Object.keys(initvar)) {
@@ -1957,12 +2497,12 @@
             }
             const raw = initvar[groupName];
             if (!isPlainObject(raw)) {
-                // 顶层非对象（数组/标量）：按数组表或行表处理
-                if (raw !== null) {
-                    const tableName = makeGroupTableName(groupName);
-                    const keyCol = '键名';
-                    const isArray = Array.isArray(raw);
-                    if (isArray) {
+                // 顶层非对象（数组/标量/null）：数组按数组表，其余按单行 JSON 表。
+                // null 是合法状态值，不能当“无数据”跳过。
+                const tableName = makeGroupTableName(groupName);
+                const keyCol = '键名';
+                const isArray = Array.isArray(raw);
+                if (isArray) {
                         // 数组表的值列用「内容」（数组项本身）
                         const valueZh = '内容';
                         const cols = [{ zh: valueZh, path: [groupName, valueZh], value: '', desc: '条目内容', type: 'TEXT', ident: toIdent(valueZh, new Set(['row_id']), 'column') }];
@@ -1983,13 +2523,11 @@
                             source: 'top-level-array',
                         });
                         seenTables.add(tableName);
-                        continue;
-                    }
-                    // 顶层标量（现金: 500 / 胜任度: 80 等）：值不能丢。
-                    // 按整组 JSON 表存（单行 内容 列，无需键列——整组只有一个身份行），
-                    // 读取时原样还原为标量；AI 只允许按需 UPDATE。
-                    const usedScalar = new Set(['row_id']);
-                    const scalarColumns = [
+                    continue;
+                }
+                // 顶层标量（含 null）：值不能丢。按整组 JSON 表存并原样还原。
+                const usedScalar = new Set(['row_id']);
+                const scalarColumns = [
                         {
                             zh: '内容',
                             path: [groupName, '内容'],
@@ -2000,9 +2538,9 @@
                             isObject: true,
                         },
                     ];
-                    let scalarInit;
-                    try { scalarInit = JSON.stringify(raw); } catch (e) { scalarInit = String(raw); }
-                    groups.push({
+                let scalarInit;
+                try { scalarInit = JSON.stringify(raw); } catch (e) { scalarInit = String(raw); }
+                groups.push({
                         name: groupName,
                         tableName,
                         ident: toIdent(tableName, usedTableIdents, 'table'),
@@ -2015,10 +2553,7 @@
                         source: 'top-level-scalar',
                         reminders: ruleReminders[groupName] || [],
                     });
-                    seenTables.add(tableName);
-                    continue;
-                }
-                report.warn(`顶层变量「${groupName}」不是对象，跳过`, 'schema');
+                seenTables.add(tableName);
                 continue;
             }
 
@@ -2073,7 +2608,31 @@
             // 不从顶层收集子表，避免“每角色一张字段相同的重复表”。
             const columns = kind === 'rows'
                 ? []
-                : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath });
+                : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, isArrayPath });
+            if (kind !== 'rows') {
+                const expanded = [];
+                for (const c of columns) {
+                    const declaredSchema = (shapeObjectSchemas[groupName] || {})[c.zh];
+                    let actual;
+                    if (c.isObject && typeof c.value === 'string') {
+                        try { actual = JSON.parse(c.value); } catch (e) { actual = undefined; }
+                    }
+                    if (c.isObject && (fixedObjectSchema(declaredSchema) || ((!declaredSchema || !declaredSchema.dynamic) && fixedObjectFromValue(actual)))) {
+                        const flatCols = flattenFixedObjectColumns(c.zh, actual, declaredSchema, {
+                            rootPath: [groupName],
+                            relativeRoot: [c.zh],
+                        });
+                        if (flatCols.length) { expanded.push(...flatCols); continue; }
+                    }
+                    expanded.push(c);
+                }
+                columns.length = 0;
+                const rebuiltUsed = new Set(['row_id']);
+                for (const c of expanded) {
+                    c.ident = toIdent(c.zh, rebuiltUsed, 'column');
+                    columns.push(applyDeclaredShape(c, groupName, c.zh));
+                }
+            }
 
             let rows = [];
             // 标量条目（如 修仙秘闻: { 标题: 内容 }）的行表标记：读回时还原为 {键: 标量}，
@@ -2086,6 +2645,12 @@
                 const objFields = new Set();
                 const pairFields = new Set();
                 const fieldDescs = {};
+                const flattenedRoots = new Set();
+                const flattenedDefs = {};
+                // 行表条目内的动态字典（如 寻缘蝶.<蝶名>.功法）需要
+                // 关系表不能退化成 JSON 单元格。使用「具体实体_键名 + 键名」
+                // 唯一定位记录，以后新增任意所属实体记录也不需要改 schema。
+                const rowChildByKey = new Map();
                 let sawScalarEntries = false;
                 let scalarIsNumber = false;
                 for (const entryName of Object.keys(raw)) {
@@ -2101,6 +2666,49 @@
                     for (const subKey of Object.keys(entry)) {
                         const sv = entry[subKey];
                         const spath = [...prefixPath, entryName, subKey];
+                        if (Array.isArray(sv) && (!isPairLeaf(sv) || declaredFieldKind(groupName, subKey) === 'array') && !String(subKey).startsWith('_')) {
+                            let ct = rowChildByKey.get(subKey);
+                            if (!ct) {
+                                ct = { key: subKey, value: {}, path: [groupName, subKey], array: true, parentRows: true, parentKeyCol: rowsKeyCol };
+                                rowChildByKey.set(subKey, ct);
+                                childTables.push(ct);
+                            }
+                            ct.value[entryName] = sv;
+                            continue;
+                        }
+                        if (isDynamicPath([groupName, subKey])) {
+                            let ct = rowChildByKey.get(subKey);
+                            if (!ct) {
+                                ct = {
+                                    key: subKey,
+                                    value: {},
+                                    path: [groupName, subKey],
+                                    dynamic: true,
+                                    parentRows: true,
+                                    parentKeyCol: rowsKeyCol,
+                                };
+                                rowChildByKey.set(subKey, ct);
+                                childTables.push(ct);
+                            }
+                            ct.value[entryName] = isPlainObject(sv) ? sv : {};
+                            continue;
+                        }
+                        const declaredObjectSchema = (shapeObjectSchemas[groupName] || {})[subKey];
+                        if (fixedObjectSchema(declaredObjectSchema) || ((!declaredObjectSchema || !declaredObjectSchema.dynamic) && fixedObjectFromValue(sv))) {
+                            const flatCols = flattenFixedObjectColumns(subKey, sv, declaredObjectSchema, {
+                                rootPath: [groupName],
+                                relativeRoot: [subKey],
+                            });
+                            if (flatCols.length) {
+                                flattenedRoots.add(subKey);
+                                for (const fc of flatCols) {
+                                    fc.ident = toIdent(fc.zh, entryUsed, 'column');
+                                    entryCols.push(fc);
+                                    flattenedDefs[fc.zh] = flattenedDefs[fc.zh] || fc;
+                                }
+                                continue;
+                            }
+                        }
                         if (isLeaf(sv)) {
                             const li = leafInfo(sv);
                             if (Array.isArray(sv)) pairFields.add(subKey);
@@ -2129,25 +2737,113 @@
                     for (const c of entryCols) row[c.zh] = c.value;
                     entryRows.push(row);
                 }
+                // 同一行表的固定对象字段可能只在部分行有样本，其他行为空。
+                // 逐行判定会先把它标成 JSON；这里按整列非空样本再审核一次并展开。
+                const objectRootCandidates = new Set(objFields);
+                for (const f of fieldOrder) {
+                    if (entryRows.some(r => isPlainObject(r[f]))) objectRootCandidates.add(f);
+                }
+                for (const rootField of objectRootCandidates) {
+                    const declared = (shapeObjectSchemas[groupName] || {})[rootField];
+                    if (declared && declared.dynamic) continue;
+                    const samples = [];
+                    for (const r of entryRows) {
+                        let v = r[rootField];
+                        if (typeof v === 'string' && v) { try { v = JSON.parse(v); } catch (e) { v = undefined; } }
+                        if (isPlainObject(v) && Object.keys(v).length) samples.push(v);
+                    }
+                    const fixedSamples = samples.filter(fixedObjectFromValue);
+                    if (!fixedSamples.length) continue;
+                    const flatCols = flattenFixedObjectColumns(rootField, fixedSamples[0], declared, { rootPath: [groupName], relativeRoot: [rootField] });
+                    if (!flatCols.length) continue;
+                    flattenedRoots.add(rootField);
+                    objFields.delete(rootField);
+                    const oldPos = fieldOrder.indexOf(rootField);
+                    if (oldPos >= 0) fieldOrder.splice(oldPos, 1);
+                    for (const fc of flatCols) {
+                        if (!fieldOrder.includes(fc.zh)) fieldOrder.push(fc.zh);
+                        flattenedDefs[fc.zh] = flattenedDefs[fc.zh] || fc;
+                    }
+                    for (const r of entryRows) {
+                        let obj = r[rootField];
+                        if (typeof obj === 'string' && obj) { try { obj = JSON.parse(obj); } catch (e) { obj = null; } }
+                        for (const fc of flatCols) {
+                            let cur = obj;
+                            for (const seg of (fc.itemPath || []).slice(1)) { if (cur === null || cur === undefined || typeof cur !== 'object') { cur = undefined; break; } cur = cur[seg]; }
+                            if (cur !== undefined) r[fc.zh] = isPairLeaf(cur) ? leafInfo(cur).value : cur;
+                        }
+                        delete r[rootField];
+                    }
+                }
+                // 类型声明可以在 InitVar 仍为空表时定义行内动态字典。
+                // 预先建空关系子表，让 AI/前端在首个父条目出现时就有可写位置。
+                const declaredRowDyn = dynamicDicts[groupName] || {};
+                const declaredRowDynKeys = new Set(Object.keys(declaredRowDyn).filter(k => declaredRowDyn[k]));
+                for (const [k, node] of Object.entries(shapeObjectSchemas[groupName] || {})) {
+                    if (node && node.kind === 'object' && node.dynamic) declaredRowDynKeys.add(k);
+                }
+                for (const subKey of declaredRowDynKeys) {
+                    if (rowChildByKey.has(subKey)) continue;
+                    const ct = {
+                        key: subKey,
+                        value: {},
+                        path: [groupName, subKey],
+                        dynamic: true,
+                        declaredOnly: true,
+                        parentRows: true,
+                        parentKeyCol: rowsKeyCol,
+                    };
+                    rowChildByKey.set(subKey, ct);
+                    childTables.push(ct);
+                }
+                // 空动态行表（大荒宗门/寻缘蝶）没有 InitVar 样本行，
+                // 固定嵌套结构必须直接从 type schema 生成展平列。
+                for (const [rootField, rootSchema] of Object.entries(shapeObjectSchemas[groupName] || {})) {
+                    if (!fixedObjectSchema(rootSchema) || flattenedRoots.has(rootField)) continue;
+                    const flatCols = flattenFixedObjectColumns(rootField, undefined, rootSchema, {
+                        rootPath: [groupName],
+                        relativeRoot: [rootField],
+                    });
+                    if (!flatCols.length) continue;
+                    flattenedRoots.add(rootField);
+                    for (const fc of flatCols) {
+                        if (!fieldOrder.includes(fc.zh)) fieldOrder.push(fc.zh);
+                        flattenedDefs[fc.zh] = flattenedDefs[fc.zh] || fc;
+                    }
+                }
                 // 字段顺序：先 usage 里出现的，再条目里出现的
-                const usageFields = (usage[groupName] || []).filter(f => f !== rowsKeyCol);
-                const shapeFields = (shapes[groupName] || []).filter(f => f !== rowsKeyCol);
-                const allFields = [...new Set([...shapeFields, ...usageFields, ...fieldOrder])];
+                const usageFields = (usage[groupName] || []).filter(f => f !== rowsKeyCol && !rowChildByKey.has(f));
+                const shapeFields = (shapes[groupName] || []).filter(f => f !== rowsKeyCol && !flattenedRoots.has(f) && !rowChildByKey.has(f));
+                const allFields = [...new Set([...shapeFields, ...usageFields, ...fieldOrder])].filter(f => !rowChildByKey.has(f));
                 columns.length = 0;
                 columns.push({ zh: rowsKeyCol, path: [groupName], value: '', desc: '', type: 'TEXT', ident: toIdent(rowsKeyCol, new Set(['row_id']), 'column') });
                 const used = new Set(['row_id', columns[0].ident.toLowerCase()]);
                 for (const f of allFields) {
-                    columns.push({
+                    const flatDef = flattenedDefs[f];
+                    if (flatDef) {
+                        columns.push({
+                            ...flatDef,
+                            value: rowFirstValue(entryRows, f),
+                            ident: toIdent(f, used, 'column'),
+                        });
+                        continue;
+                    }
+                    const declaredKind = declaredFieldKind(groupName, f);
+                    const isObjectField = objFields.has(f) || declaredKind === 'object' || declaredKind === 'array';
+                    const firstValue = rowFirstValue(entryRows, f);
+                    const column = {
                         zh: f,
                         path: [groupName, f],
                         value: '',
                         desc: fieldDescs[f] || '',
-                        type: fieldIsNumeric(f, rowFirstValue(entryRows, f)) ? 'INTEGER' : inferType(rowFirstValue(entryRows, f)),
-                        range: fieldRange(f),
+                        type: isObjectField ? 'TEXT' : (fieldIsNumeric(f, firstValue, groupName) ? 'INTEGER' : inferType(firstValue)),
+                        logicalType: declaredKind || (typeof firstValue === 'boolean' ? 'boolean' : ''),
+                        range: isObjectField ? null : fieldRange(f),
                         ident: toIdent(f, used, 'column'),
-                        isObject: objFields.has(f) || !!(shapeObjects[groupName] && shapeObjects[groupName][f]),
+                        isObject: isObjectField,
                         isPair: pairFields.has(f),
-                    });
+                    };
+                    columns.push(applyDeclaredShape(column, groupName, f));
                 }
                 if (sawScalarEntries) {
                     const scalarZh = scalarIsNumber ? '数值' : '描述';
@@ -2181,6 +2877,7 @@
                         range: null,
                         ident: toIdent('_扩展数据', used, 'column'),
                         isObject: true,
+                        jsonKind: 'object',
                     });
                 }
                 rows = entryRows.map(r => {
@@ -2219,15 +2916,15 @@
                 ));
                 for (const f of usageFields) {
                     if (columns.some(c => c.zh === f)) continue;
-                    columns.push({
+                    columns.push(applyDeclaredShape({
                         zh: f,
                         path: [groupName, f],
                         value: '',
                         desc: '',
-                        type: 'TEXT',
+                        type: fieldIsNumeric(f, '', groupName) ? 'INTEGER' : 'TEXT',
                         range: fieldRange(f),
                         ident: toIdent(f, used, 'column'),
-                    });
+                    }, groupName, f));
                 }
                 // mvu_update/zod 声明的字段：initvar 里没有也要补成列（与行表行为对齐），
                 // 否则单例表的声明字段（如 zod 卡 白娅.着装/称谓）会静默丢失。
@@ -2238,15 +2935,35 @@
                     !nestedSubKeys.has(f)
                 ));
                 for (const f of shapeFieldsForSingleton) {
-                    columns.push({
+                    columns.push(applyDeclaredShape({
                         zh: f,
                         path: [groupName, f],
                         value: '',
                         desc: '',
-                        type: fieldIsNumeric(f, '') ? 'INTEGER' : 'TEXT',
+                        type: fieldIsNumeric(f, '', groupName) ? 'INTEGER' : 'TEXT',
                         range: fieldRange(f),
                         ident: toIdent(f, used, 'column'),
-                    });
+                    }, groupName, f));
+                }
+                // usage 扫描可能先补了一个空列，之后 type schema 才证明它是固定对象。
+                // 在所有补列完成后再做一次统一展开，避免空 InitVar 的对象滞留为 JSON。
+                const finalSingletonCols = [];
+                for (const c of columns) {
+                    const rootField = c.path && c.path.length >= 2 ? c.path[1] : c.zh;
+                    const declaredSchema = (shapeObjectSchemas[groupName] || {})[rootField];
+                    if (c.isObject && fixedObjectSchema(declaredSchema)) {
+                        const flat = flattenFixedObjectColumns(rootField, undefined, declaredSchema, {
+                            rootPath: [groupName], relativeRoot: [rootField],
+                        });
+                        if (flat.length) { finalSingletonCols.push(...flat); continue; }
+                    }
+                    finalSingletonCols.push(c);
+                }
+                columns.length = 0;
+                const finalSingletonUsed = new Set(['row_id']);
+                for (const c of finalSingletonCols) {
+                    c.ident = toIdent(c.zh, finalSingletonUsed, 'column');
+                    columns.push(c);
                 }
                 // 通用溢出列：运行期脚本/前端可能写入模板未声明的动态字段，统一存 JSON，读取时自动还原
                 if (!columns.some(c => c.zh === '_扩展数据')) {
@@ -2259,6 +2976,7 @@
                         range: null,
                         ident: toIdent('_扩展数据', used, 'column'),
                         isObject: true,
+                        jsonKind: 'object',
                     });
                 }
                 const rowArr = [1];
@@ -2282,32 +3000,8 @@
             });
         }
 
-        // 处理单例/行表内部的嵌套字典 → 子行表
-        // 预扫：同一子表键出现在多个父组（如 行囊.背包 / 宗门.背包）时，冲突方统一
-        // 都用父组限定表名（行囊背包表 / 宗门背包表），而不是一个带前缀一个不带——
-        // 插件导入校验“表名规范化后重复”会拒绝整个模板（大荒实测）。
-        const childKeyParents = new Map();
-        for (const g of groups) {
-            for (const ct of g.childTables) {
-                const pk = ct.path && ct.path.length ? String(ct.path[0]) : String(g.name || '');
-                if (!childKeyParents.has(ct.key)) childKeyParents.set(ct.key, new Set());
-                childKeyParents.get(ct.key).add(pk);
-            }
-            // 预判后续会按规则声明补建的空子表（initvar 无数据、dynamicDicts 声明），
-            // 否则这类子表在预扫之后才加入，冲突判断漏掉（大荒 宗门.背包 实测）。
-            const declaredDynPre = (shapeInfo && shapeInfo.dynamicDicts && shapeInfo.dynamicDicts[g.name]) || {};
-            for (const f of Object.keys(declaredDynPre)) {
-                if (!declaredDynPre[f]) continue;
-                const alreadyChild = g.childTables.some(ct => ct.key === f);
-                const alreadyColumn = Array.isArray(g.columns) && g.columns.some(c => c.zh === f);
-                if (!alreadyChild && !alreadyColumn) {
-                    if (!childKeyParents.has(f)) childKeyParents.set(f, new Set());
-                    childKeyParents.get(f).add(g.name);
-                }
-            }
-        }
-        const multiParentChildKeys = new Set();
-        for (const [key, parents] of childKeyParents) if (parents.size > 1) multiParentChildKeys.add(key);
+        // 处理单例/行表内部的嵌套字典 → 派生行表。派生表始终使用完整路径命名，
+        // 因此无需再预扫同名子字段；行囊.背包 与 宗门.背包 会自然得到不同名称。
         for (const g of groups) {
             // 规则声明了动态键字典但 initvar 无数据（如 路遇道友录）：不给表的话
             // AI 写入无处落、整组 check 规则孤儿。补一个空子表，列由 type 声明字段
@@ -2323,70 +3017,182 @@
                 }
             }
             for (const ct of g.childTables) {
-                let tableName = makeGroupTableName(ct.key);
+                let tableName = makePathTableName(ct.path, ct.key);
                 const parentName = ct.path && ct.path.length ? String(ct.path[0]) : String(g.name || '');
-                if (multiParentChildKeys.has(ct.key) || seenTables.has(tableName)) {
-                    // 冲突时统一用父组限定（多父组重名的两个子表都加前缀，保持一致）
-                    let alt = makeGroupTableName(parentName + ct.key);
+                if (seenTables.has(tableName)) {
+                    // 完整路径仍可能因源数据本身重名，保留稳定编号作为最后兜底。
+                    let alt = tableName;
                     if (seenTables.has(alt)) {
                         let n = 2;
                         while (seenTables.has(alt + n)) n++;
                         alt = alt + n;
                     }
-                    report.note(`子表「${ct.key}」与其他表重名（父组 ${parentName}），统一用父组限定表名「${alt}」。`);
+                    report.note(`派生表路径「${(ct.path || [parentName, ct.key]).join('.')}」与其他表重名，使用表名「${alt}」。`);
                     tableName = alt;
                 }
                 seenTables.add(tableName);
+                if (ct.array) {
+                    const arrayRows = [];
+                    const values = [];
+                    if (ct.parentRows) {
+                        for (const parentKey of Object.keys(ct.value || {})) {
+                            const arr = Array.isArray(ct.value[parentKey]) ? ct.value[parentKey] : [];
+                            for (const item of arr) { arrayRows.push({ parentKey, item }); values.push(item); }
+                        }
+                    } else {
+                        const arr = Array.isArray(ct.value) ? ct.value : [];
+                        for (const item of arr) { arrayRows.push({ parentKey: '', item }); values.push(item); }
+                    }
+                    const objectItems = values.some(v => v !== null && typeof v === 'object');
+                    const arrayItems = objectItems && values.every(v => Array.isArray(v));
+                    const au = new Set(['row_id']);
+                    const acols = [];
+                    const relationEntity = ct.parentRows ? String(g.name || '上级记录') : '';
+                    const relationKeyCol = ct.parentRows ? `${relationEntity}_键名` : '';
+                    if (ct.parentRows) acols.push({ zh: relationKeyCol, path: [g.name], value: '', desc: `关联「${g.tableName}.${g.keyCol}」`, type: 'TEXT', ident: toIdent(relationKeyCol, au, 'column') });
+                    acols.push({
+                        zh: '内容', path: [...ct.path], value: '', desc: objectItems ? '数组元素（结构未固定，JSON 存储）' : '数组元素',
+                        type: objectItems ? 'TEXT' : (values.some(v => typeof v === 'number') ? 'INTEGER' : 'TEXT'),
+                        ident: toIdent('内容', au, 'column'), isObject: objectItems, jsonKind: arrayItems ? 'array' : (objectItems ? 'object' : undefined),
+                    });
+                    const arows = arrayRows.map((r, i) => {
+                        let v = r.item;
+                        if (objectItems) { try { v = JSON.stringify(v); } catch (e) { v = arrayItems ? '[]' : '{}'; } }
+                        return ct.parentRows ? [i + 1, r.parentKey, v] : [i + 1, v];
+                    });
+                    ct.tableName = tableName;
+                    groups.push({
+                        name: ct.key, tableName, ident: toIdent(tableName, usedTableIdents, 'table'),
+                        kind: ct.parentRows ? 'nestedArray' : 'pathArray',
+                        keyCol: '', keyValue: '', columns: acols, rows: arows, childTables: [],
+                        source: 'child-array', parentGroup: g.name, parentTable: ct.parentRows ? g.tableName : '',
+                        parentKeyCol: relationKeyCol, relationEntity, arrayPath: [...ct.path],
+                        reminders: ruleReminders[ct.key] || [],
+                    });
+                    continue;
+                }
                 const rowsKeyCol = '键名';
+                const relationEntity = ct.parentRows ? String(g.name || '上级记录') : '';
+                const parentKeyCol = ct.parentRows ? `${relationEntity}_键名` : '';
                 const usageFields = (usage[ct.key] || []).filter(f => f !== rowsKeyCol);
-                const shapeFields = (shapes[ct.key] || []).filter(f => f !== rowsKeyCol);
-                const columns = [{ zh: rowsKeyCol, path: [...ct.path], value: '', desc: '', type: 'TEXT', ident: toIdent(rowsKeyCol, new Set(['row_id']), 'column') }];
-                const used = new Set(['row_id', columns[0].ident.toLowerCase()]);
+                const relationSchema = ct.parentRows ? ((shapeObjectSchemas[g.name] || {})[ct.key] || null) : null;
+                const relationValueSchema = relationSchema && relationSchema.dynamic ? relationSchema.value : null;
+                const relationShapeFields = relationValueSchema && relationValueSchema.kind === 'object' && relationValueSchema.fields
+                    ? Object.keys(relationValueSchema.fields) : [];
+                const shapeFields = [...new Set([...(shapes[ct.key] || []), ...relationShapeFields])].filter(f => f !== rowsKeyCol);
+                const initialUsed = new Set(['row_id']);
+                const columns = [];
+                if (ct.parentRows) {
+                    columns.push({ zh: parentKeyCol, path: [g.name], itemPath: [], value: '', desc: `关联「${g.tableName}.${g.keyCol}」`, type: 'TEXT', ident: toIdent(parentKeyCol, initialUsed, 'column') });
+                }
+                columns.push({ zh: rowsKeyCol, path: [...ct.path], itemPath: [], value: '', desc: '', type: 'TEXT', ident: toIdent(rowsKeyCol, initialUsed, 'column') });
+                const used = new Set(['row_id', ...columns.map(c => c.ident.toLowerCase())]);
                 const fieldOrder = [];
                 const entryRows = [];
+                const relationChildByKey = new Map();
+                const objectFields = new Set();
+                const pairFields = new Set();
+                const fieldDescs = {};
                 let sawScalarEntries = false;
+                let sawObjectEntries = false;
                 let scalarIsNumber = false;
+                if (relationValueSchema && relationValueSchema.kind !== 'object') {
+                    sawScalarEntries = true;
+                    scalarIsNumber = relationValueSchema.kind === 'number';
+                }
                 // 标量条目（如 世界系统.修仙秘闻: { 标题: 内容 }）的行表标记：
                 // 读回时还原为 {键: 标量}，写入时标量落在「描述/数值」列。
                 let ctScalarValueCol = '';
                 if (isPlainObject(ct.value)) {
-                    for (const entryName of Object.keys(ct.value)) {
-                        const entry = ct.value[entryName];
+                    const sourceEntries = [];
+                    if (ct.parentRows) {
+                        for (const parentKey of Object.keys(ct.value)) {
+                            const childDict = ct.value[parentKey];
+                            if (!isPlainObject(childDict)) continue;
+                            for (const entryName of Object.keys(childDict)) {
+                                sourceEntries.push({ parentKey, entryName, entry: childDict[entryName] });
+                            }
+                        }
+                    } else {
+                        for (const entryName of Object.keys(ct.value)) sourceEntries.push({ parentKey: '', entryName, entry: ct.value[entryName] });
+                    }
+                    for (const sourceEntry of sourceEntries) {
+                        const { parentKey, entryName, entry } = sourceEntry;
                         if (!isPlainObject(entry)) {
                             sawScalarEntries = true;
                             scalarIsNumber = scalarIsNumber || typeof entry === 'number';
-                            entryRows.push({ [rowsKeyCol]: entryName, value: entry, __scalar: true });
+                            entryRows.push({ [parentKeyCol]: parentKey, [rowsKeyCol]: entryName, value: entry, __scalar: true });
                             continue;
                         }
+                        sawObjectEntries = true;
                         for (const subKey of Object.keys(entry)) {
+                            const nestedSchema = (shapeObjectSchemas[ct.key] || {})[subKey];
+                            const nestedDynamic = !!((dynamicDicts[ct.key] || {})[subKey] || (nestedSchema && nestedSchema.kind === 'object' && nestedSchema.dynamic));
+                            if (nestedDynamic) {
+                                let nct = relationChildByKey.get(subKey);
+                                if (!nct) {
+                                    nct = { key: subKey, value: {}, path: [...ct.path, subKey], dynamic: true, parentRows: true, parentKeyCol: rowsKeyCol };
+                                    relationChildByKey.set(subKey, nct);
+                                }
+                                nct.value[entryName] = isPlainObject(entry[subKey]) ? entry[subKey] : {};
+                                continue;
+                            }
                             if (!fieldOrder.includes(subKey)) fieldOrder.push(subKey);
                         }
-                        const row = { [rowsKeyCol]: entryName };
+                        const row = { [parentKeyCol]: parentKey, [rowsKeyCol]: entryName };
                         for (const subKey of Object.keys(entry)) {
+                            if (relationChildByKey.has(subKey)) continue;
                             const sv = entry[subKey];
+                            if (isPairLeaf(sv)) {
+                                pairFields.add(subKey);
+                                const pairInfo = leafInfo(sv);
+                                if (pairInfo.desc && !fieldDescs[subKey]) fieldDescs[subKey] = pairInfo.desc;
+                            }
                             row[subKey] = isLeaf(sv) ? leafInfo(sv).value : JSON.stringify(sv);
                             if (!isLeaf(sv) && !columns.some(c => c.zh === subKey)) {
+                                objectFields.add(subKey);
                                 fieldOrder.push(subKey);
                             }
                         }
                         entryRows.push(row);
                     }
                 }
-                const allFields = [...new Set([...shapeFields, ...usageFields, ...fieldOrder])];
+                for (const [subKey, node] of Object.entries(shapeObjectSchemas[ct.key] || {})) {
+                    if (!node || node.kind !== 'object' || !node.dynamic || relationChildByKey.has(subKey)) continue;
+                    relationChildByKey.set(subKey, { key: subKey, value: {}, path: [...ct.path, subKey], dynamic: true, declaredOnly: true, parentRows: true, parentKeyCol: rowsKeyCol });
+                }
+                // { 动态键: 标量值 } 的规则路径叶子表示“条目键”，不是值对象的字段。
+                // 例如 五维.${能力属性} 不能生成“武力/统率”等空列；值统一落到
+                // scalarValueCol。混合字典仍保留对象条目实际出现的字段。
+                const declaredFields = (sawScalarEntries && !sawObjectEntries) ? [] : [...shapeFields, ...usageFields];
+                const allFields = [...new Set([...declaredFields, ...fieldOrder])].filter(f => !relationChildByKey.has(f));
                 for (const f of allFields) {
-                    columns.push({
+                    const relationFieldSchema = relationValueSchema && relationValueSchema.kind === 'object' && relationValueSchema.fields
+                        ? relationValueSchema.fields[f] : null;
+                    const declaredKind = (relationFieldSchema && relationFieldSchema.kind) || declaredFieldKind(ct.key, f);
+                    const isObjectField = objectFields.has(f) || declaredKind === 'object' || declaredKind === 'array';
+                    const firstValue = rowFirstValue(entryRows, f);
+                    const column = {
                         zh: f,
                         path: [...ct.path, f],
+                        itemPath: [f],
                         value: '',
-                        desc: '',
-                        type: fieldIsNumeric(f, rowFirstValue(entryRows, f)) ? 'INTEGER' : inferType(rowFirstValue(entryRows, f)),
+                        desc: fieldDescs[f] || '',
+                        type: isObjectField ? 'TEXT' : (fieldIsNumeric(f, firstValue, ct.key) ? 'INTEGER' : inferType(firstValue)),
+                        logicalType: declaredKind || (typeof firstValue === 'boolean' ? 'boolean' : ''),
                         range: fieldRange(f),
                         ident: toIdent(f, used, 'column'),
-                        isObject: !!(shapeObjects[ct.key] && shapeObjects[ct.key][f]),
-                    });
+                        // 规则 type 可能省略或解析失败；InitVar 的实际对象/普通数组同样
+                        // 是可靠类型来源，不能仅依赖 shapeObjects，否则 JSON 会按 TEXT 读回。
+                        isObject: isObjectField,
+                        isPair: pairFields.has(f),
+                    };
+                    const applied = applyDeclaredShape(column, ct.key, f);
+                    if (declaredKind === 'number' || declaredKind === 'boolean') applied.type = 'INTEGER';
+                    columns.push(applied);
                 }
-                if (columns.length === 1) columns.push({
-                    zh: '描述', path: [...ct.path, '描述'], value: '', desc: '条目描述', type: 'TEXT',
+                if (!sawScalarEntries && columns.length === (ct.parentRows ? 2 : 1)) columns.push({
+                    zh: '描述', path: [...ct.path, '描述'], itemPath: ['描述'], value: '', desc: '条目描述', type: 'TEXT',
                     ident: toIdent('描述', used, 'column'),
                 });
                 if (sawScalarEntries) {
@@ -2399,8 +3205,9 @@
                     }
                     if (!columns.some(c => c.zh === scalarZh)) {
                         columns.push({
-                            zh: scalarZh,
-                            path: [...ct.path, scalarZh],
+                        zh: scalarZh,
+                        path: [...ct.path, scalarZh],
+                        itemPath: [scalarZh],
                             value: '',
                             desc: scalarIsNumber ? '条目数值' : '条目描述',
                             type: scalarIsNumber ? 'INTEGER' : 'TEXT',
@@ -2414,17 +3221,19 @@
                     columns.push({
                         zh: '_扩展数据',
                         path: [...ct.path, '_扩展数据'],
+                        itemPath: ['_扩展数据'],
                         value: '',
                         desc: '本表未在模板声明的动态字段（JSON 存储，读取时自动还原；内部数据，AI 不应直接修改）',
                         type: 'TEXT',
                         range: null,
                         ident: toIdent('_扩展数据', used, 'column'),
                         isObject: true,
+                        jsonKind: 'object',
                     });
                 }
                 const rows = entryRows.map(r => {
-                    const rowArr = [r.__rowId || (columns.length + 1), r[rowsKeyCol]];
-                    for (const c of columns.slice(1)) {
+                    const rowArr = [r.__rowId || (columns.length + 1)];
+                    for (const c of columns) {
                         let v = r[c.zh];
                         if (v === undefined || v === null) v = '';
                         if (c.isObject && typeof v === 'object') {
@@ -2435,24 +3244,33 @@
                     return rowArr;
                 });
                 ct.tableName = tableName; // 供父组 note 提示子表用（含重命名后的表名）
+                const parentBasePath = Array.isArray(g.writePaths) && g.writePaths.length && Array.isArray(g.writePaths[0])
+                    ? g.writePaths[0].slice() : [g.name];
                 groups.push({
                     name: ct.key,
                     tableName,
                     ident: toIdent(tableName, usedTableIdents, 'table'),
-                    kind: 'rows',
+                    kind: ct.parentRows ? 'nestedRows' : 'rows',
                     keyCol: rowsKeyCol,
+                    parentKeyCol,
+                    parentTable: ct.parentRows ? g.tableName : '',
+                    relationEntity,
+                    parentPath: ct.parentRows ? parentBasePath : [],
+                    childKey: ct.parentRows ? ct.key : '',
                     keyValue: '',
                     columns,
                     rows,
-                    childTables: [],
+                    childTables: [...relationChildByKey.values()],
                     source: 'child-table',
                     parentGroup: g.name,
+                    writePaths: ct.parentRows ? [[...parentBasePath, '*', ct.key]] : [[...ct.path]],
+                    emptyValue: Object.prototype.hasOwnProperty.call(ct, 'emptyValue') ? ct.emptyValue : undefined,
                     reminders: ruleReminders[ct.key] || [],
                     scalarValueCol: ctScalarValueCol,
                 });
             }
         }
-        const attached = attachFieldRules(groups, shapeInfo);
+        const attached = attachFieldRules(groups, shapeInfo, report);
         disambiguateColumnSlugs(attached, report);
         return attached;
     }
@@ -2465,7 +3283,7 @@
     }
 
     // 给每组列补上来自 [mvu_update] 规则的 枚举/格式/检查 说明（支持展平列，如 炼丹阶级 ← 阶级）
-    function attachFieldRules(groups, shapeInfo) {
+    function attachFieldRules(groups, shapeInfo, report) {
         const ruleEnums = (shapeInfo && shapeInfo.enums) || {};
         const ruleFormats = (shapeInfo && shapeInfo.formats) || {};
         const ruleChecks = (shapeInfo && shapeInfo.checks) || {};
@@ -2475,6 +3293,19 @@
         const ruleZodDescs = (shapeInfo && shapeInfo.zodDescs) || {};
         const ruleWildcardRules = (shapeInfo && shapeInfo.wildcardRules) || {};
         const ruleCheckPaths = (shapeInfo && shapeInfo.checkPaths) || [];
+        const ruleReminders = (shapeInfo && shapeInfo.reminders) || {};
+
+        // 规则中的 <角色名> / ${条目名} 是动态字典键，而关系表的列路径只保存
+        // 固定结构段。比较路径时去掉这些动态占位段；带 | 的 ${A|B} 是固定候选键，
+        // 仍按原有候选匹配处理。
+        function normalizedRulePath(rulePath) {
+            return (Array.isArray(rulePath)
+                ? rulePath
+                : String(rulePath == null ? '' : rulePath).split('.'))
+                .map(s => String(s).trim())
+                .filter(Boolean)
+                .filter(seg => !/^<[^>]+>$/.test(seg) && !/^\$\{[^|}]+\}$/.test(seg) && !/^\[[^\]]+\]$/.test(seg));
+        }
 
         // 路径化附着（initvar 优先）：规则分组与 initvar 结构不一致（如规则把 修为
         // 写在根目录、initvar 在 主角.修为）时，按变量树路径匹配列：
@@ -2482,9 +3313,7 @@
         //  - 通配路径（生理.欲望槽）↔ 列路径 主角.生理.欲望槽
         // 规则路径取列路径的后缀（从叶子往回逐段相等）；模板段 ${A|B} 展开后匹配任一候选项。
         function rulePathMatch(rulePath, columnPath) {
-            const rp = Array.isArray(rulePath)
-                ? rulePath
-                : String(rulePath == null ? '' : rulePath).split('.').map(s => s.trim()).filter(Boolean);
+            const rp = normalizedRulePath(rulePath);
             if (!Array.isArray(columnPath) || !rp.length) return null;
             if (rp.length > columnPath.length) return null;
             for (let i = 0; i < rp.length; i++) {
@@ -2501,9 +3330,8 @@
                 len: rp.length,
             };
         }
-        function pickBestPathRule(columnPath, entries, pickList) {
-            let best = null;
-            let bestScore = -1;
+        function matchingPathRules(columnPath, entries, pickList) {
+            const matches = [];
             for (let i = 0; i < entries.length; i++) {
                 const e = entries[i];
                 const list = pickList(e);
@@ -2512,19 +3340,95 @@
                 if (!m) continue;
                 // 完整路径 > 后缀；更长后缀 > 更短；同顶层组加分；先声明者优先（稳定）
                 const score = (m.exact ? 100000 : 0) + m.len * 100 + (m.sameRoot ? 1000 : 0) - i;
-                if (score > bestScore) {
-                    bestScore = score;
-                    best = e;
+                matches.push({ rule: e, score, list });
+            }
+            return matches.sort((a, b) => b.score - a.score);
+        }
+        const allWildcardRules = [];
+        const wildcardSeen = new Set();
+        const allReminderRules = [];
+        const reminderSeen = new Set();
+        for (const list of Object.values(ruleWildcardRules)) {
+            for (const rec of (list || [])) {
+                const sig = JSON.stringify([rec.path, rec.range, rec.format, rec.checks]);
+                if (!wildcardSeen.has(sig)) { wildcardSeen.add(sig); allWildcardRules.push(rec); }
+            }
+        }
+        for (const [owner, list] of Object.entries(ruleReminders)) {
+            for (const text of (list || [])) {
+                const sig = `${owner}\u0000${text}`;
+                if (!reminderSeen.has(sig)) {
+                    reminderSeen.add(sig);
+                    allReminderRules.push({ owner, text: String(text) });
                 }
             }
-            return best;
+        }
+        function explicitReminderPath(text) {
+            const head = String(text || '').trim().split(/[\s—–：:]+/, 1)[0].replace(/[，,；;。]+$/, '');
+            return head.includes('.') ? head : '';
+        }
+        function relationRuleMatch(g, rulePath) {
+            if (g.kind !== 'nestedRows' && g.kind !== 'nestedArray') return false;
+            const rp = normalizedRulePath(rulePath);
+            const target = [...(g.parentPath || [g.parentGroup]).map(String), String(g.childKey || g.name)];
+            if (!rp.length || !target.length) return false;
+            // 允许规则省略最外层组名，但必须覆盖关系字段本身，避免同名叶子误挂。
+            const exactPrefix = target.every((seg, i) => String(rp[i]) === seg);
+            const suffixTarget = target.length > 1 && target.slice(1).every((seg, i) => String(rp[i]) === seg);
+            if (!rp.includes(String(g.childKey || g.name))) return false;
+            if (exactPrefix) return { field: rp.length > target.length };
+            if (suffixTarget) return { field: rp.length > target.length - 1 };
+            return false;
+        }
+        function relationRuleMatches(g, rulePath) {
+            return !!relationRuleMatch(g, rulePath);
         }
         for (const g of groups) {
             // 通配路径规则（如 户.<门牌>.妻.好感值）与组级 check 都按组归到本表（含 JSON 表），
             // 供 buildNote/buildNodeProse 决定“AI 可写”还是“AI 不应修改”
             g.wildcardRules = ruleWildcardRules[g.name] || [];
+            if (g.kind === 'nestedRows' || g.kind === 'nestedArray') {
+                // 路径止于集合本身（寻缘蝶.${NPC_ID}.功法）是关系表整体规则；
+                // 继续指向集合内字段的规则是列规则。两者都归关系表，且只保留一份。
+                g.wildcardRules = allWildcardRules
+                    .map(r => ({ source: r, match: relationRuleMatch(g, r.path) }))
+                    .filter(x => x.match)
+                    .map(x => ({ ...x.source, _relationFieldRule: !!x.match.field }));
+                // 自由提醒只有在开头明确给出完整关系路径时才迁移；其余文本不按关键词猜测。
+                g.reminders = [...new Set(allReminderRules
+                    .filter(r => {
+                        const p = explicitReminderPath(r.text);
+                        return p && relationRuleMatches(g, p);
+                    })
+                    .map(r => r.text))];
+                const ambiguous = (ruleReminders[g.parentGroup] || []).filter(text => {
+                    const p = explicitReminderPath(text);
+                    return !p && String(text).includes(String(g.childKey || g.name));
+                });
+                if (ambiguous.length && report && typeof report.note === 'function') {
+                    report.note(`关系表「${g.tableName}」有 ${ambiguous.length} 条相关自由提醒未写完整路径，已保留在来源表「${g.parentTable}」，未按关键词猜测迁移。`);
+                }
+            } else {
+                // 路径已明确属于关系集合的规则全部放入对应关系表，来源实体表不再重复展示。
+                const ownedRelations = groups.filter(rel => (rel.kind === 'nestedRows' || rel.kind === 'nestedArray') && rel.parentTable === g.tableName);
+                if (ownedRelations.length) {
+                    g.wildcardRules = g.wildcardRules.filter(r => !ownedRelations.some(rel => relationRuleMatches(rel, r.path)));
+                    g.reminders = (g.reminders || []).filter(text => {
+                        const p = explicitReminderPath(text);
+                        return !p || !ownedRelations.some(rel => relationRuleMatches(rel, p));
+                    });
+                }
+            }
             const parentList = g.parentGroup ? (ruleChecks[g.parentGroup] || {})[g.name] || [] : [];
-            g.groupChecks = [...parentList, ...(ruleGroupChecks[g.name] || [])];
+            const relationTableChecks = (g.kind === 'nestedRows' || g.kind === 'nestedArray')
+                ? ruleCheckPaths.filter(e => e.tableLevel && relationRuleMatches(g, e.path)).flatMap(e => e.list || [])
+                : [];
+            if (g.kind === 'nestedRows' || g.kind === 'nestedArray') {
+                const wholeRules = [...new Set([...parentList, ...relationTableChecks])];
+                g.groupChecks = wholeRules;
+            } else {
+                g.groupChecks = [...new Set([...parentList, ...(ruleGroupChecks[g.name] || [])])];
+            }
             // 整组 JSON 表：不套用 [mvu_update] 按字段名的规则（避免误命中同名列），
             // 但组级 check/通配规则已挂上，供“可写判定”使用
             if (g.kind === 'json') continue;
@@ -2536,32 +3440,45 @@
             for (const c of g.columns) {
                 // 内部溢出列：不接受按字段名的规则
                 if (c.zh === '_扩展数据') continue;
+                // 关系标识列只负责定位所属实体与子记录。集合级 check（例如“最多三门功法”）
+                // 不能因为路径末段同名而误挂成“键名：最多三门功法”；整体规则留在来源实体表。
+                if (((g.kind === 'rows' || g.kind === 'nestedRows') && c.zh === g.keyCol)
+                    || ((g.kind === 'nestedRows' || g.kind === 'nestedArray') && c.zh === g.parentKeyCol)) {
+                    // 行表的键列只负责标识动态条目。通配路径末段表示的是键下面的值，
+                    // 不能把值的 number/range/check 套到键名本身。
+                    c.type = 'TEXT';
+                    c.enum = null;
+                    c.format = '';
+                    c.check = [];
+                    c.range = null;
+                    continue;
+                }
                 const last = c.path && c.path.length ? c.path[c.path.length - 1] : c.zh;
-                c.enum = ruleEnums[c.zh] || ruleEnums[last] || null;
+                c.enum = !c.isObject ? (ruleEnums[c.zh] || ruleEnums[last] || null) : null;
                 c.format = gFormats[c.zh] || gFormats[last] || '';
                 c.check = gChecks[c.zh] || gChecks[last] || [];
                 if (!c.desc) {
                     const zd = (ruleZodDescs[g.name] || {})[c.zh] || (ruleZodDescs[g.name] || {})[last];
                     if (zd) c.desc = zd;
                 }
-                if (!c.range && (ruleRanges[c.zh] || ruleRanges[last])) c.range = ruleRanges[c.zh] || ruleRanges[last];
-                if (c.type !== 'INTEGER' && (ruleNumeric.has(c.zh) || ruleNumeric.has(last))) c.type = 'INTEGER';
-                // 兜底：按字段名直接命中为空时，用规则书写路径匹配 initvar 列路径
-                // （字段级 checkPaths 优先于通配路径）。tableLevel 规则（容器/子表/JSON
-                // 列的整体约束）不做列级附着，仍经 groupChecks 表级保留。
-                if (!c.check || !c.check.length) {
-                    const colPath = c.path || [g.name, c.zh];
-                    const pRule = pickBestPathRule(colPath, ruleCheckPaths.filter(e => !e.tableLevel), e => e.list);
-                    const wRule = pRule ? null : pickBestPathRule(colPath, g.wildcardRules || [], e => e.checks);
-                    const r = pRule || wRule;
-                    if (r) {
-                        c.check = (r.list || r.checks || []).slice();
-                        if (!c.range && r.range) {
-                            c.range = r.range;
-                            if (c.type !== 'INTEGER') c.type = 'INTEGER';
-                        }
-                        if (!c.format && r.format) c.format = r.format;
+                if (!c.isObject && !c.range && (ruleRanges[c.zh] || ruleRanges[last])) c.range = ruleRanges[c.zh] || ruleRanges[last];
+                if (!c.isObject && c.type !== 'INTEGER' && (ruleNumeric.has(c.zh) || ruleNumeric.has(last))) c.type = 'INTEGER';
+                // 按完整书写路径合并所有同字段规则。多个 [mvu_update] 条目或 YAML+Zod
+                // 可以同时补充 check/range/format，不能只取其中“最佳一条”而覆盖其余。
+                const colPath = c.path || [g.name, c.zh];
+                const matches = [
+                    ...matchingPathRules(colPath, ruleCheckPaths.filter(e => !e.tableLevel), e => e.list),
+                    ...matchingPathRules(colPath, g.wildcardRules || [], e => e.checks),
+                ].sort((a, b) => b.score - a.score);
+                if (matches.length) {
+                    c.check = [...new Set([...(c.check || []), ...matches.flatMap(x => x.list || [])])];
+                    const rangeRule = matches.find(x => x.rule && x.rule.range);
+                    const formatRule = matches.find(x => x.rule && x.rule.format);
+                    if (!c.range && rangeRule) {
+                        c.range = rangeRule.rule.range;
+                        if (!c.isObject && c.type !== 'INTEGER') c.type = 'INTEGER';
                     }
+                    if (!c.format && formatRule) c.format = formatRule.rule.format;
                 }
             }
         }
@@ -2702,13 +3619,18 @@
                 }
             } else {
                 let dvs = dv === undefined || dv === null ? '' : String(dv);
-                if (c.isObject && dvs === '') dvs = '{}';
+                if (c.isObject && dvs === '') dvs = c.jsonKind === 'array' ? '[]' : '{}';
                 def += ` NOT NULL DEFAULT '${sqlQuote(dvs)}'`;
                 if (isKey) def += ' UNIQUE';
                 // 整组 JSON 表的内容列：SQLite 模式下用 json_valid CHECK 保证整列 JSON 合法
                 // （updateCell/insertRow 的 SQL 由 SQLite 执行时会真正校验；native 模式不生效，见报告）
                 if (includeCheck && group.kind === 'json' && c.zh === '内容') {
                     def += ` CHECK(json_valid(${c.ident}))`;
+                } else if (includeCheck && c.isObject && c.zh !== '_扩展数据') {
+                    const jsonKind = c.jsonKind === 'array' ? 'array' : 'object';
+                    // json_valid 只能拦住非 JSON；`"阁主"` 仍是合法 JSON。普通
+                    // 对象/数组列还必须校验顶层类型，防止标量写进对象列。
+                    def += ` CHECK(json_valid(${c.ident}) AND json_type(${c.ident}) = '${jsonKind}')`;
                 }
                 // 枚举 CHECK：把默认值和越界初始值一并放行，避免初始行/默认值被拒绝
                 if (includeCheck && c.enum && c.enum.length <= 8 && c.enum.every(v => !/['"]/.test(v))) {
@@ -2734,8 +3656,12 @@
         if (group.kind === 'json') {
             return `整组 JSON 存储表：本组数据以 JSON 整体保存、读取时还原任意形状（对象/字典/标量）；内部数据，AI 不应直接修改。`;
         }
-        if (group.kind === 'array') {
+        if (group.kind === 'array' || group.kind === 'pathArray' || group.kind === 'nestedArray') {
             return '数组表：每行一个数组元素，行号即数组顺序；新增元素用 INSERT，移除用 DELETE，修改用 UPDATE。';
+        }
+        if (group.kind === 'nestedRows') {
+            const entity = group.relationEntity || String(group.parentKeyCol || '').replace(/_键名$/, '') || '关联记录';
+            return `关系表：每行记录「${group.parentTable}」中某条${entity}记录的一项${group.childKey || group.name}数据；「${group.parentKeyCol}」取自「${group.parentTable}.${group.keyCol}」，并与「${group.keyCol}」共同定位该记录。`;
         }
         return `行表，以「${group.keyCol}」为唯一标识；同名记录只存在一行，更新用 UPDATE，新增用 INSERT。`;
     }
@@ -2805,6 +3731,10 @@
             // 对齐默认模板：列定义只列中文名 + 标识符；字段说明与约束放【强制约束】
             aiCols.forEach((c, i) => L.push(`- 列${i + 1}: ${c.zh} ${c.ident}`));
             L.push('【强制约束】');
+            if (group.kind === 'nestedRows') {
+                const entity = group.relationEntity || String(group.parentKeyCol || '').replace(/_键名$/, '') || '关联记录';
+                L.push(`- 维护本表时，同时遵循对应${entity}记录中与「${group.childKey || group.name}」相关的整体规则`);
+            }
             for (const c of aiCols) {
                 const parts = [];
                 if (c.range) parts.push(`数值范围 ${c.range[0]}~${c.range[1]}`);
@@ -2812,7 +3742,9 @@
                 if (c.format) parts.push(`格式要求：${String(c.format).replace(/\n/g, ' ')}`);
                 if (c.isObject) parts.push('对象以 JSON 存储，读取时还原');
                 // 真实字段说明（如 [值,说明] 的更新条件）；通用描述（唯一标识/键名/JSON 提示）不重复
-                const desc = c.desc ? String(c.desc).replace(/\n/g, ' ').trim() : '';
+                let desc = c.desc ? String(c.desc).replace(/\n/g, ' ').trim() : '';
+                // 关系列的关联含义已经在表级说明中完整表达，不再作为“强制约束”重复一遍。
+                if (group.kind === 'nestedRows' && (c.zh === group.parentKeyCol || c.zh === group.keyCol)) desc = '';
                 const generic = desc === '唯一标识' || desc === '对象（JSON 存储，读取时还原）';
                 if (desc && !generic) parts.push(desc);
                 if (parts.length) L.push(`- ${c.zh}：${parts.join('；')}`);
@@ -2824,6 +3756,8 @@
             // 通配路径规则（如 人物.角色名.亲密）：动态键无法静态展开，作为表格级提示保留，
             // AI 对照快照中的具体键套用（范围/条件仍可见）
             for (const wr of (group.wildcardRules || [])) {
+                // 关系表的字段路径规则已在对应列下展示；这里只展示止于整个集合的规则。
+                if (wr._relationFieldRule) continue;
                 const parts = [];
                 if (wr.range) parts.push(`数值范围 ${wr.range[0]}~${wr.range[1]}`);
                 if (wr.format) parts.push(`格式：${wr.format}`);
@@ -2858,17 +3792,17 @@
                 ? `开局模板已初始化唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`
                 : `开局模板已初始化唯一记录（row_id=1）；全部字段由脚本/系统维护，自动填表阶段不修改本表。`;
         }
-        if (group.kind === 'array') {
+        if (group.kind === 'array' || group.kind === 'pathArray' || group.kind === 'nestedArray') {
             return group.rows.length
-                ? `开局模板已初始化 ${group.rows.length} 个元素；自动填表阶段新增元素按 insertNode 规则 INSERT 新行，移除按 deleteNode 规则 DELETE，修改按 updateNode 规则 UPDATE。`
-                : '开局为空表；剧情出现首个元素时，按 insertNode 规则 INSERT 新行。';
+                ? `开局模板已初始化 ${group.rows.length} 个元素；新增元素使用 INSERT，移除元素使用 DELETE，仅修改元素内容时使用 UPDATE。`
+                : '开局为空表；出现符合本表定义的新元素时，使用 INSERT 写入新行。';
         }
         if (group.rows.length) {
             // 不写死具体记录名：多开场白按分支注入初始值（applyActiveGreetingInitvar），
             // 实际初始记录随所选分支变化，把首个分支的名字写进提示词会在切分支后误导 AI。
-            return `开局模板已初始化 ${group.rows.length} 条记录；自动填表阶段如有新条目，按 insertNode 规则 INSERT 新记录。`;
+            return `开局模板已初始化 ${group.rows.length} 条记录；出现符合本表定义且尚不存在的新记录时，使用 INSERT 写入完整记录。`;
         }
-        return '开局为空表；正文首次出现应记录的对象时，按 insertNode 规则 INSERT 首条记录。';
+        return '开局为空表；出现符合本表定义的新记录时，使用 INSERT 写入完整记录。';
     }
 
     // SQL 示例取值：优先真实初始行值 → 其次 DDL 默认值（INTEGER 未给默认按 0，对象列按 '{}'）
@@ -2885,7 +3819,10 @@
                 return String(Number.isFinite(num) ? num : 0);
             }
             if (String(dv) !== '') return `'${sqlQuote(String(dv))}'`;
-            if (col.isObject) return "'{}'";
+            if (col.isObject) {
+                const example = col.objectSchema ? JSON.stringify(schemaExample(col.objectSchema)) : (col.jsonKind === 'array' ? '[]' : '{}');
+                return `'${sqlQuote(example)}'`;
+            }
         }
         return col && col.zh ? `'${sqlQuote(col.zh)}示例'` : '';
     }
@@ -2950,21 +3887,43 @@
                 if (!col) return '本表全部字段均为脚本/系统维护的只读状态，AI 不应修改本表。';
                 const ident = col.ident;
                 const val = exampleUpdateValue(col);
-                return `只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；正文明确造成字段变化时更新对应字段。\nSQL示例: UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1;`;
+                return `只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；根据正文、设定与本表规则，已有字段的值发生变化时更新。\nSQL示例: UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1;`;
             }
             return '禁止。';
         }
-        if (group.kind === 'array') {
+        if (group.kind === 'array' || group.kind === 'pathArray' || group.kind === 'nestedArray') {
             // 数组表与插件按行 DSL 对齐：每行一个数组元素，支持按行增删改；
             // 不再写“整体替换”（插件没有整表替换指令，且与禁止增删自相矛盾）
-            const col = (group.columns && group.columns[0]) || { ident: 'neirong', zh: '内容' };
+            const col = (group.columns || []).find(c => c.zh === '内容') || (group.columns && group.columns[0]) || { ident: 'neirong', zh: '内容' };
+            const parent = group.kind === 'nestedArray' ? (group.columns || []).find(c => c.zh === group.parentKeyCol) : null;
             if (kind === 'update') {
-                return `对应数组元素内容变化时更新该行。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = '新内容' WHERE row_id = 1;`;
+                return `根据正文、设定与本表规则，已有数组元素的内容发生变化时更新该行。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = '新内容' WHERE row_id = 1;`;
             }
             if (kind === 'insert') {
-                return `数组出现新元素时插入新行（行号自动分配，行序即数组顺序）。\nSQL示例: INSERT INTO ${group.ident} (${col.ident}) VALUES ('新元素');`;
+                return parent
+                    ? `根据正文、设定与本表规则，对应${group.relationEntity || '关联'}记录的数组出现本表尚未记录的新元素时添加；「${group.parentKeyCol}」必须取自「${group.parentTable}.${group.keyCol || '键名'}」。\nSQL示例: INSERT INTO ${group.ident} (${parent.ident}, ${col.ident}) VALUES ('${group.relationEntity || '关联'}键名', '新元素');`
+                    : `根据正文、设定与本表规则，数组出现本表尚未记录的新元素时添加（行号自动分配，行序即数组顺序）。\nSQL示例: INSERT INTO ${group.ident} (${col.ident}) VALUES ('新元素');`;
             }
-            return `数组元素被移除时删除对应行。\nSQL示例: DELETE FROM ${group.ident} WHERE row_id = 1;`;
+            return `根据正文、设定与本表规则，已有数组元素不再属于当前数组时删除对应行。\nSQL示例: DELETE FROM ${group.ident} WHERE row_id = 1;`;
+        }
+        if (group.kind === 'nestedRows') {
+            const parent = group.columns.find(c => c.zh === group.parentKeyCol) || group.columns[0];
+            const key = group.columns.find(c => c.zh === group.keyCol) || group.columns[1];
+            const valueCols = group.columns.filter(c => c.zh !== group.parentKeyCol && c.zh !== group.keyCol && c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+            const value = valueCols[0];
+            const entity = group.relationEntity || String(group.parentKeyCol || '').replace(/_键名$/, '') || '关联';
+            const where = `${parent.ident} = '${entity}键名' AND ${key.ident} = '键名'`;
+            if (kind === 'update') {
+                return value
+                    ? `根据正文、设定与本表规则，对应${entity}记录中已有${group.childKey || group.name}数据的字段值发生变化时更新；WHERE 必须同时带「${group.parentKeyCol}」和「${group.keyCol}」。\nSQL示例: UPDATE ${group.ident} SET ${value.ident} = ${exampleUpdateValue(value)} WHERE ${where};`
+                    : '本表无 AI 可更新的业务列。';
+            }
+            if (kind === 'insert') {
+                const cols = [parent, key, ...valueCols];
+                const vals = cols.map((c, i) => i === 0 ? `'${entity}键名'` : (i === 1 ? "'键名'" : exampleCellValue(c, c.value) || "'值'"));
+                return `根据正文、设定与本表规则，对应${entity}记录中出现本表尚未记录的新${group.childKey || group.name}时添加；「${group.parentKeyCol}」必须取自「${group.parentTable}.${group.keyCol}」。\nSQL示例: INSERT INTO ${group.ident} (${cols.map(c => c.ident).join(', ')}) VALUES (${vals.join(', ')});`;
+            }
+            return `根据正文、设定与本表规则，对应${entity}记录中已有${group.childKey || group.name}不再属于其「${group.childKey || group.name}」数据时删除；WHERE 必须同时带「${group.parentKeyCol}」和「${group.keyCol}」。\nSQL示例: DELETE FROM ${group.ident} WHERE ${where};`;
         }
         const keyIdent = group.columns[0] ? group.columns[0].ident : 'key';
         // 示例优先取卡内真实初始数据；没有初始值则用 DDL 默认值；TEXT 无默认值才退回“列名示例”
@@ -2985,7 +3944,7 @@
         if (kind === 'update') {
             const updCol = exampleCols[1] || exampleCols[0];
             const updVal = updCol ? exampleUpdateValue(updCol) : "'新值'";
-            return `正文中对应记录的状态、数值或描述明确变化时，更新该记录对应字段。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${updVal} WHERE ${keyIdent} = ${keyValue};`;
+            return `根据正文、设定与本表规则，已有记录的字段值发生变化时更新。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${updVal} WHERE ${keyIdent} = ${keyValue};`;
         }
         if (kind === 'insert') {
             // 完整列示例：全部列都列出，列数与 VALUES 一一对应；
@@ -2996,9 +3955,9 @@
                 const colIdx = group.columns.indexOf(c);
                 return sampleValue(colIdx + 1, `'值${i}'`);
             });
-            return `正文中首次出现应记录的${group.keyCol}时，插入完整的新记录。\nSQL示例: INSERT INTO ${group.ident} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
+            return `根据正文、设定与本表规则，出现本表尚未记录的新${group.keyCol}时添加完整记录。\nSQL示例: INSERT INTO ${group.ident} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
         }
-        return `仅在条目彻底离场、失效或不再需要追踪时移除记录。\nSQL示例: DELETE FROM ${group.ident} WHERE ${keyIdent} = ${keyValue};`;
+        return `根据正文、设定与本表规则，已有记录所对应的对象不再属于本表记录范围时删除。\nSQL示例: DELETE FROM ${group.ident} WHERE ${keyIdent} = ${keyValue};`;
     }
 
     /**
@@ -3047,7 +4006,8 @@
             // 插件 SyncBridge 的 escapeValue 只放行 null/数字，其余值必须能 .replace()：
             // 布尔（false）会直接 TypeError（实测 val.replace is not a function），
             // 因此内容单元格统一归一化——布尔 → 1/0，null/undefined → ''，其余转字符串。
-            const normalizeCell = (v) => {
+            const normalizeCell = (v, c) => {
+                if (c && c.isObject && (v === null || v === undefined || v === '')) return c.jsonKind === 'array' ? '[]' : '{}';
                 if (v === null || v === undefined) return '';
                 if (typeof v === 'boolean') return v ? 1 : 0;
                 if (typeof v === 'number') return v;
@@ -3056,7 +4016,7 @@
             g.rows.forEach((r, ri) => {
                 const row = [ri + 1];
                 for (let ci = 0; ci < g.columns.length; ci++) {
-                    row.push(normalizeCell(r[ci + 1]));
+                    row.push(normalizeCell(r[ci + 1], g.columns[ci]));
                 }
                 content.push(row);
             });
@@ -3098,8 +4058,13 @@
      * ================================================================ */
 
     function columnLayoutType(c) {
-        if (c.type === 'INTEGER') return 'number';
+        // stat_data 的结构类型优先于 SQL 物理类型；对象/数组列即使受到同名数值
+        // 规则污染，也必须按 JSON 解析，不能退化成 number/text。
         if (c.isObject) return 'object';
+        // SQLite 用 INTEGER 0/1 存布尔值，但 stat_data 必须恢复为真正的
+        // boolean；否则卡内 Zod 结构校验会拒绝数字。
+        if (c.logicalType === 'boolean' || typeof c.value === 'boolean') return 'boolean';
+        if (c.type === 'INTEGER') return 'number';
         if (c.isPair) return 'pair';
         return 'text';
     }
@@ -3166,8 +4131,59 @@
                 }
                 continue;
             }
+            if (g.kind === 'pathArray' || g.kind === 'nestedArray') {
+                const valueCol = g.columns.find(c => c.zh === '内容') || g.columns[g.columns.length - 1];
+                const entry = {
+                    kind: g.kind,
+                    group: g.parentGroup || g.name,
+                    table: g.tableName,
+                    path: g.arrayPath || [g.parentGroup, g.name],
+                    parentKeyCol: g.parentKeyCol || '',
+                    parentTable: g.parentTable || '',
+                    cols: g.columns.map(c => ({
+                        zh: c.zh, type: columnLayoutType(c),
+                        fallback: c.isObject ? (c.jsonKind === 'array' ? '[]' : '{}') : (c.value === undefined || c.value === null ? '' : c.value),
+                        path: [], isPair: false, desc: c.desc || '',
+                    })),
+                    valueCol: valueCol ? valueCol.zh : '内容',
+                };
+                entries.push(entry);
+                pathIndex.set((g.arrayPath || [g.parentGroup, g.name]).join('.'), { table: g.tableName, kind: g.kind });
+                continue;
+            }
+            if (g.kind === 'nestedRows') {
+                const parentPath = Array.isArray(g.parentPath) && g.parentPath.length ? g.parentPath.slice() : [g.parentGroup];
+                const entry = {
+                    kind: 'nestedRows',
+                    group: parentPath[0],
+                    parentPath,
+                    childKey: g.childKey || g.name,
+                    table: g.tableName,
+                    keyCol: g.keyCol,
+                    parentKeyCol: g.parentKeyCol || `${g.relationEntity || '关联'}_键名`,
+                    parentTable: g.parentTable || '',
+                    cols: g.columns.map(c => ({
+                        zh: c.zh,
+                        type: columnLayoutType(c),
+                        fallback: c.isObject ? (c.jsonKind === 'array' ? '[]' : '{}') : (c.value === undefined || c.value === null ? '' : c.value),
+                        path: c.itemPath || ((c.zh === g.keyCol || c.zh === g.parentKeyCol) ? [] : [c.zh]),
+                        isPair: !!c.isPair,
+                        desc: c.desc || '',
+                    })),
+                    writePaths: [[...parentPath, '*', g.childKey || g.name]],
+                    scalarValueCol: g.scalarValueCol || '',
+                };
+                entries.push(entry);
+                pathIndex.set([...parentPath, '*', g.childKey || g.name, '*'].join('.'), {
+                    table: g.tableName, rows: true, nestedRows: true,
+                    parentKeyCol: entry.parentKeyCol, keyCol: entry.keyCol,
+                });
+                continue;
+            }
             // rows（含子表）
-            const writePaths = g.parentGroup ? [[g.parentGroup, g.name]] : [[g.name]];
+            const writePaths = Array.isArray(g.writePaths) && g.writePaths.length
+                ? g.writePaths.map(p => Array.isArray(p) ? p.slice() : [String(p)])
+                : (g.parentGroup ? [[g.parentGroup, g.name]] : [[g.name]]);
             const entry = {
                 kind: 'rows',
                 group: g.name,
@@ -3176,22 +4192,27 @@
                 cols: g.columns.map(c => ({
                     zh: c.zh,
                     type: columnLayoutType(c),
-                    fallback: '',
+                    fallback: c.isObject ? (c.jsonKind === 'array' ? '[]' : '{}') : (c.value === undefined || c.value === null ? '' : c.value),
+                    path: c.itemPath || (c.zh === g.keyCol ? [] : (
+                        Array.isArray(c.path) && writePaths[0] && c.path.length > writePaths[0].length
+                            ? c.path.slice(writePaths[0].length)
+                            : [c.zh]
+                    )),
                     isPair: !!c.isPair,
                     desc: c.desc || '',
                 })),
                 writePaths,
                 scalarValueCol: g.scalarValueCol || '',
+                emptyValue: Object.prototype.hasOwnProperty.call(g, 'emptyValue') ? g.emptyValue : undefined,
             };
             entries.push(entry);
             const colNames = g.columns.map(c => c.zh);
-            if (g.parentGroup) {
-                for (const c of colNames) {
-                    pathIndex.set([g.parentGroup, g.name, c.zh].join('.'), { table: g.tableName, col: c.zh, rows: true, keyCol: g.keyCol });
-                }
-            } else {
-                for (const c of colNames) {
-                    pathIndex.set([g.name, c.zh].join('.'), { table: g.tableName, col: c.zh, rows: true, keyCol: g.keyCol });
+            for (const wp of writePaths) {
+                for (const c of g.columns) {
+                    const suffix = c.itemPath || (c.zh === g.keyCol ? [] : (
+                        Array.isArray(c.path) && wp && c.path.length > wp.length ? c.path.slice(wp.length) : [c.zh]
+                    ));
+                    pathIndex.set([...wp, '*', ...suffix].join('.'), { table: g.tableName, col: c.zh, rows: true, keyCol: g.keyCol });
                 }
             }
         }
@@ -3216,10 +4237,17 @@
             table: e.table,
             keyCol: e.keyCol || '',
             keyValue: e.keyValue || '',
+            childKey: e.childKey || '',
+            parentKeyCol: e.parentKeyCol || '',
+            parentTable: e.parentTable || '',
+            parentPath: e.parentPath || [],
+            path: e.path || [],
+            valueCol: e.valueCol || '',
             scalarValueCol: e.scalarValueCol || '',
+            emptyValue: Object.prototype.hasOwnProperty.call(e, 'emptyValue') ? e.emptyValue : undefined,
             cols: (e.cols || []).map(c => e.kind === 'singleton'
                 ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
-                : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || '']),
+                : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']),
             writePaths: e.writePaths || [],
             mirrors: e.mirrors || [],
         }));
@@ -3243,9 +4271,19 @@
         };
         const text = (v, fb) => (v === undefined || v === null || v === '' ? (fb === undefined ? '' : fb) : String(v));
         const number = (v, fb) => { const n = parseFloat(v); return isNaN(n) ? (fb === undefined ? 0 : fb) : n; };
+        const boolean = (v, fb) => {
+            if (typeof v === 'boolean') return v;
+            if (typeof v === 'number') return v !== 0;
+            const s = String(v === undefined || v === null ? '' : v).trim().toLowerCase();
+            if (s === '1' || s === 'true') return true;
+            if (s === '0' || s === 'false' || s === '') return s === '' && typeof fb === 'boolean' ? fb : false;
+            const n = Number(s);
+            return Number.isFinite(n) ? n !== 0 : (typeof fb === 'boolean' ? fb : false);
+        };
         const parseObject = (v) => safeParseJson(v);
         const convertCell = (type, v, fb, desc) => {
             if (type === 'number') return number(v, fb);
+            if (type === 'boolean') return boolean(v, fb);
             if (type === 'object') return parseObject(v);
             if (type === 'pair') return [text(v, fb), desc || ''];
             return text(v, fb);
@@ -3258,10 +4296,18 @@
             }
             cur[path[path.length - 1]] = value;
         };
+        const getPath = (obj, path) => {
+            let cur = obj;
+            for (const p of path || []) { if (cur === null || cur === undefined || typeof cur !== 'object') return undefined; cur = cur[p]; }
+            return cur;
+        };
         for (const L of entries) {
             const s = sheetOf(L.table);
             if (!s || !Array.isArray(s.content) || !s.content.length) {
-                if (L.kind === 'rows') { for (const wp of L.writePaths || []) setPath(sd, wp, {}); }
+                if (L.kind === 'rows') { for (const wp of L.writePaths || []) setPath(sd, wp, L.emptyValue === null ? null : {}); }
+                else if (L.kind === 'nestedRows') { /* 所属实体记录尚未出现时不虚构关联键 */ }
+                else if (L.kind === 'pathArray') { setPath(sd, L.path || [L.group], []); }
+                else if (L.kind === 'nestedArray') { /* 同上，不虚构关联键 */ }
                 else if (L.kind === 'array') { sd[L.group] = []; for (const m of L.mirrors || []) setPath(sd, m.path, ''); }
                 else if (L.kind === 'json') { sd[L.group] = {}; }
                 continue;
@@ -3295,13 +4341,77 @@
                 }
                 sd[L.group] = arr;
                 for (const m of L.mirrors || []) setPath(sd, m.path, m.mode === 'first' ? (arr.length ? arr[0] : '') : arr);
+            } else if (L.kind === 'pathArray') {
+                const arr = [];
+                const vc = (L.cols || []).find(c => c[0] === L.valueCol) || (L.cols || [])[0];
+                const vi = header.indexOf(L.valueCol);
+                for (let r = 1; r < sRows.length; r++) {
+                    const rw = sRows[r];
+                    if (rw && vi >= 0) arr.push(convertCell(vc ? vc[1] : 'text', rw[vi], vc ? vc[2] : '', vc ? vc[5] : ''));
+                }
+                setPath(sd, L.path, arr);
+            } else if (L.kind === 'nestedArray') {
+                const pi = header.indexOf(L.parentKeyCol);
+                const vi = header.indexOf(L.valueCol);
+                const vc = (L.cols || []).find(c => c[0] === L.valueCol);
+                const parents = sd[L.group];
+                if (parents && typeof parents === 'object' && !Array.isArray(parents)) {
+                    const childKey = L.path && L.path.length ? L.path[L.path.length - 1] : '';
+                    for (const pk of Object.keys(parents)) if (parents[pk] && typeof parents[pk] === 'object') parents[pk][childKey] = [];
+                    for (let r = 1; r < sRows.length; r++) {
+                        const rw = sRows[r];
+                        if (!rw || pi < 0 || vi < 0) continue;
+                        const pk = text(rw[pi]);
+                        if (!pk || !parents[pk] || typeof parents[pk] !== 'object') continue;
+                        parents[pk][childKey].push(convertCell(vc ? vc[1] : 'text', rw[vi], vc ? vc[2] : '', vc ? vc[5] : ''));
+                    }
+                }
             } else if (L.kind === 'json') {
                 const jrow = sRows[1] || [];
                 const jidx = header.indexOf('内容');
                 const jv = jidx >= 0 ? jrow[jidx] : undefined;
                 const jparsed = parseObject(jv);
-                sd[L.group] = (jparsed === null || jparsed === undefined) ? {} : jparsed;
+                sd[L.group] = jparsed === undefined ? {} : jparsed;
                 for (const m of L.mirrors || []) setPath(sd, m.path, m.mode === 'first' ? (jparsed && typeof jparsed === 'object' && !Array.isArray(jparsed) ? jparsed : '') : jparsed);
+            } else if (L.kind === 'nestedRows') {
+                const parentIdx = header.indexOf(L.parentKeyCol);
+                const keyIdx = header.indexOf(L.keyCol);
+                const parentDict = getPath(sd, L.parentPath || [L.group]);
+                if (parentDict && typeof parentDict === 'object' && !Array.isArray(parentDict)) {
+                    for (const pk of Object.keys(parentDict)) {
+                        const parent = parentDict[pk];
+                        if (parent && typeof parent === 'object' && !Array.isArray(parent) && !(L.childKey in parent)) parent[L.childKey] = {};
+                    }
+                }
+                for (let r2 = 1; r2 < sRows.length; r2++) {
+                    const rw2 = sRows[r2];
+                    if (!rw2) continue;
+                    const parentKey = parentIdx >= 0 ? rw2[parentIdx] : undefined;
+                    const kv = keyIdx >= 0 ? rw2[keyIdx] : undefined;
+                    if (parentKey === undefined || parentKey === null || parentKey === '' || kv === undefined || kv === null || kv === '') continue;
+                    let pd = getPath(sd, L.parentPath || [L.group]);
+                    if (!pd || typeof pd !== 'object' || Array.isArray(pd)) { setPath(sd, L.parentPath || [L.group], {}); pd = getPath(sd, L.parentPath || [L.group]); }
+                    if (!pd[text(parentKey)] || typeof pd[text(parentKey)] !== 'object' || Array.isArray(pd[text(parentKey)])) pd[text(parentKey)] = {};
+                    if (!pd[text(parentKey)][L.childKey] || typeof pd[text(parentKey)][L.childKey] !== 'object' || Array.isArray(pd[text(parentKey)][L.childKey])) pd[text(parentKey)][L.childKey] = {};
+                    if (L.scalarValueCol) {
+                        const svc = (L.cols || []).find(c => c[0] === L.scalarValueCol);
+                        const svIdx = svc ? header.indexOf(svc[0]) : -1;
+                        const sv = svIdx >= 0 ? rw2[svIdx] : undefined;
+                        pd[text(parentKey)][L.childKey][text(kv)] = svc ? convertCell(svc[1], sv, svc[2], svc[5]) : text(sv);
+                        continue;
+                    }
+                    const item = {};
+                    for (let j2 = 0; j2 < (L.cols || []).length; j2++) {
+                        const c2 = L.cols[j2];
+                        if (c2[0] === L.parentKeyCol || c2[0] === L.keyCol || c2[0] === '_扩展数据') continue;
+                        const vj2 = idxs[j2] >= 0 ? rw2[idxs[j2]] : undefined;
+                        const cp2 = c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : [c2[0]];
+                        setPath(item, cp2, convertCell(c2[1], vj2, c2[2], c2[5]));
+                    }
+                    const ovIdx = header.indexOf('_扩展数据');
+                    if (ovIdx >= 0 && rw2[ovIdx]) Object.assign(item, parseObject(rw2[ovIdx]) || {});
+                    pd[text(parentKey)][L.childKey][text(kv)] = item;
+                }
             } else {
                 const dict = {};
                 const keyIdx = header.indexOf(L.keyCol);
@@ -3329,7 +4439,7 @@
                         // 消歧改名（山西→山西2）时，读回仍还原 stat_data.<组>.<山西>，
                         // 不破坏 MVU 原 shape（普通行表列 path 末尾即字段名，行为不变）。
                         const cp2 = c2 && c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : null;
-                        item[cp2 ? String(cp2[cp2.length - 1]) : c2[0]] = convertCell(c2[1], vj2, c2[2], c2[5]);
+                        setPath(item, cp2 || [c2[0]], convertCell(c2[1], vj2, c2[2], c2[5]));
                     }
                     const ovIdx = header.indexOf('_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) {
@@ -3338,7 +4448,8 @@
                     }
                     dict[text(kv)] = item;
                 }
-                for (const wp2 of L.writePaths || []) setPath(sd, wp2, dict);
+                const rowValue = Object.keys(dict).length === 0 && L.emptyValue === null ? null : dict;
+                for (const wp2 of L.writePaths || []) setPath(sd, wp2, rowValue);
             }
         }
         try { data.display_data = JSON.parse(JSON.stringify(sd)); } catch (e) {}
@@ -3360,9 +4471,31 @@
         const pathParts = (s) => String(s || '').split('.');
         const tableEntryByPath = (pathStr) => {
             let best = null;
+            const pp = pathParts(pathStr);
             for (const L of entries) {
                 if (L.kind === 'array') {
                     if (pathStr === L.group) return { layout: L, kind: 'array' };
+                    continue;
+                }
+                if (L.kind === 'pathArray') {
+                    const prefix = L.path || [];
+                    if (pathStr === prefix.join('.')) return { layout: L, kind: L.kind, prefix };
+                    continue;
+                }
+                if (L.kind === 'nestedArray') {
+                    const p = L.path || [];
+                    if (pp.length === 3 && pp[0] === L.group && p.length && pp[2] === p[p.length - 1]) {
+                        return { layout: L, kind: L.kind, prefix: [pp[0], pp[1], pp[2]] };
+                    }
+                    continue;
+                }
+                if (L.kind === 'nestedRows') {
+                    const base = Array.isArray(L.parentPath) && L.parentPath.length ? L.parentPath : [L.group];
+                    const baseMatch = base.every((p, i) => pp[i] === p);
+                    if (baseMatch && pp.length >= base.length + 2 && pp[base.length + 1] === L.childKey) {
+                        const prefix = [...base, pp[base.length], L.childKey];
+                        if (!best || prefix.length > best.prefix.length) best = { layout: L, kind: L.kind, prefix };
+                    }
                     continue;
                 }
                 const prefix = L.kind === 'singleton' ? [L.group] : ((L.writePaths || [])[0] || [L.group]);
@@ -3408,6 +4541,17 @@
             }
             return -1;
         };
+        const findRelationRow = (sheet, parentCol, parentValue, keyCol, keyValue) => {
+            if (!sheet || !Array.isArray(sheet.content) || !sheet.content[0]) return -1;
+            const pi = sheet.content[0].indexOf(parentCol);
+            const ki = sheet.content[0].indexOf(keyCol);
+            if (pi === -1 || ki === -1) return -1;
+            for (let i = 1; i < sheet.content.length; i++) {
+                const row = sheet.content[i];
+                if (row && String(row[pi]) === String(parentValue) && String(row[ki]) === String(keyValue)) return i;
+            }
+            return -1;
+        };
         const sameValue = (a, b) => {
             const sa = a === undefined || a === null ? '' : String(a);
             const sb = b === undefined || b === null ? '' : String(b);
@@ -3421,7 +4565,7 @@
                 const nv = nextObj[k];
                 const pv = prevObj ? prevObj[k] : undefined;
                 const entry = tableEntryByPath(np);
-                if (entry && entry.kind === 'array') {
+                if (entry && (entry.kind === 'array' || entry.kind === 'pathArray' || entry.kind === 'nestedArray')) {
                     ops.push({ np, entry, value: nv, replace: true });
                     continue;
                 }
@@ -3438,10 +4582,10 @@
                     ops.push({ np, entry, value: nv, json: true });
                     continue;
                 }
-                if (entry && (entry.kind === 'singleton' || entry.kind === 'rows')) {
+                if (entry && (entry.kind === 'singleton' || entry.kind === 'rows' || entry.kind === 'nestedRows')) {
                     const pre = entry.prefix.join('.');
                     const rel = np === pre ? [] : np.slice(pre.length + 1).split('.');
-                    const fIdx = entry.kind === 'rows' ? 1 : 0;
+                    const fIdx = (entry.kind === 'rows' || entry.kind === 'nestedRows') ? 1 : 0;
                     if (rel.length > fIdx) {
                         const fld = rel[fIdx];
                         const declared = entry.layout.cols.some(c => c[0] === fld);
@@ -3460,7 +4604,10 @@
                             if (!isChildGroup) {
                                 for (const c of (entry.layout.cols || [])) {
                                     const cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                                    if (Array.isArray(cp) && cp.length > 1 && cp[0] === groupName0 && cp[1] === fld) { isFlattened = true; break; }
+                                    if (Array.isArray(cp) && (
+                                        ((entry.kind === 'rows' || entry.kind === 'nestedRows') && cp.length > 1 && cp[0] === fld) ||
+                                        (entry.kind !== 'rows' && cp.length > 1 && cp[0] === groupName0 && cp[1] === fld)
+                                    )) { isFlattened = true; break; }
                                 }
                             }
                             if (!isChildGroup && !isFlattened) {
@@ -3468,12 +4615,12 @@
                                 // 当前不存在且新值为“全默认/空”时，标记为“回声候选”，稍后按
                                 // 组级判定：同批写入若有其他真实变化（如成就领取同时改 当前MC点）
                                 // 则放行；只有它自己是唯一变化时才是前端 schema 默认回声，跳过。
-                                const mk0 = entry.kind === 'rows' ? rel[1] : rel[0];
+                                const mk0 = (entry.kind === 'rows' || entry.kind === 'nestedRows') ? rel[1] : rel[0];
                                 if (String(mk0).charAt(0) === '_' && pv === undefined && isStructurallyDefault(nv)) {
-                                    ops.push({ np, entry, value: nv, prev: pv, overflow: true, echoCandidate: true, mergeKey: entry.kind === 'rows' ? rel[1] : rel[0], rowKey: entry.kind === 'rows' ? rel[0] : undefined });
+                                    ops.push({ np, entry, value: nv, prev: pv, overflow: true, echoCandidate: true, mergeKey: mk0, rowKey: (entry.kind === 'rows' || entry.kind === 'nestedRows') ? rel[0] : undefined, parentKey: entry.kind === 'nestedRows' ? entry.prefix[entry.prefix.length - 2] : undefined });
                                     continue;
                                 }
-                                ops.push({ np, entry, value: nv, overflow: true, mergeKey: entry.kind === 'rows' ? rel[1] : rel[0], rowKey: entry.kind === 'rows' ? rel[0] : undefined });
+                                ops.push({ np, entry, value: nv, overflow: true, mergeKey: (entry.kind === 'rows' || entry.kind === 'nestedRows') ? rel[1] : rel[0], rowKey: (entry.kind === 'rows' || entry.kind === 'nestedRows') ? rel[0] : undefined, parentKey: entry.kind === 'nestedRows' ? entry.prefix[entry.prefix.length - 2] : undefined });
                                 continue;
                             }
                         }
@@ -3512,10 +4659,41 @@
             // 空组保护只在 target 完全没提供该组（nextObj 为 null，前端分批写）时生效：
             // 此时组缺失≠删除意图，跳过扫描避免 DELETE-only 误删。
             // 显式把组置空（nextObj 存在但无键，如前端点删除后整组变 {}）是明确的删除意图，必须执行删除。
-            if (nextObj === null && Object.keys(prevDict).length > 0 && nextKeys.size === 0) continue;
+            if (nextDict === undefined && Object.keys(prevDict).length > 0 && nextKeys.size === 0) continue;
             for (const k of Object.keys(prevDict)) {
                 if (!nextKeys.has(k)) {
                     ops.push({ np: wp.concat([k]).join('.'), entry: { layout: L, kind: 'rows', prefix: wp }, kind: 'row-delete', rowKey: k });
+                }
+            }
+        }
+        // 关系子表删除检测：每个父条目下的子键独立比对。
+        for (const L of entries) {
+            if (L.kind !== 'nestedRows') continue;
+            const readParents = (root) => {
+                let cur = root;
+                for (const p of L.parentPath || [L.group]) { if (!cur || typeof cur !== 'object') return undefined; cur = cur[p]; }
+                return cur;
+            };
+            const prevParents = readParents(prevStat);
+            const nextParents = readParents(nextStat);
+            if (!prevParents || typeof prevParents !== 'object' || Array.isArray(prevParents)) continue;
+            for (const parentKey of Object.keys(prevParents)) {
+                const prevChild = prevParents[parentKey] && prevParents[parentKey][L.childKey];
+                if (!prevChild || typeof prevChild !== 'object' || Array.isArray(prevChild)) continue;
+                const nextParent = nextParents && nextParents[parentKey];
+                const nextChild = nextParent && nextParent[L.childKey];
+                if (nextParent === undefined) continue; // 父行删除由父表处理，避免分批写误删
+                const nextKeys = nextChild && typeof nextChild === 'object' && !Array.isArray(nextChild)
+                    ? new Set(Object.keys(nextChild)) : new Set();
+                for (const childEntryKey of Object.keys(prevChild)) {
+                    if (!nextKeys.has(childEntryKey)) {
+                        const prefix = [...(L.parentPath || [L.group]), parentKey, L.childKey];
+                        ops.push({
+                            np: prefix.concat([childEntryKey]).join('.'),
+                            entry: { layout: L, kind: 'nestedRows', prefix },
+                            kind: 'row-delete', rowKey: childEntryKey, parentKey,
+                        });
+                    }
                 }
             }
         }
@@ -3557,7 +4735,8 @@
                 const flattenedContainers = new Set();
                 for (const c of (entry.layout.cols || [])) {
                     const cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                    if (Array.isArray(cp) && cp.length > 1 && cp[0] === groupName) flattenedContainers.add(cp[1]);
+                    if (!Array.isArray(cp) || cp.length <= 1) continue;
+                    flattenedContainers.add(entry.kind === 'rows' ? cp[0] : (cp[0] === groupName ? cp[1] : cp[0]));
                 }
                 if (entry.layout.cols.some(c => c[0] === fld) || childGroupKeys.has(fld) || flattenedContainers.has(fld)) continue;
                 ops.push({
@@ -3694,8 +4873,10 @@
             if (!found) continue;
             const sheet = found.sheet;
             const header = sheet.content && sheet.content[0] ? sheet.content[0] : [];
-            if (op.kind === 'row-delete' && E.kind === 'rows') {
-                const rowIndex = findRowByColumn(sheet, L.keyCol, op.rowKey);
+            if (op.kind === 'row-delete' && (E.kind === 'rows' || E.kind === 'nestedRows')) {
+                const rowIndex = E.kind === 'nestedRows'
+                    ? findRelationRow(sheet, L.parentKeyCol, op.parentKey, L.keyCol, op.rowKey)
+                    : findRowByColumn(sheet, L.keyCol, op.rowKey);
                 if (rowIndex !== -1) {
                     resolved.push({ kind: 'row-delete', key: found.key, sheet, header, layout: L, rowIndex });
                 } else {
@@ -3729,10 +4910,12 @@
                 const ovcIdx = header.indexOf('_扩展数据');
                 if (ovcIdx === -1) continue;
                 let ovRow = 1;
-                if (E.kind === 'rows') {
+                if (E.kind === 'rows' || E.kind === 'nestedRows') {
                     const ovKey = op.rowKey;
                     if (ovKey === undefined) continue;
-                    ovRow = findRowByColumn(sheet, L.keyCol, ovKey);
+                    ovRow = E.kind === 'nestedRows'
+                        ? findRelationRow(sheet, L.parentKeyCol, op.parentKey, L.keyCol, ovKey)
+                        : findRowByColumn(sheet, L.keyCol, ovKey);
                     if (ovRow === -1) continue; // 行已不存在，无需清理
                 }
                 // 删除在运行时读取当前单元格再执行，避免覆盖同批次的溢出写入（见 runDirectOps）
@@ -3746,10 +4929,12 @@
                     continue;
                 }
                 let ovRow = 1;
-                if (E.kind === 'rows') {
+                if (E.kind === 'rows' || E.kind === 'nestedRows') {
                     const ovKey = op.rowKey;
                     if (ovKey === undefined) continue;
-                    ovRow = findRowByColumn(sheet, L.keyCol, ovKey);
+                    ovRow = E.kind === 'nestedRows'
+                        ? findRelationRow(sheet, L.parentKeyCol, op.parentKey, L.keyCol, ovKey)
+                        : findRowByColumn(sheet, L.keyCol, ovKey);
                     if (ovRow === -1) {
                         // 行可能只存在于 seedRows：跳过，避免 INSERT 撞 UNIQUE
                         const srH2 = header;
@@ -3761,9 +4946,11 @@
                             continue;
                         }
                         // 合并进同一新行（与已声明字段同一条 INSERT，避免重复 INSERT 撞 UNIQUE）
-                        const nk2 = L.table + '\u0000' + ovKey;
+                        const nk2 = E.kind === 'nestedRows'
+                            ? L.table + '\u0000' + String(op.parentKey == null ? '' : op.parentKey) + '\u0000' + ovKey
+                            : L.table + '\u0000' + ovKey;
                         let nr2 = newRows.get(nk2);
-                        if (!nr2) { nr2 = { table: L.table, header, layout: L, keyCol: L.keyCol, keyVal: ovKey, cells: {} }; newRows.set(nk2, nr2); }
+                        if (!nr2) { nr2 = { table: L.table, header, layout: L, keyCol: L.keyCol, keyVal: ovKey, parentKeyCol: E.kind === 'nestedRows' ? L.parentKeyCol : '', parentVal: op.parentKey, cells: {} }; newRows.set(nk2, nr2); }
                         const ovCell = JSON.stringify({ [op.mergeKey]: op.value });
                         const prevOv = nr2.cells['_扩展数据'];
                         if (prevOv) {
@@ -3783,12 +4970,16 @@
                 directOps.push({ kind: 'overflow', key: found.key, sheet, header, layout: L, rowIndex: ovRow, mergeKey: op.mergeKey, value: op.value });
                 continue;
             }
-            if (op.replace && E.kind === 'array') {
+            if (op.replace && (E.kind === 'array' || E.kind === 'pathArray' || E.kind === 'nestedArray')) {
                 const arr = Array.isArray(op.value) ? op.value : [];
-                const oldVals = sheet.content.slice(1).map(r => (r ? r[1] : undefined));
+                const valueIdx = header.indexOf(L.valueCol || (header[1] || '内容'));
+                const parentIdx = E.kind === 'nestedArray' ? header.indexOf(L.parentKeyCol) : -1;
+                const parentVal = E.kind === 'nestedArray' ? E.prefix[1] : undefined;
+                const oldRows = sheet.content.slice(1).filter(r => E.kind !== 'nestedArray' || (r && parentIdx >= 0 && String(r[parentIdx]) === String(parentVal)));
+                const oldVals = oldRows.map(r => (r && valueIdx >= 0 ? r[valueIdx] : undefined));
                 const unchanged = oldVals.length === arr.length && oldVals.every((v, i) => sameValue(v, arr[i]));
                 if (unchanged) continue;
-                resolved.push({ kind: 'array', key: found.key, sheet, header, layout: L, arr });
+                resolved.push({ kind: E.kind === 'nestedArray' ? 'nested-array' : 'array', key: found.key, sheet, header, layout: L, arr, parentIdx, parentVal, valueIdx });
                 continue;
             }
             const parts = pathParts(op.np);
@@ -3803,10 +4994,13 @@
                     const r = sheet.content[ri];
                     if (r && String(r[0]) === '1') { rowIndex = ri; break; }
                 }
-            } else if (E.kind === 'rows') {
+            } else if (E.kind === 'rows' || E.kind === 'nestedRows') {
                 const keyVal = parts[E.prefix.length];
                 if (keyVal === undefined) continue;
-                rowIndex = findRowByColumn(sheet, L.keyCol, keyVal);
+                const parentVal = E.kind === 'nestedRows' ? E.prefix[E.prefix.length - 2] : undefined;
+                rowIndex = E.kind === 'nestedRows'
+                    ? findRelationRow(sheet, L.parentKeyCol, parentVal, L.keyCol, keyVal)
+                    : findRowByColumn(sheet, L.keyCol, keyVal);
                 if (rowIndex === -1) {
                     // 行不在 content：直接 INSERT（含 seedRows 里的模板行——插件 seed 物化
                     // 会按业务键去重，不会重复；快照兜底已删，跳过 = 永远落不了库）
@@ -3820,16 +5014,26 @@
                         // 展平容器路径（如 主角.炼丹.熟练度 → 炼丹熟练度 列）
                         for (const c of (L.cols || [])) {
                             const cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                            if (Array.isArray(cp) && cp.length === parts.length && cp.every((p, i) => p === parts[i])) {
+                            const logicalParts = E.kind === 'rows' ? parts.slice(E.prefix.length + 1) : parts;
+                            if (Array.isArray(cp) && cp.length === logicalParts.length && cp.every((p, i) => p === logicalParts[i])) {
                                 colZh = Array.isArray(c) ? c[0] : (c.zh);
                                 break;
                             }
                         }
                     }
-                    const nk = L.table + '\u0000' + keyVal;
+                    const nk = E.kind === 'nestedRows'
+                        ? L.table + '\u0000' + String(parentVal == null ? '' : parentVal) + '\u0000' + keyVal
+                        : L.table + '\u0000' + keyVal;
                     let nr = newRows.get(nk);
-                    if (!nr) { nr = { table: L.table, header, layout: L, keyCol: L.keyCol, keyVal, cells: {} }; newRows.set(nk, nr); }
-                    nr.cells[colZh] = op.value;
+                    if (!nr) { nr = { table: L.table, header, layout: L, keyCol: L.keyCol, keyVal, parentKeyCol: L.parentKeyCol || '', parentVal, cells: {} }; newRows.set(nk, nr); }
+                    // 对象列（JSON 存储，如 宗门.资源/建筑）：新行合并时整对象 JSON 序列化，
+                    // 否则 String(对象) 会落成 '[object Object]'（旧行更新有 jsonCell 处理，
+                    // 新行合并路径此前漏了）。
+                    const colDefN = (L.cols || []).find(c => c[0] === colZh);
+                    const objColN = colDefN && /object|json/i.test(String(Array.isArray(colDefN) ? colDefN[1] : (colDefN.type || '')));
+                    nr.cells[colZh] = (objColN && op.value && typeof op.value === 'object')
+                        ? JSON.stringify(op.value)
+                        : op.value;
                     continue;
                 }
             }
@@ -3846,7 +5050,8 @@
                 // 展平容器路径（如 主角.炼丹.熟练度 → 炼丹熟练度 列）
                 for (const c of (L.cols || [])) {
                     const cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                    if (Array.isArray(cp) && cp.length === parts.length && cp.every((p, i) => p === parts[i])) {
+                    const logicalParts = E.kind === 'rows' ? parts.slice(E.prefix.length + 1) : parts;
+                    if (Array.isArray(cp) && cp.length === logicalParts.length && cp.every((p, i) => p === logicalParts[i])) {
                         colZh = Array.isArray(c) ? c[0] : (c.zh);
                         colIdx = header.indexOf(colZh);
                         break;
@@ -3878,6 +5083,10 @@
             }
             const ki = nr.header.indexOf(nr.keyCol);
             if (ki >= 0) { arr[ki] = String(nr.keyVal); obj[nr.keyCol] = String(nr.keyVal); }
+            if (nr.parentKeyCol) {
+                const pi = nr.header.indexOf(nr.parentKeyCol);
+                if (pi >= 0) { arr[pi] = String(nr.parentVal); obj[nr.parentKeyCol] = String(nr.parentVal); }
+            }
             resolved.push({ kind: 'cell', key: nr.table, sheet: null, header: nr.header, layout: nr.layout, rowIndex: -1, colIdx: -1, colZh: '', value: undefined, newRowArr: arr, newRowObj: obj });
         }
         if (resolved.length === 0 && directOps.length === 0) return 0;
@@ -3906,7 +5115,22 @@
                         try { await Promise.resolve(api.deleteRow(L.table, rr)); } catch (e) {}
                     }
                     for (let ai = 0; ai < r.arr.length; ai++) {
-                        const o = {}; o[r.header[1] || '名称'] = String(r.arr[ai]);
+                        const o = {}; const av = r.arr[ai]; o[L.valueCol || r.header[1] || '内容'] = av && typeof av === 'object' ? JSON.stringify(av) : String(av);
+                        try { await Promise.resolve(api.insertRow(L.table, o)); } catch (e) {}
+                    }
+                    continue;
+                }
+                if (r.kind === 'nested-array') {
+                    for (let rr = r.sheet.content.length - 1; rr >= 1; rr--) {
+                        const row = r.sheet.content[rr];
+                        if (row && r.parentIdx >= 0 && String(row[r.parentIdx]) === String(r.parentVal)) {
+                            try { await Promise.resolve(api.deleteRow(L.table, rr)); } catch (e) {}
+                        }
+                    }
+                    for (const item of r.arr) {
+                        const o = {};
+                        o[L.parentKeyCol] = String(r.parentVal);
+                        o[L.valueCol || '内容'] = item && typeof item === 'object' ? JSON.stringify(item) : String(item);
                         try { await Promise.resolve(api.insertRow(L.table, o)); } catch (e) {}
                     }
                     continue;
@@ -4149,6 +5373,7 @@
             `function sheetOf(name){return window.getSheetByName(name);}`,
             `function text(v,fb){if(v===undefined||v===null||v==='')return fb===undefined?'':fb;return String(v);}`,
             `function number(v,fb){var n=parseFloat(v);return isNaN(n)?(fb===undefined?0:fb):n;}`,
+            `function boolean(v,fb){if(typeof v==='boolean')return v;if(typeof v==='number')return v!==0;var s=String(v===undefined||v===null?'':v).trim().toLowerCase();if(s==='1'||s==='true')return true;if(s==='0'||s==='false'||s==='')return s===''&&typeof fb==='boolean'?fb:false;var n=Number(s);return isFinite(n)?n!==0:(typeof fb==='boolean'?fb:false);}`,
             `function parseObject(v){`,
             `  try{`,
             `    if(!v)return {};`,
@@ -4163,6 +5388,7 @@
             `}`,
             `function convertCell(type,v,fb){`,
             `  if(type==='number')return number(v,fb);`,
+            `  if(type==='boolean')return boolean(v,fb);`,
             `  if(type==='object')return parseObject(v);`,
             `  if(type==='pair'){`,
             `    var base=text(v,fb);`,
@@ -4180,6 +5406,7 @@
             `  }`,
             `  cur[path[path.length-1]]=value;`,
             `}`,
+            `function getPath(obj,path){var cur=obj;for(var i=0;i<(path||[]).length;i++){if(cur===null||cur===undefined||typeof cur!=='object')return undefined;cur=cur[path[i]];}return cur;}`,
             '',
             `var runtimeDisplay={};`,
             '',
@@ -4231,7 +5458,9 @@
             `      var s=sheetOfSnap(L.table);`,
             `      if(!s||!Array.isArray(s.content)||!s.content.length){`,
             `        if(L.kind==='rows'){`,
-            `          for(var wi=0;wi<(L.writePaths||[]).length;wi++)setPath(sd,L.writePaths[wi],{});`,
+            `          for(var wi=0;wi<(L.writePaths||[]).length;wi++)setPath(sd,L.writePaths[wi],L.emptyValue===null?null:{});`,
+            `        }else if(L.kind==='pathArray'){`,
+            `          setPath(sd,L.path,[]);`,
             `        }else if(L.kind==='array'){`,
             `          sd[L.group]=[];`,
             `          for(var mi=0;mi<(L.mirrors||[]).length;mi++)setPath(sd,L.mirrors[mi].path,'');`,
@@ -4271,17 +5500,50 @@
             `          var mm=L.mirrors[mi2];`,
             `          setPath(sd,mm.path,mm.mode==='first'?(arr.length?arr[0]:''):arr);`,
             `        }`,
+            `      }else if(L.kind==='pathArray'){`,
+            `        var parr=[];var pvi=header.indexOf(L.valueCol);var pvc=null;for(var pci=0;pci<L.cols.length;pci++){if(L.cols[pci][0]===L.valueCol){pvc=L.cols[pci];break;}}`,
+            `        for(var pr=1;pr<sRows.length;pr++){var prw=sRows[pr];if(prw&&pvi>=0)parr.push(convertCell(pvc?pvc[1]:'text',prw[pvi],pvc?pvc[2]:'',pvc?pvc[5]:''));}`,
+            `        setPath(sd,L.path,parr);`,
+            `      }else if(L.kind==='nestedArray'){`,
+            `        var napi=header.indexOf(L.parentKeyCol),navi=header.indexOf(L.valueCol),navc=null;for(var naci=0;naci<L.cols.length;naci++){if(L.cols[naci][0]===L.valueCol){navc=L.cols[naci];break;}}`,
+            `        var naps=sd[L.group];var nack=L.path&&L.path.length?L.path[L.path.length-1]:'';`,
+            `        if(naps&&typeof naps==='object'&&!Array.isArray(naps)){for(var napk in naps){if(naps[napk]&&typeof naps[napk]==='object')naps[napk][nack]=[];}for(var nar=1;nar<sRows.length;nar++){var narw=sRows[nar];if(!narw||napi<0||navi<0)continue;var nap=text(narw[napi]);if(nap&&naps[nap]&&typeof naps[nap]==='object')naps[nap][nack].push(convertCell(navc?navc[1]:'text',narw[navi],navc?navc[2]:'',navc?navc[5]:''));}}`,
             `      }else if(L.kind==='json'){`,
             `        // 整组 JSON：单行“内容”列原样还原任意形状（对象/字典/标量）`,
             `        var jrow=s.content[1]||[];`,
             `        var jidx=header.indexOf('内容');`,
             `        var jv=jidx>=0?jrow[jidx]:undefined;`,
             `        var jparsed=parseObject(jv);`,
-            `        sd[L.group]=jparsed===null||jparsed===undefined?{}:jparsed;`,
+            `        sd[L.group]=jparsed===undefined?{}:jparsed;`,
             `        // 镜像（若有）`,
             `        for(var mi3=0;mi3<(L.mirrors||[]).length;mi3++){`,
             `          var mm3=L.mirrors[mi3];`,
             `          setPath(sd,mm3.path,mm3.mode==='first'?(jparsed&&typeof jparsed==='object'&&!Array.isArray(jparsed)?jparsed:''):jparsed);`,
+            `        }`,
+            `      }else if(L.kind==='nestedRows'){`,
+            `        var parentIdx=header.indexOf(L.parentKeyCol);`,
+            `        var nKeyIdx=header.indexOf(L.keyCol);`,
+            `        var npd=getPath(sd,L.parentPath||[L.group]);`,
+            `        if(npd&&typeof npd==='object'&&!Array.isArray(npd)){`,
+            `          for(var pk0 in npd){var po0=npd[pk0];if(po0&&typeof po0==='object'&&!Array.isArray(po0)&&!(L.childKey in po0))po0[L.childKey]={};}`,
+            `        }`,
+            `        for(var nr0=1;nr0<sRows.length;nr0++){`,
+            `          var nrw=sRows[nr0];if(!nrw)continue;`,
+            `          var npk=parentIdx>=0?nrw[parentIdx]:undefined;var nkv=nKeyIdx>=0?nrw[nKeyIdx]:undefined;`,
+            `          if(npk===undefined||npk===null||npk===''||nkv===undefined||nkv===null||nkv==='')continue;`,
+            `          npk=text(npk);nkv=text(nkv);`,
+            `          var npd2=getPath(sd,L.parentPath||[L.group]);if(!npd2||typeof npd2!=='object'||Array.isArray(npd2)){setPath(sd,L.parentPath||[L.group],{});npd2=getPath(sd,L.parentPath||[L.group]);}`,
+            `          if(!npd2[npk]||typeof npd2[npk]!=='object'||Array.isArray(npd2[npk]))npd2[npk]={};`,
+            `          if(!npd2[npk][L.childKey]||typeof npd2[npk][L.childKey]!=='object'||Array.isArray(npd2[npk][L.childKey]))npd2[npk][L.childKey]={};`,
+            `          if(L.scalarValueCol){`,
+            `            var nsvc=null;for(var nsc=0;nsc<L.cols.length;nsc++){if(L.cols[nsc][0]===L.scalarValueCol){nsvc=L.cols[nsc];break;}}`,
+            `            var nsvi=nsvc?header.indexOf(nsvc[0]):-1;var nsv=nsvi>=0?nrw[nsvi]:undefined;`,
+            `            npd2[npk][L.childKey][nkv]=nsvc?convertCell(nsvc[1],nsv,nsvc[2],nsvc[5]):text(nsv);continue;`,
+            `          }`,
+            `          var nitem={};`,
+            `          for(var nc0=0;nc0<L.cols.length;nc0++){var ncc=L.cols[nc0];if(ncc[0]===L.parentKeyCol||ncc[0]===L.keyCol||ncc[0]==='_扩展数据')continue;var nvi=idxs[nc0]>=0?nrw[idxs[nc0]]:undefined;var ncp=ncc[3]&&ncc[3].length?ncc[3]:[ncc[0]];setPath(nitem,ncp,convertCell(ncc[1],nvi,ncc[2],ncc[5]));}`,
+            `          var novi=header.indexOf('_扩展数据');if(novi>=0&&nrw[novi]){var nov=parseObject(nrw[novi]);for(var nok in nov){if(Object.prototype.hasOwnProperty.call(nov,nok))nitem[nok]=nov[nok];}}`,
+            `          npd2[npk][L.childKey][nkv]=nitem;`,
             `        }`,
             `      }else{`,
             `        var dict={};`,
@@ -4311,7 +5573,7 @@
             `            // 与核心 statDataFromTables 一致：条目对象键优先用列 path 末尾`,
             `            // 的原始中文（拼音冲突消歧改名如 山西→山西2 时读回形状不变）。`,
             `            var cjPath=cj2&&cj2.length>3&&Array.isArray(cj2[3])&&cj2[3].length?cj2[3]:null;`,
-            `            item[cjPath?String(cjPath[cjPath.length-1]):cj2[0]]=convertCell(cj2[1],vj2,cj2[2],cj2[5]);`,
+            `            setPath(item,cjPath||[cj2[0]],convertCell(cj2[1],vj2,cj2[2],cj2[5]));`,
             `          }`,
             `          // 溢出列合并：模板未声明的动态字段`,
             `          var ovIdx=header.indexOf('_扩展数据');`,
@@ -4321,7 +5583,8 @@
             `          }`,
             `          dict[text(kv)]=item;`,
             `        }`,
-            `        for(var wi2=0;wi2<(L.writePaths||[]).length;wi2++)setPath(sd,L.writePaths[wi2],dict);`,
+            `        var rowValue=Object.keys(dict).length===0&&L.emptyValue===null?null:dict;`,
+            `        for(var wi2=0;wi2<(L.writePaths||[]).length;wi2++)setPath(sd,L.writePaths[wi2],rowValue);`,
             `      }`,
             `    }`,
             `  }catch(e){`,
@@ -4473,6 +5736,27 @@
             `  }catch(e){}`,
             `  if(typeof setInterval==='function')setInterval(function(){try{mvuBridgeGuard();}catch(e){}},3000);`,
             `})();`,
+            `// 自包含 EJS 数据入口：只导入转换卡时也向 st-prompt-template 注册。`,
+            `var ejsDefineRetries=0;`,
+            `function installBridgeEjsDefine(){`,
+            `  var installed=false;var ws=[];`,
+            `  function addW(w){try{if(w&&ws.indexOf(w)===-1)ws.push(w);}catch(e){}}`,
+            `  addW(window);addW(rootWindow);for(var ri=0;ri<roots.length;ri++)addW(roots[ri]);`,
+            `  for(var wi=0;wi<ws.length;wi++){`,
+            `    try{`,
+            `      var ej=ws[wi].EjsTemplate;if(!ej||!ej.defines||typeof ej.defines!=='object')continue;`,
+            `      var old=ej.defines.mvu2shujukuGetAllVariables;`,
+            `      if(typeof old!=='function'||old.__mvu2shujukuBridge){`,
+            `        var fn=function(){try{if(!bridgeOwnCardActive())return {stat_data:{}};return window.getAllVariables?window.getAllVariables():{stat_data:{}};}catch(e){return {stat_data:{}};}};`,
+            `        fn.__mvu2shujukuBridge=true;ej.defines.mvu2shujukuGetAllVariables=fn;`,
+            `      }`,
+            `      installed=true;`,
+            `    }catch(e){}`,
+            `  }`,
+            `  if(!installed&&ejsDefineRetries++<60&&typeof setTimeout==='function')setTimeout(installBridgeEjsDefine,1000);`,
+            `  return installed;`,
+            `}`,
+            `installBridgeEjsDefine();`,
             '',
             `var currentStat=function(){`,
             `  try{return window.getAllVariables().stat_data||{};}catch(e){return {};}`,
@@ -4480,10 +5764,17 @@
             '',
             `function tableEntryByPath(pathStr){`,
             `  var best=null;`,
+            `  var pparts=pathParts(pathStr);`,
             `  for(var ei=0;ei<SD_LAYOUT.length;ei++){`,
             `    var L=SD_LAYOUT[ei];`,
             `    if(L.kind==='array'){`,
             `      if(pathStr===L.group)return{layout:L,kind:'array'};`,
+            `      continue;`,
+            `    }`,
+            `    if(L.kind==='pathArray'){var pap=L.path||[];if(pathStr===pap.join('.'))return{layout:L,kind:L.kind,prefix:pap};continue;}`,
+            `    if(L.kind==='nestedArray'){var nap=L.path||[];if(pparts.length===3&&pparts[0]===L.group&&nap.length&&pparts[2]===nap[nap.length-1])return{layout:L,kind:L.kind,prefix:[pparts[0],pparts[1],pparts[2]]};continue;}`,
+            `    if(L.kind==='nestedRows'){`,
+            `      var nb=L.parentPath&&L.parentPath.length?L.parentPath:[L.group];var nbm=true;for(var nbi=0;nbi<nb.length;nbi++){if(pparts[nbi]!==nb[nbi]){nbm=false;break;}}if(nbm&&pparts.length>=nb.length+2&&pparts[nb.length+1]===L.childKey){var nprefix=nb.concat([pparts[nb.length],L.childKey]);if(!best||nprefix.length>best.prefix.length)best={layout:L,kind:L.kind,prefix:nprefix};}`,
             `      continue;`,
             `    }`,
             `    var prefix=null;`,
@@ -4511,7 +5802,7 @@
             `      var nv=nextObj[k];`,
             `      var pv=prevObj?prevObj[k]:undefined;`,
             `      var entry=tableEntryByPath(np);`,
-            `      if(entry&&entry.kind==='array'){`,
+            `      if(entry&&(entry.kind==='array'||entry.kind==='pathArray'||entry.kind==='nestedArray')){`,
             `        ops.push({np:np,entry:entry,value:nv,replace:true});`,
             `        continue;`,
             `      }`,
@@ -4520,11 +5811,11 @@
             `        ops.push({np:np,entry:entry,value:nv,json:true});`,
             `        continue;`,
             `      }`,
-            `      if(entry&&(entry.kind==='singleton'||entry.kind==='rows')){`,
+            `      if(entry&&(entry.kind==='singleton'||entry.kind==='rows'||entry.kind==='nestedRows')){`,
             `        // 模板未声明的动态字段 → 溢出列 JSON 合并`,
             `        var pre=entry.prefix.join('.');`,
             `        var rel=np===pre?[]:np.slice(pre.length+1).split('.');`,
-            `        var fIdx=entry.kind==='rows'?1:0;`,
+            `        var fIdx=(entry.kind==='rows'||entry.kind==='nestedRows')?1:0;`,
             `        if(rel.length>fIdx){`,
             `          var fld=rel[fIdx];`,
             `          var declared=entry.layout.cols.some(function(c){return c[0]===fld;});`,
@@ -4543,11 +5834,11 @@
             `              for(var ci2=0;ci2<(entry.layout.cols||[]).length;ci2++){`,
             `                var cc2=entry.layout.cols[ci2];`,
             `                var cp2=cc2&&cc2[3];`,
-            `                if(cp2&&cp2.length>1&&cp2[0]===groupName0&&cp2[1]===fld){isFlattened=true;break;}`,
+            `                if(cp2&&(((entry.kind==='rows'||entry.kind==='nestedRows')&&cp2.length>1&&cp2[0]===fld)||((entry.kind!=='rows'&&entry.kind!=='nestedRows')&&cp2.length>1&&cp2[0]===groupName0&&cp2[1]===fld))){isFlattened=true;break;}`,
             `              }`,
             `            }`,
             `            if(!isChildGroup&&!isFlattened){`,
-            `              ops.push({np:np,entry:entry,value:nv,overflow:true,mergeKey:entry.kind==='rows'?rel[1]:rel[0],rowKey:entry.kind==='rows'?rel[0]:undefined});`,
+            `              ops.push({np:np,entry:entry,value:nv,overflow:true,mergeKey:(entry.kind==='rows'||entry.kind==='nestedRows')?rel[1]:rel[0],rowKey:(entry.kind==='rows'||entry.kind==='nestedRows')?rel[0]:undefined,parentKey:entry.kind==='nestedRows'?entry.prefix[entry.prefix.length-2]:undefined});`,
             `              continue;`,
             `            }`,
             `          }`,
@@ -4596,7 +5887,7 @@
             `        for(var c3=0;c3<(dentry.layout.cols||[]).length;c3++){`,
             `          var cc3=dentry.layout.cols[c3];`,
             `          var cp3=cc3&&cc3[3];`,
-            `          if(cp3&&cp3.length>1&&cp3[0]===dgroup&&cp3[1]===dfld){dflat=true;break;}`,
+            `          if(cp3&&((dentry.kind==='rows'&&cp3.length>1&&cp3[0]===dfld)||(dentry.kind!=='rows'&&cp3.length>1&&cp3[0]===dgroup&&cp3[1]===dfld))){dflat=true;break;}`,
             `        }`,
             `      }`,
             `      if((dentry.layout.cols||[]).some(function(c){return c[0]===dfld;})||dchild||dflat)continue;`,
@@ -4610,6 +5901,7 @@
             `  try{tablesAll=API.exportTableAsJson()||{};}catch(e){}`,
             `  function sheetOfLocal(name){for(var k in tablesAll){if(k.indexOf('sheet_')===0&&tablesAll[k]&&tablesAll[k].name===name)return tablesAll[k];}return null;}`,
             `  function findRowLocal(sheet,colName,value){if(!sheet||!Array.isArray(sheet.content))return -1;var ci=sheet.content[0]?sheet.content[0].indexOf(colName):-1;if(ci===-1)return -1;for(var i=1;i<sheet.content.length;i++){if(sheet.content[i]&&String(sheet.content[i][ci])===String(value))return i;}return -1;}`,
+            `  function findRelationLocal(sheet,parentCol,parentValue,keyCol,keyValue){if(!sheet||!Array.isArray(sheet.content)||!sheet.content[0])return -1;var pi=sheet.content[0].indexOf(parentCol),ki=sheet.content[0].indexOf(keyCol);if(pi===-1||ki===-1)return -1;for(var i=1;i<sheet.content.length;i++){var r=sheet.content[i];if(r&&String(r[pi])===String(parentValue)&&String(r[ki])===String(keyValue))return i;}return -1;}`,
             `  // 单例/整组JSON表若缺初始行（插件可能只保留表头+seedRows，未物化到 content），先按模板补行，`,
             `  // 避免 updateCell: Row index 1 out of bounds 导致写入落空`,
             `  var needSeed={};`,
@@ -4701,41 +5993,53 @@
             `      try{await Promise.resolve(API.updateCell(L.table,orRow,'_扩展数据',orStr));}catch(e){console.warn('['+BRIDGE_NAME+'] 溢出列删除失败:',e);}`,
             `      continue;`,
             `    }`,
-            `    if(op.replace&&E.kind==='array'){`,
+            `    if(op.replace&&(E.kind==='array'||E.kind==='pathArray'||E.kind==='nestedArray')){`,
             `      // 数组整体替换：先清空旧行，再逐行插入`,
             `      var arr=Array.isArray(op.value)?op.value:[];`,
             `      var oldVals=[];`,
-            `      for(var rv=1;rv<sheet.content.length;rv++)oldVals.push(sheet.content[rv]?sheet.content[rv][1]:undefined);`,
+            `      var avi=header.indexOf(L.valueCol||header[1]||'内容');var api=E.kind==='nestedArray'?header.indexOf(L.parentKeyCol):-1;var apv=E.kind==='nestedArray'?E.prefix[1]:undefined;`,
+            `      for(var rv=1;rv<sheet.content.length;rv++){var arw=sheet.content[rv];if(E.kind!=='nestedArray'||(arw&&api>=0&&String(arw[api])===String(apv)))oldVals.push(arw&&avi>=0?arw[avi]:undefined);}`,
             `      var arrSame=oldVals.length===arr.length&&oldVals.every(function(v,i){return String(v)===String(arr[i]);});`,
             `      if(arrSame)continue;`,
             `      // deleteRow 的 rowIndex 是 content 数组索引（0=表头，1=第一数据行），rr 即数组索引`,
-            `      for(var rr=sheet.content.length-1;rr>=1;rr--){try{await Promise.resolve(API.deleteRow(L.table,rr));}catch(e){}}`,
+            `      for(var rr=sheet.content.length-1;rr>=1;rr--){var drw=sheet.content[rr];if(E.kind!=='nestedArray'||(drw&&api>=0&&String(drw[api])===String(apv))){try{await Promise.resolve(API.deleteRow(L.table,rr));}catch(e){}}}`,
             `      for(var ai=0;ai<arr.length;ai++){`,
-            `        var o={};o[header[1]||'名称']=String(arr[ai]);`,
+            `        var o={};var av=arr[ai];if(E.kind==='nestedArray')o[L.parentKeyCol]=String(apv);o[L.valueCol||header[1]||'内容']=(av&&typeof av==='object')?JSON.stringify(av):String(av);`,
             `        try{await Promise.resolve(API.insertRow(L.table,o));}catch(e){console.warn('['+BRIDGE_NAME+'] insertRow 失败:',e);}`,
             `      }`,
             `      continue;`,
             `    }`,
             `    var parts=pathParts(op.np);`,
-            `    var isRows=E.kind==='rows';`,
+            `    var isRows=E.kind==='rows'||E.kind==='nestedRows';`,
             `    var rowIndex=-1;`,
             `    if(E.kind==='singleton'){`,
             `      rowIndex=1;`,
             `    }else if(isRows){`,
             `      var keyVal=parts[E.prefix.length];`,
             `      if(keyVal===undefined){continue;}`,
-            `      rowIndex=findRowLocal(sheet,L.keyCol,keyVal);`,
+            `      var parentVal=E.kind==='nestedRows'?E.prefix[E.prefix.length-2]:undefined;`,
+            `      rowIndex=E.kind==='nestedRows'?findRelationLocal(sheet,L.parentKeyCol,parentVal,L.keyCol,keyVal):findRowLocal(sheet,L.keyCol,keyVal);`,
             `      if(rowIndex===-1){`,
             `        // 新条目：插入`,
             `        var newRow={};`,
             `        for(var nc=0;nc<L.cols.length;nc++){`,
             `          var cc=L.cols[nc];`,
+            `          if(E.kind==='nestedRows'&&cc[0]===L.parentKeyCol){newRow[cc[0]]=String(parentVal);continue;}`,
             `          if(cc[0]===L.keyCol){newRow[cc[0]]=String(keyVal);continue;}`,
             `          var cp=parts.slice(E.prefix.length+1);`,
             `          // 标量条目行表（如 修仙秘闻.标题=内容）：值落在「描述/数值」列，`,
             `          // 而不是把条目键当成列名（否则新条目会带空描述插入）。`,
             `          if(L.scalarValueCol&&cp.length===1){ if(cc[0]===L.scalarValueCol)newRow[cc[0]]=String(op.value); }`,
-            `          else if(cp.length===1&&cp[0]===cc[0])newRow[cc[0]]=String(op.value);`,
+            `          else {`,
+            `            var ccPath=cc&&cc[3]&&cc[3].length?cc[3]:[cc[0]];`,
+            `            var sameNew=ccPath.length===cp.length;`,
+            `            for(var cpi=0;sameNew&&cpi<cp.length;cpi++){if(String(ccPath[cpi])!==String(cp[cpi]))sameNew=false;}`,
+            `            if(!sameNew)continue;`,
+            `            // 对象列（JSON 存储，如 宗门.资源/建筑）：整对象 JSON 序列化，`,
+            `            // 否则 String(对象) 落成 '[object Object]'。`,
+            `            var objColN=cc&&/object|json/i.test(String(cc[1]||''));`,
+            `            newRow[cc[0]]=(objColN&&op.value&&typeof op.value==='object')?JSON.stringify(op.value):String(op.value);`,
+            `          }`,
             `        }`,
             `        try{await Promise.resolve(API.insertRow(L.table,newRow));}catch(e){console.warn('['+BRIDGE_NAME+'] insertRow 失败:',e);}`,
             `        continue;`,
@@ -4750,9 +6054,10 @@
             `      for(var pc=0;pc<(L.cols||[]).length;pc++){`,
             `        var pcol=L.cols[pc];`,
             `        var pp=pcol&&pcol[3];`,
-            `        if(pp&&pp.length===parts.length){`,
+            `        var logicalParts=(E.kind==='rows'||E.kind==='nestedRows')?parts.slice(E.prefix.length+1):parts;`,
+            `        if(pp&&pp.length===logicalParts.length){`,
             `          var sameP=true;`,
-            `          for(var pi2=0;pi2<parts.length;pi2++){if(String(pp[pi2])!==String(parts[pi2])){sameP=false;break;}}`,
+            `          for(var pi2=0;pi2<logicalParts.length;pi2++){if(String(pp[pi2])!==String(logicalParts[pi2])){sameP=false;break;}}`,
             `          if(sameP){colZh=pcol[0];colIdx=header.indexOf(colZh);break;}`,
             `        }`,
             `      }`,
@@ -4970,8 +6275,10 @@
             `}`,
             `function currentCharName(){`,
             `  var ctx=getContext();`,
-            `  try{var n=ctx&&(ctx.name||ctx.charName||ctx.characterName);if(n)return String(n);}catch(e){}`,
-            `  return '';`,
+            `  try{var n=ctx&&(ctx.name||ctx.charName||ctx.characterName);n=String(n||'').trim();if(n)return n;}catch(e){}`,
+            `  // 新建/切换聊天时上下文可能尚未暴露角色名；转换时固化的卡名是可靠兜底。`,
+            `  var embedded=String(BRIDGE_CARD_NAME||'').trim();`,
+            `  return embedded||'角色';`,
             `}`,
             `var initState={running:false,done:false,key:''};`,
             `var initRetries=0;`,
@@ -5419,25 +6726,165 @@
      * （EjsTemplate.defines），并用卡内布局 + 插件表格惰性重建 stat_data（window.getAllVariables），
      * 不依赖卡内桥是否运行。
      * ================================================================ */
-    function rewriteEjsConditions(text, layout, report) {
+    function findJsCallEnd(source, openIndex) {
+        let depth = 0;
+        let quote = '';
+        let escaped = false;
+        for (let i = openIndex; i < source.length; i++) {
+            const ch = source[i];
+            if (quote) {
+                if (escaped) escaped = false;
+                else if (ch === '\\') escaped = true;
+                else if (ch === quote) quote = '';
+                continue;
+            }
+            if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+            if (ch === '(') depth++;
+            else if (ch === ')' && --depth === 0) return i;
+        }
+        return -1;
+    }
+
+    // 改写函数调用但不执行 JS。balanced-call 扫描允许 fallback 中包含对象、数组或函数调用，
+    // 比旧版只接受 getvar("stat_data") 的单条正则覆盖更完整。
+    function rewriteStatDataCalls(source) {
+        let out = String(source || '');
+        let count = 0;
+        const getvarRe = /\bgetvar\s*\(/gi;
+        let m;
+        while ((m = getvarRe.exec(out))) {
+            const open = out.indexOf('(', m.index);
+            const end = findJsCallEnd(out, open);
+            if (end < 0) break;
+            const args = out.slice(open + 1, end);
+            const first = args.match(/^\s*(["'])(stat_data(?:\.[^"']*)?)\1(?:\s*,[\s\S]*)?$/i);
+            if (!first) { getvarRe.lastIndex = end + 1; continue; }
+            const suffix = first[2].slice('stat_data'.length).replace(/^\./, '');
+            const replacement = 'mvu2shujukuGetAllVariables().stat_data' + (suffix ? '.' + suffix : '');
+            out = out.slice(0, m.index) + replacement + out.slice(end + 1);
+            count++;
+            getvarRe.lastIndex = m.index + replacement.length;
+        }
+
+        // 这些入口在不同版本的 MVU/提示词模板教程中都出现过。只改写明确读取
+        // `.stat_data` 的形式；不碰普通 getVariables()，以免改变非 MVU 变量语义。
+        const directReaders = [
+            /\bgetAllVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
+            /\bEjsTemplate\s*\.\s*allVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
+            /\ballVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
+            /\ball_variables\s*\.\s*stat_data\b/gi,
+            /\bTavernHelper\s*\.\s*getVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
+            /\bgetVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
+        ];
+        for (const re of directReaders) {
+            out = out.replace(re, () => {
+                count++;
+                return 'mvu2shujukuGetAllVariables().stat_data';
+            });
+        }
+        return { text: out, count };
+    }
+
+    function unresolvedEjsDataReads(text) {
+        const found = [];
+        const blocks = String(text || '').match(/<%[\s\S]*?%>/g) || [];
+        const suspicious = /\b(?:getvar|getAllVariables|getVariables|allVariables)\s*\(|\ball_variables\s*\.\s*stat_data|\bTavernHelper\s*\.\s*getVariables\s*\(/gi;
+        for (const block of blocks) {
+            if (!/stat_data/i.test(block)) continue;
+            if (!suspicious.test(block)) { suspicious.lastIndex = 0; continue; }
+            suspicious.lastIndex = 0;
+            const oneLine = block.replace(/\s+/g, ' ').trim();
+            if (!found.includes(oneLine)) found.push(oneLine.slice(0, 240));
+        }
+        return found;
+    }
+
+    function parseStaticStatAccessor(expr) {
+        let s = String(expr || '').trim();
+        let m = s.match(/^getvar\s*\(\s*(["'])stat_data((?:\.[^"']*)?)\1\s*\)([\s\S]*)$/i);
+        if (m) s = (m[2] ? m[2] : '') + (m[3] || '');
+        else {
+            m = s.match(/^getvar\s*\(\s*(["'])stat_data\1\s*(?:,[\s\S]*?)?\)([\s\S]*)$/i);
+            if (!m) return null;
+            s = m[2] || '';
+        }
+        const parts = [];
+        const tokenRe = /\.\s*([A-Za-z_$\u4e00-\u9fff][\w$\u4e00-\u9fff]*)|\[\s*(["'])(.*?)\2\s*\]|\[\s*(\d+)\s*\]/g;
+        let pos = 0;
+        let tm;
+        while ((tm = tokenRe.exec(s))) {
+            if (s.slice(pos, tm.index).trim()) return null;
+            if (tm[4] !== undefined) {
+                // [值,说明] 叶子的 [0] 与数据库标量列等价；其它动态下标不安全。
+                if (tm[4] !== '0') return null;
+            } else parts.push(tm[1] !== undefined ? tm[1] : tm[3]);
+            pos = tokenRe.lastIndex;
+        }
+        return !s.slice(pos).trim() && parts.length ? parts : null;
+    }
+
+    function dbConditionForStaticPath(parts, operator, literal, layout) {
+        const entries = layout && Array.isArray(layout.entries) ? layout.entries : [];
+        const esc = v => String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        let rhs = String(literal).trim();
+        if (/^["']/.test(rhs)) {
+            try { rhs = "'" + esc(Function('return (' + rhs + ')')()) + "'"; } catch (e) { return null; }
+        }
+        const op = operator === '===' ? '==' : (operator === '!==' ? '!=' : operator);
+        for (const L of entries) {
+            const prefixes = L.kind === 'singleton' ? [[L.group]] : (L.writePaths || [[L.group]]);
+            for (const prefix of prefixes) {
+                if (!prefix.every((p, i) => parts[i] === p)) continue;
+                const rest = parts.slice(prefix.length);
+                if (L.kind === 'singleton' && rest.length === 1 && (L.cols || []).some(c => c.zh === rest[0])) {
+                    return `db.${L.table}.where('${esc(L.keyCol)}','${esc(L.keyValue)}').get('${esc(rest[0])}') ${op} ${rhs}`;
+                }
+                if (L.kind === 'rows' && rest.length === 2 && (L.cols || []).some(c => c.zh === rest[1])) {
+                    return `db.${L.table}.where('${esc(L.keyCol)}','${esc(rest[0])}').get('${esc(rest[1])}') ${op} ${rhs}`;
+                }
+            }
+        }
+        return null;
+    }
+
+    // 可选且刻意保守：只转换“单个静态字段 与 字面量比较”的无 else EJS。
+    // 复杂分支继续保留 EJS，避免正则式翻译悄悄改变 JavaScript 语义。
+    function translateSimpleEjsConditions(text, layout, report) {
+        let count = 0;
+        const out = String(text || '').replace(
+            /<%_?\s*if\s*\(\s*((?:getvar\s*\([\s\S]*?\)[\s\S]*?))\s*(===|!==|==|!=|>=|<=|>|<)\s*((?:["'](?:\\.|[^"'\\])*["'])|-?\d+(?:\.\d+)?|true|false|null)\s*\)\s*\{\s*_?%>([^<]*?)<%_?\s*\}\s*_?%>/gi,
+            (whole, accessor, op, literal, body) => {
+                const parts = parseStaticStatAccessor(accessor);
+                const condition = parts && dbConditionForStaticPath(parts, op, literal, layout);
+                if (!condition) return whole;
+                count++;
+                return `<if db="${condition.replace(/"/g, '&quot;')}">${body}</if>`;
+            }
+        );
+        if (count && report) report.auto(`已将 ${count} 个简单只读 EJS 条件转换为数据库 <if db>；复杂 EJS 继续保留兼容执行。`);
+        return { text: out, count };
+    }
+
+    function rewriteEjsConditions(text, layout, report, options = {}) {
         const items = [];
         let out = String(text || '');
-        const before = out;
-        // getvar('stat_data[.路径]') / getvar("stat_data").组.字段 → mvu2shujukuGetAllVariables().stat_data…
-        out = out.replace(/getvar\s*\(\s*['"]stat_data(\.[^'"]*)?['"]\s*\)/gi, (m, path) => {
-            const suffix = path ? String(path).replace(/^\./, '') : '';
-            return 'mvu2shujukuGetAllVariables().stat_data' + (suffix ? '.' + suffix : '');
-        });
-        if (out !== before) {
-            const count = (out.match(/mvu2shujukuGetAllVariables\(\)\.stat_data/g) || []).length;
+        if (options.translateSimpleEjs) out = translateSimpleEjsConditions(out, layout, report).text;
+        const rewritten = rewriteStatDataCalls(out);
+        out = rewritten.text;
+        if (rewritten.count) {
+            const count = rewritten.count;
             items.push({ original: 'getvar(\'stat_data…\')', rewritten: 'mvu2shujukuGetAllVariables().stat_data…', status: 'auto' });
-            report.auto(`已把 ${count} 处 MVU 数据读取 getvar('stat_data…') 改为 mvu2shujukuGetAllVariables().stat_data…（EJS 结构保留，函数由扩展注册进模板上下文并惰性读取表格）。`);
+            report.auto(`已把 ${count} 处 MVU/EJS 数据读取入口改为 mvu2shujukuGetAllVariables().stat_data…（EJS 结构保留，函数由扩展或卡内桥注册进模板上下文并惰性读取表格）。`);
         }
         // 非 MVU 的 getwi 等引用：保留并提示
         const orphanRe = /<%[-=]\s*await\s+getwi[\s\S]*?-?%>/g;
         const orphans = out.match(orphanRe);
         if (orphans) {
             report.note(`检测到 ${orphans.length} 处 getwi 世界书引用（非 MVU 语法），已原样保留；若目标环境不支持请人工处理。`);
+        }
+        const unresolved = unresolvedEjsDataReads(out);
+        for (const snippet of unresolved) {
+            report.manual(`检测到无法安全自动改写的 EJS 数据读取，请核对：\`${snippet.replace(/`/g, '\\`')}\``);
         }
         return { text: out, items };
     }
@@ -5710,7 +7157,7 @@
         const usage = scanStatusUsage(card, Object.keys(initvar));
         report.note(`状态栏/脚本字段扫描：${Object.keys(usage).map(g => `${g}(${usage[g].length})`).join('、') || '无'}。`);
 
-        const shapeInfo = parseMvuShapes(card);
+        const shapeInfo = parseMvuShapes(card, report);
         // 多分支兜底：即使 [mvu_update] 未声明动态键，也按各分支 <initvar> 的键集差异
         // 识别动态键字典（如 世界系统.修仙秘闻），避免固定列在按分支注入时丢数据。
         try {
@@ -5805,7 +7252,9 @@
                 continue;
             }
             // EJS 重写
-            const rw = rewriteEjsConditions(content, layout, report);
+            const rw = rewriteEjsConditions(content, layout, report, {
+                translateSimpleEjs: !!opts.translateSimpleEjs,
+            });
             if (rw.items.length) {
                 for (const it of rw.items) {
                     if (it.status === 'auto') {
@@ -6235,6 +7684,13 @@ ${DB_INIT_SNIPPET}
         return null;
     }
 
+    function characterDisplayName(ch) {
+        try {
+            const raw = ch && (ch.name || (ch.data && ch.data.name));
+            return String(raw || '').trim();
+        } catch (e) { return ''; }
+    }
+
     function isConvertedMvuCard(character) {
         try {
             const ext = charExtensions(character);
@@ -6247,7 +7703,7 @@ ${DB_INIT_SNIPPET}
     // /api/characters/get 返回的 full.data（avatar 在顶层、data 里没有）可能不一致，
     // 因此命中时同时接受 name|avatar 精确匹配与仅卡名匹配（名称兜底）。
     function cardCacheKey(ch) {
-        try { return ch ? String(ch.name || '') + '|' + String(ch.avatar || '') : ''; } catch (e) { return ''; }
+        try { return ch ? characterDisplayName(ch) + '|' + String(ch.avatar || (ch.data && ch.data.avatar) || '') : ''; } catch (e) { return ''; }
     }
 
     // 布局归属判定：与模板缓存一致，头像可能因列表对象/完整卡对象不一致而不同，
@@ -6367,13 +7823,17 @@ ${DB_INIT_SNIPPET}
             if (typeof sc === 'string') { try { sc = JSON.parse(sc); } catch (e) { sc = null; } }
             if (sc && sc.template && typeof sc.template === 'object' && !Array.isArray(sc.template)) {
                 const ch = currentCharacter();
-                const properName = ch ? String(ch.name || '') + '模板' : '';
+                const cardName = characterDisplayName(ch);
+                const properName = cardName ? cardName + '模板' : '';
                 let nameChanged = false;
                 for (const k of Object.keys(sc.template)) {
                     const st = sc.template[k];
                     if (!st || typeof st !== 'object') continue;
                     const pn = String(st.presetName || '');
-                    if (pn.indexOf('旧版') === 0 && properName && pn !== properName) {
+                    // “模板”是早期自动建表在角色上下文尚未就绪时生成的缺名标签。
+                    // 只在无歧义的缺名/旧版标签上自动更名，不触碰用户自定义模板名。
+                    const missingName = pn.trim() === '模板';
+                    if ((pn.indexOf('旧版') === 0 || missingName) && properName && pn !== properName) {
                         st.presetName = properName;
                         if (typeof st.source === 'string' && st.source.indexOf('legacy') === 0) st.source = 'ui';
                         st.updatedAt = Date.now();
@@ -6573,7 +8033,7 @@ ${DB_INIT_SNIPPET}
             }
         }, 30000);
         try {
-            const presetName = String((character && character.name) || '') + '模板';
+            const presetName = (characterDisplayName(character) || '角色') + '模板';
             const out = await mvu2shujukuEnsureInit(api, entry.content, presetName);
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);
@@ -6926,6 +8386,7 @@ ${DB_INIT_SNIPPET}
                 appendPlaceholder: true,
                 asPng: 'auto',
                 ddlIncludeCheck: true,
+                translateSimpleEjs: false,
                 debug: false,
             };
         }
@@ -8474,6 +9935,7 @@ ${DB_INIT_SNIPPET}
             asPng: settings.asPng === 'auto' ? sourceIsPng : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
             ddlIncludeCheck: settings.ddlIncludeCheck !== false,
+            translateSimpleEjs: !!settings.translateSimpleEjs,
         };
         if (settings.installMvuShim !== 'auto') {
             opts.installMvuShim = settings.installMvuShim === 'yes';
@@ -8643,6 +10105,7 @@ ${DB_INIT_SNIPPET}
             asPng: settings.asPng === 'auto' ? (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
             ddlIncludeCheck: settings.ddlIncludeCheck !== false,
+            translateSimpleEjs: !!settings.translateSimpleEjs,
         };
         if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
         toast('正在合并并重新转换…');
@@ -8695,7 +10158,7 @@ ${DB_INIT_SNIPPET}
         const panel = hostDocument.getElementById(PANEL_ID);
         const context = getContextSafe();
         const log = [];
-        const displayName = ((lastResult.card && (lastResult.card.data || lastResult.card).name) || '角色');
+        const displayName = String((lastResult.card && (lastResult.card.data || lastResult.card).name) || '').trim() || '角色';
         try {
             // 统一成 chara_card_v3 包装（服务端按 json_data 整体导入，保留世界书等全部内容）
             let cardData = lastResult.card;
@@ -8852,6 +10315,7 @@ ${DB_INIT_SNIPPET}
             asPng: settings.asPng === 'auto' ? (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
             ddlIncludeCheck: settings.ddlIncludeCheck !== false,
+            translateSimpleEjs: !!settings.translateSimpleEjs,
         };
         if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
         const result = core.convert(lastInput, opts);
@@ -9162,6 +10626,9 @@ ${DB_INIT_SNIPPET}
             '        <label class="mvu2shujuku-check-label" title="控制生成的表格 DDL 是否带 CHECK 约束（数值范围、枚举、JSON 表 json_valid）。关闭后仅保留列类型与默认值，新建聊天时 SQLite 不再做这些校验；改动需重新转换生效"><input type="checkbox" id="mvu2shujuku-ddl-check" ' + (settings.ddlIncludeCheck !== false ? 'checked' : '') + ' /> 转换时在表格 DDL 中加入 CHECK 约束（数值范围/枚举/json_valid）</label>',
             '      </div>',
             '      <div class="mvu2shujuku-row">',
+            '        <label class="mvu2shujuku-check-label" title="仅把无 else、无嵌套、静态字段与字面量比较的简单 EJS if 转成数据库 <if db>；循环、函数和复杂分支仍保留 EJS"><input type="checkbox" id="mvu2shujuku-ejs-translate" ' + (settings.translateSimpleEjs ? 'checked' : '') + ' /> 尝试把安全的简单 EJS 条件翻译为数据库语法（实验性）</label>',
+            '      </div>',
+            '      <div class="mvu2shujuku-row">',
             '        <label class="mvu2shujuku-label" for="mvu2shujuku-shim">MVU 兼容层</label>',
             '        <select id="mvu2shujuku-shim">',
             '          <option value="auto" ' + (settings.installMvuShim === 'auto' ? 'selected' : '') + '>自动（检测到 MVU API 才装）</option>',
@@ -9345,6 +10812,14 @@ ${DB_INIT_SNIPPET}
                 if (lastResult) {
                     toast('DDL CHECK 开关已保存；重新转换后生效（现有转换结果不变）', 'info');
                 }
+            });
+        }
+        const ejsTranslateBox = panel.querySelector('#mvu2shujuku-ejs-translate');
+        if (ejsTranslateBox && ejsTranslateBox.dataset.bound !== 'true') {
+            ejsTranslateBox.dataset.bound = 'true';
+            ejsTranslateBox.addEventListener('change', () => {
+                getSettings().translateSimpleEjs = ejsTranslateBox.checked;
+                saveSettings();
             });
         }
         const pngSel = panel.querySelector('#mvu2shujuku-png');
@@ -9539,6 +11014,7 @@ ${DB_INIT_SNIPPET}
         writeStatDiffToDb,
         get lastStatWriteFailed() { return statWriteHadFailure; },
         rewriteEjsConditions,
+        translateSimpleEjsConditions,
         toPinyinSlug,
         transformCard,
         convert,
@@ -20461,6 +21937,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         return null;
     }
 
+    function characterDisplayName(ch) {
+        try {
+            const raw = ch && (ch.name || (ch.data && ch.data.name));
+            return String(raw || '').trim();
+        } catch (e) { return ''; }
+    }
+
     function isConvertedMvuCard(character) {
         try {
             const ext = charExtensions(character);
@@ -20473,7 +21956,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     // /api/characters/get 返回的 full.data（avatar 在顶层、data 里没有）可能不一致，
     // 因此命中时同时接受 name|avatar 精确匹配与仅卡名匹配（名称兜底）。
     function cardCacheKey(ch) {
-        try { return ch ? String(ch.name || '') + '|' + String(ch.avatar || '') : ''; } catch (e) { return ''; }
+        try { return ch ? characterDisplayName(ch) + '|' + String(ch.avatar || (ch.data && ch.data.avatar) || '') : ''; } catch (e) { return ''; }
     }
 
     // 布局归属判定：与模板缓存一致，头像可能因列表对象/完整卡对象不一致而不同，
@@ -20593,13 +22076,17 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             if (typeof sc === 'string') { try { sc = JSON.parse(sc); } catch (e) { sc = null; } }
             if (sc && sc.template && typeof sc.template === 'object' && !Array.isArray(sc.template)) {
                 const ch = currentCharacter();
-                const properName = ch ? String(ch.name || '') + '模板' : '';
+                const cardName = characterDisplayName(ch);
+                const properName = cardName ? cardName + '模板' : '';
                 let nameChanged = false;
                 for (const k of Object.keys(sc.template)) {
                     const st = sc.template[k];
                     if (!st || typeof st !== 'object') continue;
                     const pn = String(st.presetName || '');
-                    if (pn.indexOf('旧版') === 0 && properName && pn !== properName) {
+                    // “模板”是早期自动建表在角色上下文尚未就绪时生成的缺名标签。
+                    // 只在无歧义的缺名/旧版标签上自动更名，不触碰用户自定义模板名。
+                    const missingName = pn.trim() === '模板';
+                    if ((pn.indexOf('旧版') === 0 || missingName) && properName && pn !== properName) {
                         st.presetName = properName;
                         if (typeof st.source === 'string' && st.source.indexOf('legacy') === 0) st.source = 'ui';
                         st.updatedAt = Date.now();
@@ -20799,7 +22286,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             }
         }, 30000);
         try {
-            const presetName = String((character && character.name) || '') + '模板';
+            const presetName = (characterDisplayName(character) || '角色') + '模板';
             const out = await mvu2shujukuEnsureInit(api, entry.content, presetName);
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);
@@ -21152,6 +22639,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 appendPlaceholder: true,
                 asPng: 'auto',
                 ddlIncludeCheck: true,
+                translateSimpleEjs: false,
                 debug: false,
             };
         }
@@ -22700,6 +24188,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             asPng: settings.asPng === 'auto' ? sourceIsPng : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
             ddlIncludeCheck: settings.ddlIncludeCheck !== false,
+            translateSimpleEjs: !!settings.translateSimpleEjs,
         };
         if (settings.installMvuShim !== 'auto') {
             opts.installMvuShim = settings.installMvuShim === 'yes';
@@ -22869,6 +24358,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             asPng: settings.asPng === 'auto' ? (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
             ddlIncludeCheck: settings.ddlIncludeCheck !== false,
+            translateSimpleEjs: !!settings.translateSimpleEjs,
         };
         if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
         toast('正在合并并重新转换…');
@@ -22921,7 +24411,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         const panel = hostDocument.getElementById(PANEL_ID);
         const context = getContextSafe();
         const log = [];
-        const displayName = ((lastResult.card && (lastResult.card.data || lastResult.card).name) || '角色');
+        const displayName = String((lastResult.card && (lastResult.card.data || lastResult.card).name) || '').trim() || '角色';
         try {
             // 统一成 chara_card_v3 包装（服务端按 json_data 整体导入，保留世界书等全部内容）
             let cardData = lastResult.card;
@@ -23078,6 +24568,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             asPng: settings.asPng === 'auto' ? (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
             ddlIncludeCheck: settings.ddlIncludeCheck !== false,
+            translateSimpleEjs: !!settings.translateSimpleEjs,
         };
         if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
         const result = core.convert(lastInput, opts);
@@ -23388,6 +24879,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             '        <label class="mvu2shujuku-check-label" title="控制生成的表格 DDL 是否带 CHECK 约束（数值范围、枚举、JSON 表 json_valid）。关闭后仅保留列类型与默认值，新建聊天时 SQLite 不再做这些校验；改动需重新转换生效"><input type="checkbox" id="mvu2shujuku-ddl-check" ' + (settings.ddlIncludeCheck !== false ? 'checked' : '') + ' /> 转换时在表格 DDL 中加入 CHECK 约束（数值范围/枚举/json_valid）</label>',
             '      </div>',
             '      <div class="mvu2shujuku-row">',
+            '        <label class="mvu2shujuku-check-label" title="仅把无 else、无嵌套、静态字段与字面量比较的简单 EJS if 转成数据库 <if db>；循环、函数和复杂分支仍保留 EJS"><input type="checkbox" id="mvu2shujuku-ejs-translate" ' + (settings.translateSimpleEjs ? 'checked' : '') + ' /> 尝试把安全的简单 EJS 条件翻译为数据库语法（实验性）</label>',
+            '      </div>',
+            '      <div class="mvu2shujuku-row">',
             '        <label class="mvu2shujuku-label" for="mvu2shujuku-shim">MVU 兼容层</label>',
             '        <select id="mvu2shujuku-shim">',
             '          <option value="auto" ' + (settings.installMvuShim === 'auto' ? 'selected' : '') + '>自动（检测到 MVU API 才装）</option>',
@@ -23571,6 +25065,14 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (lastResult) {
                     toast('DDL CHECK 开关已保存；重新转换后生效（现有转换结果不变）', 'info');
                 }
+            });
+        }
+        const ejsTranslateBox = panel.querySelector('#mvu2shujuku-ejs-translate');
+        if (ejsTranslateBox && ejsTranslateBox.dataset.bound !== 'true') {
+            ejsTranslateBox.dataset.bound = 'true';
+            ejsTranslateBox.addEventListener('change', () => {
+                getSettings().translateSimpleEjs = ejsTranslateBox.checked;
+                saveSettings();
             });
         }
         const pngSel = panel.querySelector('#mvu2shujuku-png');
