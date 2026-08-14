@@ -3732,6 +3732,261 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     assert.strictEqual(win.replaceVariables, undefined, '切回普通卡后应撤销 replaceVariables');
 });
 
+test('桥+扩展共用注册表：页面已有真 MVU 函数时，切到真 MVU 卡后必须按“原始函数”还原（getVariables/updateVariablesWith/replaceVariables/getAllVariables/Mvu）', async () => {
+    const vm2 = require('vm');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '守卫测试卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [{ comment: '[InitVar]', content: '主角:\n  姓名: 张三' }],
+            },
+        },
+        avatar: 'g.png',
+        extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const bridge = r.files.find(f => f.kind === 'bridge').data;
+    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
+        kind: e.kind,
+        group: e.group,
+        table: e.table,
+        keyCol: e.keyCol || '',
+        keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']),
+        writePaths: e.writePaths || [],
+        mirrors: e.mirrors || [],
+    }));
+    const converted = {
+        name: '守卫测试卡',
+        avatar: 'g.png',
+        extensions: { mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) } },
+        character_book: {
+            entries: [{
+                keys: ['__ACU_TEMPLATE_DATA__'],
+                content: Buffer.from(JSON.stringify(r.template)).toString('base64'),
+            }],
+        },
+    };
+    // 页面里已存在“真 MVU/TH”函数（模拟用户先开过真 MVU 卡，全局没清）
+    function realGet() { return 'REAL_GET'; }
+    function realUpd() { return 'REAL_UPD'; }
+    function realRep() { return 'REAL_REP'; }
+    function realGav() { return { stat_data: { 真: 1 } }; }
+    const realMvu = { getMvuData() { return 'REAL_MVU'; }, custom: 42 };
+
+    // 组装扩展 index.js（与 build-extension.js 相同内联方式）
+    const srcDir = path.join(__dirname, '..', 'src');
+    const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
+    const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
+    const yamlLibsData = fs.readFileSync(path.join(srcDir, 'vendor', 'mvu-yaml-libs.js'), 'utf8');
+    const jsonrepairData = fs.readFileSync(path.join(srcDir, 'vendor', 'jsonrepair-lite.js'), 'utf8');
+    const pinyinInline = pinyinData
+        .replace(/^[\s\S]*?module\.exports\s*=\s*/, 'root.__MVU2SHUJUKU_PINYIN__ = ')
+        .replace(/;\s*$/, ';');
+    const yamlLibsInline = [
+        '(function () {',
+        '  var module = { exports: {} };',
+        '  var exports = module.exports;',
+        yamlLibsData,
+        '  var target = typeof globalThis !== "undefined" ? globalThis : this;',
+        '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;',
+        '})();',
+        '',
+    ].join('\n');
+    const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
+    const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
+
+    const tables = JSON.parse(JSON.stringify(r.template));
+    let initialized = false;
+    const fakeApi = {
+        getTemplatePresetNames: () => [],
+        exportTableAsJson: () => (initialized ? tables : {}),
+        initGameSession: async (arg1, opts) => {
+            initialized = true;
+            if (opts && opts.templateData && typeof opts.templateData === 'object') {
+                for (const k of Object.keys(tables)) delete tables[k];
+                Object.assign(tables, opts.templateData);
+            }
+            return { success: true, runtimeReady: true };
+        },
+        importTemplateFromData: async () => ({ success: true }),
+        importTableAsJson: async (jsonStr) => {
+            try { const parsed = JSON.parse(jsonStr); for (const k of Object.keys(tables)) delete tables[k]; Object.assign(tables, parsed); } catch (e) {}
+            return true;
+        },
+        insertRow: async () => 1,
+        updateCell: async () => true,
+        deleteRow: async () => true,
+        registerTableUpdateCallback: () => true,
+    };
+    const handlers = {};
+    let characters = [converted];
+    const context = {
+        chatId: 'c1',
+        name: '守卫测试卡',
+        characters,
+        characterId: 0,
+        chat: [{ role: 'assistant', name: '守卫测试卡', mes: '开场白', is_user: false }],
+        extensionSettings: { mvu2shujuku: { debug: false } },
+        eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed',
+            MESSAGE_RECEIVED: 'message_received',
+            MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated',
+            MESSAGE_EDITED: 'edited',
+            MESSAGE_SENT: 'sent',
+            MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {},
+        saveChatConditional: async () => {},
+        saveChat: async () => {},
+        updateChatMetadata: async () => {},
+        getRequestHeaders: () => ({}),
+        setChatMessages: () => {},
+    };
+    const fakeEl = () => {
+        const el = {
+            dataset: {}, style: {}, children: [], _listeners: {}, _value: '',
+            addEventListener: (t, fn) => { (el._listeners[t] = el._listeners[t] || []).push(fn); },
+            removeEventListener: () => {}, dispatchEvent: () => true,
+            appendChild: (c) => { el.children.push(c); return c; }, removeChild: () => {},
+            querySelector: () => fakeEl(), querySelectorAll: () => [],
+            click: () => {}, focus: () => {}, blur: () => {}, contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(el, 'innerHTML', { get: () => el._html || '', set: (v) => { el._html = v; } });
+        Object.defineProperty(el, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(el, 'value', { get: () => el._value, set: (v) => { el._value = v; } });
+        Object.defineProperty(el, 'checked', { get: () => !!el._checked, set: (v) => { el._checked = v; } });
+        Object.defineProperty(el, 'disabled', { get: () => !!el._disabled, set: (v) => { el._disabled = v; } });
+        return el;
+    };
+    const doc = {
+        querySelector: () => fakeEl(), getElementById: () => fakeEl(), createElement: () => fakeEl(),
+        createTextNode: () => fakeEl(), addEventListener: () => {}, body: fakeEl(),
+    };
+    const win = {
+        top: null, parent: null, document: doc, console,
+        setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t),
+        CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context },
+        AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {}, toastr: undefined,
+        getContext: () => context,
+        getVariables: realGet,
+        updateVariablesWith: realUpd,
+        replaceVariables: realRep,
+        getAllVariables: realGav,
+        Mvu: realMvu,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm2.createContext(win);
+    // 先跑卡内桥（tavern_helper 先于扩展接管加载），再跑扩展
+    vm2.runInContext(bridge, win);
+    vm2.runInContext(extIndex, win);
+    const ours = (fn) => !!(fn && typeof fn === 'function' && (fn.__mvu2shujukuBridge || fn.__mvu2shujuku));
+    const oursMvu = (m) => !!(m && (m.__mvu2shujukuFake || m.__mvu2shujukuBridgeFake));
+
+    // 阶段1：转换卡接管全部 5 个全局（含页面已有的真函数）
+    await new Promise(res => setTimeout(res, 3200));
+    assert.ok(ours(win.getVariables), '转换卡激活后 getVariables 应被接管（哪怕页面已有真函数）');
+    assert.ok(ours(win.updateVariablesWith), 'updateVariablesWith 应被接管');
+    assert.ok(ours(win.replaceVariables), 'replaceVariables 应被接管');
+    assert.ok(ours(win.getAllVariables), 'getAllVariables 应被接管');
+    assert.ok(oursMvu(win.Mvu), 'Mvu 应被接管');
+
+    // 阶段2：切到普通真 MVU 卡——必须还原为页面原有的真函数，而不是删除/残留我方接管
+    characters = [{ name: '普通卡', avatar: 'x.png', character_book: { entries: [{ keys: ['随便'], content: '内容' }] } }];
+    context.characters = characters;
+    context.name = '普通卡';
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 2200));
+    assert.strictEqual(win.getVariables, realGet, '切到真 MVU 卡后 getVariables 应还原为原始函数');
+    assert.strictEqual(win.updateVariablesWith, realUpd, 'updateVariablesWith 应还原为原始函数');
+    assert.strictEqual(win.replaceVariables, realRep, 'replaceVariables 应还原为原始函数');
+    assert.strictEqual(win.getAllVariables, realGav, 'getAllVariables 应还原为原始函数');
+    assert.strictEqual(win.Mvu, realMvu, 'Mvu 应还原为原始对象');
+
+    // 阶段3：切回转换卡——重新接管
+    characters = [converted];
+    context.characters = characters;
+    context.name = '守卫测试卡';
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 2200));
+    assert.ok(ours(win.getVariables), '切回转换卡后 getVariables 应重新接管');
+    assert.ok(ours(win.getAllVariables), '切回转换卡后 getAllVariables 应重新接管');
+    assert.ok(oursMvu(win.Mvu), '切回转换卡后 Mvu 应重新接管');
+});
+
+test('桥缺省接管：全局函数原本不存在时，切到普通卡必须清除我方接管（不残留、不还原成桥版）', async () => {
+    const vm2 = require('vm');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '缺省卡',
+            description: '',
+            first_mes: '你好',
+            character_book: { entries: [{ comment: '[InitVar]', content: '主角:\n  姓名: 张三' }] },
+        },
+        extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const bridge = r.files.find(f => f.kind === 'bridge').data;
+    const handlers = {};
+    const context = {
+        chatId: 'c1',
+        name: '缺省卡',
+        characters: [{ name: '缺省卡', avatar: '' }],
+        characterId: 0,
+        chat: [],
+        eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
+        event_types: { CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received' },
+    };
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        importTemplateFromData: async () => ({ success: true }),
+        registerTableUpdateCallback: () => {},
+        updateCell: async () => true,
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null,
+        setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
+        setInterval: (fn, ms) => setInterval(fn, ms), clearInterval: (t) => clearInterval(t),
+        console, CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+        getContext: () => context,
+        AutoCardUpdaterAPI: fakeApi,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm2.createContext(win);
+    vm2.runInContext(bridge, win);
+    const ours = (fn) => !!(fn && typeof fn === 'function' && (fn.__mvu2shujukuBridge || fn.__mvu2shujuku));
+    // 页面原本没有这些函数：桥接管（缺省才补）
+    assert.ok(typeof win.getVariables === 'function' && ours(win.getVariables), '函数缺失时桥应补上 getVariables');
+    assert.ok(typeof win.updateVariablesWith === 'function' && ours(win.updateVariablesWith), '函数缺失时桥应补上 updateVariablesWith');
+    assert.ok(typeof win.replaceVariables === 'function' && ours(win.replaceVariables), '函数缺失时桥应补上 replaceVariables');
+    assert.ok(ours(win.getAllVariables), 'getAllVariables 应由桥定义');
+    // 切到普通卡：我方接管必须全部清除（原值不存在 → delete，不能残留）
+    context.characters[0] = { name: '普通卡', avatar: 'x.png' };
+    context.name = '普通卡';
+    (handlers['chat_changed'] || []).forEach(fn => fn());
+    await new Promise(res => setTimeout(res, 3600));
+    assert.strictEqual(win.getVariables, undefined, '切到普通卡后 getVariables 应被清除（原值不存在）');
+    assert.strictEqual(win.updateVariablesWith, undefined, '切到普通卡后 updateVariablesWith 应被清除');
+    assert.strictEqual(win.replaceVariables, undefined, '切到普通卡后 replaceVariables 应被清除');
+    assert.strictEqual(win.getAllVariables, undefined, '切到普通卡后 getAllVariables 应被清除');
+});
+
 test('懒加载角色：缓存键用列表对象（带 avatar），开场写入不被“无模板缓存”丢弃', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
