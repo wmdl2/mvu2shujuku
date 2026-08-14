@@ -3987,6 +3987,243 @@ test('桥缺省接管：全局函数原本不存在时，切到普通卡必须�
     assert.strictEqual(win.getAllVariables, undefined, '切到普通卡后 getAllVariables 应被清除');
 });
 
+test('initvar 写在其他世界书条目（[scenario_builtin]）且分多个开局：转换以首个分支推导结构，运行时按所选分支注入', async () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'scenario分支卡',
+            description: '',
+            first_mes: '[角色卡介绍]',
+            character_book: {
+                entries: [
+                    // 世界书 [InitVar] 条目只是占位（“已迁移到 scenario 条目”），真实 initvar 在各 scenario 里
+                    { comment: '[initvar]变量初始化勿开', enabled: false, content: '# 初始变量已迁移到 scenario 条目的 <initvar> 中\n{}' },
+                    {
+                        comment: '[scenario_builtin]开局-街头魂穿',
+                        enabled: false,
+                        content: '话说街头魂穿...\n<initvar>\n世界运转:\n  当前日期: 崇祯七年七月初五日\n主角:\n  官职: 桐城县衙皂吏\n  声望: -40\n</initvar>',
+                    },
+                    {
+                        comment: '[scenario_builtin]开局-云际寺夺银',
+                        enabled: false,
+                        content: '话说云际寺夺银...\n<initvar>\n世界运转:\n  当前日期: 崇祯七年八月二十六日\n主角:\n  官职: 桐城县快班班头\n  声望: 15\n</initvar>',
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    // 转换：不得因 [InitVar] 占位为空而中止，结构/初始值以首个 scenario 分支为基准
+    const r = core.convert(card, { mode: 'both' });
+    assert.ok(r.reportText.includes('已改用分支 <initvar> 推导结构'), '报告应注明 initvar 来自分支 <initvar>');
+    assert.ok(r.reportText.includes('首个来自 世界书条目「[scenario_builtin]开局-街头魂穿」'), '报告应注明首个分支来源条目');
+    const zjName = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '主角表');
+    assert.ok(zjName, '应生成主角表');
+    const zj = r.template[zjName];
+    const hdr = zj.content[0];
+    assert.strictEqual(zj.content[1][hdr.indexOf('官职')], '桐城县衙皂吏', '主角表初始行应来自首个 scenario 分支');
+    assert.strictEqual(Number(zj.content[1][hdr.indexOf('声望')]), -40, '主角表初始声望应来自首个 scenario 分支');
+    const sjName = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '世界运转表');
+    assert.ok(sjName && r.template[sjName].content[1][r.template[sjName].content[0].indexOf('当前日期')] === '崇祯七年七月初五日', '世界运转表初始值应来自首个 scenario 分支');
+
+    // 运行时：卡内前端把第二个 scenario 开局写进首楼 → 按该分支 <initvar> 注入（覆盖初始值）
+    const layout = core.buildLayout(r.schema).entries.map(e => ({
+        kind: e.kind,
+        group: e.group,
+        table: e.table,
+        keyCol: e.keyCol || '',
+        keyValue: e.keyValue || '',
+        cols: (e.cols || []).map(c => [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']),
+        writePaths: e.writePaths || [],
+        mirrors: e.mirrors || [],
+    }));
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s || !s.content[rowIndex]) return false;
+            const ci = s.content[0].indexOf(col);
+            if (ci === -1) return false;
+            s.content[rowIndex][ci] = String(value);
+            return true;
+        },
+        insertRow: async (tableName, obj) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s) return 0;
+            const row = s.content[0].map(h => (obj && obj[h] !== undefined && obj[h] !== null) ? String(obj[h]) : '');
+            row[0] = s.content.length || 1;
+            s.content.push(row);
+            return row[0];
+        },
+        deleteRow: async (tableName, rowIndex) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s || !s.content[rowIndex]) return false;
+            s.content.splice(rowIndex, 1);
+            return true;
+        },
+    };
+    const prevAll = core.statDataFromTables(layout, tables);
+    const branch2Text = card.data.character_book.entries[2].content;
+    const m2 = String(branch2Text).match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
+    const branch2 = core.parseInitVar(m2[1]);
+    const n = await core.writeStatDiffToDb(fakeApi, layout, prevAll.stat_data || {}, branch2);
+    assert.ok(n >= 1, '切到分支2 应产生差异写入');
+    const zj2 = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.strictEqual(zj2.content[1][zj2.content[0].indexOf('官职')], '桐城县快班班头', '注入分支2 后主角表官职应更新');
+    assert.strictEqual(Number(zj2.content[1][zj2.content[0].indexOf('声望')]), 15, '注入分支2 后主角表声望应更新');
+    const sj2 = Object.values(tables).find(s => s && s.name === '世界运转表');
+    assert.strictEqual(sj2.content[1][sj2.content[0].indexOf('当前日期')], '崇祯七年八月二十六日', '注入分支2 后世界运转表日期应更新');
+});
+
+test('[mvu_plot] 剧情条目不得被当规则解析：长文本 <说明: |-> 不产生伪枚举，DDL 列不挂超长 CHECK（残明余烬1.8.1 导入校验失败回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'plot条目卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '资产:\n  店铺:\n    说明: 药铺\n    月入: 10' },
+                    // 剧情条目：正文 YAML 里的 说明 是块标量长文本（含 / 与 |），
+                    // 旧逻辑把 [mvu_plot] 当规则解析 → 长文被 /| 切碎成伪枚举 → 列 CHECK 超长 → 插件 DDL 校验失败
+                    {
+                        comment: '[mvu_plot]战斗系统',
+                        content: '战斗系统:\n  说明: |-\n    当剧情中双方军队发生交战时，按以下规则判定。\n    将领阵亡/重伤概率极低；士气如纸|一翼动摇即全线溃散。',
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: '变量更新规则:\n  资产:\n    类型: "{ [资产名: string]: { 说明: string; 月入: number } }"',
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.strictEqual(si.enums['说明'], undefined, '[mvu_plot] 长文本不得被误判为 说明 枚举');
+    assert.strictEqual(si.checks['战斗系统'], undefined, '[mvu_plot] 条目不得被当规则组解析');
+    const r = core.convert(card, { mode: 'both' });
+    const k = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '资产表');
+    assert.ok(k, '应生成资产表');
+    const ddl = r.template[k].sourceData.ddl || r.template[k].sourceData.ddlSql || '';
+    const m = ddl.match(/shuoming[^\n]*/);
+    assert.ok(m, '资产表 DDL 应有 shuoming 列');
+    assert.ok(!/CHECK/.test(m[0]), '说明 列不得带超长枚举 CHECK（m[0]=' + m[0].slice(0, 120) + '）');
+    // DDL 列注释应与表头逐字一致（插件导入校验要求）
+    const header = r.template[k].content[0];
+    const cols = [];
+    for (const l of ddl.split('\n')) {
+        const cm = l.match(/^  ([A-Za-z0-9_]+) .*?--\s*([^\n]+)\s*$/);
+        if (cm) cols.push(cm[2].trim());
+    }
+    assert.strictEqual(cols[0], '行号', 'row_id 列注释应为行号');
+    for (let i = 1; i < header.length; i++) {
+        assert.strictEqual(cols[i], String(header[i]), '第 ' + (i + 1) + ' 列 DDL 注释应与表头一致');
+    }
+});
+
+test('动态键字典子对象所在组不展平为行表：天下地图.地区态势 拆子行表，山西/陕西 不变成冲突列（1.8.1 导入校验失败回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '动态键子对象卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: '天下地图:\n  地区态势:\n    山西: { 名义归属: 大明, 实控势力: 明廷 }\n    陕西: { 名义归属: 大明, 实控势力: 明廷与流寇争夺 }',
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: '变量更新规则:\n  天下地图:\n    地区态势:\n      type: "{ [地区: string]: { 名义归属: string; 实控势力: string } }"',
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    // 天下地图组应是容器（不把地区展平成列），地区态势拆子行表
+    const names = r.meta.tableNames;
+    assert.ok(!names.includes('天下地图表') || Object.values(r.template).find(s => s && s.name === '天下地图表').content[0].length <= 2,
+        '天下地图表不得含 山西/陕西 列（应为容器）');
+    const k = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '地区态势表');
+    assert.ok(k, '应生成地区态势子行表');
+    const s = r.template[k];
+    assert.deepStrictEqual(s.content[0], ['row_id', '键名', '名义归属', '实控势力', '_扩展数据'], '地区态势表列应来自 type 声明字段');
+    const rows = s.content.slice(1).map(row => row[1]);
+    assert.ok(rows.includes('山西') && rows.includes('陕西'), '地区态势应为行条目（键名=地区名）');
+    // 读回形状：stat_data.天下地图.地区态势.山西/陕西 均还原
+    // 与 buildLayoutJson 一致：列 path 用 schema（改名列如 陕西2 的 path 仍为 陕西），
+    // writePaths/mirrors 取自 buildLayout（schema 组对象上不携带）
+    const layout = core.buildLayout(r.schema).entries.map(e => {
+        const g = r.schema.find(x => x.tableName === e.table) || { name: e.group, columns: [] };
+        return {
+            kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+            cols: (e.cols || []).map((c, i) => {
+                const sc = (g.columns || [])[i] || {};
+                return [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, sc.path || [e.group, c.zh], !!c.isPair, c.desc || ''];
+            }),
+            writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+        };
+    });
+    const sd = core.statDataFromTables(layout, r.template).stat_data;
+    assert.strictEqual(sd['天下地图']['地区态势']['山西']['名义归属'], '大明', '读回 山西 应还原');
+    assert.strictEqual(sd['天下地图']['地区态势']['陕西']['实控势力'], '明廷与流寇争夺', '读回 陕西 应还原');
+});
+
+test('拼音相同列消歧兜底：同表 山西/陕西 两列时后列改名（陕西→陕西2），读回 path 保持原中文', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '拼音冲突列卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: '统计:\n  省份: { 山西: 1, 陕西: 2 }',
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const k = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '统计表');
+    assert.ok(k, '应生成统计表');
+    const s = r.template[k];
+    const hdr = s.content[0];
+    assert.ok(hdr.includes('山西') && hdr.includes('陕西2'), '拼音冲突列应消歧改名（山西、陕西2），实际表头=' + JSON.stringify(hdr));
+    assert.ok(r.reportText.includes('映射为相同物理列名候选'), '报告应说明消歧原因');
+    // DDL 注释与表头一致
+    const ddl = s.sourceData.ddl || s.sourceData.ddlSql || '';
+    for (const h of hdr.slice(1)) {
+        assert.ok(ddl.includes('-- ' + h), 'DDL 注释应与表头一致（' + h + '）');
+    }
+    // 读回：path 末尾保持原始中文（陕西），不因改名变成 陕西2
+    const layout = core.buildLayout(r.schema).entries.map(e => {
+        const g = r.schema.find(x => x.tableName === e.table) || { name: e.group, columns: [] };
+        return {
+            kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
+            cols: (e.cols || []).map((c, i) => {
+                const sc = (g.columns || [])[i] || {};
+                return [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, sc.path || [e.group, c.zh], !!c.isPair, c.desc || ''];
+            }),
+            writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+        };
+    });
+    const sd = core.statDataFromTables(layout, r.template).stat_data;
+    assert.strictEqual(Number(sd['统计']['省份']['山西']), 1, '读回 山西 应保持原键名');
+    assert.strictEqual(Number(sd['统计']['省份']['陕西']), 2, '读回 陕西 应保持原键名（path 优先于改名列）');
+    assert.strictEqual(sd['统计']['省份']['陕西2'], undefined, '不得出现 陕西2 键');
+});
+
 test('懒加载角色：缓存键用列表对象（带 avatar），开场写入不被“无模板缓存”丢弃', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
