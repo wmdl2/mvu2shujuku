@@ -571,19 +571,20 @@ test('道渊状态栏字段扫描', () => {
 
 /* ---------------- buildSchema / generateTemplate ---------------- */
 console.log('buildSchema / generateTemplate');
-test('道渊：14 张表，结构正确', () => {
+test('道渊：15 张表（含关系子表），结构正确', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const t = r.template;
     const byName = (name) => Object.keys(t).find(k => t[k].name === name);
-    assert.strictEqual(Object.keys(t).filter(k => k.startsWith('sheet_')).length, 14);
+    assert.strictEqual(Object.keys(t).filter(k => k.startsWith('sheet_')).length, 15);
     const hero = t[byName('主角表')];
     assert.ok(hero.content[0].includes('生命'), '主角表应有 生命 列');
     assert.ok(hero.sourceData.ddl.includes('CHECK('), '主角表 DDL 应有范围约束（来自卡内规则）');
     assert.ok(hero.sourceData.ddl.includes('DEFAULT'), '主角表 DDL 应有默认值');
     const jade = t[byName('玉简表')];
-    assert.ok(jade.content[0].includes('历史记录'), '玉简表应有 历史记录 列');
-    assert.ok(jade.sourceData.ddl.includes('-- 历史记录'), '玉简表 DDL 应有中文列注释');
+    assert.ok(!jade.content[0].includes('历史记录'), '动态历史记录不应留作 JSON 列');
+    const history = t[byName('玉简_历史记录表')];
+    assert.deepStrictEqual(history.content[0].slice(0, 3), ['row_id', '玉简_键名', '键名'], '历史记录应拆为带具体实体关联键的关系表');
     // 标识符应为拼音 slug（无下划线冲突、可作 SQL 标识符）
     for (const k of Object.keys(t).filter(k => k.startsWith('sheet_'))) {
         assert.ok(/^sheet_[a-z0-9_]+$/.test(k), `sheet key 应为拼音 slug：${k}`);
@@ -765,11 +766,11 @@ test('writeStatDiffToDb：多操作走逐条原生 CRUD（不再用 executeSqlBa
 
 test('writeStatDiffToDb：同一新行的多字段合并为一条 INSERT（不撞 UNIQUE）', async () => {
     const layout = [
-        { kind: 'rows', group: '气运', table: '气运表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['效果', 'text', '', '', '', ''], ['说明', 'text', '', '', '', '']], writePaths: [['气运']], mirrors: [] },
+        { kind: 'rows', group: '气运', table: '主角_气运表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['效果', 'text', '', '', '', ''], ['说明', 'text', '', '', '', '']], writePaths: [['气运']], mirrors: [] },
     ];
     const tables = {
         mate: { type: 'chatSheets', version: 1 },
-        sheet_1: { name: '气运表', content: [['row_id', '名称', '效果', '说明']] },
+        sheet_1: { name: '主角_气运表', content: [['row_id', '名称', '效果', '说明']] },
     };
     const insertedRows = [];
     const api = {
@@ -958,7 +959,7 @@ test('行表条目自带「名称」字段时键列改名，表头不得重复�
             },
         },
     }), { mode: 'both' });
-    const t1 = Object.values(r1.template).find(s => s && s.name === '技能熟练度表');
+    const t1 = Object.values(r1.template).find(s => s && s.name === '角色_技能熟练度表');
     assert.ok(t1, '应有技能熟练度表');
     const h1 = t1.content[0];
     assert.strictEqual(new Set(h1).size, h1.length, `子行表表头不得重复：${JSON.stringify(h1)}`);
@@ -1511,6 +1512,7 @@ test('脚本语法与 SD_LAYOUT 结构', () => {
     assert.ok(r.bridgeScript.includes('mag_variable_update_ended'), '写库后应广播 MVU 原版的 VARIABLE_UPDATE_ENDED 事件');
     // EJS 数据函数由扩展注册（桥不在主窗口执行，注册无效）；桥不再包含注册代码
     assert.ok(!r.bridgeScript.includes('installTemplateDefines'), '桥不应再包含失效的模板注册代码');
+    assert.ok(r.bridgeScript.includes("var embedded=String(BRIDGE_CARD_NAME||'').trim()"), '聊天上下文暂无角色名时应用转换时固化卡名兜底，避免模板名只剩“模板”');
 });
 
 test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
@@ -2130,6 +2132,32 @@ test('数组表提示词按行增删改，不再“整体替换/禁止增删”'
     assert.ok(!sheet.sourceData.initNode.includes('无（开局'), 'initNode 不应出现“无（…）”矛盾表述');
 });
 
+test('嵌套数组拆成有序子表，不在父表保留业务 JSON 列', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '数组子表卡', first_mes: '你好',
+            character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify({
+                主角: { 姓名: '甲', 成就勋章: ['开局', '破境', '登仙'] },
+                人物: { 甲: { 名称: '甲', 标签: ['剑修', '长老', '谨慎'] } },
+            }) }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const hero = r.schema.find(g => g.name === '主角');
+    const npc = r.schema.find(g => g.name === '人物');
+    assert.ok(!hero.columns.some(c => c.zh === '成就勋章'));
+    assert.ok(!npc.columns.some(c => c.zh === '标签'));
+    const medals = r.schema.find(g => g.name === '成就勋章');
+    const tags = r.schema.find(g => g.name === '标签');
+    assert.strictEqual(medals.kind, 'pathArray');
+    assert.strictEqual(tags.kind, 'nestedArray');
+    assert.deepStrictEqual(tags.columns.map(c => c.zh), ['人物_键名', '内容']);
+    const businessJson = r.schema.flatMap(g => g.columns.filter(c => c.isObject && c.zh !== '_扩展数据'));
+    assert.deepStrictEqual(businessJson, []);
+});
+
 test('行表 initNode 不写死首个开场分支的初始记录名（多开场白分支注入后不误导）', () => {
     const card = {
         spec: 'chara_card_v3',
@@ -2196,7 +2224,7 @@ test('行表 SQL 示例排除下划线只读字段', () => {
         },
     };
     const r = core.convert(card, { mode: 'both' });
-    const sheet = Object.values(r.template).find(s => s && s.name === '气运表');
+    const sheet = Object.values(r.template).find(s => s && s.name === '主角_气运表');
     assert.ok(sheet, '应生成气运表');
     assert.ok(sheet.content[0].includes('_剩余次数'), '表头应有 _剩余次数 列');
     assert.ok(!sheet.sourceData.insertNode.includes('_剩余次数'), 'INSERT 示例不应包含 _剩余次数');
@@ -2735,6 +2763,81 @@ test('合成卡：与参考卡无关的组名也能转换（含 [value,desc] 叶
     assert.ok(r.card.data.alternate_greetings[0].includes('<UpdateVariable>'));
     // 数据桥脚本包含更新块解析
     assert.ok(r.bridgeScript.includes('parseUpdateCommands'));
+});
+
+test('EJS 数据入口改写：fallback/getAllVariables/allVariables/TavernHelper 全覆盖，动态读取进入人工报告', () => {
+    const report = core.createReport();
+    const src = [
+        '<% const a = getvar("stat_data", {}).主角.生命; %>',
+        '<%= getvar("stat_data.世界.时间", null) %>',
+        '<%= getAllVariables().stat_data.主角.生命 %>',
+        '<%= EjsTemplate.allVariables().stat_data.主角.生命 %>',
+        '<%= all_variables.stat_data.主角.生命 %>',
+        '<%= TavernHelper.getVariables().stat_data.主角.生命 %>',
+        '<% const key = "stat_data"; print(getvar(key)); %>',
+    ].join('\n');
+    const rw = core.rewriteEjsConditions(src, { entries: [] }, report);
+    assert.strictEqual((rw.text.match(/mvu2shujukuGetAllVariables\(\)\.stat_data/g) || []).length, 6, rw.text);
+    assert.ok(rw.text.includes('getvar(key)'), '动态 getvar 不能冒险改写');
+    assert.ok(report.manualReview.some(x => x.includes('getvar(key)')), '未识别动态数据入口必须进入人工报告');
+});
+
+test('EJS 兼容端到端：改写后的 if 从数据库重建 stat_data 并得到与原模板一致的输出', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '测试角色', description: '', first_mes: '你好',
+            character_book: { entries: [
+                { comment: '[InitVar]', content: '冒险者:\n  等级: 12' },
+                { comment: '条件', content: '<% if (getvar("stat_data", {}).冒险者.等级 >= 10) { %>老练冒险者<% } %>' },
+            ] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const tpl = r.card.data.character_book.entries.find(e => e.comment === '条件').content;
+    const { win } = bridgeSandbox(r, { extra: { EjsTemplate: { defines: {} } } });
+    const ctx = win.EjsTemplate.defines;
+    assert.strictEqual(typeof ctx.mvu2shujukuGetAllVariables, 'function', '卡内桥应自行注册 EJS define');
+    // 最小 EJS 执行器：执行真实的 JS 控制块/表达式；上下文显式作为函数参数，等价于禁用 with。
+    const render = (source, context) => {
+        let code = "let __out='';\n";
+        let last = 0;
+        const re = /<%([=-]?)([\s\S]*?)%>/g;
+        let m;
+        while ((m = re.exec(source))) {
+            code += '__out+=' + JSON.stringify(source.slice(last, m.index)) + ';\n';
+            code += m[1] ? '__out+=String((' + m[2] + '));\n' : m[2] + '\n';
+            last = re.lastIndex;
+        }
+        code += '__out+=' + JSON.stringify(source.slice(last)) + ';return __out;';
+        const keys = Object.keys(context);
+        return Function(...keys, code)(...keys.map(k => context[k]));
+    };
+    assert.strictEqual(render(tpl, ctx), '老练冒险者');
+});
+
+test('可选简单 EJS→数据库语法：仅静态字段字面量条件转换，复杂 EJS 保留', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '简单翻译卡', description: '', first_mes: '你好',
+            character_book: { entries: [
+                { comment: '[InitVar]', content: '冒险者:\n  等级: 12' },
+                { comment: '简单', content: '<% if (getvar("stat_data").冒险者["等级"][0] >= 10) { %>老练冒险者<% } %>' },
+                { comment: '复杂', content: '<% if ([1,2,3].some(x => x > 1)) { %>保留<% } %>' },
+            ] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both', translateSimpleEjs: true });
+    const simple = r.card.data.character_book.entries.find(e => e.comment === '简单').content;
+    const complex = r.card.data.character_book.entries.find(e => e.comment === '复杂').content;
+    assert.ok(simple.startsWith('<if db="db.冒险者表.'), simple);
+    assert.ok(simple.includes("get('等级') >= 10"), simple);
+    assert.ok(!simple.includes('<%'), simple);
+    assert.ok(complex.includes('<% if'), '复杂 EJS 必须保留');
+    assert.ok(r.reportText.includes('简单只读 EJS 条件转换为数据库'), r.reportText);
 });
 
 test('MVU 规则来源：范围/枚举/提醒均来自卡内 [MvuUpdate]（代码无内置数值字典）', () => {
@@ -3947,7 +4050,7 @@ test('动态键字典子对象所在组不展平为行表：天下地图.地区�
     const names = r.meta.tableNames;
     assert.ok(!names.includes('天下地图表') || Object.values(r.template).find(s => s && s.name === '天下地图表').content[0].length <= 2,
         '天下地图表不得含 山西/陕西 列（应为容器）');
-    const k = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '地区态势表');
+    const k = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '天下地图_地区态势表');
     assert.ok(k, '应生成地区态势子行表');
     const s = r.template[k];
     assert.deepStrictEqual(s.content[0], ['row_id', '键名', '名义归属', '实控势力', '_扩展数据'], '地区态势表列应来自 type 声明字段');
@@ -3962,7 +4065,7 @@ test('动态键字典子对象所在组不展平为行表：天下地图.地区�
             kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
             cols: (e.cols || []).map((c, i) => {
                 const sc = (g.columns || [])[i] || {};
-                return [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, sc.path || [e.group, c.zh], !!c.isPair, c.desc || ''];
+                return [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || ''];
             }),
             writePaths: e.writePaths || [], mirrors: e.mirrors || [],
         };
@@ -4009,7 +4112,7 @@ test('拼音相同列消歧兜底：同表 山西/陕西 两列时后列改名�
             kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
             cols: (e.cols || []).map((c, i) => {
                 const sc = (g.columns || [])[i] || {};
-                return [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, sc.path || [e.group, c.zh], !!c.isPair, c.desc || ''];
+                return [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || ''];
             }),
             writePaths: e.writePaths || [], mirrors: e.mirrors || [],
         };
@@ -4068,6 +4171,209 @@ test('JSON 表内容列为非严格 JSON（尾逗号/单引号/注释）时读�
     Object.values(bTables).find(x => x && x.name === '宗门表').content[1][1] = "{'掌门':'李四',}";
     const sdBridge = win.getAllVariables().stat_data;
     assert.strictEqual(sdBridge['宗门']['掌门'], '李四', '桥读回：非严格 JSON 不应丢（mvuBridgeJsonrepair 兜底）');
+});
+
+test('组级 type 块标量（{ [键]: {...} } 动态键字典）必须解析：宗门/灵兽栏/寻缘蝶 不得退化成整组 JSON 表（大荒前端不显示回归）', async () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '组级type卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '宗门: {}\n灵兽栏: {}' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  宗门:',
+                            '    type: |-',
+                            '      {',
+                            '        [宗门键名: string]: {',
+                            '          名称: string;',
+                            '          主角职务: string;',
+                            '          主角贡献点: number;',
+                            '        }',
+                            '      }',
+                            '  灵兽栏:',
+                            '    type: |-',
+                            '      {',
+                            '        [灵兽名: string]: {',
+                            '          种族: string;',
+                            '          境界: string;',
+                            '        }',
+                            '      }',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.ok(si.dynamicGroups.has('宗门'), '组级 type 动态键字典应识别 宗门（旧正则把块标量截断成空导致丢失）');
+    assert.ok(si.dynamicGroups.has('灵兽栏'), '组级 type 动态键字典应识别 灵兽栏');
+    assert.ok((si.shapes['宗门'] || []).includes('主角职务'), '宗门条目字段应含 主角职务（EJS 渲染依赖）');
+    const r = core.convert(card, { mode: 'both' });
+    const zj = Object.values(r.template).find(s => s && s.name === '宗门表');
+    assert.ok(zj, '应生成宗门表');
+    assert.deepStrictEqual(zj.content[0], ['row_id', '键名', '名称', '主角职务', '主角贡献点', '_扩展数据'], '宗门表应为动态键字典行表（列来自 type 声明）');
+    const ls = Object.values(r.template).find(s => s && s.name === '灵兽栏表');
+    assert.ok(ls && ls.content[0].includes('种族') && ls.content[0].includes('境界'), '灵兽栏表应为行表（种族/境界列）');
+    // 写嵌套数据 → 读回 EJS 兼容（{宗门名: {主角职务,…}}）
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const layout = JSON.parse(r.card.data.extensions.mvu2shujuku.layout);
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        updateCell: async (t, ri, col, v) => { const s = Object.values(tables).find(x => x && x.name === t); if (!s || !s.content[ri]) return false; const ci = s.content[0].indexOf(col); if (ci === -1) return false; s.content[ri][ci] = String(v); return true; },
+        insertRow: async (t, obj) => { const s = Object.values(tables).find(x => x && x.name === t); if (!s) return 0; const row = s.content[0].map(h => (obj && obj[h] !== undefined && obj[h] !== null) ? String(obj[h]) : ''); row[0] = s.content.length || 1; s.content.push(row); return row[0]; },
+        deleteRow: async (t, ri) => { const s = Object.values(tables).find(x => x && x.name === t); if (!s || !s.content[ri]) return false; s.content.splice(ri, 1); return true; },
+    };
+    const prevAll = core.statDataFromTables(layout, tables);
+    const next = JSON.parse(JSON.stringify(prevAll.stat_data));
+    next['宗门'] = { 无常派: { 名称: '无常派', 主角职务: '外门杂役', 主角贡献点: 0 } };
+    await core.writeStatDiffToDb(fakeApi, layout, prevAll.stat_data, next);
+    const sd = core.statDataFromTables(layout, tables).stat_data;
+    const _sect = sd['宗门'];
+    let _sd = null;
+    for (const _k in _sect) { if (_sect[_k]) { _sd = _sect[_k]; break; } }
+    assert.strictEqual(_sd && _sd['主角职务'], '外门杂役', '读回应为嵌套结构（EJS 的 _sd.主角职务 可读）');
+    assert.strictEqual(Number(_sd && _sd['主角贡献点']), 0, 'EJS 的 _sd.主角贡献点 可读');
+});
+
+test('规则 YAML 非法回退正则时，组级 type/check、字段级 type/check/range/format 全部提取完整（正则回退路径同类审计）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '回退完整性卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '宗门: {}\n灵兽栏: {}\n主角:\n  道心: 50\n  气运: 普通' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  世界:',
+                            '    灵气浓度:',
+                            "      format: '稀薄'|'普通'", // 裸 | 非法 YAML → 整体回退正则
+                            '  宗门:',
+                            '    type: |-',
+                            '      {',
+                            '        [宗门键名: string]: {',
+                            '          名称: string;',
+                            '          主角职务: string;',
+                            '        }',
+                            '      }',
+                            '    check:',
+                            '      - 加入宗门时全量初始化',
+                            '  灵兽栏:',
+                            '    type: |-',
+                            '      {',
+                            '        [灵兽名: string]: { 种族: string; 境界: string; }',
+                            '      }',
+                            '  主角:',
+                            '    道心:',
+                            '      type: number',
+                            '      range: 0~100',
+                            '      check:',
+                            '        - 归零走火入魔',
+                            '    气运:',
+                            "      format: '普通'|'鸿运'",
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.ok(si.dynamicGroups.has('宗门') && si.dynamicGroups.has('灵兽栏'), '回退正则也要识别组级 type 动态键字典');
+    assert.ok((si.groupChecks['宗门'] || []).some(x => x.includes('全量初始化')), '组级 check 应保留');
+    assert.deepStrictEqual(si.ranges['道心'], [0, 100], '字段级 range 应保留');
+    assert.deepStrictEqual((si.checks['主角'] || {}).道心, ['归零走火入魔'], '字段级 check 应保留');
+    assert.ok((si.formats['主角'] || {}).气运, '字段级 format 应保留');
+    const r = core.convert(card, { mode: 'both' });
+    const zj = Object.values(r.template).find(s => s && s.name === '宗门表');
+    assert.ok(zj && zj.content[0].includes('主角职务'), '宗门表应为行表（主角职务列）');
+    assert.ok(r.reportText.includes('回退正则路径'), '报告应注明 YAML 失败已回退正则（便于发现解析异常）');
+});
+
+test('组级 type 固定嵌套对象用下划线展平，新行读写后 EJS 仍得到原嵌套结构（大荒宗门回归）', async () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '嵌套对象宗门卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '宗门: {}' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  宗门:',
+                            '    type: |-',
+                            '      {',
+                            '        [宗门键名: string]: {',
+                            '          名称: string; 等级: number; 阵营: string; 宗旨: string; 声望: number; 风气: string; 通缉: number;',
+                            '          资源: { 灵脉: string; 库存灵石: number; 特产: string; 气运: string; };',
+                            '          建筑: { 大殿: number; 藏经阁: number; 杂役处: number; };',
+                            '          主角职务: string; 主角贡献点: number;',
+                            '        }',
+                            '      }',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    // 嵌套对象字段完整：旧 parseShapeString 只取第一个 key（名称），其余标量/对象字段全丢
+    assert.ok((si.shapes['宗门'] || []).includes('等级'), '顶层标量字段 等级 应提取（旧实现丢失）');
+    assert.ok((si.shapes['宗门'] || []).includes('声望') && (si.shapes['宗门'] || []).includes('通缉'), '声望/通缉 应提取');
+    assert.ok(si.objects['宗门'] && si.objects['宗门']['资源'] && si.objects['宗门']['建筑'], '资源/建筑 应为对象字段');
+    const r = core.convert(card, { mode: 'both' });
+    const zj = Object.values(r.template).find(s => s && s.name === '宗门表');
+    assert.ok(zj.content[0].includes('资源_灵脉') && zj.content[0].includes('建筑_大殿'), '固定嵌套对象应展平为带下划线的列');
+    assert.ok(!zj.content[0].includes('资源') && !zj.content[0].includes('建筑'), '不应再保留整对象 JSON 列');
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const layout = JSON.parse(r.card.data.extensions.mvu2shujuku.layout);
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        updateCell: async (t, ri, col, v) => { const s = Object.values(tables).find(x => x && x.name === t); if (!s || !s.content[ri]) return false; const ci = s.content[0].indexOf(col); if (ci === -1) return false; s.content[ri][ci] = String(v); return true; },
+        insertRow: async (t, obj) => { const s = Object.values(tables).find(x => x && x.name === t); if (!s) return 0; const row = s.content[0].map(h => (obj && obj[h] !== undefined && obj[h] !== null) ? String(obj[h]) : ''); row[0] = s.content.length || 1; s.content.push(row); return row[0]; },
+        deleteRow: async (t, ri) => { const s = Object.values(tables).find(x => x && x.name === t); if (!s || !s.content[ri]) return false; s.content.splice(ri, 1); return true; },
+    };
+    const prevAll = core.statDataFromTables(layout, tables);
+    const next = JSON.parse(JSON.stringify(prevAll.stat_data));
+    next['宗门'] = {
+        无常派: {
+            名称: '无常派', 等级: 3, 阵营: '正道', 宗旨: '无常即常', 声望: 100, 风气: '务实', 通缉: 0,
+            师尊: '无', 主角派系: '无', 禁闭剩余: 0,
+            资源: { 灵脉: '下品', 库存灵石: 5000, 特产: '无常丹', 气运: '平' },
+            建筑: { 大殿: 1, 藏经阁: 1, 杂役处: 1 },
+            主角职务: '外门杂役', 主角贡献点: 0,
+        },
+    };
+    await core.writeStatDiffToDb(fakeApi, layout, prevAll.stat_data, next);
+    const zj2 = Object.values(tables).find(s => s && s.name === '宗门表');
+    const hdr2 = zj2.content[0];
+    assert.strictEqual(zj2.content[1][hdr2.indexOf('资源_灵脉')], '下品');
+    assert.strictEqual(Number(zj2.content[1][hdr2.indexOf('资源_库存灵石')]), 5000);
+    assert.strictEqual(Number(zj2.content[1][hdr2.indexOf('建筑_大殿')]), 1);
+    // EJS 视角全字段可读
+    const sd = core.statDataFromTables(layout, tables).stat_data;
+    let _sd = null;
+    for (const _k in sd['宗门']) { if (sd['宗门'][_k]) { _sd = sd['宗门'][_k]; break; } }
+    assert.strictEqual(_sd['主角职务'], '外门杂役', 'EJS _sd.主角职务 可读');
+    assert.strictEqual(_sd['师尊'], '无', 'EJS _sd.师尊 可读（_扩展数据 合并）');
+    assert.strictEqual(_sd['资源']['灵脉'], '下品', 'EJS _sd.资源.灵脉 可读（展平列还原）');
+    assert.strictEqual(_sd['建筑']['大殿'], 1, 'EJS _sd.建筑.大殿 可读');
 });
 
 test('懒加载角色：缓存键用列表对象（带 avatar），开场写入不被“无模板缓存”丢弃', async () => {
@@ -4567,7 +4873,7 @@ test('行表键同时存在于 seedRows 与 content：差异写入只更新 cont
 
     // 气运表：content 与 seedRows 同时含同键（模拟插件运行时导出的冲突形态）
     const tables = JSON.parse(JSON.stringify(r.template));
-    const qy = Object.values(tables).find(s => s && s.name === '气运表');
+    const qy = Object.values(tables).find(s => s && s.name === '主角_气运表');
     const keyCol = '名称';
     qy.content = [qy.content[0], [1, '测试气运', '被动', '效果']];
     qy.seedRows = [[1, '测试气运', '被动', '效果']];
@@ -4681,7 +4987,7 @@ test('删除行表条目（如删气运）：差异路径 deleteRow 同步移除
     const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
 
     const tables = JSON.parse(JSON.stringify(r.template));
-    const qy0 = Object.values(tables).find(s => s && s.name === '气运表');
+    const qy0 = Object.values(tables).find(s => s && s.name === '主角_气运表');
     const keyCol = qy0.content[0].includes('名称') ? '名称' : qy0.content[0][1];
     const persisted = JSON.parse(JSON.stringify(r.template));
     const checkpointMsg = {
@@ -4765,7 +5071,7 @@ test('删除行表条目（如删气运）：差异路径 deleteRow 同步移除
     const keyB = '保留气运';
     await win.Mvu.replaceMvuData({ stat_data: { 主角: { 气运: { [keyA]: { 名称: keyA, 类型: '测试' }, [keyB]: { 名称: keyB, 类型: '测试' } } } } });
     await new Promise(res => setTimeout(res, 1000));
-    const qyIns = Object.values(tables).find(s => s && s.name === '气运表');
+    const qyIns = Object.values(tables).find(s => s && s.name === '主角_气运表');
     const keyIdxIns = qyIns.content[0].indexOf(keyCol);
     assert.ok(qyIns.content.slice(1).some(row => row && row[keyIdxIns] === keyA), '插入后气运表应包含新条目');
     // 前端删除其中一条：target 组仍非空 → 触发 deleteRow（空组保护只拦“整组未发”）
@@ -4774,7 +5080,7 @@ test('删除行表条目（如删气运）：差异路径 deleteRow 同步移除
     delete stat.主角.气运[keyA];
     await win.Mvu.replaceMvuData({ stat_data: stat });
     await new Promise(res => setTimeout(res, 1200));
-    const qyNow = Object.values(tables).find(s => s && s.name === '气运表');
+    const qyNow = Object.values(tables).find(s => s && s.name === '主角_气运表');
     const keyIdxNow = qyNow.content[0].indexOf(keyCol);
     const keysNow = qyNow.content.slice(1).map(row => row && row[keyIdxNow]).filter(Boolean);
     assert.ok(!keysNow.includes(keyA), '删除操作后运行时气运表不应再包含被删条目');
@@ -4804,7 +5110,7 @@ test('条目只在 seedRows（content 无行）时删除：扩展不再快照兜
 
     // 运行时气运表：content 仅表头，条目在 seedRows（模拟道渊：气运未物化、UI 从 seedRows 读取）
     const tables = JSON.parse(JSON.stringify(r.template));
-    const qy0 = Object.values(tables).find(s => s && s.name === '气运表');
+    const qy0 = Object.values(tables).find(s => s && s.name === '主角_气运表');
     const keyCol = qy0.content[0].includes('名称') ? '名称' : qy0.content[0][1];
     qy0.content = [qy0.content[0]];
     qy0.seedRows = [[1, '测试气运', '被动', '效果']];
@@ -4892,7 +5198,7 @@ test('条目只在 seedRows（content 无行）时删除：扩展不再快照兜
     await win.Mvu.replaceMvuData({ stat_data: stat });
     await new Promise(res => setTimeout(res, 1200));
     assert.strictEqual(lastImport, null, '不再走 importTableAsJson 快照兜底（seedRows 由插件模板/guide 管理）');
-    const qySent = Object.values(tables).find(s => s && s.name === '气运表');
+    const qySent = Object.values(tables).find(s => s && s.name === '主角_气运表');
     const ki = qySent.content[0].indexOf(keyCol);
     const seedKeys = (qySent.seedRows || []).map(row => row && row[ki]).filter(Boolean);
     assert.ok(seedKeys.includes('测试气运'), 'seed-only 行不参与 stat_data 对账，seedRows 保持不变');
@@ -5005,7 +5311,7 @@ test('首写缺锚点：写库前 initGameSession 建锚，差异写入把行表
     await win.Mvu.replaceMvuData({ stat_data: { 主角: { 气运: { 测试气运: { 名称: '测试气运', 类型: '被动' } } } } });
     await new Promise(res => setTimeout(res, 1200));
     assert.strictEqual(initCalls, 0, '首写不再手工 initGameSession（锚点由插件提交管线建立）');
-    const qy = Object.values(tables).find(s => s && s.name === '气运表');
+    const qy = Object.values(tables).find(s => s && s.name === '主角_气运表');
     const ki = qy.content[0].indexOf('键名');
     const contentKeys = qy.content.slice(1).map(r => r && r[ki]).filter(Boolean);
     assert.ok(contentKeys.includes('测试气运'), '首写后行表数据必须落到 content（不留在 seedRows）');
@@ -5016,7 +5322,7 @@ test('行表初始数据不进模板 content（避免插件 seedRows 反复补�
     const r = core.convert(card, { mode: 'both' });
     // 主角.气运 在开场注入（initvar 中为空），模板气运表不应预置内容行——
     // 若预置，插件会把 content 行转成 seedRows 并在删除后从模板 scope 补回（实测删不掉）。
-    const qy = Object.values(r.template).find(s => s && s.name === '气运表');
+    const qy = Object.values(r.template).find(s => s && s.name === '主角_气运表');
     assert.ok(qy, '转换结果应包含气运表');
     assert.strictEqual((qy.content || []).length, 1, '气运表模板 content 只应有表头（初始行由开场注入物化）');
     assert.ok(!Array.isArray(qy.seedRows) || qy.seedRows.length === 0, '气运表模板不应有 seedRows');
@@ -5049,7 +5355,7 @@ test('diff 路径行表删除：显式空组=删除意图、组缺失才空组�
     const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
 
     const tables = JSON.parse(JSON.stringify(r.template));
-    const qy = Object.values(tables).find(s => s && s.name === '气运表');
+    const qy = Object.values(tables).find(s => s && s.name === '主角_气运表');
     const keyCol = '名称';
     qy.content = [qy.content[0], [1, '测试气运', '被动', '效果'], [2, '其他气运', '主动', '效果2']];
     const deleted = [];
@@ -5125,7 +5431,7 @@ test('diff 路径行表删除：显式空组=删除意图、组缺失才空组�
     const n1 = await win.MVU2SHUJUKU_CORE.writeStatDiffToDb(fakeApi, toLayout(r.schema), prev, nextPartial);
     assert.ok(n1 > 0, '非空组缺键应有写入');
     assert.strictEqual(deleted.length, 3, '应再调用一次 deleteRow');
-    assert.strictEqual(deleted[0][0], '气运表', '删除目标表应为气运表');
+    assert.strictEqual(deleted[0][0], '主角_气运表', '删除目标表应为气运表');
     assert.strictEqual(deleted[deleted.length - 1][1], 1, '单行删除 rowIndex 应为 content 数据行索引 1');
 });
 
@@ -6198,6 +6504,14 @@ test('首楼替换丢失插件作用域字段后重进：拷回 InternalSheetGui
                 source: 'legacy_frozen',
                 updatedAt: 1,
             },
+            branch: {
+                mode: 'chat_override',
+                isolationKey: 'branch',
+                presetName: '模板',
+                templateStr: JSON.stringify(r.template),
+                source: 'ui',
+                updatedAt: 1,
+            },
         },
     };
     const guideState = { version: 2, tags: { '': { data: JSON.parse(JSON.stringify(r.template)), templateScopeMode: 'chat_override', reason: 'game_init' } } };
@@ -6266,6 +6580,8 @@ test('首楼替换丢失插件作用域字段后重进：拷回 InternalSheetGui
     assert.strictEqual(state.presetName, '首楼修复卡模板', '冻结模板名应恢复为 卡名+模板');
     assert.strictEqual(context.chat_metadata.TavernDB_ACU_ScopedConfig.template[''].presetName, '首楼修复卡模板', 'chat_metadata 权威源应同步恢复模板名');
     assert.ok(String(state.source || '').indexOf('legacy') !== 0, 'source 不应再是 legacy 冻结');
+    assert.strictEqual(chatMsg.TavernDB_ACU_ScopedConfig.template.branch.presetName, '首楼修复卡模板', '既有聊天中缺名的“模板”标签应恢复为卡名+模板');
+    assert.strictEqual(context.chat_metadata.TavernDB_ACU_ScopedConfig.template.branch.presetName, '首楼修复卡模板', '缺名标签修复应同步到 chat_metadata');
 });
 
 test('首楼替换后作用域整体缺失：修复只拷回 InternalSheetGuide，绝不用转换器模板重建 ScopedConfig（防两套 sheet key 冲突）', async () => {
@@ -6616,13 +6932,13 @@ test('[mvu_update] 动态键字典（{ [键]: value }）拆成子行表而非固
     };
     const r = core.convert(card, { mode: 'both' });
     const layout = core.buildLayout(r.schema);
-    const e = layout.entries.find(x => x.table === '修仙秘闻表');
+    const e = layout.entries.find(x => x.table === '世界系统_修仙秘闻表');
     assert.ok(e, '应有修仙秘闻表（子行表）');
     assert.strictEqual(e.kind, 'rows', '修仙秘闻应为行表');
     assert.strictEqual(e.scalarValueCol, '描述', '标量条目应标记描述列');
     const ws = layout.entries.find(x => x.table === '世界系统表');
     assert.ok(ws.cols.every(c => c.zh !== '修仙秘闻诡异阵纹' && c.zh !== '修仙秘闻半夜声响'), '修仙秘闻不得展平成固定列');
-    const t = Object.values(r.template).find(s => s && s.name === '修仙秘闻表');
+    const t = Object.values(r.template).find(s => s && s.name === '世界系统_修仙秘闻表');
     assert.deepStrictEqual(t.content[0], ['row_id', '键名', '描述', '_扩展数据'], '修仙秘闻表头应为 键名/描述');
     // 读回保持 {键: 值} 原形（z.record(z.string(), z.string()) 兼容）
     const lj = layout.entries.map(e => ({
@@ -6637,7 +6953,200 @@ test('[mvu_update] 动态键字典（{ [键]: value }）拆成子行表而非固
     const card2 = { ...card, data: { ...card.data, name: '静态卡', character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify({ 世界系统: { 当前时间: '巳时', 今日运势: { 宜: '看潮', 忌: '翻地图' } } }) }] } } };
     const r2 = core.convert(card2, { mode: 'both' });
     const ws2 = core.buildLayout(r2.schema).entries.find(x => x.table === '世界系统表');
-    assert.ok(ws2.cols.some(c => c.zh === '今日运势宜') && ws2.cols.some(c => c.zh === '今日运势忌'), '固定子对象应展平为列');
+    assert.ok(ws2.cols.some(c => c.zh === '今日运势_宜') && ws2.cols.some(c => c.zh === '今日运势_忌'), '固定子对象应以下划线展开为列');
+});
+
+test('数值型动态字典的键名不继承值规则，模板键不得膨胀为空列（1.8.1 五维回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '五维卡', first_mes: '你好',
+            character_book: { entries: [
+                { comment: '[InitVar]', content: JSON.stringify({
+                    主角: { 声望: -40, 五维: { 生命: 80, 武力: 15, 统率: 5, 智谋: 45, 政治: 15 } },
+                }) },
+                { comment: '[mvu_update]', content: [
+                    '变量更新规则:',
+                    '  主角:',
+                    '    声望:',
+                    '      type: number',
+                    '      range: -1000~1000',
+                    '    五维:',
+                    '      type: |-','        { [能力属性: string]: number; }',
+                    '      生命:',
+                    '        type: number',
+                    '        range: 0~100',
+                    '        check: [只在正文明确伤害或恢复时更新]',
+                    '      ${武力|统率|智谋|政治}:',
+                    '        type: number',
+                    '        range: 0~100',
+                    '        check: [只因长期实践更新]',
+                ].join('\n') },
+            ] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const g = r.schema.find(x => x.tableName === '主角_五维表');
+    assert.ok(g, '五维应生成标量字典子表');
+    assert.deepStrictEqual(g.columns.map(c => c.zh), ['键名', '数值', '_扩展数据']);
+    const key = g.columns.find(c => c.zh === '键名');
+    assert.strictEqual(key.type, 'TEXT');
+    assert.strictEqual(key.range, null);
+    assert.deepStrictEqual(key.check, []);
+    const sheet = Object.values(r.template).find(s => s && s.name === '主角_五维表');
+    assert.match(sheet.sourceData.ddl, /jianming TEXT NOT NULL/);
+    assert.doesNotMatch(sheet.sourceData.ddl, /jianming[^\n]*CHECK/);
+    assert.deepStrictEqual(sheet.content.slice(1).map(row => row.slice(1, 3)), [
+        ['生命', 80], ['武力', 15], ['统率', 5], ['智谋', 45], ['政治', 15],
+    ]);
+    const main = r.schema.find(x => x.tableName === '主角表');
+    assert.deepStrictEqual(main.columns.find(c => c.zh === '声望').range, [-1000, 1000], '负数下界不得丢失负号');
+});
+
+test('SQLite INTEGER 布尔列读回 stat_data 时恢复 boolean（1.8.1 Zod 开局校验回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '布尔卡', first_mes: '你好',
+            character_book: { entries: [
+                { comment: '[InitVar]', content: JSON.stringify({
+                    人际网络: { 故友与同僚: { 常彪: { 好感度: 65, 是否在场: false } } },
+                }) },
+                { comment: '[mvu_update]', content: [
+                    '变量更新规则:',
+                    '  人际网络:',
+                    '    故友与同僚:',
+                    '      type: |-','        { [姓名: string]: { 好感度: number; 是否在场: boolean; } }',
+                ].join('\n') },
+            ] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const layout = core.buildLayout(r.schema);
+    const rel = layout.entries.find(e => e.table === '人际网络_故友与同僚表');
+    assert.ok(rel, '应生成故友与同僚子表');
+    assert.strictEqual(rel.cols.find(c => c.zh === '是否在场').type, 'boolean', '布尔逻辑类型不得退化为 number');
+    const packed = layout.entries.map(e => ({
+        ...e,
+        cols: (e.cols || []).map(c => [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']),
+    }));
+    const sd = core.statDataFromTables(packed, r.template).stat_data;
+    assert.strictEqual(sd.人际网络.故友与同僚.常彪.是否在场, false);
+    assert.strictEqual(typeof sd.人际网络.故友与同僚.常彪.是否在场, 'boolean');
+    assert.ok(r.bridgeScript.includes("if(type==='boolean')return boolean(v,fb)"), '卡内桥也必须恢复布尔值');
+});
+
+test('行条目内动态字典用具体实体关联键+键名关系表，嵌套读写不依赖特例', async () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '关系子表卡', first_mes: '你好',
+            character_book: { entries: [
+                { comment: '[InitVar]', content: JSON.stringify({
+                    寻缘蝶: { 小蝶: { 名称: '小蝶', 功法: { 太虚诀: { 等级: 2, 描述: '旧' } }, 神通: { 飞天: '会飞' } } },
+                }) },
+                { comment: '[mvu_update]', content: [
+                    '变量更新规则:', '  寻缘蝶:', '    type: |-',
+                    '      { [蝶名: string]: {', '        名称: string;',
+                    '        功法: { [功法名: string]: { 等级: number; 描述: string; } };',
+                    '        神通: { [神通名: string]: string; };', '      } }',
+                    '    功法:',
+                    '      check:',
+                    '        - 每只寻缘蝶最多保留三门功法',
+                    '    _强制更新提醒:',
+                    '      - 寻缘蝶.${NPC_ID}.功法 — 路径明确的提醒迁入功法表',
+                    '      - 新NPC建卡时综合检查全部能力',
+                    '  寻缘蝶.${NPC_ID}.功法:',
+                    '    check:',
+                    '      - 建卡铁律集合规则应随功法表维护',
+                    '  寻缘蝶.<蝶名>.功法.<功法名>.等级:',
+                    '    range: 0~9',
+                    '    check:',
+                    '      - 功法提升时更新',
+                ].join('\n') },
+                { comment: '[mvu_update]zod深层规则', content: [
+                    '变量更新规则: |-',
+                    '  z.object({',
+                    '    寻缘蝶: z.object({',
+                    '      /**',
+                    '       * check:',
+                    '       *   - Zod功法集合规则迁入功法表',
+                    '       */',
+                    '      功法: z.object({',
+                    '        /**',
+                    '         * check:',
+                    '         *   - Zod等级规则迁入功法表',
+                    '         */',
+                    '        等级: z.number(),',
+                    '      }),',
+                    '    }),',
+                    '  });',
+                ].join('\n') },
+            ] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const gongfa = r.schema.find(g => g.name === '功法');
+    const shentong = r.schema.find(g => g.name === '神通');
+    assert.strictEqual(gongfa.kind, 'nestedRows');
+    assert.deepStrictEqual(gongfa.columns.slice(0, 4).map(c => c.zh), ['寻缘蝶_键名', '键名', '等级', '描述']);
+    assert.strictEqual(shentong.scalarValueCol, '描述');
+    const gongfaSheet = Object.values(r.template).find(s => s && s.name === '寻缘蝶_功法表');
+    const butterflySheet = Object.values(r.template).find(s => s && s.name === '寻缘蝶表');
+    assert.match(gongfaSheet.sourceData.note, /寻缘蝶_键名.*寻缘蝶表\.键名/);
+    assert.match(gongfaSheet.sourceData.note, /功法提升时更新/, '完整动态路径下的字段规则应迁入关系表');
+    assert.match(gongfaSheet.sourceData.note, /维护本表时，同时遵循对应寻缘蝶记录中与「功法」相关的整体规则/);
+    assert.doesNotMatch(gongfaSheet.sourceData.note, /键名：每只寻缘蝶最多/, '集合整体规则不得误挂到关系表键名列');
+    assert.doesNotMatch(gongfaSheet.sourceData.note, /无法拆分为单字段约束/);
+    assert.match(gongfaSheet.sourceData.note, /每只寻缘蝶最多保留三门功法/, '结构化的集合整体规则应迁入功法表');
+    assert.match(gongfaSheet.sourceData.note, /建卡铁律集合规则应随功法表维护/, '路径止于功法集合的规则应迁入功法表');
+    for (const movedRule of ['每只寻缘蝶最多保留三门功法', '建卡铁律集合规则应随功法表维护', '功法提升时更新']) {
+        assert.strictEqual((gongfaSheet.sourceData.note.match(new RegExp(movedRule, 'g')) || []).length, 1, '迁入功法表的规则只能展示一次');
+        assert.doesNotMatch(butterflySheet.sourceData.note, new RegExp(movedRule), '已迁入功法表的结构化规则不应在来源实体表重复展示');
+    }
+    assert.match(gongfaSheet.sourceData.note, /路径明确的提醒迁入功法表/, '开头带完整关系路径的自由提醒应迁入功法表');
+    assert.doesNotMatch(butterflySheet.sourceData.note, /路径明确的提醒迁入功法表/, '已迁移的路径提醒不得在来源实体表重复');
+    assert.match(butterflySheet.sourceData.note, /新NPC建卡时综合检查全部能力/, '无明确路径的自由提醒应保留在来源实体表');
+    assert.doesNotMatch(gongfaSheet.sourceData.note, /新NPC建卡时综合检查全部能力/, '不得按关键词猜测无路径提醒的关系表归属');
+    assert.match(gongfaSheet.sourceData.note, /Zod功法集合规则迁入功法表/, '深层 Zod 集合规则应保留完整路径并迁入关系表');
+    assert.match(gongfaSheet.sourceData.note, /Zod等级规则迁入功法表/, '深层 Zod 字段规则应迁入关系表');
+    assert.doesNotMatch(butterflySheet.sourceData.note, /Zod功法集合规则|Zod等级规则/, '深层 Zod 规则迁移后不得在来源实体表重复');
+    assert.deepStrictEqual(gongfa.columns.find(c => c.zh === '等级').range, [0, 9], '完整动态路径的范围应附着到关系表字段');
+    assert.ok(!gongfaSheet.sourceData.initNode.includes('insertNode'), '初始化提示不得泄漏模板内部节点名');
+    for (const node of ['updateNode', 'insertNode', 'deleteNode']) {
+        assert.ok(gongfaSheet.sourceData[node].startsWith('根据正文、设定与本表规则'), `${node} 应使用统一判断依据`);
+    }
+    const overflowDdlLine = gongfaSheet.sourceData.ddl.split('\n').find(line => line.includes('-- _扩展数据')) || '';
+    assert.ok(overflowDdlLine && !overflowDdlLine.includes('CHECK('), '_扩展数据 是内部兼容列，不应生成 JSON CHECK');
+
+    const entries = core.buildLayout(r.schema).entries.map(e => ({
+        kind: e.kind, group: e.group, childKey: e.childKey || '', table: e.table,
+        keyCol: e.keyCol || '', parentKeyCol: e.parentKeyCol || '', parentTable: e.parentTable || '',
+        scalarValueCol: e.scalarValueCol || '', emptyValue: e.emptyValue, path: e.path || [], valueCol: e.valueCol || '',
+        cols: (e.cols || []).map(c => [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']),
+        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
+    }));
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const sheet = name => Object.values(tables).find(s => s && s.name === name);
+    const api = {
+        exportTableAsJson: () => tables,
+        updateCell: (name, ri, col, value) => { const s = sheet(name); s.content[ri][s.content[0].indexOf(col)] = value; return true; },
+        insertRow: (name, obj) => { const s = sheet(name); const h = s.content[0]; s.content.push([s.content.length, ...h.slice(1).map(k => obj[k] ?? '')]); return true; },
+        deleteRow: (name, ri) => { sheet(name).content.splice(ri, 1); return true; },
+    };
+    const prev = { 寻缘蝶: { 小蝶: { 名称: '小蝶', 功法: { 太虚诀: { 等级: 2, 描述: '旧' } }, 神通: { 飞天: '会飞' } } } };
+    const next = JSON.parse(JSON.stringify(prev));
+    next.寻缘蝶.小蝶.功法.太虚诀.等级 = 3;
+    next.寻缘蝶.小蝶.功法.新功 = { 等级: 1, 描述: '新' };
+    next.寻缘蝶.小蝶.神通.遁地 = '会遁';
+    await core.writeStatDiffToDb(api, entries, prev, next);
+    const sd = core.statDataFromTables(entries, tables).stat_data;
+    assert.strictEqual(sd.寻缘蝶.小蝶.功法.太虚诀.等级, 3);
+    assert.deepStrictEqual(sd.寻缘蝶.小蝶.功法.新功, { 等级: 1, 描述: '新' });
+    assert.strictEqual(sd.寻缘蝶.小蝶.神通.遁地, '会遁');
 });
 
 test('无规则时按跨分支 <initvar> 键集变化识别动态键字典（兜底）', () => {
@@ -6656,7 +7165,7 @@ test('无规则时按跨分支 <initvar> 键集变化识别动态键字典（兜
         },
     };
     const r = core.convert(card, { mode: 'both' });
-    const e = core.buildLayout(r.schema).entries.find(x => x.table === '修仙秘闻表');
+    const e = core.buildLayout(r.schema).entries.find(x => x.table === '世界系统_修仙秘闻表');
     assert.ok(e && e.kind === 'rows', '跨分支键集不同应识别为行表');
     const ws = core.buildLayout(r.schema).entries.find(x => x.table === '世界系统表');
     assert.ok(ws.cols.every(c => c.zh.indexOf('修仙秘闻') !== 0), '修仙秘闻不得展平成固定列');
@@ -6732,10 +7241,312 @@ test('type 块标量内含中文键（标签/描述等）时不得截断父字�
     assert.ok(!si.enums['分类'], '分类联合类型不应被误解析');
     // 落到模板 note
     const r = core.convert(card, { mode: 'both' });
-    const bj = Object.values(r.template).find(s => s && s.name === '修仙八卦论坛表');
+    const bj = Object.values(r.template).find(s => s && s.name === '世界系统_修仙八卦论坛表');
     assert.ok(bj && bj.sourceData.note.includes('标签只能使用热、新、荐、爆、普通'), '修仙八卦论坛表 note 应含标签约束');
-    const mw = Object.values(r.template).find(s => s && s.name === '修仙秘闻表');
+    const mw = Object.values(r.template).find(s => s && s.name === '世界系统_修仙秘闻表');
     assert.ok(mw && mw.sourceData.note.includes('每次生成4条秘闻'), '修仙秘闻表 note 应含整表 check');
+});
+
+test('TS 类型声明后接竖线说明不得变成枚举 CHECK（大荒背包 miaoshu 填表失败回归）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '类型说明误枚举卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: [
+                            '背包:',
+                            '  铁剑:',
+                            '    数量: 1',
+                            '    描述: 无',
+                        ].join('\n'),
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  世界:',
+                            '    灵气浓度:',
+                            "      format: '稀薄'|'普通'", // 强制走大荒使用的非法 YAML → 正则回退路径
+                            '  背包:',
+                            '    数量: number;',
+                            '    描述: string; | 外观、材质、来历、因果代价（如「玄铁百炼锻成，剑脊暗刻火纹，曾饮百妖之血」），未装备时为「无」',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.ok(!si.enums['描述'], '`string; | 自然语言说明` 是类型声明，不是枚举');
+    const r = core.convert(card, { mode: 'both' });
+    const bag = Object.values(r.template).find(s => s && /背包表$/.test(s.name));
+    assert.ok(bag, '应生成背包表');
+    assert.ok(!bag.sourceData.ddl.includes('CHECK(miaoshu IN ('), '描述列不得生成伪枚举 CHECK，否则任意物品描述都无法写入');
+});
+
+test('点路径嵌套动态表保持对象形状：固定部位/饰品拆表且不生成已装备表（大荒前端回归）', async () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '嵌套装备卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: [
+                            '主角:',
+                            '  姓名: 测试',
+                            '  装备:',
+                            '    固定部位:',
+                            '      主手: { 名称: 无, 品质: 无, 描述: 无, 作用: 无, 已装备: false }',
+                            '      副手: { 名称: 无, 品质: 无, 描述: 无, 作用: 无, 已装备: false }',
+                            '    饰品: {}',
+                        ].join('\n'),
+                    },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: [
+                            '变量更新规则:',
+                            '  世界:',
+                            '    灵气浓度:',
+                            "      format: '稀薄'|'普通'", // 强制走大荒实际使用的非法 YAML 正则回退路径
+                            '  主角:',
+                            '    外貌:',
+                            '      type: string',
+                            '      check:',
+                            '        - 随剧情更新',
+                            '    装备.固定部位.${主手|副手}:',
+                            '      type: |-',
+                            '        {',
+                            '          名称: string; // 装备名称',
+                            "          品质: '无' | '凡'", // 联合类型后没有分号，是大荒原规则的写法
+                            '          描述: string; // 外观与来历',
+                            '          作用: string;',
+                            '          已装备: boolean;',
+                            '        }',
+                            '      check:',
+                            '        - 固定部位必须保持完整对象',
+                            '    装备.饰品:',
+                            '      type: |-',
+                            '        {',
+                            '          [饰品键名: string]: {',
+                            '            名称: string;',
+                            '            品质: string;',
+                            '            描述: string;',
+                            '            作用: string;',
+                            '            已装备: boolean;',
+                            '          }',
+                            '        }',
+                            '      check:',
+                            '        - 饰品按键名增删',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.ok(si.dynamicPaths.has('主角.装备.固定部位'), '固定部位应登记为完整嵌套动态路径');
+    assert.ok(si.dynamicPaths.has('主角.装备.饰品'), '饰品应登记为完整嵌套动态路径');
+    assert.ok(!(si.dynamicDicts['主角'] || {}).已装备, '前一字段 block 不得吞入装备规则并凭空登记 主角.已装备');
+    assert.deepStrictEqual(
+        (si.shapes['固定部位'] || []).filter(x => ['名称', '品质', '描述', '作用', '已装备'].includes(x)),
+        ['名称', '品质', '描述', '作用', '已装备'],
+        '注释及无分号联合类型之后的字段也必须完整解析'
+    );
+
+    const r = core.convert(card, { mode: 'both' });
+    const names = r.meta.tableNames;
+    assert.ok(names.includes('主角_装备_固定部位表') && names.includes('主角_装备_饰品表'), '装备容器下应按完整路径拆出固定部位表和饰品表');
+    assert.ok(!names.includes('装备表') && !names.includes('已装备表'), '装备容器和已装备标量不得误建行表');
+    const layout = JSON.parse(r.card.data.extensions.mvu2shujuku.layout);
+    const fixedLayout = layout.find(x => x.table === '主角_装备_固定部位表');
+    const accessoryLayout = layout.find(x => x.table === '主角_装备_饰品表');
+    assert.deepStrictEqual(fixedLayout.writePaths, [['主角', '装备', '固定部位']], '固定部位写回路径不得丢失中间的装备层');
+    assert.deepStrictEqual(accessoryLayout.writePaths, [['主角', '装备', '饰品']], '饰品写回路径不得丢失中间的装备层');
+
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const byName = n => Object.values(tables).find(x => x && x.name === n);
+    const fixed = byName('主角_装备_固定部位表');
+    assert.deepStrictEqual(fixed.content[0], ['row_id', '键名', '名称', '品质', '描述', '作用', '已装备', '_扩展数据']);
+    let sd = core.statDataFromTables(layout, tables).stat_data;
+    assert.strictEqual(typeof sd.主角.装备.固定部位.主手, 'object', '固定部位读回必须是对象，不能是 JSON 字符串');
+    assert.strictEqual(sd.主角.装备.固定部位.主手.名称, '无', '前端直接读取 主手.名称 应可用');
+    assert.deepStrictEqual(sd.主角.装备.饰品, {}, '空饰品表应还原为空字典');
+
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        updateCell: async (t, ri, col, v) => { const s = byName(t); if (!s || !s.content[ri]) return false; const ci = s.content[0].indexOf(col); if (ci === -1) return false; s.content[ri][ci] = String(v); return true; },
+        insertRow: async (t, obj) => { const s = byName(t); if (!s) return 0; const row = s.content[0].map(h => obj && obj[h] != null ? String(obj[h]) : ''); row[0] = s.content.length || 1; s.content.push(row); return row[0]; },
+        deleteRow: async (t, ri) => { const s = byName(t); if (!s || !s.content[ri]) return false; s.content.splice(ri, 1); return true; },
+    };
+    const next = JSON.parse(JSON.stringify(sd));
+    next.主角.装备.固定部位.主手 = { 名称: '玄铁剑', 品质: '凡', 描述: '玄铁百炼', 作用: '破甲', 已装备: 1 };
+    next.主角.装备.饰品.护心玉佩 = { 名称: '护心玉佩', 品质: '凡', 描述: '温润古玉', 作用: '护心', 已装备: 1 };
+    await core.writeStatDiffToDb(fakeApi, layout, sd, next);
+    sd = core.statDataFromTables(layout, tables).stat_data;
+    assert.strictEqual(sd.主角.装备.固定部位.主手.名称, '玄铁剑', '固定槽位写表后应按原嵌套路径读回');
+    assert.strictEqual(sd.主角.装备.饰品.护心玉佩.作用, '护心', '新增饰品写表后应按原嵌套路径读回');
+});
+
+test('大荒式空动态表：前端别名补列、混合字段名/类型保留、JSON 对象结构可见且强校验', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '大荒形状回归卡', description: '', first_mes: '你好',
+            character_book: { entries: [
+                { comment: '[InitVar]', content: '宗门: {}\n寻缘蝶: {}' },
+                { comment: '[mvu_update]', content: [
+                    '变量更新规则:',
+                    '  宗门:',
+                    '    type: |- ',
+                    '      { [宗门名: string]: {',
+                    '        名称: string;',
+                    '        等级: number;',
+                    '        人口: { 老祖: string; 宗主: string; 圣女: string; 长老数: number; 弟子数: number; };',
+                    '      } }',
+                    '  寻缘蝶:',
+                    '    type: |- ',
+                    '      { [角色名: string]: {',
+                    '        姓名: string;',
+                    '        好感度: number;',
+                    '        性癖XP: string;',
+                    '        性格2: string;',
+                    '        三围_体型: string;',
+                    '        元阴_元阳: string;',
+                    '      } }',
+                ].join('\n') },
+            ] },
+            extensions: { regex_scripts: [{ scriptName: '状态栏', replaceString: [
+                'var views={',
+                'sect: function(d) {',
+                " var rootSect=get(d,'宗门')||{};",
+                ' var selectedKey=Object.keys(rootSect)[0];',
+                ' var s=selectedKey?rootSect[selectedKey]:{};',
+                " var pop=s['人口']||{};",
+                " return val(s,'师尊')+val(s,'主角派系')+val(s,'禁闭剩余',0)+val(pop,'老祖');",
+                '},',
+                'inventory: function(d) {',
+                " var items=list(d,'背包');",
+                " return items.map(function(item){return val(item,'品质');});",
+                '}',
+                '};',
+            ].join('\n') }], tavern_helper: { scripts: [] } },
+        },
+    };
+    const usage = core.scanStatusUsage(card, ['宗门', '寻缘蝶', '背包']);
+    assert.ok(usage.宗门.includes('师尊') && usage.宗门.includes('主角派系') && usage.宗门.includes('禁闭剩余'));
+    assert.ok(!usage.宗门.includes('老祖') && !usage.宗门.includes('品质'), '嵌套 JSON 键和其他 render 的临时变量不得混成宗门列');
+
+    const r = core.convert(card, { mode: 'both' });
+    const sect = Object.values(r.template).find(x => x && x.name === '宗门表');
+    const npc = Object.values(r.template).find(x => x && x.name === '寻缘蝶表');
+    assert.ok(sect && npc);
+    for (const f of ['师尊', '主角派系', '禁闭剩余']) assert.ok(sect.content[0].includes(f), `宗门表应包含 ${f}`);
+    assert.match(sect.sourceData.ddl, /jinbishengyu INTEGER/);
+    assert.match(sect.sourceData.ddl, /renkou_zongzhu TEXT/);
+    assert.match(sect.sourceData.ddl, /renkou_changlaoshu INTEGER/);
+    assert.doesNotMatch(sect.sourceData.ddl, /\srenkou\s+TEXT/);
+    assert.doesNotMatch(sect.sourceData.note, /逻辑路径：/, '普通展开列不应重复输出内部逻辑路径');
+    for (const f of ['性癖XP', '性格2', '三围_体型', '元阴_元阳']) assert.ok(npc.content[0].includes(f), `混合字段名 ${f} 不得丢失`);
+    assert.match(npc.sourceData.ddl, /haogandu INTEGER/);
+});
+
+test('通用形状往返：对象内 number 不污染外层、子表对象/普通数组/null 与绝对点路径均保持', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '通用形状不变量卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    {
+                        comment: '[InitVar]',
+                        content: [
+                            '平台:',
+                            '  甲站:',
+                            '    收益明细: { 本月总收益: 10, 主要来源: 广告 }',
+                            '人际:',
+                            '  当前人物: 阿青',
+                            '  人物:',
+                            '    阿青:',
+                            '      生育: { 状态: 未孕, 周期: 3 }',
+                            '      最近互动记录: [初次见面]',
+                            "      好感度: [20, '0~100 的当前好感']",
+                            '主角:',
+                            '  关系网: null',
+                            '图鉴: null',
+                        ].join('\n'),
+                    },
+                    {
+                        comment: '[mvu_update]合法对象规则',
+                        content: [
+                            '变量更新规则:',
+                            '  平台:',
+                            '    收益明细:',
+                            '      type: |-',
+                            '        {',
+                            '          本月总收益: number;',
+                            '          主要来源: string;',
+                            '        }',
+                        ].join('\n'),
+                    },
+                    {
+                        comment: '[mvu_update]非法YAML绝对点路径',
+                        content: [
+                            '变量更新规则:',
+                            '  世界:',
+                            '    状态:',
+                            "      format: '平静'|'动荡'", // 强制进入正则回退
+                            '  主角.关系网:',
+                            '    type: |-',
+                            '      {',
+                            '        [人物ID: string]: {',
+                            '          姓名: string;',
+                            '          好感度: number;',
+                            '        }',
+                            '      }',
+                        ].join('\n'),
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+
+    const si = core.parseMvuShapes(card);
+    assert.ok(si.dynamicPaths.has('主角.关系网'), '规则外壳内的绝对点路径不得加成 变量更新规则.主角.关系网');
+    assert.ok(!si.dynamicPaths.has('变量更新规则.主角.关系网'), '变量更新规则 只是语法外壳，不是 stat_data 路径');
+
+    const r = core.convert(card, { mode: 'both' });
+    const layout = JSON.parse(r.card.data.extensions.mvu2shujuku.layout);
+    const tables = r.template;
+    const sd = core.statDataFromTables(layout, tables).stat_data;
+
+    assert.deepStrictEqual(sd.平台.甲站.收益明细, { 本月总收益: 10, 主要来源: '广告' }, '对象内部含 number 时外层仍须按 JSON 对象读回');
+    assert.deepStrictEqual(sd.人际.人物.阿青.生育, { 状态: '未孕', 周期: 3 }, '子行表应依据 InitVar 实际值识别对象列');
+    assert.deepStrictEqual(sd.人际.人物.阿青.最近互动记录, ['初次见面'], '普通业务数组不得误当 [value, desc]');
+    assert.strictEqual(sd.人际.人物.阿青.好感度, 20, '数字 [value, desc] 按既有 MVU 语义读回纯数字');
+    assert.strictEqual(sd.主角.关系网, null, '动态字典的 null 初始占位在空表时应保持 null');
+    assert.strictEqual(sd.图鉴, null, '顶层 null 必须经过 JSON 表原样往返，不得被跳过或变成空对象');
+
+    const platform = Object.values(tables).find(x => x && x.name === '平台表');
+    const incomeIndex = platform.content[0].indexOf('收益明细_本月总收益');
+    assert.ok(incomeIndex >= 0, '固定收益明细对象应展平为叶子列');
+    assert.match(platform.sourceData.ddl, /shouyimingxi_benyuezongshouyi INTEGER/i, '嵌套 number 应只影响对应叶子列');
+    const relationLayout = layout.find(x => x.table === '主角_关系网表');
+    assert.deepStrictEqual(relationLayout.writePaths, [['主角', '关系网']], '绝对点路径应写回真实完整路径');
+    assert.strictEqual(relationLayout.emptyValue, null, '空动态表应记录 null 初始占位');
 });
 
 test('规则声明但 initvar 无数据的动态键字典（路遇道友录式）也建空子表，列与规则来自 type 声明', () => {
@@ -6775,7 +7586,7 @@ test('规则声明但 initvar 无数据的动态键字典（路遇道友录式�
         },
     };
     const r = core.convert(card, { mode: 'both' });
-    const s = Object.values(r.template).find(x => x && x.name === '路遇道友录表');
+    const s = Object.values(r.template).find(x => x && x.name === '人际交往_路遇道友录表');
     assert.ok(s, '应生成路遇道友录空子表（initvar 无数据但有规则声明）');
     assert.deepStrictEqual(s.content[0], ['row_id', '键名', '好感度数值', '关系标签', '_扩展数据'], '空子表列应来自 type 声明的条目字段');
     assert.ok(s.sourceData.note.includes('好感度数值用 delta'), '空子表 note 应含整表 check');
@@ -6850,7 +7661,7 @@ test('非法 YAML（format 带裸 | 联合）时回退正则，功法式动态�
     assert.strictEqual(si.dynamicDicts['主角']['功法'], true, '非法 YAML 时应回退正则，功法动态字典仍被识别');
     assert.deepStrictEqual(si.shapes['功法'], ['名称', '品阶', '修炼层数', '效果'], '功法条目字段应来自 type 声明');
     const r = core.convert(card, { mode: 'both' });
-    const gf = Object.values(r.template).find(s => s && s.name === '功法表');
+    const gf = Object.values(r.template).find(s => s && s.name === '主角_功法表');
     assert.deepStrictEqual(gf && gf.content[0], ['row_id', '键名', '名称', '品阶', '修炼层数', '效果', '_扩展数据'], '功法表列应为 type 声明字段，而非只剩 _扩展数据');
 });
 
@@ -6915,7 +7726,7 @@ test('不同组下同名子表（行囊.背包 / 宗门.背包）用父组限定
     const r = core.convert(card, { mode: 'both' });
     const names = Object.keys(r.template).filter(k => k.startsWith('sheet_')).map(k => r.template[k].name);
     assert.strictEqual(names.filter((n, i) => names.indexOf(n) !== i).length, 0, '表名不得重复');
-    assert.ok(names.includes('行囊背包表') && names.includes('宗门背包表'), '同名子表应统一用父组限定表名（两个都带前缀）');
+    assert.ok(names.includes('行囊_背包表') && names.includes('宗门_背包表'), '所有派生表都应使用完整路径和下划线命名');
     // 模拟插件 canonicalizeDisplayName：NFKC + 去空白 + 小写，规范化后也不得重复
     const norm = s => String(s).normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
     const canon = names.map(norm);
@@ -6999,8 +7810,8 @@ test('路径化附着：规则分组与 initvar 结构不一致（修为 写在�
     );
     const r = core.convert(card, { mode: 'both' });
     const g = r.schema.find(x => x.name === '主角');
-    const c = g.columns.find(x => x.zh === '修为进度百分比');
-    assert.ok(c, '应有展平列 修为进度百分比');
+    const c = g.columns.find(x => x.zh === '修为_进度百分比');
+    assert.ok(c, '应有展平列 修为_进度百分比');
     assert.deepStrictEqual(c.check, ['突破时更新', '仅正文明确修炼时变动'], '展平列应附着规则 check');
     assert.deepStrictEqual(c.range, [0, 100], '展平列应附着规则 range');
     assert.strictEqual(c.type, 'INTEGER', '带 range 的列应为 INTEGER');
@@ -7042,7 +7853,7 @@ test('路径化附着：6 空格嵌套写法（主角.修为.进度百分比）�
     );
     const r = core.convert(card, { mode: 'both' });
     const g = r.schema.find(x => x.name === '主角');
-    const c = g.columns.find(x => x.zh === '修为进度百分比');
+    const c = g.columns.find(x => x.zh === '修为_进度百分比');
     assert.deepStrictEqual(c.check, ['突破时更新'], '6 空格子字段的 check 应附着到展平列');
 });
 
@@ -7079,11 +7890,11 @@ test('路径化附着：通配路径（生理.欲望槽）按 initvar 列路径�
     };
     const r = core.convert(card, { mode: 'both' });
     const g = r.schema.find(x => x.name === '主角');
-    const c = g.columns.find(x => x.zh === '生理欲望槽');
-    assert.ok(c && c.check && c.check.length === 2, '生理欲望槽 列应附着通配 check');
-    assert.deepStrictEqual(c.range, [0, 100], '生理欲望槽 列应附着通配 range');
-    const b = g.columns.find(x => x.zh === '生理体香');
-    assert.ok(b && b.check && b.check.length === 1, '生理体香 列应附着通配 check');
+    const c = g.columns.find(x => x.zh === '生理_欲望槽');
+    assert.ok(c && c.check && c.check.length === 2, '生理_欲望槽 列应附着通配 check');
+    assert.deepStrictEqual(c.range, [0, 100], '生理_欲望槽 列应附着通配 range');
+    const b = g.columns.find(x => x.zh === '生理_体香');
+    assert.ok(b && b.check && b.check.length === 1, '生理_体香 列应附着通配 check');
 });
 
 test('路径化附着：容器/子表级（tableLevel）check 不挂到键名列，仍保留在表级 groupChecks（行囊.背包 / 宗门.背包 回归）', () => {
@@ -7120,13 +7931,13 @@ test('路径化附着：容器/子表级（tableLevel）check 不挂到键名列
         },
     };
     const r = core.convert(card, { mode: 'both' });
-    const bg = r.schema.find(x => x.tableName === '宗门背包表');
-    assert.ok(bg, '应有宗门背包表');
+    const bg = r.schema.find(x => x.tableName === '宗门_背包表');
+    assert.ok(bg, '应有宗门_背包表');
     const keyCol = bg.columns[0];
     assert.ok(!(keyCol.check && keyCol.check.length), '子表级 check 不应挂到键名列');
     assert.ok(bg.groupChecks.length === 2, '子表级 check 应保留在表级 groupChecks');
-    const xl = r.schema.find(x => x.tableName === '行囊背包表');
-    assert.ok(xl && xl.groupChecks.length === 0, '行囊背包表无对应规则时不得误挂宗门.背包 的表级 check');
+    const xl = r.schema.find(x => x.tableName === '行囊_背包表');
+    assert.ok(xl && xl.groupChecks.length === 0, '行囊_背包表无对应规则时不得误挂宗门.背包 的表级 check');
 });
 
 test('切换开场分支：动态字典行表整组替换（旧行删除、新行插入），读回为该分支初始值', async () => {
@@ -7180,7 +7991,7 @@ test('切换开场分支：动态字典行表整组替换（旧行删除、新�
     };
     const n = await core.writeStatDiffToDb(fakeApi, layout, prev, parsed);
     assert.ok(n > 0, '切换分支应产生差异写入');
-    const mxt = Object.values(tables).find(s => s && s.name === '修仙秘闻表');
+    const mxt = Object.values(tables).find(s => s && s.name === '世界系统_修仙秘闻表');
     const names = mxt.content.slice(1).map(r => r[1]).sort();
     assert.deepStrictEqual(names, ['海图司账本', '贝壳风铃', '龙绡渡潮阵'], '修仙秘闻应整组替换为分支B条目');
     const sd = core.statDataFromTables(layout, tables).stat_data;
