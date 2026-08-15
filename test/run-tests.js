@@ -3011,7 +3011,7 @@ test('世界书无 [InitVar] 但问候语含 <initvar> 块：按 MVU 规范兜�
     assert.ok(byName('人物表'), '应从问候语 <initvar> 推导出 人物表');
 });
 
-test('离线/镜像 MVU 引擎脚本按 import URL 识别并移除；整页注入前端加一次性守卫；状态栏事件监听原样保留', () => {
+test('仅移除 MVU 引擎/Schema 脚本，调用标准 Mvu API 的用户业务脚本必须保留', () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3037,6 +3037,9 @@ test('离线/镜像 MVU 引擎脚本按 import URL 识别并移除；整页注�
                 tavern_helper: {
                     scripts: [
                         { name: 'MVU', enabled: true, content: "import 'https://testingcf.jsdelivr.net/gh/NLKASHEI/MVU-offline@v1.0.2/mvu_bundle_full.js'" },
+                        { name: 'ZOD Schema', enabled: true, content: "import { registerMvuSchema } from 'https://example.test/schema.js';\nconst schema = {};\nregisterMvuSchema(schema);" },
+                        { name: '用户倒计时', enabled: true, content: "const data = Mvu.getMvuData();\ndata.stat_data.系统.剩余时间 = 10;\nawait Mvu.replaceMvuData(data);" },
+                        { name: '外部MVU业务模块', enabled: true, content: "import 'https://example.test/my-mvu-timer.js';" },
                         { name: '助手', enabled: true, content: 'console.log("非 MVU 脚本");' },
                     ],
                 },
@@ -3047,6 +3050,12 @@ test('离线/镜像 MVU 引擎脚本按 import URL 识别并移除；整页注�
     const d = r.card.data || r.card;
     const thScripts = (d.extensions && d.extensions.tavern_helper && d.extensions.tavern_helper.scripts) || [];
     assert.ok(!thScripts.some(s => String(s.content || '').includes('MVU-offline')), '应移除离线 MVU 引擎 import 脚本');
+    assert.ok(!thScripts.some(s => String(s.name || '') === 'ZOD Schema'), '纯 registerMvuSchema 声明脚本应由数据库 Schema 替代');
+    const userScript = thScripts.find(s => String(s.name || '') === '用户倒计时');
+    assert.ok(userScript, '调用 Mvu.* 的用户业务脚本不得被当成引擎误删');
+    assert.ok(String(userScript.content || '').includes('Mvu.replaceMvuData'), '用户业务脚本内容应原样保留');
+    assert.strictEqual(userScript.type, 'script', '保留脚本应补齐酒馆助手要求的 type');
+    assert.ok(thScripts.some(s => String(s.name || '') === '外部MVU业务模块'), '仅因未知 import URL 含 mvu 不得删除业务模块');
     assert.ok(thScripts.some(s => String(s.content || '').includes('非 MVU 脚本')), '应保留非 MVU 脚本');
     const front = (d.extensions && d.extensions.regex_scripts || []).find(rx => String(rx.scriptName || '') === '前端');
     assert.ok(front && String(front.replaceString || '').includes('__mvu2shujukuFrontendLoaded'), '整页注入前端应加一次性加载守卫');

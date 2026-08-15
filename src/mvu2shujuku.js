@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.2.6';
+    const VERSION = '0.2.7';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -7001,6 +7001,38 @@
         return false;
     }
 
+    // 只识别“应被数据库桥替代的 MVU 引擎/Schema 启动脚本”。调用 Mvu.* 的普通
+    // 游戏逻辑是接口消费者，必须保留；兼容层存在并不等于能重新生成被删除的业务代码。
+    // 对混合脚本采取保守策略：无法确认是纯框架脚本时保留，避免误删用户功能。
+    function isMvuEngineScriptContent(content) {
+        const s = String(content || '');
+        if (!s.trim()) return false;
+        const importRe = /(?:^|\n)\s*(?:import\s+(?:[^'"\n]+?\s+from\s+)?['"]([^'"]+)['"]\s*;?|(?:await\s+)?import\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;?)/gmi;
+        let hasKnownEngineImport = false;
+        let withoutImports = s.replace(importRe, (whole, spec1, spec2) => {
+            const spec = String(spec1 || spec2 || '');
+            // 仅匹配已知的引擎发布物。不能因为 URL/仓库名里出现 mvu 就删除：很多
+            // 配置助手、前端和用户业务模块也会在名字里带 mvu。
+            const knownEngine =
+                /(?:^|\/)MagicalAstrogy\/MagVarUpdate(?:@[^/]*)?\/(?:artifact|dist)\/[^?#]*(?:bundle|index)[^/?#]*\.js(?:[?#]|$)/i.test(spec) ||
+                /(?:^|\/)NLKASHEI\/MVU-offline(?:@[^/]*)?\/[^?#]*mvu[_-]?bundle[^/?#]*\.js(?:[?#]|$)/i.test(spec);
+            if (knownEngine) {
+                hasKnownEngineImport = true;
+                return '\n';
+            }
+            return whole;
+        });
+        // 单行/纯 import 的官方引擎、离线镜像：确定可删。
+        if (hasKnownEngineImport && !withoutImports.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|[;\s]/g, '')) return true;
+        // registerMvuSchema 脚本只负责声明已迁移的变量 Schema；若同时调用 Mvu.*，视为
+        // 混合业务脚本并保留，避免连带删掉初始化之外的用户逻辑。
+        if (/\bregisterMvuSchema\s*\(/.test(s) && !/\bMvu\s*\./.test(s)) return true;
+        // 内联完整引擎通常体积很大并同时包含框架名和 createMvu；小型用户脚本即使在
+        // 注释中提到 MagVarUpdate 也不会被误删。
+        if (s.length > 20000 && /MagVarUpdate|magvar/i.test(s) && /\bcreateMvu\b|\bregisterMvuSchema\b/.test(s)) return true;
+        return false;
+    }
+
     // 整页注入模式：replaceString 用 $('body').load(...) 把整个前端页面塞进 body。
     // 加“每页只加载一次”守卫，避免消息重渲染时反复重启前端应用；
     // 应用常驻后靠 VARIABLE_UPDATE_ENDED 事件活体刷新（与 MVU 原版一致）。
@@ -7422,15 +7454,21 @@
         const keptScripts = [];
         for (const s of scripts) {
             const content = String(s.content || '');
-            if (isMvuScriptContent(content)) {
-                report.note(`已移除 tavern_helper 脚本「${s.name}」（MVU 相关：${content.slice(0, 80)}…）。`);
+            if (isMvuEngineScriptContent(content)) {
+                report.note(`已移除 tavern_helper 脚本「${s.name}」（明确识别为 MVU 引擎/Schema 启动脚本：${content.slice(0, 80)}…）。`);
                 continue;
             }
             const isExternal = /(?:^|[^.\w])import\s*(?:\(\s*)?['"](?:https?:)?\/\//i.test(content) || /import\s*\(\s*['"]https?:\/\//i.test(content);
+            const usesMvuApi = /\bMvu\s*\./.test(content);
+            const ambiguousMvuImport = isExternal && /(?:magvar|mvu)/i.test(content) && !usesMvuApi;
             report.manual(
-                `保留 tavern_helper 脚本「${s.name}」（${isExternal ? '外部 import，无法静态确认其内部调用；已默认安装 MVU 兼容层兜底，若仍有异常请人工检查' : '未检测到 MVU API；若依赖 MVU 变量请人工检查'}）。`
+                `保留 tavern_helper 脚本「${s.name}」（${usesMvuApi ? '调用 Mvu.* 的业务脚本，改由数据库桥兼容层提供标准接口' : (ambiguousMvuImport ? '名称疑似与 MVU 有关，但不是已知引擎产物；为避免误删业务功能已保留，请按需核对' : (isExternal ? '外部 import，无法静态确认其内部调用；已默认安装 MVU 兼容层兜底，若仍有异常请人工检查' : '未检测到 MVU API；若依赖 MVU 变量请人工检查'))}）。`
             );
-            keptScripts.push(deepClone(s));
+            const kept = deepClone(s);
+            // 某些旧卡脚本对象缺 type；保留时一并规范化，避免一个旧元素让酒馆助手
+            // 对整组 scripts 的 discriminatedUnion 解析失败。
+            if (!kept.type) kept.type = 'script';
+            keptScripts.push(kept);
         }
         keptScripts.push({
             // 必须带 type:'script'：酒馆助手（JS-Slash-Runner）用 zod discriminatedUnion
