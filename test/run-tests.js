@@ -54,6 +54,26 @@ test('[value, desc] 叶子解析', () => {
     assert.strictEqual(li.desc, '一把剑');
 });
 
+test('初始数据宏：解析字符串值与动态行键，不改固定结构键', () => {
+    const input = {
+        '系统<user>': { '称呼': '<user>', '说明': '你是 {{user}}' },
+        '人际网络': { '<user>': { '关系': '与<user>本人相同' } },
+    };
+    const sub = s => String(s).replace(/<user>/gi, '测试用户').replace(/\{\{user\}\}/gi, '测试用户');
+    const out = core.resolveInitDataMacros(input, sub, [['人际网络']]);
+    assert.ok(out['系统<user>'], '固定组名不应被运行时宏改写');
+    assert.strictEqual(out['系统<user>']['称呼'], '测试用户');
+    assert.strictEqual(out['系统<user>']['说明'], '你是 测试用户');
+    assert.strictEqual(out['人际网络']['测试用户']['关系'], '与测试用户本人相同');
+});
+
+test('初始数据宏：动态键替换后冲突时拒绝静默覆盖', () => {
+    assert.throws(
+        () => core.resolveInitDataMacros({ 人口: { '<user>': 1, '测试用户': 2 } }, s => String(s).replace(/<user>/gi, '测试用户'), [['人口']]),
+        /键名冲突/,
+    );
+});
+
 /* ---------------- parseMvuShapes ---------------- */
 console.log('parseMvuShapes');
 test('从 [mvu_update] 提取结构声明', () => {
@@ -678,6 +698,19 @@ test('statDataFromTables：按布局从表格重建 stat_data（单例/行表/�
     assert.strictEqual(data.stat_data.角色['月咏深雪'].发情值, 10, '行表多条应还原');
     assert.deepStrictEqual(data.stat_data['$器灵台词'], ['第一句', '第二句'], '数组表应还原');
     assert.ok(data.display_data && data.display_data.系统, '应有 display_data 镜像');
+});
+
+test('statDataFromTables：表格回放未就绪时仍构造单例组骨架（EJS 早期读取不抛错）', () => {
+    const layout = [{
+        kind: 'singleton', group: '世界运转', table: '世界运转表', keyCol: '名称', keyValue: '世界运转',
+        cols: [
+            ['场景', 'text', '普通', ['世界运转', '场景'], false, ''],
+            ['时间_日期', 'text', '未知', ['世界运转', '时间', '日期'], false, ''],
+        ],
+    }];
+    const data = core.statDataFromTables(layout, {});
+    assert.strictEqual(data.stat_data.世界运转.场景, '普通');
+    assert.strictEqual(data.stat_data.世界运转.时间.日期, '未知');
 });
 
 test('writeStatDiffToDb：stat_data 差异写回数据库（单例更新/行表插入/数组替换）', async () => {
@@ -2689,6 +2722,10 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
     assert.ok(index.includes('if(L.scalarValueCol&&parts.length===E.prefix.length+1){colZh=L.scalarValueCol;}'), '桥已有行更新应把 colZh 指到 scalarValueCol 列');
     // 扩展侧应覆盖桥先定义的 getAllVariables（核心 statDataFromTables 才含 scalarValueCol + 持久化兜底）
     assert.ok(!index.includes("if (typeof window.getAllVariables === 'function') return;"), '扩展 installWindowGetAllVariables 不应因桥已定义而跳过安装');
+    assert.ok(index.includes('function ensureActiveLayoutLazy()'), 'EJS 同步执行时应能惰性恢复当前卡布局');
+    assert.ok(index.includes('return ejsVariablesSafe();'), 'EJS define 应使用结构安全的变量读取');
+    assert.ok(index.includes('fp === greetingState.pendingFp'), '大型 initvar 写入在途时应按指纹去重');
+    assert.ok(index.includes('hadFullCheckpointBeforeInit'), '重进已有 checkpoint 的聊天不应重放开局 initvar');
 });
 
 /* ---------------- 对照金标准 ---------------- */
@@ -7996,6 +8033,59 @@ test('切换开场分支：动态字典行表整组替换（旧行删除、新�
     assert.deepStrictEqual(names, ['海图司账本', '贝壳风铃', '龙绡渡潮阵'], '修仙秘闻应整组替换为分支B条目');
     const sd = core.statDataFromTables(layout, tables).stat_data;
     assert.deepStrictEqual(sd.世界系统.修仙秘闻, { 海图司账本: '分支B秘闻一', 龙绡渡潮阵: '分支B秘闻二', 贝壳风铃: '分支B秘闻三' }, '读回应为分支B的 {键: 值}');
+});
+
+test('开局建表：模板数据调用 SillyTavern 原生 substituteParams（单元格+动态行键）', async () => {
+    const vm = require('vm');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '宏测试卡', description: '', first_mes: '你好',
+            character_book: { entries: [{
+                comment: '[InitVar]',
+                content: '系统:\n  称呼: <user>\n  备注: "你是 {{user}}"\n人物:\n  <user>:\n    关系: 本人\n同行者:\n  - <user>\n  - <user>',
+            }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const converted = core.convert(card, { mode: 'both' });
+    let tables = {};
+    let imported = null;
+    const api = {
+        exportTableAsJson: () => tables,
+        initGameSession: async (_data, opts) => {
+            imported = JSON.parse(JSON.stringify(opts.templateData));
+            tables = imported;
+            return { success: true, runtimeReady: true };
+        },
+        importTemplateFromData: async (tpl) => { imported = tpl; tables = tpl; return { success: true }; },
+        registerTableUpdateCallback: () => {}, updateCell: async () => true, insertRow: async () => 1, deleteRow: async () => true,
+    };
+    const context = {
+        chatId: 'macro-chat', name: '宏测试卡',
+        chat: [{ role: 'assistant', name: '宏测试卡', mes: '你好', is_user: false }],
+        substituteParams: s => String(s).replace(/<user>/gi, '林海').replace(/\{\{user\}\}/gi, '林海'),
+        eventSource: { on: () => {}, emit: () => {} }, event_types: { MESSAGE_RECEIVED: 'x' },
+    };
+    const win = {
+        top: null, parent: null, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: t => clearTimeout(t), console,
+        CustomEvent: function () {}, addEventListener() {}, dispatchEvent() { return true; },
+        TextDecoder, atob: s => Buffer.from(s, 'base64').toString('binary'), getContext: () => context,
+        AutoCardUpdaterAPI: api,
+    };
+    win.top = win; win.parent = win; win.window = win; win.globalThis = win;
+    vm.createContext(win);
+    vm.runInContext(converted.bridgeScript, win);
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.ok(imported, '应把已解析模板交给 initGameSession');
+    const system = Object.values(imported).find(s => s && s.name === '系统表');
+    const people = Object.values(imported).find(s => s && s.name === '人物表');
+    const companions = Object.values(imported).find(s => s && s.name === '同行者表');
+    assert.strictEqual(system.content[1][system.content[0].indexOf('称呼')], '林海');
+    assert.strictEqual(system.content[1][system.content[0].indexOf('备注')], '你是 林海');
+    assert.strictEqual(people.content[1][people.content[0].indexOf('键名')], '林海');
+    assert.deepStrictEqual(Array.from(people.content[0]), ['row_id', '键名', '关系', '_扩展数据'], '表头必须保持固定');
+    assert.deepStrictEqual(Array.from(companions.content.slice(1), row => row[1]), ['林海', '林海'], '数组允许重复元素，不得误当业务键冲突');
 });
 
 runTests(parseArgs());

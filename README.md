@@ -108,6 +108,9 @@ st-prompt-template 的模板上下文（`EjsTemplate.defines`），因此只导�
 字面量比较的简单 `<% if %>` 转为数据库 `<if db>`；复杂分支、循环和函数仍保留 EJS。
 该选项默认关闭，兼容层仍是主路径。
 
+初始数据中的 `<user>`、`{{user}}`、`<char>` 等宏会在进入当前聊天后调用
+SillyTavern 原生 `substituteParams` 解析；表名和固定列名不支持运行时宏。
+
 ## 目录
 
 | 路径 | 说明 |
