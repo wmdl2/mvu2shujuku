@@ -1715,6 +1715,63 @@ test('Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessag
         });
 });
 
+test('Mvu 兼容层：解析事件按官方顺序触发，COMMAND_PARSED 修改命令后真正生效', async () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const seen = [];
+    const handlers = {};
+    const eventEmit = async (name, ...args) => {
+        seen.push({ name, args });
+        if (handlers[name]) await handlers[name](...args);
+    };
+    const { win } = bridgeSandbox(r, { extra: { eventEmit } });
+    handlers[win.Mvu.events.COMMAND_PARSED] = async (variables, commands, message) => {
+        assert.ok(variables.stat_data.$internal, '解析事件期间应保留 $internal');
+        assert.strictEqual(message, "_.set('主角.修为', 20);");
+        assert.strictEqual(commands[0].type, 'set');
+        commands[0].args[0] = '主角.灵气';
+        commands[0].args[commands[0].args.length - 1] = 7;
+        commands.push({ type: 'insert', full_match: '', args: ['主角.测试列表', 3], reason: '监听器追加' });
+    };
+    handlers[win.Mvu.events.VARIABLE_UPDATE_ENDED] = async (variables) => {
+        variables.stat_data.主角.灵气 = 8;
+    };
+    const base = { stat_data: { 主角: { 修为: 10, 灵气: 0, 测试列表: [1, 2] } } };
+    const parsed = await win.Mvu.parseMessage("_.set('主角.修为', 20);", base);
+    assert.strictEqual(parsed.stat_data.主角.修为, 10, '原命令路径被监听器改写后不应再修改修为');
+    assert.strictEqual(parsed.stat_data.主角.灵气, 8, '命令改写与结束事件修改都应生效');
+    assert.deepStrictEqual(Array.from(parsed.stat_data.主角.测试列表), [1, 2, 3], 'insert(path, value) 应追加到数组尾部');
+    assert.deepStrictEqual(seen.map(x => x.name).filter(name => name !== win.Mvu.events.SINGLE_VARIABLE_UPDATED), [
+        win.Mvu.events.VARIABLE_UPDATE_STARTED,
+        win.Mvu.events.COMMAND_PARSED,
+        win.Mvu.events.VARIABLE_UPDATE_ENDED,
+    ], '更新事件顺序应与 MVU 一致');
+    assert.ok(seen.some(x => x.name === win.Mvu.events.SINGLE_VARIABLE_UPDATED), '兼容已废弃的单变量更新事件');
+    assert.strictEqual(seen.find(x => x.name === win.Mvu.events.COMMAND_PARSED).args.length, 3, 'COMMAND_PARSED 应传 variables/commands/message_content 三参数');
+});
+
+test('Mvu 兼容层：insert/delete 的两参数和三参数形式', async () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const { win } = bridgeSandbox(r);
+    const base = { stat_data: { 容器: { 数组: ['a', 'b'], 对象: { 甲: 1 } } } };
+    const text = "_.insert('容器.数组', 'c');\n_.insert('容器.对象', '乙', 2);\n_.delete('容器.数组', 'b');\n_.delete('容器.对象', '甲');";
+    const parsed = await win.Mvu.parseMessage(text, base);
+    assert.deepStrictEqual(Array.from(parsed.stat_data.容器.数组), ['a', 'c']);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(parsed.stat_data.容器.对象)), { 乙: 2 });
+});
+
+test('Mvu 兼容层：reloadInitVar 从转换后初始模板恢复数据', async () => {
+    const card = requireFixture();
+    const r = core.convert(card, { mode: 'both' });
+    const { win } = bridgeSandbox(r);
+    const data = { stat_data: { 主角: { 姓名: '被修改' } } };
+    const ok = await win.Mvu.reloadInitVar(data);
+    assert.strictEqual(ok, true, '能访问转换模板时应真实恢复，不应空返 true');
+    assert.strictEqual(data.stat_data.主角.姓名, '未知');
+    assert.ok(data.display_data && data.delta_data && data.initialized_lorebooks);
+});
+
 test('Mvu 兼容层：覆盖式接管已存在的真 MVU（保留自定义属性，双轨不再冲突）', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
