@@ -1,5 +1,5 @@
 // MVU转数据库 · SillyTavern 原生扩展
-// 生成自 转换器/src/mvu2shujuku.js（0.2.7），核心源码内联如下
+// 生成自 转换器/src/mvu2shujuku.js（0.2.8），核心源码内联如下
 // @ts-nocheck
 (function (root) {
 /*
@@ -17,7 +17,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.2.7';
+    const VERSION = '0.2.8';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -5310,6 +5310,13 @@
         const layout = buildLayout(schema);
         const layoutJson = buildLayoutJson(layout);
         const templateJson = JSON.stringify(template);
+        const initialTables = JSON.parse(templateJson);
+        for (const key in initialTables) {
+            const sheet = initialTables[key];
+            if (key.indexOf('sheet_') !== 0 || !sheet || !Array.isArray(sheet.content) || sheet.content.length > 1 || !Array.isArray(sheet.seedRows) || !sheet.seedRows.length) continue;
+            sheet.content = [sheet.content[0], ...sheet.seedRows];
+        }
+        const initialMvuJson = JSON.stringify(statDataFromTables(JSON.parse(layoutJson), initialTables));
         const b64 = opts.templateB64 || (typeof Buffer !== 'undefined'
             ? Buffer.from(templateJson, 'utf8').toString('base64')
             : btoaSafe(templateJson));
@@ -5333,6 +5340,7 @@
             `var BRIDGE_NAME=${JSON.stringify(name)};`,
             `var BRIDGE_CARD_NAME=${JSON.stringify(bridgeCardName)};`,
             `var BRIDGE_CARD_AVATAR=${JSON.stringify(bridgeCardAvatar)};`,
+            `var INITIAL_MVU_DATA=${initialMvuJson};`,
             `console.log('['+BRIDGE_NAME+'] 桥启动 v'+VERSION);`,
             ...(jsonrepairInline ? [
                 `// jsonrepair（与 MVU 源码同款，JSONPatch 容错解析；扩展内联的完整库优先）`,
@@ -6163,7 +6171,8 @@
             `// 完整的 Mvu 兼容层：按 MVU 官方全局 API（createMvu）实现数据库读写，`,
             `// 覆盖式接管运行环境里可能残留的真 MVU 对象（避免双轨冲突）。`,
             `var mvuShimTimer=null;`,
-            `function emitMvuEvent(name,a,b){`,
+            `async function emitMvuEvent(name){`,
+            `  var args=Array.prototype.slice.call(arguments,1);`,
             `  var targets=[];`,
             `  function add(t){try{if(t&&typeof t.dispatchEvent==='function'&&targets.indexOf(t)===-1)targets.push(t);}catch(e){}}`,
             `  add(window);add(rootWindow);`,
@@ -6175,19 +6184,22 @@
             `  }`,
             `  var EventCtor=null;`,
             `  try{EventCtor=window.CustomEvent||rootWindow.CustomEvent||CustomEvent;}catch(e){EventCtor=CustomEvent;}`,
+            `  var pending=[];var emitted=[];`,
+            `  function invoke(fn,owner){if(typeof fn!=='function'||emitted.indexOf(fn)!==-1)return;emitted.push(fn);try{pending.push(Promise.resolve(fn.apply(owner,[name].concat(args))));}catch(e){}}`,
             `  for(var t=0;t<targets.length;t++){`,
-            `    try{targets[t].dispatchEvent(new EventCtor(name,{detail:{after:a,before:b}}));}catch(e){}`,
-            `    try{if(targets[t].eventSource&&typeof targets[t].eventSource.emit==='function')targets[t].eventSource.emit(name,a,b);}catch(e){}`,
+            `    try{targets[t].dispatchEvent(new EventCtor(name,{detail:{args:args,after:args[0],before:args[1]}}));}catch(e){}`,
+            `    try{if(targets[t].eventSource)invoke(targets[t].eventSource.emit,targets[t].eventSource);}catch(e){}`,
+            `    try{invoke(targets[t].eventEmit,targets[t]);}catch(e){}`,
             `  }`,
             `  // 与 MVU 原版一致：走 TH 的事件总线（前端 eventOn 监听的就是它）`,
-            `  try{if(typeof eventEmit==='function')eventEmit(name,a,b);}catch(e){}`,
+            `  try{if(typeof eventEmit==='function')invoke(eventEmit,window);}catch(e){}`,
             `  // 缺少 ST 事件总线（如消息 iframe）时提供 eventOn/eventOff 兜底，绑定到同名 CustomEvent`,
             `  for(var t2=0;t2<targets.length;t2++){`,
             `    try{`,
             `      var w=targets[t2];`,
             `      if(w&&typeof w.eventOn!=='function'&&typeof w.addEventListener==='function'){`,
             `        w.eventOn=function(evName,handler){`,
-            `          var wrapped=function(e){try{var d=e&&e.detail;if(d&&Object.prototype.hasOwnProperty.call(d,'after')){handler(d.after,d.before);}else{handler(d);}}catch(err){}};`,
+            `          var wrapped=function(e){try{var d=e&&e.detail;if(d&&Array.isArray(d.args)){handler.apply(null,d.args);}else if(d&&Object.prototype.hasOwnProperty.call(d,'after')){handler(d.after,d.before);}else{handler(d);}}catch(err){}};`,
             `          w.addEventListener(evName,wrapped);`,
             `          return {stop:function(){try{w.removeEventListener(evName,wrapped);}catch(e2){}}};`,
             `        };`,
@@ -6195,6 +6207,7 @@
             `      }`,
             `    }catch(e){}`,
             `  }`,
+            `  if(pending.length)await Promise.allSettled(pending);`,
             `}`,
             `var mvuFake=null;`,
             `function applyMvuShim(){`,
@@ -6283,19 +6296,12 @@
             `    };`,
             `    mvuFake.parseMessage=async function(message,old_data){`,
             `      try{`,
-            `        var out=JSON.parse(JSON.stringify(old_data||{}));`,
-            `        if(!out.stat_data||typeof out.stat_data!=='object')out.stat_data={};`,
-            `        if(!out.display_data||typeof out.display_data!=='object')out.display_data={};`,
-            `        if(!out.delta_data||typeof out.delta_data!=='object')out.delta_data={};`,
-            `        // 与官方 updateVariables 一致：更新期间把 display/delta 挂到 stat_data.$internal`,
-            `        out.stat_data.$internal={display_data:out.display_data,delta_data:out.delta_data};`,
-            `        var cmds=parseUpdateCommands(String(message||''));`,
-            `        if(cmds.length)applyCommandsToStat(out.stat_data,cmds,out.display_data);`,
-            `        delete out.stat_data.$internal;`,
-            `        return out;`,
+            `        return await runMvuUpdateCycle(message,old_data);`,
             `      }catch(e){console.warn('['+BRIDGE_NAME+'] Mvu.parseMessage 异常:',e);return undefined;}`,
             `    };`,
-            `    mvuFake.reloadInitVar=async function(){return true;};`,
+            `    mvuFake.reloadInitVar=async function(mvu_data){`,
+            `      try{if(!mvu_data||!INITIAL_MVU_DATA)return false;var initial=INITIAL_MVU_DATA;mvu_data.stat_data=JSON.parse(JSON.stringify(initial.stat_data||{}));mvu_data.display_data=JSON.parse(JSON.stringify(initial.display_data||initial.stat_data||{}));mvu_data.delta_data={};mvu_data.initialized_lorebooks=mvu_data.initialized_lorebooks||{};return true;}catch(e){return false;}`,
+            `    };`,
             `    mvuFake.getCurrentMvuData=function(){return mvuFake.getMvuData({type:'message',message_id:'latest'});};`,
             `    mvuFake.replaceCurrentMvuData=async function(mvu_data){return mvuFake.replaceMvuData(mvu_data,{type:'message',message_id:'latest'});};`,
             `    mvuFake.isDuringExtraAnalysis=function(){return false;};`,
@@ -6426,7 +6432,7 @@
             `      initState.done=true;`,
             `      if(!hadCheckpointBeforeInit&&hasFullCheckpoint()){try{rootWindow.__mvu2shujukuFreshOpeningCheckpoint={chatKey:key,at:Date.now()};}catch(e){}}`,
             `      // 建表/初始化成功 ≈ MVU 的 VARIABLE_INITIALIZED 时机，广播给前端`,
-            `      try{var curStat2=currentStat();emitMvuEvent('mag_variable_initialized',mvuWrap(curStat2));}catch(e){}`,
+            `      try{var curStat2=currentStat();var sw=0;var cx=getContext();var cc=cx&&Array.isArray(cx.chat)?cx.chat:[];for(var si=cc.length-1;si>=0;si--){if(cc[si]&&!cc[si].is_user){sw=Number(cc[si].swipe_id||0);break;}}emitMvuEvent('mag_variable_initialized',mvuWrap(curStat2),sw);}catch(e){}`,
             `    }`,
             `  }catch(e){`,
             `    console.warn('['+BRIDGE_NAME+'] 开局建表异常:',e);`,
@@ -6494,8 +6500,11 @@
             `          for(var pi=0;pi<patch.length;pi++){`,
             `            var op=patch[pi]||{};`,
             `            if(!op.path&&!op.to)continue;`,
-            `            var jt=op.op==='delta'?'add':(op.op==='remove'?'delete':op.op||'set');`,
-            `            cmds.push({type:jt,path:String(op.path||op.to||'').replace(/^\\//,'').replace(/\\//g,'.'),value:op.value,from:op.from});`,
+            `            var jt=op.op==='delta'?'add':(op.op==='remove'?'delete':((op.op==='insert'||op.op==='add')?'insert':op.op||'set'));`,
+            `            var jp=String(op.path||op.to||'').replace(/^\\//,'').replace(/\\//g,'.');`,
+            `            var jpp=jp.split('.');var jpk=jpp.pop();var jparent=jpp.join('.');`,
+            `            var rawArgs=jt==='move'?[String(op.from||'').replace(/^\\//,'').replace(/\\//g,'.'),jp]:(jt==='delete'?[jp]:(jt==='insert'?[jparent,jpk,JSON.stringify(op.value)]:[jp,JSON.stringify(op.value)]));`,
+            `            cmds.push({type:jt,path:jt==='insert'?jparent:jp,keyOrIndex:jt==='insert'?parseCommandValue2(jpk):undefined,value:op.value,from:op.from,rawArgs:rawArgs,full_match:JSON.stringify(op),reason:'json_patch'});`,
             `          }`,
             `        }`,
             `      }catch(e){}`,
@@ -6524,15 +6533,31 @@
             `      if(rmatch)reason=rmatch[1].trim();`,
             `      var type=cm[1];`,
             `      var path=String(args[0]||'').replace(/^['\"]|['\"]$/g,'').replace(/^\\//,'').replace(/\\//g,'.');`,
-            `      if(type==='remove'||type==='unset'||type==='delete'){cmds.push({type:'delete',path:path,reason:reason});}`,
-            `      else if(type==='insert'){cmds.push({type:'insert',path:path,keyOrIndex:args[1]?parseCommandValue2(args[1]):null,value:args[2]?parseCommandValue2(args[2]):undefined,reason:reason});}`,
-            `      else if(type==='assign'){cmds.push({type:'assign',path:path,keyOrIndex:args[2]!==undefined?parseCommandValue2(args[1]):undefined,value:args[2]!==undefined?parseCommandValue2(args[2]):parseCommandValue2(args[1]),reason:reason});}`,
-            `      else if(type==='add'){cmds.push({type:'add',path:path,value:args[1]!==undefined?parseCommandValue2(args[1]):undefined,reason:reason});}`,
-            `      else {cmds.push({type:'set',path:path,value:args[2]!==undefined?parseCommandValue2(args[2]):(args[1]!==undefined?parseCommandValue2(args[1]):undefined),reason:reason});}`,
+            `      var fullMatch=inner.slice(cm.index,end+1);`,
+            `      if(type==='remove'||type==='unset'||type==='delete'){cmds.push({type:'delete',path:path,keyOrIndex:args[1]!==undefined?parseCommandValue2(args[1]):undefined,rawArgs:args,full_match:fullMatch,reason:reason});}`,
+            `      else if(type==='insert'||type==='assign'){cmds.push({type:'insert',path:path,keyOrIndex:args[2]!==undefined?parseCommandValue2(args[1]):null,value:args[2]!==undefined?parseCommandValue2(args[2]):parseCommandValue2(args[1]),rawArgs:args,full_match:fullMatch,reason:reason});}`,
+            `      else if(type==='add'){cmds.push({type:'add',path:path,value:args[1]!==undefined?parseCommandValue2(args[1]):undefined,rawArgs:args,full_match:fullMatch,reason:reason});}`,
+            `      else {cmds.push({type:'set',path:path,expected:args[2]!==undefined?parseCommandValue2(args[1]):undefined,value:args[2]!==undefined?parseCommandValue2(args[2]):(args[1]!==undefined?parseCommandValue2(args[1]):undefined),rawArgs:args,full_match:fullMatch,reason:reason});}`,
             `      cmdRe.lastIndex=end+1;`,
             `    }`,
             `  }`,
+            `  if(!cmds.length&&/\\.(set|assign|insert|remove|unset|delete|add)\\(/.test(String(text||''))&&!/<(updatevariable|json_?patch)>/i.test(String(text||'')))return parseUpdateCommands('<UpdateVariable>'+String(text||'')+'</UpdateVariable>');`,
             `  return cmds;`,
+            `}`,
+            `function commandInfoFromInternal(cmd){`,
+            `  var type=cmd.type;if(type==='assign')type='insert';if(type==='remove'||type==='unset')type='delete';`,
+            `  var args=Array.isArray(cmd.rawArgs)?cmd.rawArgs.slice():null;`,
+            `  if(!args){if(type==='move')args=[String(cmd.from||''),String(cmd.path||'')];else if(type==='delete')args=cmd.keyOrIndex===undefined?[String(cmd.path||'')]:[String(cmd.path||''),cmd.keyOrIndex];else if(type==='insert')args=cmd.keyOrIndex===null||cmd.keyOrIndex===undefined?[String(cmd.path||''),cmd.value]:[String(cmd.path||''),cmd.keyOrIndex,cmd.value];else if(type==='set'&&cmd.expected!==undefined)args=[String(cmd.path||''),cmd.expected,cmd.value];else args=[String(cmd.path||''),cmd.value];}`,
+            `  return {type:type,full_match:cmd.full_match||'',args:args,reason:cmd.reason||''};`,
+            `}`,
+            `function internalFromCommandInfo(info){`,
+            `  if(!info||!Array.isArray(info.args)||!info.args.length)return null;var type=String(info.type||'set').toLowerCase();if(type==='assign')type='insert';if(type==='remove'||type==='unset')type='delete';var args=info.args;`,
+            `  function clean(v){return String(v==null?'':v).replace(/^['\"]|['\"]$/g,'').replace(/^\\//,'').replace(/\\//g,'.');}`,
+            `  if(type==='move')return {type:type,from:clean(args[0]),path:clean(args[1]),full_match:info.full_match||'',reason:info.reason||''};var path=clean(args[0]);`,
+            `  if(type==='delete')return {type:type,path:path,keyOrIndex:args.length>1?parseCommandValue2(args[1]):undefined,full_match:info.full_match||'',reason:info.reason||''};`,
+            `  if(type==='insert')return {type:type,path:path,keyOrIndex:args.length>2?parseCommandValue2(args[1]):null,value:parseCommandValue2(args[args.length-1]),full_match:info.full_match||'',reason:info.reason||''};`,
+            `  if(type==='add')return {type:type,path:path,value:parseCommandValue2(args[1]),full_match:info.full_match||'',reason:info.reason||''};`,
+            `  return {type:'set',path:path,expected:args.length>2?parseCommandValue2(args[1]):undefined,value:parseCommandValue2(args[args.length-1]),full_match:info.full_match||'',reason:info.reason||''};`,
             `}`,
             `function trimDisplay(v){try{return String(JSON.stringify(v)).replace(/^"|"$/g,'').replace(/\\\\"/g,'"');}catch(e){return String(v);}}`,
             `function noteDisplay(display,path,oldV,newV,reason){if(!display)return;var r=reason?(' ('+reason+')'):'';display[path]=trimDisplay(oldV)+'->'+trimDisplay(newV)+r;}`,
@@ -6555,12 +6580,15 @@
             `    }`,
             `    if(cmd.type==='delete'){`,
             `      var oldDel=null;`,
-            `      if(parts.length===1){oldDel=stat[parts[0]];try{delete stat[parts[0]];}catch(e){}}`,
-            `      else{`,
+            `      if(cmd.keyOrIndex!==undefined){`,
+            `        var dc=stat;for(var dpi=0;dpi<parts.length;dpi++)dc=dc==null?undefined:dc[parts[dpi]];oldDel=dc;`,
+            `        if(Array.isArray(dc)){var dri=typeof cmd.keyOrIndex==='number'?cmd.keyOrIndex:-1;if(dri<0){for(var di=0;di<dc.length;di++){try{if(JSON.stringify(dc[di])===JSON.stringify(cmd.keyOrIndex)){dri=di;break;}}catch(e){}}}if(dri>=0&&dri<dc.length)dc.splice(dri,1);}`,
+            `        else if(dc&&typeof dc==='object'){var dkey=typeof cmd.keyOrIndex==='number'?Object.keys(dc)[cmd.keyOrIndex]:String(cmd.keyOrIndex);if(dkey!==undefined)try{delete dc[dkey];}catch(e){}}`,
+            `      }else{`,
             `        var cur=stat;`,
             `        var ok=true;`,
             `        for(var d=0;d<parts.length-1;d++){cur=cur?cur[parts[d]]:null;if(!cur){ok=false;break;}}`,
-            `        if(ok){oldDel=cur[parts[parts.length-1]];try{delete cur[parts[parts.length-1]];}catch(e){}}`,
+            `        if(ok&&cur){var dl=parts[parts.length-1];oldDel=cur[dl];if(Array.isArray(cur)&&/^\\d+$/.test(String(dl)))cur.splice(Number(dl),1);else try{delete cur[dl];}catch(e){}}`,
             `      }`,
             `      if(Array.isArray(oldDel)&&oldDel.length===2)oldDel=oldDel[0];`,
             `      noteDisplay(display,cmd.path,oldDel,'(移除)',cmd.reason);`,
@@ -6568,16 +6596,11 @@
             `    }`,
             `    if(cmd.type==='insert'){`,
             `      var container=stat;`,
-            `      var ok2=true;`,
-            `      for(var d2=0;d2<parts.length-1;d2++){container=container?container[parts[d2]]:null;if(!container){ok2=false;break;}}`,
-            `      if(!ok2)continue;`,
-            `      // JSONPatch insert 的键在 path 最后一段；_.insert 风格才用 keyOrIndex`,
-            `      var key=cmd.keyOrIndex!==undefined?cmd.keyOrIndex:parts[parts.length-1];`,
-            `      if(key==='-'||key===null){`,
-            `        if(Array.isArray(container))container.push(cmd.value);`,
-            `        else if(container&&typeof container==='object')container[String(Date.now())]=cmd.value;`,
-            `      }else if(Array.isArray(container)&&/^\\d+$/.test(String(key))){container.splice(Number(key),0,cmd.value);}`,
-            `      else if(container&&typeof container==='object'){container[key]=cmd.value;}`,
+            `      for(var d2=0;d2<parts.length;d2++)container=container==null?undefined:container[parts[d2]];`,
+            `      if(container==null||typeof container!=='object')continue;var key=cmd.keyOrIndex;`,
+            `      if(key===null||key===undefined){if(Array.isArray(container))container.push(cmd.value);else if(cmd.value&&typeof cmd.value==='object'&&!Array.isArray(cmd.value)){for(var mk in cmd.value)if(Object.prototype.hasOwnProperty.call(cmd.value,mk))container[mk]=cmd.value[mk];}}`,
+            `      else if(Array.isArray(container)&&(key==='-'||/^-?\\d+$/.test(String(key)))){var ii=key==='-'||Number(key)===-1?container.length:Number(key);container.splice(ii,0,cmd.value);}`,
+            `      else if(container&&typeof container==='object'){container[String(key)]=cmd.value;}`,
             `      noteDisplay(display,cmd.path,'(新增)',cmd.value,cmd.reason);`,
             `      continue;`,
             `    }`,
@@ -6651,6 +6674,21 @@
             `  }`,
             `  return stat;`,
             `}`,
+            `async function applyCommandsWithMvuEvents(stat,cmds,display){`,
+            `  function at(path){var c=stat;var ps=String(path||'').split('.').filter(function(p){return p!=='';});for(var i=0;i<ps.length;i++)c=c==null?undefined:c[ps[i]];try{return JSON.parse(JSON.stringify(c));}catch(e){return c;}}`,
+            `  for(var i=0;i<cmds.length;i++){var cmd=cmds[i];var oldV=at(cmd.path);applyCommandsToStat(stat,[cmd],display);var newV=at(cmd.path);try{if(JSON.stringify(oldV)!==JSON.stringify(newV))await emitMvuEvent('mag_variable_updated',stat,cmd.path,oldV,newV);}catch(e){}}`,
+            `}`,
+            `async function runMvuUpdateCycle(message,oldData){`,
+            `  var out=JSON.parse(JSON.stringify(oldData||{}));if(!out.stat_data||typeof out.stat_data!=='object')out.stat_data={};if(!out.display_data||typeof out.display_data!=='object')out.display_data={};if(!out.delta_data||typeof out.delta_data!=='object')out.delta_data={};`,
+            `  var before=JSON.parse(JSON.stringify(out));out.stat_data.$internal={display_data:out.display_data,delta_data:out.delta_data};`,
+            `  await emitMvuEvent('mag_variable_update_started',out);`,
+            `  var originalMessage=String(message||'');var processedMessage=originalMessage;try{var sm=(typeof substitudeMacros==='function'?substitudeMacros:(rootWindow&&typeof rootWindow.substitudeMacros==='function'?rootWindow.substitudeMacros:null));if(sm)processedMessage=String(sm(originalMessage));}catch(e){}`,
+            `  var raw=parseUpdateCommands(processedMessage);var infos=[];for(var i=0;i<raw.length;i++)infos.push(commandInfoFromInternal(raw[i]));`,
+            `  await emitMvuEvent('mag_command_parsed',out,infos,originalMessage);`,
+            `  var cmds=[];for(var j=0;j<infos.length;j++){var c=internalFromCommandInfo(infos[j]);if(c)cmds.push(c);}if(cmds.length)await applyCommandsWithMvuEvents(out.stat_data,cmds,out.display_data);`,
+            `  out.delta_data=JSON.parse(JSON.stringify(out.display_data||{}));if(out.stat_data.$internal)out.stat_data.$internal.delta_data=out.delta_data;`,
+            `  await emitMvuEvent('mag_variable_update_ended',out,before);delete out.stat_data.$internal;return out;`,
+            `}`,
             `var appliedBlocks=null;`,
             `function applyPendingUpdateBlocks(){`,
             `  var ctx=getContext();`,
@@ -6668,24 +6706,24 @@
             `    var msgKey=key+':'+mi+':'+String(msg.swipe_id||0);`,
             `    if(appliedBlocks[msgKey])continue;`,
             `    appliedBlocks[msgKey]=true;`,
-            `    var cmds=parseUpdateCommands(text);`,
-            `    console.log('['+BRIDGE_NAME+'] 消息 #'+mi+' 含更新块，解析出 '+cmds.length+' 条命令');`,
-            `    if(!cmds.length)continue;`,
-            `    Promise.resolve().then(function(){`,
+            `    var parsedNow=parseUpdateCommands(text);`,
+            `    console.log('['+BRIDGE_NAME+'] 消息 #'+mi+' 含更新块，解析出 '+parsedNow.length+' 条命令');`,
+            `    if(!parsedNow.length)continue;`,
+            `    (function(messageText){Promise.resolve().then(async function(){`,
             `      try{`,
             `        var prev=currentStat();`,
-            `        var next=JSON.parse(JSON.stringify(prev));`,
-            `        var disp={};`,
-            `        applyCommandsToStat(next,cmds,disp);`,
+            `        var nextWrap=await runMvuUpdateCycle(messageText,mvuWrap(prev));`,
+            `        var next=(nextWrap&&nextWrap.stat_data)||{};`,
+            `        var modified=JSON.stringify(next)!==JSON.stringify(prev);`,
+            `        if(modified){var updateContext={variables:nextWrap,message_content:messageText};await emitMvuEvent('mag_before_message_update',updateContext);nextWrap=updateContext.variables||nextWrap;next=(nextWrap&&nextWrap.stat_data)||next;}`,
+            `        try{rootWindow.__mvu2shujukuSuppressTableMvuEnded=(Number(rootWindow.__mvu2shujukuSuppressTableMvuEnded)||0)+1;}catch(e){}`,
             `        return writeDiffToDb(prev,next).then(function(){`,
-            `          for(var dk in disp){if(disp.hasOwnProperty(dk))runtimeDisplay[dk]=disp[dk];}`,
-            `          var afterWrap=mvuWrap(next);`,
-            `          try{if(afterWrap&&afterWrap.stat_data&&typeof afterWrap.stat_data==='object'&&afterWrap.stat_data.$internal===undefined){afterWrap.stat_data.$internal={display_data:afterWrap.display_data||{},delta_data:afterWrap.delta_data||{}};}}catch(e){}`,
-            `          broadcastBridgeEvent(afterWrap,mvuWrap(prev));`,
-            `          try{if(afterWrap&&afterWrap.stat_data)delete afterWrap.stat_data.$internal;}catch(e){}`,
+            `          var disp=(nextWrap&&nextWrap.display_data)||{};for(var dk in disp){if(Object.prototype.hasOwnProperty.call(disp,dk))runtimeDisplay[dk]=disp[dk];}`,
+            `        }).finally(function(){`,
+            `          try{rootWindow.__mvu2shujukuSuppressTableMvuEnded=Math.max(0,(Number(rootWindow.__mvu2shujukuSuppressTableMvuEnded)||1)-1);}catch(e){}`,
             `        });`,
             `      }catch(e){console.warn('['+BRIDGE_NAME+'] 应用 MVU 更新块失败:',e);}`,
-            `    });`,
+            `    });})(text);`,
             `  }`,
             `}`,
             (appendPlaceholder ? [
@@ -8481,7 +8519,13 @@ ${DB_INIT_SNIPPET}
                 if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
                 reentryNotifyFingerprint = fp;
                 dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
-                emitMvuEvent('mag_variable_initialized', allR, null);
+                let swipeId = 0;
+                try {
+                    const cx = getContextSafe();
+                    const cc = cx && Array.isArray(cx.chat) ? cx.chat : [];
+                    for (let si = cc.length - 1; si >= 0; si--) { if (cc[si] && !cc[si].is_user) { swipeId = Number(cc[si].swipe_id || 0); break; } }
+                } catch (e) {}
+                emitMvuEvent('mag_variable_initialized', allR, swipeId);
                 dispatchVariableUpdateEnded();
                 dbg('[重读通知] 已派发 VARIABLE_INITIALIZED + VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
             } catch (e) {}
@@ -9735,7 +9779,7 @@ ${DB_INIT_SNIPPET}
             }
         } catch (e) {}
     }
-    function emitMvuEvent(name, a, b) {
+    async function emitMvuEvent(name, ...args) {
         // 广播前先把 shim/getAllVariables 同步到当前所有 iframe：
         // 即使新 iframe 恰好在 2s 复查和 MutationObserver 之间创建，
         // 前端在事件回调里读 window.Mvu/getAllVariables 也一定能拿到。
@@ -9752,16 +9796,23 @@ ${DB_INIT_SNIPPET}
                 for (const f of frames) { try { add(f.contentWindow); } catch (e) {} }
             } catch (e) {}
         }
+        const pending = [];
+        const emitted = [];
+        const invoke = (fn, owner) => {
+            if (typeof fn !== 'function' || emitted.indexOf(fn) !== -1) return;
+            emitted.push(fn);
+            try { pending.push(Promise.resolve(fn.apply(owner, [name, ...args]))); } catch (e) {}
+        };
         for (const t of targets) {
-            try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: { after: a, before: b } })); } catch (e) {}
-            try { if (t.eventSource && typeof t.eventSource.emit === 'function') t.eventSource.emit(name, a, b); } catch (e) {}
+            try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: { args, after: args[0], before: args[1] } })); } catch (e) {}
+            try { if (t.eventSource) invoke(t.eventSource.emit, t.eventSource); } catch (e) {}
             // 前端 iframe 的 eventOn 可能是 TH 注入的、绑定在 TH 事件总线（eventEmit）上；
             // 只对主窗口调 eventEmit 收不到，必须对每个 target（含消息 iframe）也广播 eventEmit。
-            try { if (typeof t.eventEmit === 'function') t.eventEmit(name, a, b); } catch (e) {}
+            try { invoke(t.eventEmit, t); } catch (e) {}
         }
         // 与 MVU 原版一致：尽量走 TH 的事件总线（前端 eventOn 监听的就是它）
-        try { if (typeof hostWindow.eventEmit === 'function') hostWindow.eventEmit(name, a, b); } catch (e) {}
-        try { if (typeof window.eventEmit === 'function') window.eventEmit(name, a, b); } catch (e) {}
+        try { invoke(hostWindow.eventEmit, hostWindow); } catch (e) {}
+        try { invoke(window.eventEmit, window); } catch (e) {}
         for (const t of targets) {
             try {
                 if (t && typeof t.eventOn !== 'function' && typeof t.addEventListener === 'function') {
@@ -9769,7 +9820,8 @@ ${DB_INIT_SNIPPET}
                         const wrapped = (e) => {
                             try {
                                 const d = e && e.detail;
-                                if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
+                                if (d && Array.isArray(d.args)) handler(...d.args);
+                                else if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
                                 else handler(d);
                             } catch (err) {}
                         };
@@ -9780,6 +9832,7 @@ ${DB_INIT_SNIPPET}
                 }
             } catch (e) {}
         }
+        if (pending.length) await Promise.allSettled(pending);
     }
 
     function installTableUpdateHook() {
@@ -9787,6 +9840,7 @@ ${DB_INIT_SNIPPET}
         if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
         try {
             api.registerTableUpdateCallback(() => {
+                try { if (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) > 0) return; } catch (e0) {}
                 // 插件在聊天切换时会先清空运行时（clearDerivedRuntimeState + notifyRuntimeTableCleared）
                 // 再加载新聊天：清空瞬间不广播，否则前端读到空数据显示默认值且不再刷新。
                 try {
@@ -9856,8 +9910,16 @@ ${DB_INIT_SNIPPET}
                     if (Array.isArray(patch)) {
                         for (const op of patch) {
                             if (!op || (!op.path && !op.to)) continue;
-                            const jt = op.op === 'delta' ? 'add' : (op.op === 'remove' ? 'delete' : op.op || 'set');
-                            cmds.push({ type: jt, path: String(op.path || op.to || '').replace(/^\//, '').replace(/\//g, '.'), value: op.value, from: op.from });
+                            const jt = op.op === 'delta' ? 'add' : (op.op === 'remove' ? 'delete' : ((op.op === 'insert' || op.op === 'add') ? 'insert' : op.op || 'set'));
+                            const jp = String(op.path || op.to || '').replace(/^\//, '').replace(/\//g, '.');
+                            const jpParts = jp.split('.');
+                            const jpKey = jpParts.pop();
+                            const jpParent = jpParts.join('.');
+                            const rawArgs = jt === 'move' ? [String(op.from || '').replace(/^\//, '').replace(/\//g, '.'), jp]
+                                : jt === 'delete' ? [jp]
+                                : jt === 'insert' || op.op === 'add' ? [jpParent, jpKey, JSON.stringify(op.value)]
+                                : [jp, JSON.stringify(op.value)];
+                            cmds.push({ type: jt, path: (jt === 'insert' || op.op === 'add') ? jpParent : jp, keyOrIndex: (jt === 'insert' || op.op === 'add') ? parseMvuCmdValue(jpKey) : undefined, value: op.value, from: op.from, rawArgs, full_match: JSON.stringify(op), reason: 'json_patch' });
                         }
                     }
                 } catch (e) {}
@@ -9884,15 +9946,46 @@ ${DB_INIT_SNIPPET}
                 if (rm) reason = rm[1].trim();
                 const type = cm[1];
                 const path = String(args[0] || '').replace(/^['"]|['"]$/g, '').replace(/^\//, '').replace(/\//g, '.');
-                if (type === 'remove' || type === 'unset' || type === 'delete') cmds.push({ type: 'delete', path, reason });
-                else if (type === 'insert') cmds.push({ type: 'insert', path, keyOrIndex: args[1] !== undefined ? parseMvuCmdValue(args[1]) : null, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : undefined, reason });
-                else if (type === 'assign') cmds.push({ type: 'assign', path, keyOrIndex: args[2] !== undefined ? parseMvuCmdValue(args[1]) : undefined, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : parseMvuCmdValue(args[1]), reason });
-                else if (type === 'add') cmds.push({ type: 'add', path, value: args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined, reason });
-                else cmds.push({ type: 'set', path, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : (args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined), reason });
+                const full_match = inner.slice(cm.index, end + 1);
+                if (type === 'remove' || type === 'unset' || type === 'delete') cmds.push({ type: 'delete', path, keyOrIndex: args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined, rawArgs: args, full_match, reason });
+                else if (type === 'insert' || type === 'assign') cmds.push({ type: 'insert', path, keyOrIndex: args[2] !== undefined ? parseMvuCmdValue(args[1]) : null, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : parseMvuCmdValue(args[1]), rawArgs: args, full_match, reason });
+                else if (type === 'add') cmds.push({ type: 'add', path, value: args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined, rawArgs: args, full_match, reason });
+                else cmds.push({ type: 'set', path, expected: args[2] !== undefined ? parseMvuCmdValue(args[1]) : undefined, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : (args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined), rawArgs: args, full_match, reason });
                 cmdRe.lastIndex = end + 1;
             }
         }
+        if (!cmds.length && /\.(set|assign|insert|remove|unset|delete|add)\(/.test(String(text || '')) && !/<(updatevariable|json_?patch)>/i.test(String(text || ''))) {
+            return parseMvuCommands('<UpdateVariable>' + String(text || '') + '</UpdateVariable>');
+        }
         return cmds;
+    }
+    function mvuCommandInfoFromInternal(cmd) {
+        let type = cmd.type;
+        if (type === 'assign') type = 'insert';
+        if (type === 'remove' || type === 'unset') type = 'delete';
+        let args = Array.isArray(cmd.rawArgs) ? cmd.rawArgs.slice() : null;
+        if (!args) {
+            if (type === 'move') args = [String(cmd.from || ''), String(cmd.path || '')];
+            else if (type === 'delete') args = cmd.keyOrIndex === undefined ? [String(cmd.path || '')] : [String(cmd.path || ''), cmd.keyOrIndex];
+            else if (type === 'insert') args = cmd.keyOrIndex === null || cmd.keyOrIndex === undefined ? [String(cmd.path || ''), cmd.value] : [String(cmd.path || ''), cmd.keyOrIndex, cmd.value];
+            else if (type === 'set' && cmd.expected !== undefined) args = [String(cmd.path || ''), cmd.expected, cmd.value];
+            else args = [String(cmd.path || ''), cmd.value];
+        }
+        return { type, full_match: cmd.full_match || '', args, reason: cmd.reason || '' };
+    }
+    function mvuInternalFromCommandInfo(info) {
+        if (!info || !Array.isArray(info.args) || !info.args.length) return null;
+        let type = String(info.type || 'set').toLowerCase();
+        if (type === 'assign') type = 'insert';
+        if (type === 'remove' || type === 'unset') type = 'delete';
+        const args = info.args;
+        const cleanPath = (v) => String(v == null ? '' : v).replace(/^['"]|['"]$/g, '').replace(/^\//, '').replace(/\//g, '.');
+        if (type === 'move') return { type, from: cleanPath(args[0]), path: cleanPath(args[1]), full_match: info.full_match || '', reason: info.reason || '' };
+        const path = cleanPath(args[0]);
+        if (type === 'delete') return { type, path, keyOrIndex: args.length > 1 ? parseMvuCmdValue(args[1]) : undefined, full_match: info.full_match || '', reason: info.reason || '' };
+        if (type === 'insert') return { type, path, keyOrIndex: args.length > 2 ? parseMvuCmdValue(args[1]) : null, value: parseMvuCmdValue(args[args.length - 1]), full_match: info.full_match || '', reason: info.reason || '' };
+        if (type === 'add') return { type, path, value: parseMvuCmdValue(args[1]), full_match: info.full_match || '', reason: info.reason || '' };
+        return { type: 'set', path, expected: args.length > 2 ? parseMvuCmdValue(args[1]) : undefined, value: parseMvuCmdValue(args[args.length - 1]), full_match: info.full_match || '', reason: info.reason || '' };
     }
     function applyMvuCommands(stat, cmds, display) {
         const setPathArr = (obj, parts, value) => {
@@ -9929,24 +10022,42 @@ ${DB_INIT_SNIPPET}
             }
             if (cmd.type === 'delete') {
                 let oldDel = null;
-                let cur = stat, ok = true;
-                for (let d = 0; d < parts.length - 1; d++) { cur = cur ? cur[parts[d]] : null; if (!cur) { ok = false; break; } }
-                if (ok && cur) { oldDel = cur[parts[parts.length - 1]]; try { delete cur[parts[parts.length - 1]]; } catch (e) {} }
+                if (cmd.keyOrIndex !== undefined) {
+                    let collection = stat;
+                    for (const p of parts) collection = collection == null ? undefined : collection[p];
+                    oldDel = collection;
+                    if (Array.isArray(collection)) {
+                        const ri = typeof cmd.keyOrIndex === 'number' ? cmd.keyOrIndex : collection.findIndex(v => JSON.stringify(v) === JSON.stringify(cmd.keyOrIndex));
+                        if (ri >= 0 && ri < collection.length) collection.splice(ri, 1);
+                    } else if (collection && typeof collection === 'object') {
+                        const dk = typeof cmd.keyOrIndex === 'number' ? Object.keys(collection)[cmd.keyOrIndex] : String(cmd.keyOrIndex);
+                        if (dk !== undefined) delete collection[dk];
+                    }
+                } else {
+                    let cur = stat, ok = true;
+                    for (let d = 0; d < parts.length - 1; d++) { cur = cur ? cur[parts[d]] : null; if (!cur) { ok = false; break; } }
+                    if (ok && cur) {
+                        const dk = parts[parts.length - 1];
+                        oldDel = cur[dk];
+                        if (Array.isArray(cur) && /^\d+$/.test(String(dk))) cur.splice(Number(dk), 1); else try { delete cur[dk]; } catch (e) {}
+                    }
+                }
                 if (Array.isArray(oldDel) && oldDel.length === 2) oldDel = oldDel[0];
                 note(cmd.path, oldDel, '(移除)', cmd.reason);
                 continue;
             }
             if (cmd.type === 'insert') {
-                let container = stat, ok2 = true;
-                for (let d2 = 0; d2 < parts.length - 1; d2++) { container = container ? container[parts[d2]] : null; if (!container) { ok2 = false; break; } }
-                if (!ok2) continue;
-                // JSONPatch insert 的键在 path 最后一段；_.insert 风格才用 keyOrIndex
-                const key = cmd.keyOrIndex !== undefined ? cmd.keyOrIndex : parts[parts.length - 1];
-                if (key === '-' || key === null) {
+                let container = stat;
+                for (const p of parts) container = container == null ? undefined : container[p];
+                if (container == null || (typeof container !== 'object' && !Array.isArray(container))) continue;
+                const key = cmd.keyOrIndex;
+                if (key === null || key === undefined) {
                     if (Array.isArray(container)) container.push(cmd.value);
-                    else if (container && typeof container === 'object') container[String(Date.now())] = cmd.value;
-                } else if (Array.isArray(container) && /^\d+$/.test(String(key))) container.splice(Number(key), 0, cmd.value);
-                else if (container && typeof container === 'object') container[key] = cmd.value;
+                    else if (cmd.value && typeof cmd.value === 'object' && !Array.isArray(cmd.value)) Object.assign(container, cmd.value);
+                } else if (Array.isArray(container) && (key === '-' || /^-?\d+$/.test(String(key)))) {
+                    const idx = key === '-' || Number(key) === -1 ? container.length : Number(key);
+                    container.splice(idx, 0, cmd.value);
+                } else if (container && typeof container === 'object') container[String(key)] = cmd.value;
                 note(cmd.path, '(新增)', cmd.value, cmd.reason);
                 continue;
             }
@@ -10017,6 +10128,49 @@ ${DB_INIT_SNIPPET}
                 note(cmd.path, oldV, newV, cmd.reason);
             }
         }
+    }
+
+    async function applyMvuCommandsWithEvents(stat, cmds, display) {
+        const at = (path) => {
+            let cur = stat;
+            for (const p of String(path || '').split('.').filter(Boolean)) cur = cur == null ? undefined : cur[p];
+            try { return JSON.parse(JSON.stringify(cur)); } catch (e) { return cur; }
+        };
+        for (const cmd of cmds) {
+            const oldValue = at(cmd.path);
+            applyMvuCommands(stat, [cmd], display);
+            const newValue = at(cmd.path);
+            try {
+                if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+                    await emitMvuEvent('mag_variable_updated', stat, cmd.path, oldValue, newValue);
+                }
+            } catch (e) {}
+        }
+    }
+
+    async function runMvuUpdateCycle(message, oldData) {
+        const out = JSON.parse(JSON.stringify(oldData || {}));
+        if (!out.stat_data || typeof out.stat_data !== 'object') out.stat_data = {};
+        if (!out.display_data || typeof out.display_data !== 'object') out.display_data = {};
+        if (!out.delta_data || typeof out.delta_data !== 'object') out.delta_data = {};
+        const before = JSON.parse(JSON.stringify(out));
+        out.stat_data.$internal = { display_data: out.display_data, delta_data: out.delta_data };
+        await emitMvuEvent('mag_variable_update_started', out);
+        const originalMessage = String(message || '');
+        let processedMessage = originalMessage;
+        try {
+            const macroFn = (typeof window.substitudeMacros === 'function' && window.substitudeMacros) || (typeof hostWindow.substitudeMacros === 'function' && hostWindow.substitudeMacros);
+            if (macroFn) processedMessage = String(macroFn(originalMessage));
+        } catch (e) {}
+        const infos = parseMvuCommands(processedMessage).map(mvuCommandInfoFromInternal);
+        await emitMvuEvent('mag_command_parsed', out, infos, originalMessage);
+        const commands = infos.map(mvuInternalFromCommandInfo).filter(Boolean);
+        if (commands.length) await applyMvuCommandsWithEvents(out.stat_data, commands, out.display_data);
+        out.delta_data = JSON.parse(JSON.stringify(out.display_data || {}));
+        if (out.stat_data.$internal) out.stat_data.$internal.delta_data = out.delta_data;
+        await emitMvuEvent('mag_variable_update_ended', out, before);
+        delete out.stat_data.$internal;
+        return out;
     }
 
     let windowMvuShimTimer = null;
@@ -10186,22 +10340,25 @@ ${DB_INIT_SNIPPET}
             };
             windowMvuFake.parseMessage = async function (message, old_data) {
                 try {
-                    const out = JSON.parse(JSON.stringify(old_data || {}));
-                    if (!out.stat_data || typeof out.stat_data !== 'object') out.stat_data = {};
-                    if (!out.display_data || typeof out.display_data !== 'object') out.display_data = {};
-                    if (!out.delta_data || typeof out.delta_data !== 'object') out.delta_data = {};
-                    // 与官方 updateVariables 一致：更新期间把 display/delta 挂到 stat_data.$internal
-                    out.stat_data.$internal = { display_data: out.display_data, delta_data: out.delta_data };
-                    const cmds = parseMvuCommands(String(message || ''));
-                    if (cmds.length) applyMvuCommands(out.stat_data, cmds, out.display_data);
-                    delete out.stat_data.$internal;
-                    return out;
+                    return await runMvuUpdateCycle(message, old_data);
                 } catch (e) {
                     dbgWarn(' Mvu.parseMessage 异常:', e);
                     return undefined;
                 }
             };
-            windowMvuFake.reloadInitVar = async function () { return true; };
+            windowMvuFake.reloadInitVar = async function (mvu_data) {
+                try {
+                    const core = window.MVU2SHUJUKU_CORE;
+                    const tpl = cachedTemplateForCurrentCard();
+                    if (!mvu_data || !core || typeof core.statDataFromTables !== 'function' || !activeLayout || !tpl) return false;
+                    const initial = core.statDataFromTables(activeLayout, tpl) || {};
+                    mvu_data.stat_data = JSON.parse(JSON.stringify(initial.stat_data || {}));
+                    mvu_data.display_data = JSON.parse(JSON.stringify(initial.display_data || initial.stat_data || {}));
+                    mvu_data.delta_data = {};
+                    mvu_data.initialized_lorebooks = mvu_data.initialized_lorebooks || {};
+                    return true;
+                } catch (e) { return false; }
+            };
             windowMvuFake.getCurrentMvuData = function () { return windowMvuFake.getMvuData({ type: 'message', message_id: 'latest' }); };
             windowMvuFake.replaceCurrentMvuData = async function (mvu_data) { return windowMvuFake.replaceMvuData(mvu_data, { type: 'message', message_id: 'latest' }); };
             windowMvuFake.isDuringExtraAnalysis = function () { return false; };
@@ -23085,7 +23242,13 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (fp === reentryNotifyFingerprint) return; // 数据未变化，不重复广播
                 reentryNotifyFingerprint = fp;
                 dbg('[重读通知] 就绪后 stat_data 快照: ' + JSON.stringify(sdR).slice(0, 160));
-                emitMvuEvent('mag_variable_initialized', allR, null);
+                let swipeId = 0;
+                try {
+                    const cx = getContextSafe();
+                    const cc = cx && Array.isArray(cx.chat) ? cx.chat : [];
+                    for (let si = cc.length - 1; si >= 0; si--) { if (cc[si] && !cc[si].is_user) { swipeId = Number(cc[si].swipe_id || 0); break; } }
+                } catch (e) {}
+                emitMvuEvent('mag_variable_initialized', allR, swipeId);
                 dispatchVariableUpdateEnded();
                 dbg('[重读通知] 已派发 VARIABLE_INITIALIZED + VARIABLE_UPDATE_ENDED 让前端重读最新 stat_data');
             } catch (e) {}
@@ -24339,7 +24502,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             }
         } catch (e) {}
     }
-    function emitMvuEvent(name, a, b) {
+    async function emitMvuEvent(name, ...args) {
         // 广播前先把 shim/getAllVariables 同步到当前所有 iframe：
         // 即使新 iframe 恰好在 2s 复查和 MutationObserver 之间创建，
         // 前端在事件回调里读 window.Mvu/getAllVariables 也一定能拿到。
@@ -24356,16 +24519,23 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 for (const f of frames) { try { add(f.contentWindow); } catch (e) {} }
             } catch (e) {}
         }
+        const pending = [];
+        const emitted = [];
+        const invoke = (fn, owner) => {
+            if (typeof fn !== 'function' || emitted.indexOf(fn) !== -1) return;
+            emitted.push(fn);
+            try { pending.push(Promise.resolve(fn.apply(owner, [name, ...args]))); } catch (e) {}
+        };
         for (const t of targets) {
-            try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: { after: a, before: b } })); } catch (e) {}
-            try { if (t.eventSource && typeof t.eventSource.emit === 'function') t.eventSource.emit(name, a, b); } catch (e) {}
+            try { const EC = t.CustomEvent || CustomEvent; t.dispatchEvent(new EC(name, { detail: { args, after: args[0], before: args[1] } })); } catch (e) {}
+            try { if (t.eventSource) invoke(t.eventSource.emit, t.eventSource); } catch (e) {}
             // 前端 iframe 的 eventOn 可能是 TH 注入的、绑定在 TH 事件总线（eventEmit）上；
             // 只对主窗口调 eventEmit 收不到，必须对每个 target（含消息 iframe）也广播 eventEmit。
-            try { if (typeof t.eventEmit === 'function') t.eventEmit(name, a, b); } catch (e) {}
+            try { invoke(t.eventEmit, t); } catch (e) {}
         }
         // 与 MVU 原版一致：尽量走 TH 的事件总线（前端 eventOn 监听的就是它）
-        try { if (typeof hostWindow.eventEmit === 'function') hostWindow.eventEmit(name, a, b); } catch (e) {}
-        try { if (typeof window.eventEmit === 'function') window.eventEmit(name, a, b); } catch (e) {}
+        try { invoke(hostWindow.eventEmit, hostWindow); } catch (e) {}
+        try { invoke(window.eventEmit, window); } catch (e) {}
         for (const t of targets) {
             try {
                 if (t && typeof t.eventOn !== 'function' && typeof t.addEventListener === 'function') {
@@ -24373,7 +24543,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         const wrapped = (e) => {
                             try {
                                 const d = e && e.detail;
-                                if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
+                                if (d && Array.isArray(d.args)) handler(...d.args);
+                                else if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
                                 else handler(d);
                             } catch (err) {}
                         };
@@ -24384,6 +24555,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 }
             } catch (e) {}
         }
+        if (pending.length) await Promise.allSettled(pending);
     }
 
     function installTableUpdateHook() {
@@ -24391,6 +24563,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
         try {
             api.registerTableUpdateCallback(() => {
+                try { if (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) > 0) return; } catch (e0) {}
                 // 插件在聊天切换时会先清空运行时（clearDerivedRuntimeState + notifyRuntimeTableCleared）
                 // 再加载新聊天：清空瞬间不广播，否则前端读到空数据显示默认值且不再刷新。
                 try {
@@ -24460,8 +24633,16 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                     if (Array.isArray(patch)) {
                         for (const op of patch) {
                             if (!op || (!op.path && !op.to)) continue;
-                            const jt = op.op === 'delta' ? 'add' : (op.op === 'remove' ? 'delete' : op.op || 'set');
-                            cmds.push({ type: jt, path: String(op.path || op.to || '').replace(/^\//, '').replace(/\//g, '.'), value: op.value, from: op.from });
+                            const jt = op.op === 'delta' ? 'add' : (op.op === 'remove' ? 'delete' : ((op.op === 'insert' || op.op === 'add') ? 'insert' : op.op || 'set'));
+                            const jp = String(op.path || op.to || '').replace(/^\//, '').replace(/\//g, '.');
+                            const jpParts = jp.split('.');
+                            const jpKey = jpParts.pop();
+                            const jpParent = jpParts.join('.');
+                            const rawArgs = jt === 'move' ? [String(op.from || '').replace(/^\//, '').replace(/\//g, '.'), jp]
+                                : jt === 'delete' ? [jp]
+                                : jt === 'insert' || op.op === 'add' ? [jpParent, jpKey, JSON.stringify(op.value)]
+                                : [jp, JSON.stringify(op.value)];
+                            cmds.push({ type: jt, path: (jt === 'insert' || op.op === 'add') ? jpParent : jp, keyOrIndex: (jt === 'insert' || op.op === 'add') ? parseMvuCmdValue(jpKey) : undefined, value: op.value, from: op.from, rawArgs, full_match: JSON.stringify(op), reason: 'json_patch' });
                         }
                     }
                 } catch (e) {}
@@ -24488,15 +24669,46 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 if (rm) reason = rm[1].trim();
                 const type = cm[1];
                 const path = String(args[0] || '').replace(/^['"]|['"]$/g, '').replace(/^\//, '').replace(/\//g, '.');
-                if (type === 'remove' || type === 'unset' || type === 'delete') cmds.push({ type: 'delete', path, reason });
-                else if (type === 'insert') cmds.push({ type: 'insert', path, keyOrIndex: args[1] !== undefined ? parseMvuCmdValue(args[1]) : null, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : undefined, reason });
-                else if (type === 'assign') cmds.push({ type: 'assign', path, keyOrIndex: args[2] !== undefined ? parseMvuCmdValue(args[1]) : undefined, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : parseMvuCmdValue(args[1]), reason });
-                else if (type === 'add') cmds.push({ type: 'add', path, value: args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined, reason });
-                else cmds.push({ type: 'set', path, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : (args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined), reason });
+                const full_match = inner.slice(cm.index, end + 1);
+                if (type === 'remove' || type === 'unset' || type === 'delete') cmds.push({ type: 'delete', path, keyOrIndex: args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined, rawArgs: args, full_match, reason });
+                else if (type === 'insert' || type === 'assign') cmds.push({ type: 'insert', path, keyOrIndex: args[2] !== undefined ? parseMvuCmdValue(args[1]) : null, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : parseMvuCmdValue(args[1]), rawArgs: args, full_match, reason });
+                else if (type === 'add') cmds.push({ type: 'add', path, value: args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined, rawArgs: args, full_match, reason });
+                else cmds.push({ type: 'set', path, expected: args[2] !== undefined ? parseMvuCmdValue(args[1]) : undefined, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : (args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined), rawArgs: args, full_match, reason });
                 cmdRe.lastIndex = end + 1;
             }
         }
+        if (!cmds.length && /\.(set|assign|insert|remove|unset|delete|add)\(/.test(String(text || '')) && !/<(updatevariable|json_?patch)>/i.test(String(text || ''))) {
+            return parseMvuCommands('<UpdateVariable>' + String(text || '') + '</UpdateVariable>');
+        }
         return cmds;
+    }
+    function mvuCommandInfoFromInternal(cmd) {
+        let type = cmd.type;
+        if (type === 'assign') type = 'insert';
+        if (type === 'remove' || type === 'unset') type = 'delete';
+        let args = Array.isArray(cmd.rawArgs) ? cmd.rawArgs.slice() : null;
+        if (!args) {
+            if (type === 'move') args = [String(cmd.from || ''), String(cmd.path || '')];
+            else if (type === 'delete') args = cmd.keyOrIndex === undefined ? [String(cmd.path || '')] : [String(cmd.path || ''), cmd.keyOrIndex];
+            else if (type === 'insert') args = cmd.keyOrIndex === null || cmd.keyOrIndex === undefined ? [String(cmd.path || ''), cmd.value] : [String(cmd.path || ''), cmd.keyOrIndex, cmd.value];
+            else if (type === 'set' && cmd.expected !== undefined) args = [String(cmd.path || ''), cmd.expected, cmd.value];
+            else args = [String(cmd.path || ''), cmd.value];
+        }
+        return { type, full_match: cmd.full_match || '', args, reason: cmd.reason || '' };
+    }
+    function mvuInternalFromCommandInfo(info) {
+        if (!info || !Array.isArray(info.args) || !info.args.length) return null;
+        let type = String(info.type || 'set').toLowerCase();
+        if (type === 'assign') type = 'insert';
+        if (type === 'remove' || type === 'unset') type = 'delete';
+        const args = info.args;
+        const cleanPath = (v) => String(v == null ? '' : v).replace(/^['"]|['"]$/g, '').replace(/^\//, '').replace(/\//g, '.');
+        if (type === 'move') return { type, from: cleanPath(args[0]), path: cleanPath(args[1]), full_match: info.full_match || '', reason: info.reason || '' };
+        const path = cleanPath(args[0]);
+        if (type === 'delete') return { type, path, keyOrIndex: args.length > 1 ? parseMvuCmdValue(args[1]) : undefined, full_match: info.full_match || '', reason: info.reason || '' };
+        if (type === 'insert') return { type, path, keyOrIndex: args.length > 2 ? parseMvuCmdValue(args[1]) : null, value: parseMvuCmdValue(args[args.length - 1]), full_match: info.full_match || '', reason: info.reason || '' };
+        if (type === 'add') return { type, path, value: parseMvuCmdValue(args[1]), full_match: info.full_match || '', reason: info.reason || '' };
+        return { type: 'set', path, expected: args.length > 2 ? parseMvuCmdValue(args[1]) : undefined, value: parseMvuCmdValue(args[args.length - 1]), full_match: info.full_match || '', reason: info.reason || '' };
     }
     function applyMvuCommands(stat, cmds, display) {
         const setPathArr = (obj, parts, value) => {
@@ -24533,24 +24745,42 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             }
             if (cmd.type === 'delete') {
                 let oldDel = null;
-                let cur = stat, ok = true;
-                for (let d = 0; d < parts.length - 1; d++) { cur = cur ? cur[parts[d]] : null; if (!cur) { ok = false; break; } }
-                if (ok && cur) { oldDel = cur[parts[parts.length - 1]]; try { delete cur[parts[parts.length - 1]]; } catch (e) {} }
+                if (cmd.keyOrIndex !== undefined) {
+                    let collection = stat;
+                    for (const p of parts) collection = collection == null ? undefined : collection[p];
+                    oldDel = collection;
+                    if (Array.isArray(collection)) {
+                        const ri = typeof cmd.keyOrIndex === 'number' ? cmd.keyOrIndex : collection.findIndex(v => JSON.stringify(v) === JSON.stringify(cmd.keyOrIndex));
+                        if (ri >= 0 && ri < collection.length) collection.splice(ri, 1);
+                    } else if (collection && typeof collection === 'object') {
+                        const dk = typeof cmd.keyOrIndex === 'number' ? Object.keys(collection)[cmd.keyOrIndex] : String(cmd.keyOrIndex);
+                        if (dk !== undefined) delete collection[dk];
+                    }
+                } else {
+                    let cur = stat, ok = true;
+                    for (let d = 0; d < parts.length - 1; d++) { cur = cur ? cur[parts[d]] : null; if (!cur) { ok = false; break; } }
+                    if (ok && cur) {
+                        const dk = parts[parts.length - 1];
+                        oldDel = cur[dk];
+                        if (Array.isArray(cur) && /^\d+$/.test(String(dk))) cur.splice(Number(dk), 1); else try { delete cur[dk]; } catch (e) {}
+                    }
+                }
                 if (Array.isArray(oldDel) && oldDel.length === 2) oldDel = oldDel[0];
                 note(cmd.path, oldDel, '(移除)', cmd.reason);
                 continue;
             }
             if (cmd.type === 'insert') {
-                let container = stat, ok2 = true;
-                for (let d2 = 0; d2 < parts.length - 1; d2++) { container = container ? container[parts[d2]] : null; if (!container) { ok2 = false; break; } }
-                if (!ok2) continue;
-                // JSONPatch insert 的键在 path 最后一段；_.insert 风格才用 keyOrIndex
-                const key = cmd.keyOrIndex !== undefined ? cmd.keyOrIndex : parts[parts.length - 1];
-                if (key === '-' || key === null) {
+                let container = stat;
+                for (const p of parts) container = container == null ? undefined : container[p];
+                if (container == null || (typeof container !== 'object' && !Array.isArray(container))) continue;
+                const key = cmd.keyOrIndex;
+                if (key === null || key === undefined) {
                     if (Array.isArray(container)) container.push(cmd.value);
-                    else if (container && typeof container === 'object') container[String(Date.now())] = cmd.value;
-                } else if (Array.isArray(container) && /^\d+$/.test(String(key))) container.splice(Number(key), 0, cmd.value);
-                else if (container && typeof container === 'object') container[key] = cmd.value;
+                    else if (cmd.value && typeof cmd.value === 'object' && !Array.isArray(cmd.value)) Object.assign(container, cmd.value);
+                } else if (Array.isArray(container) && (key === '-' || /^-?\d+$/.test(String(key)))) {
+                    const idx = key === '-' || Number(key) === -1 ? container.length : Number(key);
+                    container.splice(idx, 0, cmd.value);
+                } else if (container && typeof container === 'object') container[String(key)] = cmd.value;
                 note(cmd.path, '(新增)', cmd.value, cmd.reason);
                 continue;
             }
@@ -24621,6 +24851,49 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 note(cmd.path, oldV, newV, cmd.reason);
             }
         }
+    }
+
+    async function applyMvuCommandsWithEvents(stat, cmds, display) {
+        const at = (path) => {
+            let cur = stat;
+            for (const p of String(path || '').split('.').filter(Boolean)) cur = cur == null ? undefined : cur[p];
+            try { return JSON.parse(JSON.stringify(cur)); } catch (e) { return cur; }
+        };
+        for (const cmd of cmds) {
+            const oldValue = at(cmd.path);
+            applyMvuCommands(stat, [cmd], display);
+            const newValue = at(cmd.path);
+            try {
+                if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+                    await emitMvuEvent('mag_variable_updated', stat, cmd.path, oldValue, newValue);
+                }
+            } catch (e) {}
+        }
+    }
+
+    async function runMvuUpdateCycle(message, oldData) {
+        const out = JSON.parse(JSON.stringify(oldData || {}));
+        if (!out.stat_data || typeof out.stat_data !== 'object') out.stat_data = {};
+        if (!out.display_data || typeof out.display_data !== 'object') out.display_data = {};
+        if (!out.delta_data || typeof out.delta_data !== 'object') out.delta_data = {};
+        const before = JSON.parse(JSON.stringify(out));
+        out.stat_data.$internal = { display_data: out.display_data, delta_data: out.delta_data };
+        await emitMvuEvent('mag_variable_update_started', out);
+        const originalMessage = String(message || '');
+        let processedMessage = originalMessage;
+        try {
+            const macroFn = (typeof window.substitudeMacros === 'function' && window.substitudeMacros) || (typeof hostWindow.substitudeMacros === 'function' && hostWindow.substitudeMacros);
+            if (macroFn) processedMessage = String(macroFn(originalMessage));
+        } catch (e) {}
+        const infos = parseMvuCommands(processedMessage).map(mvuCommandInfoFromInternal);
+        await emitMvuEvent('mag_command_parsed', out, infos, originalMessage);
+        const commands = infos.map(mvuInternalFromCommandInfo).filter(Boolean);
+        if (commands.length) await applyMvuCommandsWithEvents(out.stat_data, commands, out.display_data);
+        out.delta_data = JSON.parse(JSON.stringify(out.display_data || {}));
+        if (out.stat_data.$internal) out.stat_data.$internal.delta_data = out.delta_data;
+        await emitMvuEvent('mag_variable_update_ended', out, before);
+        delete out.stat_data.$internal;
+        return out;
     }
 
     let windowMvuShimTimer = null;
@@ -24790,22 +25063,25 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             };
             windowMvuFake.parseMessage = async function (message, old_data) {
                 try {
-                    const out = JSON.parse(JSON.stringify(old_data || {}));
-                    if (!out.stat_data || typeof out.stat_data !== 'object') out.stat_data = {};
-                    if (!out.display_data || typeof out.display_data !== 'object') out.display_data = {};
-                    if (!out.delta_data || typeof out.delta_data !== 'object') out.delta_data = {};
-                    // 与官方 updateVariables 一致：更新期间把 display/delta 挂到 stat_data.$internal
-                    out.stat_data.$internal = { display_data: out.display_data, delta_data: out.delta_data };
-                    const cmds = parseMvuCommands(String(message || ''));
-                    if (cmds.length) applyMvuCommands(out.stat_data, cmds, out.display_data);
-                    delete out.stat_data.$internal;
-                    return out;
+                    return await runMvuUpdateCycle(message, old_data);
                 } catch (e) {
                     dbgWarn(' Mvu.parseMessage 异常:', e);
                     return undefined;
                 }
             };
-            windowMvuFake.reloadInitVar = async function () { return true; };
+            windowMvuFake.reloadInitVar = async function (mvu_data) {
+                try {
+                    const core = window.MVU2SHUJUKU_CORE;
+                    const tpl = cachedTemplateForCurrentCard();
+                    if (!mvu_data || !core || typeof core.statDataFromTables !== 'function' || !activeLayout || !tpl) return false;
+                    const initial = core.statDataFromTables(activeLayout, tpl) || {};
+                    mvu_data.stat_data = JSON.parse(JSON.stringify(initial.stat_data || {}));
+                    mvu_data.display_data = JSON.parse(JSON.stringify(initial.display_data || initial.stat_data || {}));
+                    mvu_data.delta_data = {};
+                    mvu_data.initialized_lorebooks = mvu_data.initialized_lorebooks || {};
+                    return true;
+                } catch (e) { return false; }
+            };
             windowMvuFake.getCurrentMvuData = function () { return windowMvuFake.getMvuData({ type: 'message', message_id: 'latest' }); };
             windowMvuFake.replaceCurrentMvuData = async function (mvu_data) { return windowMvuFake.replaceMvuData(mvu_data, { type: 'message', message_id: 'latest' }); };
             windowMvuFake.isDuringExtraAnalysis = function () { return false; };
