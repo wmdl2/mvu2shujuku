@@ -1,5 +1,5 @@
 // MVU转数据库 · SillyTavern 原生扩展
-// 生成自 转换器/src/mvu2shujuku.js（0.2.1），核心源码内联如下
+// 生成自 转换器/src/mvu2shujuku.js（0.2.3），核心源码内联如下
 // @ts-nocheck
 (function (root) {
 /*
@@ -17,7 +17,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.2.1';
+    const VERSION = '0.2.3';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -54,6 +54,13 @@
         'function mvu2shujukuMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}',
         'function mvu2shujukuExpectedColumns(tpl){var map={};if(!tpl||typeof tpl!=="object")return map;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object"||typeof s.name!=="string")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var cols=[];for(var i=1;i<hdr.length;i++){if(cols.indexOf(hdr[i])===-1)cols.push(hdr[i]);}map[s.name]=cols;}return map;}',
         'function mvu2shujukuMissingColumns(api,expected){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=all[k];}var mismatch=[];for(var name in expected){var sheet=have[name];if(!sheet)continue;var hdr=Array.isArray(sheet.content)&&Array.isArray(sheet.content[0])?sheet.content[0]:[];var exp=expected[name];for(var i=0;i<exp.length;i++){if(hdr.indexOf(exp[i])===-1){mismatch.push(name+"(缺列:"+exp[i]+")");break;}}}return mismatch;}',
+        // 世界书的 substituteParams 发生在正文注入链上；数据库模板是直接解码导入，必须在这里显式调用同一原生接口。
+        // 仅处理 content 数据行与 seedRows；表名和表头是固定结构，若包含宏则明确报错。
+        'function mvu2shujukuMacroMark(s){s=String(s==null?"":s);return /<(?:USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/i.test(s)||/\\{\\{[\\s\\S]*?\\}\\}/.test(s);}',
+        'function mvu2shujukuMacroEnv(){var win=(typeof window!=="undefined"?window:(typeof globalThis!=="undefined"?globalThis:null));var tries=[];function add(w){try{if(w&&tries.indexOf(w)===-1)tries.push(w);}catch(e){}}add(win);if(win){try{add(win.parent);}catch(e){}try{add(win.top);}catch(e){}}for(var i=0;i<tries.length;i++){var w=tries[i],ctx=null;try{if(w.SillyTavern&&typeof w.SillyTavern.getContext==="function")ctx=w.SillyTavern.getContext();}catch(e){}try{if(!ctx&&typeof w.getContext==="function")ctx=w.getContext();}catch(e){}if(ctx&&typeof ctx.substituteParams==="function")return {ctx:ctx,fn:ctx.substituteParams,holder:w};}return null;}',
+        'function mvu2shujukuMacroCacheKey(seed,ctx){var s=String(seed||"")+"|"+String(ctx&&(ctx.chatId||ctx.chat_id||ctx.chatFile||ctx.chatFileName)||"unknown");var h=2166136261;for(var i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return String(h>>>0);}',
+        'function mvu2shujukuCheckRowKeyCollision(rows,start,sheet){var ddl=String(sheet&&sheet.sourceData&&sheet.sourceData.ddl||"");var composite=/\\bUNIQUE\\s*\\(\\s*[^,]+,\\s*[^)]+\\)/i.test(ddl);var single=!composite&&/\\bUNIQUE\\b/i.test(ddl);if(!single&&!composite)return;var seen={};if(!Array.isArray(rows))return;for(var i=start;i<rows.length;i++){var row=rows[i];if(!Array.isArray(row)||row.length<(composite?3:2))continue;var a=String(row[1]==null?"":row[1]);var b=composite?String(row[2]==null?"":row[2]):"";if(!a||composite&&!b)continue;var key=composite?a+"\\u0000"+b:a;if(seen[key])throw new Error("表「"+String(sheet&&sheet.name||"")+"」宏替换后键名冲突："+(composite?a+" / "+b:a));seen[key]=true;}}',
+        'function mvu2shujukuResolveTemplateMacros(tpl,seed){var has=false;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object")continue;if(mvu2shujukuMacroMark(s.name))return {ok:false,status:"error",message:"表名不支持运行时宏："+s.name};var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];for(var hi=0;hi<hdr.length;hi++)if(mvu2shujukuMacroMark(hdr[hi]))return {ok:false,status:"error",message:"固定列名不支持运行时宏："+hdr[hi]};var lists=[];if(Array.isArray(s.content))lists.push({rows:s.content,start:1});if(Array.isArray(s.seedRows))lists.push({rows:s.seedRows,start:0});for(var li=0;li<lists.length;li++){var rs=lists[li].rows;for(var ri=lists[li].start;ri<rs.length;ri++){var row=rs[ri];if(!Array.isArray(row))continue;for(var ci=0;ci<row.length;ci++)if(typeof row[ci]==="string"&&mvu2shujukuMacroMark(row[ci]))has=true;}}}if(!has)return {ok:true,template:tpl};var env=mvu2shujukuMacroEnv();if(!env)return {ok:false,status:"partial",message:"初始数据含有 SillyTavern 宏，但 substituteParams 尚未就绪，等待重试"};var ck=mvu2shujukuMacroCacheKey(seed,env.ctx);var holder=env.holder||{};var cache=holder.__mvu2shujukuResolvedMacroTemplates||(holder.__mvu2shujukuResolvedMacroTemplates={});if(cache[ck])return {ok:true,template:cache[ck]};var out=JSON.parse(JSON.stringify(tpl));try{for(var k2 in out){if(k2.indexOf("sheet_")!==0)continue;var sh=out[k2];if(!sh||typeof sh!=="object")continue;var sets=[];if(Array.isArray(sh.content))sets.push({rows:sh.content,start:1});if(Array.isArray(sh.seedRows))sets.push({rows:sh.seedRows,start:0});for(var si=0;si<sets.length;si++){var rows=sets[si].rows;for(var r=sets[si].start;r<rows.length;r++){if(!Array.isArray(rows[r]))continue;for(var c=0;c<rows[r].length;c++){if(typeof rows[r][c]==="string")rows[r][c]=String(env.fn.call(env.ctx,rows[r][c]));}}mvu2shujukuCheckRowKeyCollision(rows,sets[si].start,sh);}}}catch(e){return {ok:false,status:"error",message:e&&e.message?e.message:String(e)};}cache[ck]=out;return {ok:true,template:out};}',
         // 聊天里是否已存在 full checkpoint：表格数据以持久化的 checkpoint 为准。
         // 插件回放是异步的，刷新/切聊天时运行时表格可能暂时为空，仅凭 exportTableAsJson
         // 判断“缺表”会误触发 initGameSession(默认模板)，把带数据的好 checkpoint 覆盖成默认值。
@@ -65,7 +72,7 @@
         'function mvu2shujukuChatHasAiFloor(){try{var win=(typeof window!=="undefined"?window:(typeof globalThis!=="undefined"?globalThis:null));var ctx=null;var tries=[win];if(win){try{if(win.parent&&win.parent!==win)tries.push(win.parent);}catch(e){}}for(var ti=0;ti<tries.length;ti++){var w=tries[ti];if(!w)continue;try{if(w.SillyTavern&&typeof w.SillyTavern.getContext==="function"){ctx=w.SillyTavern.getContext();break;}}catch(e){}try{if(typeof w.getContext==="function"){ctx=w.getContext();break;}}catch(e){}}var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];for(var mi=0;mi<chat.length;mi++){if(chat[mi]&&!chat[mi].is_user)return true;}return false;}catch(e){return false;}}',
         'var mvu2shujukuInitSessionHung=false;',
         'function mvu2shujukuWithTimeout(promise,ms,label){var done=false;var tid=null;var timeoutPromise=new Promise(function(resolve){tid=setTimeout(function(){if(!done){done=true;resolve({timeout:true,message:label+" 超时("+(ms/1000)+"s)"});}},ms);});return Promise.race([Promise.resolve(promise).then(function(v){if(!done){done=true;if(tid)clearTimeout(tid);}return v;}),timeoutPromise]);}',
-        'async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);if(mvu2shujukuChatHasFullCheckpoint()){out.status="skip";out.message="聊天已有 full checkpoint，跳过自动建表（以持久化数据为准，运行时物化由插件完成）";return out;}if(!mvu2shujukuChatHasAiFloor()){out.status="partial";out.message="聊天暂无 AI 楼层（首楼未就绪或切换加载中），等待重试";return out;}var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){var all2={};try{all2=api.exportTableAsJson()||{};}catch(e){}var rtCount=0;var rtEmptyAll=true;var rtHasSeed=false;var tplHasRows=false;for(var k2 in all2){if(k2.indexOf("sheet_")!==0)continue;var sh2=all2[k2];if(!sh2||typeof sh2!=="object"||typeof sh2.name!=="string")continue;rtCount++;if(Array.isArray(sh2.content)&&sh2.content.length>1)rtEmptyAll=false;if(Array.isArray(sh2.seedRows)&&sh2.seedRows.length)rtHasSeed=true;}for(var tk in tpl){if(tk.indexOf("sheet_")!==0)continue;var tsx=tpl[tk];if(tsx&&typeof tsx==="object"&&Array.isArray(tsx.content)&&tsx.content.length>1){tplHasRows=true;break;}}/* 根因修复：插件 native 初始化可能已用“仅表头”模板建表（content 无行、无 checkpoint）。此时跳过 initGameSession 会让 checkpoint 停在无行状态，刷新后 v2-replay 无法恢复任何行（插件 loadFromData 的 hasRealDataRows 门禁 + 有 checkpoint 后 seedRows 不再物化）。只要运行时全表仅表头且带有模板 seedRows（插件 native 初始化签名），就继续走 initGameSession 用完整模板原子建锚+补行（无损：无真实数据行）。*/var headerOnlyFresh=rtCount>0&&rtEmptyAll&&rtHasSeed&&tplHasRows;if(!headerOnlyFresh){var emptyS=[];try{for(var k3 in all2){if(k3.indexOf("sheet_")!==0)continue;var sh3=all2[k3];if(!sh3||typeof sh3!=="object"||typeof sh3.name!=="string")continue;if(Array.isArray(sh3.content)&&sh3.content.length>1)continue;if(Array.isArray(sh3.seedRows)&&sh3.seedRows.length)continue;var ts3=mvu2shujukuSheetByName(tpl,sh3.name);if(!ts3||!Array.isArray(ts3.content)||ts3.content.length!==2)continue;emptyS.push(sh3.name);}}catch(e){}if(emptyS.length){for(var ei=0;ei<emptyS.length;ei++){try{var ts2=mvu2shujukuSheetByName(tpl,emptyS[ei]);var hdr2=ts2.content[0];var row2=ts2.content[1];var obj2={};for(var ci=1;ci<hdr2.length;ci++){obj2[hdr2[ci]]=(row2[ci]!==undefined&&row2[ci]!==null)?row2[ci]:"";}await Promise.resolve(api.insertRow(emptyS[ei],obj2));}catch(e){}}out.status="skip";out.message="已为仅表头的单例/JSON表补初始行："+emptyS.join("、");return out;}out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}}var steps=[];var initOk=false;if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试");}else if(r2&&r2.success===false){steps.push("initGameSession: "+(r2.message||"失败"));}else{initOk=true;steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用");}if(!initOk&&typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}',
+        'async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var macroResult=mvu2shujukuResolveTemplateMacros(tpl,b64);if(!macroResult.ok){out.status=macroResult.status||"error";out.message=macroResult.message||"初始数据宏替换失败";return out;}tpl=macroResult.template;out.template=tpl;var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);if(mvu2shujukuChatHasFullCheckpoint()){out.status="skip";out.message="聊天已有 full checkpoint，跳过自动建表（以持久化数据为准，运行时物化由插件完成）";return out;}if(!mvu2shujukuChatHasAiFloor()){out.status="partial";out.message="聊天暂无 AI 楼层（首楼未就绪或切换加载中），等待重试";return out;}var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){var all2={};try{all2=api.exportTableAsJson()||{};}catch(e){}var rtCount=0;var rtEmptyAll=true;var rtHasSeed=false;var tplHasRows=false;for(var k2 in all2){if(k2.indexOf("sheet_")!==0)continue;var sh2=all2[k2];if(!sh2||typeof sh2!=="object"||typeof sh2.name!=="string")continue;rtCount++;if(Array.isArray(sh2.content)&&sh2.content.length>1)rtEmptyAll=false;if(Array.isArray(sh2.seedRows)&&sh2.seedRows.length)rtHasSeed=true;}for(var tk in tpl){if(tk.indexOf("sheet_")!==0)continue;var tsx=tpl[tk];if(tsx&&typeof tsx==="object"&&Array.isArray(tsx.content)&&tsx.content.length>1){tplHasRows=true;break;}}/* 根因修复：插件 native 初始化可能已用“仅表头”模板建表（content 无行、无 checkpoint）。此时跳过 initGameSession 会让 checkpoint 停在无行状态，刷新后 v2-replay 无法恢复任何行（插件 loadFromData 的 hasRealDataRows 门禁 + 有 checkpoint 后 seedRows 不再物化）。只要运行时全表仅表头且带有模板 seedRows（插件 native 初始化签名），就继续走 initGameSession 用完整模板原子建锚+补行（无损：无真实数据行）。*/var headerOnlyFresh=rtCount>0&&rtEmptyAll&&rtHasSeed&&tplHasRows;if(!headerOnlyFresh){var emptyS=[];try{for(var k3 in all2){if(k3.indexOf("sheet_")!==0)continue;var sh3=all2[k3];if(!sh3||typeof sh3!=="object"||typeof sh3.name!=="string")continue;if(Array.isArray(sh3.content)&&sh3.content.length>1)continue;if(Array.isArray(sh3.seedRows)&&sh3.seedRows.length)continue;var ts3=mvu2shujukuSheetByName(tpl,sh3.name);if(!ts3||!Array.isArray(ts3.content)||ts3.content.length!==2)continue;emptyS.push(sh3.name);}}catch(e){}if(emptyS.length){for(var ei=0;ei<emptyS.length;ei++){try{var ts2=mvu2shujukuSheetByName(tpl,emptyS[ei]);var hdr2=ts2.content[0];var row2=ts2.content[1];var obj2={};for(var ci=1;ci<hdr2.length;ci++){obj2[hdr2[ci]]=(row2[ci]!==undefined&&row2[ci]!==null)?row2[ci]:"";}await Promise.resolve(api.insertRow(emptyS[ei],obj2));}catch(e){}}out.status="skip";out.message="已为仅表头的单例/JSON表补初始行："+emptyS.join("、");return out;}out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}}var steps=[];var initOk=false;if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试");}else if(r2&&r2.success===false){steps.push("initGameSession: "+(r2.message||"失败"));}else{initOk=true;steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用");}if(!initOk&&typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}',
     ].join('\n');
 
     /* ================================================================
@@ -332,6 +339,32 @@
                 }
             }
         }
+    }
+
+    // 初始数据的宏替换：字符串值始终走 SillyTavern 原生 substituteParams；
+    // 键名只在布局明确标记的“动态行字典”路径上替换，避免 <user> 等宏
+    // 意外改变组名/固定字段名。替换后键冲突会直接报错，不静默覆盖数据。
+    function resolveInitDataMacros(value, substituteParams, dynamicKeyPaths = []) {
+        if (typeof substituteParams !== 'function') throw new Error('SillyTavern substituteParams 不可用');
+        const patterns = (Array.isArray(dynamicKeyPaths) ? dynamicKeyPaths : [])
+            .filter(Array.isArray).map(p => p.map(x => String(x)));
+        const isDynamicKeyObject = (path) => patterns.some(p => p.length === path.length && p.every((v, i) => v === '*' || v === String(path[i])));
+        const walk = (node, path) => {
+            if (typeof node === 'string') return String(substituteParams(node));
+            if (Array.isArray(node)) return node.map((v, i) => walk(v, path.concat(String(i))));
+            if (!node || typeof node !== 'object') return node;
+            const out = {};
+            const resolveKeys = isDynamicKeyObject(path);
+            for (const rawKey of Object.keys(node)) {
+                const key = resolveKeys ? String(substituteParams(rawKey)) : rawKey;
+                if (Object.prototype.hasOwnProperty.call(out, key)) {
+                    throw new Error(`宏替换后键名冲突：${path.concat(key).join('.')}`);
+                }
+                out[key] = walk(node[rawKey], path.concat(key));
+            }
+            return out;
+        };
+        return walk(value, []);
     }
 
     // 解析 [value, desc] 叶子：返回 { value, desc }
@@ -4304,7 +4337,18 @@
         for (const L of entries) {
             const s = sheetOf(L.table);
             if (!s || !Array.isArray(s.content) || !s.content.length) {
-                if (L.kind === 'rows') { for (const wp of L.writePaths || []) setPath(sd, wp, L.emptyValue === null ? null : {}); }
+                if (L.kind === 'singleton') {
+                    // EJS/前端可能在插件回放与布局建立之间同步读取。即使整张表
+                    // 尚未出现，也先按布局构造单例组及嵌套路径，避免
+                    // stat_data.世界运转.场景 在加载窗口因中间组 undefined 直接抛错。
+                    sd[L.group] = {};
+                    for (const c of L.cols || []) {
+                        if (c[0] === '_扩展数据') continue;
+                        const cp = Array.isArray(c[3]) && c[3].length ? c[3] : [L.group, c[0]];
+                        setPath(sd, cp, convertCell(c[1], undefined, c[2], c[5]));
+                    }
+                }
+                else if (L.kind === 'rows') { for (const wp of L.writePaths || []) setPath(sd, wp, L.emptyValue === null ? null : {}); }
                 else if (L.kind === 'nestedRows') { /* 所属实体记录尚未出现时不虚构关联键 */ }
                 else if (L.kind === 'pathArray') { setPath(sd, L.path || [L.group], []); }
                 else if (L.kind === 'nestedArray') { /* 同上，不虚构关联键 */ }
@@ -5457,7 +5501,10 @@
             `      var L=SD_LAYOUT[ei];`,
             `      var s=sheetOfSnap(L.table);`,
             `      if(!s||!Array.isArray(s.content)||!s.content.length){`,
-            `        if(L.kind==='rows'){`,
+            `        if(L.kind==='singleton'){`,
+            `          sd[L.group]={};`,
+            `          for(var msj=0;msj<L.cols.length;msj++){var msc=L.cols[msj];if(msc[0]==='_扩展数据')continue;var msp=msc[3]&&msc[3].length?msc[3]:[L.group,msc[0]];setPath(sd,msp,convertCell(msc[1],undefined,msc[2],msc[5]));}`,
+            `        }else if(L.kind==='rows'){`,
             `          for(var wi=0;wi<(L.writePaths||[]).length;wi++)setPath(sd,L.writePaths[wi],L.emptyValue===null?null:{});`,
             `        }else if(L.kind==='pathArray'){`,
             `          setPath(sd,L.path,[]);`,
@@ -6328,6 +6375,7 @@
             `    var apiNow=getApi();`,
             `    if(!apiNow){console.warn('['+BRIDGE_NAME+'] 插件 API 未就绪，稍后重试建表');initState.running=false;if(initRetries<15){initRetries++;setTimeout(ensureTemplateInit,3000);}return;}`,
             `    var out=await mvu2shujukuEnsureInit(apiNow,TEMPLATE_B64,currentCharName()+'模板');`,
+            `    if(out&&out.template)TEMPLATE=out.template;`,
             `    console.log('['+BRIDGE_NAME+'] ensureTemplateInit 结果:', out.status, out.message);`,
             `    if(out.status==='error'||out.status==='partial'){`,
             `      console.warn('['+BRIDGE_NAME+'] 开局建表未完全成功:',out.message);`,
@@ -8034,7 +8082,18 @@ ${DB_INIT_SNIPPET}
         }, 30000);
         try {
             const presetName = (characterDisplayName(character) || '角色') + '模板';
+            // 在 ensureInit 前记录：“本次进入前就已有存档”与“本次新建的 checkpoint”
+            // 语义不同。前者只能建立分支指纹基线，不能重放开局 initvar。
+            const hadFullCheckpointBeforeInit = mvu2shujukuChatHasFullCheckpoint();
             const out = await mvu2shujukuEnsureInit(api, entry.content, presetName);
+            // 后续补行/差异写入也必须使用已解析模板，不能再从原始 base64
+            // 缓存取回字面量 <user>。
+            if (out && out.template) {
+                try {
+                    const holder = (typeof window !== 'undefined' ? window : globalThis);
+                    if (holder) holder.__mvu2shujukuTemplateCache = out.template;
+                } catch (e) {}
+            }
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);
                 autoInitState.done = '';
@@ -8048,6 +8107,11 @@ ${DB_INIT_SNIPPET}
                 console.log('[mvu2shujuku] 开局自动建表：' + out.message);
                 autoInitState.retries = 0;
                 autoInitState.done = key;
+                const greetingState = greetingInitState(key);
+                greetingState.ready = true;
+                if (hadFullCheckpointBeforeInit && !greetingState.appliedFp && !greetingState.pendingFp) {
+                    greetingState.baselineNext = true;
+                }
                 installWindowGetAllVariables();
                 installWindowMvuShim();
                 installTableUpdateHook();
@@ -8199,10 +8263,44 @@ ${DB_INIT_SNIPPET}
     // 开场白多分支按所选分支注入初始化（MVU 语义：每个 swipe 的 <initvar> 独立替换初始状态）。
     // 转换时只以首个分支为模板基准，这里在开局/换 swipe 时把“当前激活分支”的 <initvar>
     // 写入数据库（覆盖模板初始行），避免多分支状态被合并。
-    let lastGreetingInitFp = '';
+    // 按聊天记录分支初始化状态：大型卡一次差异写入可能超过 2s，
+    // 若只在写完后设指纹，2s 轮询会在途中重复提交，使旧回调失效并形成
+    // manual_crud → persist → v2-replay 循环。pendingFp 是在途去重，appliedFp 是已落定去重。
+    const greetingInitStateByChat = Object.create(null);
+    function greetingInitState(chatKey) {
+        const key = String(chatKey || 'unknown');
+        if (!greetingInitStateByChat[key]) {
+            greetingInitStateByChat[key] = { ready: false, baselineNext: false, appliedFp: '', pendingFp: '', pendingAt: 0 };
+        }
+        return greetingInitStateByChat[key];
+    }
+    const greetingMacroCache = Object.create(null);
+    function greetingDynamicKeyPaths(layoutEntries) {
+        const out = [];
+        const add = (p) => {
+            if (!Array.isArray(p) || !p.length) return;
+            const key = p.join('\u0001');
+            if (!out.some(x => x.join('\u0001') === key)) out.push(p.slice());
+        };
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            if (!L) continue;
+            if (L.kind === 'rows') {
+                for (const p of (Array.isArray(L.writePaths) ? L.writePaths : [])) add(p);
+            } else if (L.kind === 'nestedRows') {
+                const pp = Array.isArray(L.parentPath) ? L.parentPath : [];
+                add(pp);
+                add(pp.concat('*', L.childKey || ''));
+            }
+        }
+        return out;
+    }
     function applyActiveGreetingInitvar() {
         try {
             const ctx = getContextSafe();
+            const chatKey = autoInitChatId();
+            const greetingState = greetingInitState(chatKey);
+            // 自动建表/回放尚未完成时不抢先写库；否则会与插件 v2-replay 竞争。
+            if (!greetingState.ready) return;
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
             const first = chat[0];
             if (!first || first.is_user) return;
@@ -8211,18 +8309,57 @@ ${DB_INIT_SNIPPET}
             if (!m) return;
             const core = window.MVU2SHUJUKU_CORE;
             if (!core || typeof core.parseInitVar !== 'function') return;
-            const parsed = core.parseInitVar(m[1]);
+            let parsed = core.parseInitVar(m[1]);
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+            // 原版 MVU 的 initvar 来自已经 SillyTavern 宏处理的世界书链路；
+            // 这里是直接读首楼文本，因此显式走同一 substituteParams。
+            // 同一聊天/同一分支只解析一次，避免 random/dice 类宏在轮询重试中变值。
+            const macroSource = String(m[1]);
+            const macroKey = autoInitChatId() + '|' + (typeof core.stableHash === 'function' ? core.stableHash(macroSource) : macroSource);
+            if (greetingMacroCache[macroKey]) {
+                parsed = greetingMacroCache[macroKey];
+            } else if (/<(?:USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/i.test(macroSource) || /\{\{[\s\S]*?\}\}/.test(macroSource)) {
+                if (typeof ctx.substituteParams !== 'function' || typeof core.resolveInitDataMacros !== 'function') {
+                    dbgWarn(' 开场分支含宏，但 SillyTavern substituteParams 尚未就绪，等待轮询重试。');
+                    return;
+                }
+                parsed = core.resolveInitDataMacros(
+                    parsed,
+                    ctx.substituteParams.bind(ctx),
+                    greetingDynamicKeyPaths(activeLayout),
+                );
+                greetingMacroCache[macroKey] = parsed;
+            }
             // 按内容指纹去重（不依赖 swipe_id）：前端用 setChatMessages 改写首楼时
             // swipe_id 可能不变，只要 initvar 内容变了就重新注入。
             // 指纹只在写入真正落定后提交：若写入被丢弃/失败（如表格未就绪、运行时被清空），
             // 保留旧指纹让 2s 轮询继续重试，避免“分支值永远不注入”。
             let fp = '';
             try { fp = JSON.stringify(parsed); } catch (e) { fp = ''; }
-            if (fp && fp === lastGreetingInitFp) return;
+            // 重进已有 full checkpoint 的聊天：数据库是权威状态，首次只记录当前
+            // 分支指纹，绝不用开局 initvar 覆盖玩家已发展的存档。之后指纹真正变化
+            // （用户切换开场分支）仍会正常注入。
+            if (greetingState.baselineNext) {
+                greetingState.baselineNext = false;
+                greetingState.appliedFp = fp;
+                greetingState.pendingFp = '';
+                greetingState.pendingAt = 0;
+                dbg('[开场分支] 已有 checkpoint，仅建立当前分支指纹基线，不重写存档。');
+                return;
+            }
+            if (fp && fp === greetingState.appliedFp) return;
+            // 同一指纹正在写入时跳过轮询重复提交。60s 租约只是异常兜底：
+            // 若一次写入的回调真的丢失，一分钟后允许重试，而不是永久卡死。
+            if (fp && fp === greetingState.pendingFp && Date.now() - greetingState.pendingAt < 60000) return;
+            greetingState.pendingFp = fp;
+            greetingState.pendingAt = Date.now();
             dbg('[开场分支] 按当前分支注入 <initvar>（swipe=' + String(first.swipe_id == null ? 0 : first.swipe_id) + '，顶层组 ' + Object.keys(parsed).join('、') + '）。');
             scheduleWindowStatOverlay(parsed, (ok) => {
-                if (ok) lastGreetingInitFp = fp;
+                // 期间若切换到新分支，旧回调不得覆盖新 pending 状态。
+                if (greetingState.pendingFp !== fp) return;
+                greetingState.pendingFp = '';
+                greetingState.pendingAt = 0;
+                if (ok) greetingState.appliedFp = fp;
                 else dbgWarn(' 开场分支 <initvar> 注入未落定（写入被丢弃或失败），保留指纹待轮询重试。');
             });
         } catch (e) {
@@ -9156,6 +9293,60 @@ ${DB_INIT_SNIPPET}
         } catch (e) {}
     }
 
+    // EJS 会在 CHAT_CHANGED 的同步提示词构建阶段执行，比 autoInitDatabase
+    // 的延时完整卡加载更早。这里直接从当前角色扩展标记同步恢复布局，
+    // 否则 getAllVariables 的早期读取会因 activeLayout 未就绪返回空 stat_data。
+    function ensureActiveLayoutLazy() {
+        try {
+            if (activeLayout && layoutBelongsToCurrentCard(activeLayoutCardKey)) return true;
+            const ch = currentCharacter();
+            if (!ch || !isConvertedMvuCard(ch)) return false;
+            const ext = charExtensions(ch);
+            const mk = ext && ext.mvu2shujuku;
+            if (!mk || !mk.layout) return false;
+            const parsed = typeof mk.layout === 'string' ? JSON.parse(mk.layout) : mk.layout;
+            if (!Array.isArray(parsed) || !parsed.length) return false;
+            activeLayout = parsed;
+            activeLayoutCardKey = cardCacheKey(ch);
+            activePlaceholderNeeded = detectPlaceholderFor(ch);
+            // 同步解码卡内模板作为回放未就绪时的结构/初值兜底。
+            try { cachedTemplateForCurrentCard(); } catch (e) {}
+            dbg(' EJS 早期读取：已从当前卡标记惰性恢复布局（' + parsed.length + ' 项）。');
+            return true;
+        } catch (e) { return false; }
+    }
+
+    function ejsVariablesSafe() {
+        let current = null;
+        try { if (typeof window.getAllVariables === 'function') current = window.getAllVariables(); } catch (e) {}
+        try {
+            if (!ensureActiveLayoutLazy()) return current && current.stat_data ? current : { stat_data: {}, display_data: {} };
+            const core = window.MVU2SHUJUKU_CORE;
+            if (!core || typeof core.statDataFromTables !== 'function') return current || { stat_data: {}, display_data: {} };
+            // 重进聊天时 checkpoint 比旧桥/尚未回放的运行时更可靠；优先从持久化帧
+            // 重建，避免用模板初值（如 SFW）覆盖存档的当前场景（如 NSFW）。
+            try {
+                const persisted = readPersistedTableData();
+                if (persisted) return core.statDataFromTables(activeLayout, persisted);
+            } catch (e) {}
+            // 先用空表+布局构造“必定存在的结构骨架”，再用实际读取覆盖。
+            // 这只防 undefined 链式访问，不触发任何数据库写入。
+            const base = core.statDataFromTables(activeLayout, {});
+            const merge = (dst, src) => {
+                if (!src || typeof src !== 'object' || Array.isArray(src)) return dst;
+                for (const k of Object.keys(src)) {
+                    const sv = src[k];
+                    if (sv && typeof sv === 'object' && !Array.isArray(sv) && dst[k] && typeof dst[k] === 'object' && !Array.isArray(dst[k])) merge(dst[k], sv);
+                    else dst[k] = sv;
+                }
+                return dst;
+            };
+            if (current && current.stat_data && typeof current.stat_data === 'object') merge(base.stat_data, current.stat_data);
+            if (current && current.display_data && typeof current.display_data === 'object') base.display_data = current.display_data;
+            return base;
+        } catch (e) { return current || { stat_data: {}, display_data: {} }; }
+    }
+
     function installWindowGetAllVariables() {
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.statDataFromTables !== 'function') return;
@@ -9177,7 +9368,11 @@ ${DB_INIT_SNIPPET}
                 }
                 const api = getAcuApi();
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
-                    return { stat_data: {}, display_data: {} };
+                    try {
+                        const persisted0 = readPersistedTableData();
+                        if (persisted0) return core.statDataFromTables(activeLayout || [], persisted0);
+                    } catch (e) {}
+                    return core.statDataFromTables(activeLayout || [], {});
                 }
                 // 运行时优先：插件就绪后运行时即插件完整回放的权威状态（含全部表与溢出字段）。
                 // 持久化重建只是空/跨卡窗口的兜底。判定“就绪”用真实数据行而非表名：
@@ -10856,10 +11051,11 @@ ${DB_INIT_SNIPPET}
         try {
             const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
             if (ejs && ejs.defines && typeof ejs.defines === 'object') {
-                if (typeof ejs.defines.mvu2shujukuGetAllVariables !== 'function') {
-                    ejs.defines.mvu2shujukuGetAllVariables = function () {
-                        try { return window.getAllVariables ? window.getAllVariables() : { stat_data: {} }; } catch (e) { return { stat_data: {} }; }
-                    };
+                const oldDefine = ejs.defines.mvu2shujukuGetAllVariables;
+                if (typeof oldDefine !== 'function' || oldDefine.__mvu2shujukuBridge || oldDefine.__mvu2shujuku) {
+                    const safeDefine = function () { return ejsVariablesSafe(); };
+                    safeDefine.__mvu2shujuku = true;
+                    ejs.defines.mvu2shujukuGetAllVariables = safeDefine;
                     dbg(' 扩展侧注册 mvu2shujukuGetAllVariables 完成');
                 }
                 defineTimer = null;
@@ -11000,6 +11196,7 @@ ${DB_INIT_SNIPPET}
         parseCardPng,
         writeCardPng,
         parseInitVar,
+        resolveInitDataMacros,
         leafInfo,
         json5Lite,
         stableHash,
@@ -21904,12 +22101,17 @@ function mvu2shujukuTablesSafeToAnchor(api,tpl){try{var all=api.exportTableAsJso
 function mvu2shujukuMissingTableNames(api,names){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=true;}var missing=[];for(var i=0;i<names.length;i++){if(!have[names[i]])missing.push(names[i]);}return missing;}
 function mvu2shujukuExpectedColumns(tpl){var map={};if(!tpl||typeof tpl!=="object")return map;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object"||typeof s.name!=="string")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var cols=[];for(var i=1;i<hdr.length;i++){if(cols.indexOf(hdr[i])===-1)cols.push(hdr[i]);}map[s.name]=cols;}return map;}
 function mvu2shujukuMissingColumns(api,expected){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=all[k];}var mismatch=[];for(var name in expected){var sheet=have[name];if(!sheet)continue;var hdr=Array.isArray(sheet.content)&&Array.isArray(sheet.content[0])?sheet.content[0]:[];var exp=expected[name];for(var i=0;i<exp.length;i++){if(hdr.indexOf(exp[i])===-1){mismatch.push(name+"(缺列:"+exp[i]+")");break;}}}return mismatch;}
+function mvu2shujukuMacroMark(s){s=String(s==null?"":s);return /<(?:USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/i.test(s)||/\{\{[\s\S]*?\}\}/.test(s);}
+function mvu2shujukuMacroEnv(){var win=(typeof window!=="undefined"?window:(typeof globalThis!=="undefined"?globalThis:null));var tries=[];function add(w){try{if(w&&tries.indexOf(w)===-1)tries.push(w);}catch(e){}}add(win);if(win){try{add(win.parent);}catch(e){}try{add(win.top);}catch(e){}}for(var i=0;i<tries.length;i++){var w=tries[i],ctx=null;try{if(w.SillyTavern&&typeof w.SillyTavern.getContext==="function")ctx=w.SillyTavern.getContext();}catch(e){}try{if(!ctx&&typeof w.getContext==="function")ctx=w.getContext();}catch(e){}if(ctx&&typeof ctx.substituteParams==="function")return {ctx:ctx,fn:ctx.substituteParams,holder:w};}return null;}
+function mvu2shujukuMacroCacheKey(seed,ctx){var s=String(seed||"")+"|"+String(ctx&&(ctx.chatId||ctx.chat_id||ctx.chatFile||ctx.chatFileName)||"unknown");var h=2166136261;for(var i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return String(h>>>0);}
+function mvu2shujukuCheckRowKeyCollision(rows,start,sheet){var ddl=String(sheet&&sheet.sourceData&&sheet.sourceData.ddl||"");var composite=/\bUNIQUE\s*\(\s*[^,]+,\s*[^)]+\)/i.test(ddl);var single=!composite&&/\bUNIQUE\b/i.test(ddl);if(!single&&!composite)return;var seen={};if(!Array.isArray(rows))return;for(var i=start;i<rows.length;i++){var row=rows[i];if(!Array.isArray(row)||row.length<(composite?3:2))continue;var a=String(row[1]==null?"":row[1]);var b=composite?String(row[2]==null?"":row[2]):"";if(!a||composite&&!b)continue;var key=composite?a+"\u0000"+b:a;if(seen[key])throw new Error("表「"+String(sheet&&sheet.name||"")+"」宏替换后键名冲突："+(composite?a+" / "+b:a));seen[key]=true;}}
+function mvu2shujukuResolveTemplateMacros(tpl,seed){var has=false;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object")continue;if(mvu2shujukuMacroMark(s.name))return {ok:false,status:"error",message:"表名不支持运行时宏："+s.name};var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];for(var hi=0;hi<hdr.length;hi++)if(mvu2shujukuMacroMark(hdr[hi]))return {ok:false,status:"error",message:"固定列名不支持运行时宏："+hdr[hi]};var lists=[];if(Array.isArray(s.content))lists.push({rows:s.content,start:1});if(Array.isArray(s.seedRows))lists.push({rows:s.seedRows,start:0});for(var li=0;li<lists.length;li++){var rs=lists[li].rows;for(var ri=lists[li].start;ri<rs.length;ri++){var row=rs[ri];if(!Array.isArray(row))continue;for(var ci=0;ci<row.length;ci++)if(typeof row[ci]==="string"&&mvu2shujukuMacroMark(row[ci]))has=true;}}}if(!has)return {ok:true,template:tpl};var env=mvu2shujukuMacroEnv();if(!env)return {ok:false,status:"partial",message:"初始数据含有 SillyTavern 宏，但 substituteParams 尚未就绪，等待重试"};var ck=mvu2shujukuMacroCacheKey(seed,env.ctx);var holder=env.holder||{};var cache=holder.__mvu2shujukuResolvedMacroTemplates||(holder.__mvu2shujukuResolvedMacroTemplates={});if(cache[ck])return {ok:true,template:cache[ck]};var out=JSON.parse(JSON.stringify(tpl));try{for(var k2 in out){if(k2.indexOf("sheet_")!==0)continue;var sh=out[k2];if(!sh||typeof sh!=="object")continue;var sets=[];if(Array.isArray(sh.content))sets.push({rows:sh.content,start:1});if(Array.isArray(sh.seedRows))sets.push({rows:sh.seedRows,start:0});for(var si=0;si<sets.length;si++){var rows=sets[si].rows;for(var r=sets[si].start;r<rows.length;r++){if(!Array.isArray(rows[r]))continue;for(var c=0;c<rows[r].length;c++){if(typeof rows[r][c]==="string")rows[r][c]=String(env.fn.call(env.ctx,rows[r][c]));}}mvu2shujukuCheckRowKeyCollision(rows,sets[si].start,sh);}}}catch(e){return {ok:false,status:"error",message:e&&e.message?e.message:String(e)};}cache[ck]=out;return {ok:true,template:out};}
 function mvu2shujukuHasFullFrame(o){try{if(!o||typeof o!=="object")return false;var fr=o.storageFrame;if(fr&&typeof fr==="object"&&fr.version===2&&Array.isArray(fr.logEntries)&&fr.checkpoint&&fr.checkpoint.kind==="full")return true;for(var ck in o){var child=o[ck];if(typeof child==="string"){try{child=JSON.parse(child);}catch(e){continue;}}if(child&&typeof child==="object"){var fr2=child.storageFrame;if(fr2&&typeof fr2==="object"&&fr2.version===2&&Array.isArray(fr2.logEntries)&&fr2.checkpoint&&fr2.checkpoint.kind==="full")return true;}}return false;}catch(e){return false;}}
 function mvu2shujukuChatHasFullCheckpoint(){try{var win=(typeof window!=="undefined"?window:(typeof globalThis!=="undefined"?globalThis:null));var ctx=null;var tries=[win];if(win){try{if(win.parent&&win.parent!==win)tries.push(win.parent);}catch(e){}}for(var ti=0;ti<tries.length;ti++){var w=tries[ti];if(!w)continue;try{if(w.SillyTavern&&typeof w.SillyTavern.getContext==="function"){ctx=w.SillyTavern.getContext();break;}}catch(e){}try{if(typeof w.getContext==="function"){ctx=w.getContext();break;}}catch(e){}}var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];for(var mi=0;mi<chat.length;mi++){var msg=chat[mi];if(!msg||typeof msg!=="object")continue;for(var k in msg){if(k.indexOf("TavernDB_ACU_")!==0&&k.indexOf("_acu_")!==0)continue;var v=msg[k];if(typeof v==="string"){try{v=JSON.parse(v);}catch(e){continue;}}if(mvu2shujukuHasFullFrame(v))return true;}}return false;}catch(e){return false;}}
 function mvu2shujukuChatHasAiFloor(){try{var win=(typeof window!=="undefined"?window:(typeof globalThis!=="undefined"?globalThis:null));var ctx=null;var tries=[win];if(win){try{if(win.parent&&win.parent!==win)tries.push(win.parent);}catch(e){}}for(var ti=0;ti<tries.length;ti++){var w=tries[ti];if(!w)continue;try{if(w.SillyTavern&&typeof w.SillyTavern.getContext==="function"){ctx=w.SillyTavern.getContext();break;}}catch(e){}try{if(typeof w.getContext==="function"){ctx=w.getContext();break;}}catch(e){}}var chat=ctx&&Array.isArray(ctx.chat)?ctx.chat:[];for(var mi=0;mi<chat.length;mi++){if(chat[mi]&&!chat[mi].is_user)return true;}return false;}catch(e){return false;}}
 var mvu2shujukuInitSessionHung=false;
 function mvu2shujukuWithTimeout(promise,ms,label){var done=false;var tid=null;var timeoutPromise=new Promise(function(resolve){tid=setTimeout(function(){if(!done){done=true;resolve({timeout:true,message:label+" 超时("+(ms/1000)+"s)"});}},ms);});return Promise.race([Promise.resolve(promise).then(function(v){if(!done){done=true;if(tid)clearTimeout(tid);}return v;}),timeoutPromise]);}
-async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);if(mvu2shujukuChatHasFullCheckpoint()){out.status="skip";out.message="聊天已有 full checkpoint，跳过自动建表（以持久化数据为准，运行时物化由插件完成）";return out;}if(!mvu2shujukuChatHasAiFloor()){out.status="partial";out.message="聊天暂无 AI 楼层（首楼未就绪或切换加载中），等待重试";return out;}var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){var all2={};try{all2=api.exportTableAsJson()||{};}catch(e){}var rtCount=0;var rtEmptyAll=true;var rtHasSeed=false;var tplHasRows=false;for(var k2 in all2){if(k2.indexOf("sheet_")!==0)continue;var sh2=all2[k2];if(!sh2||typeof sh2!=="object"||typeof sh2.name!=="string")continue;rtCount++;if(Array.isArray(sh2.content)&&sh2.content.length>1)rtEmptyAll=false;if(Array.isArray(sh2.seedRows)&&sh2.seedRows.length)rtHasSeed=true;}for(var tk in tpl){if(tk.indexOf("sheet_")!==0)continue;var tsx=tpl[tk];if(tsx&&typeof tsx==="object"&&Array.isArray(tsx.content)&&tsx.content.length>1){tplHasRows=true;break;}}/* 根因修复：插件 native 初始化可能已用“仅表头”模板建表（content 无行、无 checkpoint）。此时跳过 initGameSession 会让 checkpoint 停在无行状态，刷新后 v2-replay 无法恢复任何行（插件 loadFromData 的 hasRealDataRows 门禁 + 有 checkpoint 后 seedRows 不再物化）。只要运行时全表仅表头且带有模板 seedRows（插件 native 初始化签名），就继续走 initGameSession 用完整模板原子建锚+补行（无损：无真实数据行）。*/var headerOnlyFresh=rtCount>0&&rtEmptyAll&&rtHasSeed&&tplHasRows;if(!headerOnlyFresh){var emptyS=[];try{for(var k3 in all2){if(k3.indexOf("sheet_")!==0)continue;var sh3=all2[k3];if(!sh3||typeof sh3!=="object"||typeof sh3.name!=="string")continue;if(Array.isArray(sh3.content)&&sh3.content.length>1)continue;if(Array.isArray(sh3.seedRows)&&sh3.seedRows.length)continue;var ts3=mvu2shujukuSheetByName(tpl,sh3.name);if(!ts3||!Array.isArray(ts3.content)||ts3.content.length!==2)continue;emptyS.push(sh3.name);}}catch(e){}if(emptyS.length){for(var ei=0;ei<emptyS.length;ei++){try{var ts2=mvu2shujukuSheetByName(tpl,emptyS[ei]);var hdr2=ts2.content[0];var row2=ts2.content[1];var obj2={};for(var ci=1;ci<hdr2.length;ci++){obj2[hdr2[ci]]=(row2[ci]!==undefined&&row2[ci]!==null)?row2[ci]:"";}await Promise.resolve(api.insertRow(emptyS[ei],obj2));}catch(e){}}out.status="skip";out.message="已为仅表头的单例/JSON表补初始行："+emptyS.join("、");return out;}out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}}var steps=[];var initOk=false;if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试");}else if(r2&&r2.success===false){steps.push("initGameSession: "+(r2.message||"失败"));}else{initOk=true;steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用");}if(!initOk&&typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}
+async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"skip",message:"",missing:[]};var t1=(to&&to.importMs)||15000;var t2=(to&&to.initMs)||20000;var tpl=null;try{tpl=JSON.parse(mvu2shujukuDecodeB64(b64));}catch(e){out.status="error";out.message="模板解码失败: "+(e&&e.message?e.message:e);return out;}var macroResult=mvu2shujukuResolveTemplateMacros(tpl,b64);if(!macroResult.ok){out.status=macroResult.status||"error";out.message=macroResult.message||"初始数据宏替换失败";return out;}tpl=macroResult.template;out.template=tpl;var names=mvu2shujukuExpectedTableNames(tpl);if(!names.length){out.status="error";out.message="模板中没有 sheet_* 表";return out;}out.missing=mvu2shujukuMissingTableNames(api,names);if(mvu2shujukuChatHasFullCheckpoint()){out.status="skip";out.message="聊天已有 full checkpoint，跳过自动建表（以持久化数据为准，运行时物化由插件完成）";return out;}if(!mvu2shujukuChatHasAiFloor()){out.status="partial";out.message="聊天暂无 AI 楼层（首楼未就绪或切换加载中），等待重试";return out;}var colMiss=[];var needsImport=out.missing.length>0;if(!needsImport){colMiss=mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));needsImport=colMiss.length>0;}if(!needsImport){var all2={};try{all2=api.exportTableAsJson()||{};}catch(e){}var rtCount=0;var rtEmptyAll=true;var rtHasSeed=false;var tplHasRows=false;for(var k2 in all2){if(k2.indexOf("sheet_")!==0)continue;var sh2=all2[k2];if(!sh2||typeof sh2!=="object"||typeof sh2.name!=="string")continue;rtCount++;if(Array.isArray(sh2.content)&&sh2.content.length>1)rtEmptyAll=false;if(Array.isArray(sh2.seedRows)&&sh2.seedRows.length)rtHasSeed=true;}for(var tk in tpl){if(tk.indexOf("sheet_")!==0)continue;var tsx=tpl[tk];if(tsx&&typeof tsx==="object"&&Array.isArray(tsx.content)&&tsx.content.length>1){tplHasRows=true;break;}}/* 根因修复：插件 native 初始化可能已用“仅表头”模板建表（content 无行、无 checkpoint）。此时跳过 initGameSession 会让 checkpoint 停在无行状态，刷新后 v2-replay 无法恢复任何行（插件 loadFromData 的 hasRealDataRows 门禁 + 有 checkpoint 后 seedRows 不再物化）。只要运行时全表仅表头且带有模板 seedRows（插件 native 初始化签名），就继续走 initGameSession 用完整模板原子建锚+补行（无损：无真实数据行）。*/var headerOnlyFresh=rtCount>0&&rtEmptyAll&&rtHasSeed&&tplHasRows;if(!headerOnlyFresh){var emptyS=[];try{for(var k3 in all2){if(k3.indexOf("sheet_")!==0)continue;var sh3=all2[k3];if(!sh3||typeof sh3!=="object"||typeof sh3.name!=="string")continue;if(Array.isArray(sh3.content)&&sh3.content.length>1)continue;if(Array.isArray(sh3.seedRows)&&sh3.seedRows.length)continue;var ts3=mvu2shujukuSheetByName(tpl,sh3.name);if(!ts3||!Array.isArray(ts3.content)||ts3.content.length!==2)continue;emptyS.push(sh3.name);}}catch(e){}if(emptyS.length){for(var ei=0;ei<emptyS.length;ei++){try{var ts2=mvu2shujukuSheetByName(tpl,emptyS[ei]);var hdr2=ts2.content[0];var row2=ts2.content[1];var obj2={};for(var ci=1;ci<hdr2.length;ci++){obj2[hdr2[ci]]=(row2[ci]!==undefined&&row2[ci]!==null)?row2[ci]:"";}await Promise.resolve(api.insertRow(emptyS[ei],obj2));}catch(e){}}out.status="skip";out.message="已为仅表头的单例/JSON表补初始行："+emptyS.join("、");return out;}out.status="skip";out.message="已有全部表格且结构匹配，跳过开局建表";return out;}}var steps=[];var initOk=false;if(typeof api.initGameSession==="function"&&!mvu2shujukuInitSessionHung){try{var r2=await mvu2shujukuWithTimeout(api.initGameSession({},{injectTemplate:true,loadPreset:false,templateData:tpl,templatePresetName:presetName||""}),t2,"initGameSession");if(r2&&r2.timeout){mvu2shujukuInitSessionHung=true;steps.push("initGameSession: 超时，已跳过后续重试");}else if(r2&&r2.success===false){steps.push("initGameSession: "+(r2.message||"失败"));}else{initOk=true;steps.push("initGameSession: 完成"+(r2&&r2.runtimeReady===false?"（运行时未就绪）":""));}}catch(e){steps.push("initGameSession异常: "+(e&&e.message?e.message:e));}}else if(typeof api.initGameSession!=="function"){steps.push("initGameSession: 不可用");}if(!initOk&&typeof api.importTemplateFromData==="function"){try{var r1=await mvu2shujukuWithTimeout(api.importTemplateFromData(tpl,{scope:"chat",presetName:presetName||""}),t1,"importTemplateFromData");steps.push(r1&&r1.timeout?r1.message:(r1&&r1.success===false?("importTemplateFromData: "+(r1.message||"失败")):"importTemplateFromData: 完成"));}catch(e){steps.push("importTemplateFromData异常: "+(e&&e.message?e.message:e));}}out.missing=mvu2shujukuMissingTableNames(api,names);colMiss=out.missing.length?[]:mvu2shujukuMissingColumns(api,mvu2shujukuExpectedColumns(tpl));out.status=(out.missing.length||colMiss.length)?"partial":"ok";out.message=steps.join("；")+"；剩余缺表："+(out.missing.length?out.missing.join("、"):"无")+(colMiss.length?"；结构不匹配："+colMiss.join("、"):"");return out;}
 
     const DB_TEMPLATE_KEY = '__ACU_TEMPLATE_DATA__';
     const autoInitState = { running: false, done: '', inited: false, retries: 0, anchorChat: '', anchorTries: 0, apiRetries: 0 };
@@ -22287,7 +22489,18 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         }, 30000);
         try {
             const presetName = (characterDisplayName(character) || '角色') + '模板';
+            // 在 ensureInit 前记录：“本次进入前就已有存档”与“本次新建的 checkpoint”
+            // 语义不同。前者只能建立分支指纹基线，不能重放开局 initvar。
+            const hadFullCheckpointBeforeInit = mvu2shujukuChatHasFullCheckpoint();
             const out = await mvu2shujukuEnsureInit(api, entry.content, presetName);
+            // 后续补行/差异写入也必须使用已解析模板，不能再从原始 base64
+            // 缓存取回字面量 <user>。
+            if (out && out.template) {
+                try {
+                    const holder = (typeof window !== 'undefined' ? window : globalThis);
+                    if (holder) holder.__mvu2shujukuTemplateCache = out.template;
+                } catch (e) {}
+            }
             if (out.status === 'error' || out.status === 'partial') {
                 console.warn('[mvu2shujuku] 开局自动建表未完全成功：' + out.message);
                 autoInitState.done = '';
@@ -22301,6 +22514,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 console.log('[mvu2shujuku] 开局自动建表：' + out.message);
                 autoInitState.retries = 0;
                 autoInitState.done = key;
+                const greetingState = greetingInitState(key);
+                greetingState.ready = true;
+                if (hadFullCheckpointBeforeInit && !greetingState.appliedFp && !greetingState.pendingFp) {
+                    greetingState.baselineNext = true;
+                }
                 installWindowGetAllVariables();
                 installWindowMvuShim();
                 installTableUpdateHook();
@@ -22452,10 +22670,44 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     // 开场白多分支按所选分支注入初始化（MVU 语义：每个 swipe 的 <initvar> 独立替换初始状态）。
     // 转换时只以首个分支为模板基准，这里在开局/换 swipe 时把“当前激活分支”的 <initvar>
     // 写入数据库（覆盖模板初始行），避免多分支状态被合并。
-    let lastGreetingInitFp = '';
+    // 按聊天记录分支初始化状态：大型卡一次差异写入可能超过 2s，
+    // 若只在写完后设指纹，2s 轮询会在途中重复提交，使旧回调失效并形成
+    // manual_crud → persist → v2-replay 循环。pendingFp 是在途去重，appliedFp 是已落定去重。
+    const greetingInitStateByChat = Object.create(null);
+    function greetingInitState(chatKey) {
+        const key = String(chatKey || 'unknown');
+        if (!greetingInitStateByChat[key]) {
+            greetingInitStateByChat[key] = { ready: false, baselineNext: false, appliedFp: '', pendingFp: '', pendingAt: 0 };
+        }
+        return greetingInitStateByChat[key];
+    }
+    const greetingMacroCache = Object.create(null);
+    function greetingDynamicKeyPaths(layoutEntries) {
+        const out = [];
+        const add = (p) => {
+            if (!Array.isArray(p) || !p.length) return;
+            const key = p.join('\u0001');
+            if (!out.some(x => x.join('\u0001') === key)) out.push(p.slice());
+        };
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            if (!L) continue;
+            if (L.kind === 'rows') {
+                for (const p of (Array.isArray(L.writePaths) ? L.writePaths : [])) add(p);
+            } else if (L.kind === 'nestedRows') {
+                const pp = Array.isArray(L.parentPath) ? L.parentPath : [];
+                add(pp);
+                add(pp.concat('*', L.childKey || ''));
+            }
+        }
+        return out;
+    }
     function applyActiveGreetingInitvar() {
         try {
             const ctx = getContextSafe();
+            const chatKey = autoInitChatId();
+            const greetingState = greetingInitState(chatKey);
+            // 自动建表/回放尚未完成时不抢先写库；否则会与插件 v2-replay 竞争。
+            if (!greetingState.ready) return;
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
             const first = chat[0];
             if (!first || first.is_user) return;
@@ -22464,18 +22716,57 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             if (!m) return;
             const core = window.MVU2SHUJUKU_CORE;
             if (!core || typeof core.parseInitVar !== 'function') return;
-            const parsed = core.parseInitVar(m[1]);
+            let parsed = core.parseInitVar(m[1]);
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+            // 原版 MVU 的 initvar 来自已经 SillyTavern 宏处理的世界书链路；
+            // 这里是直接读首楼文本，因此显式走同一 substituteParams。
+            // 同一聊天/同一分支只解析一次，避免 random/dice 类宏在轮询重试中变值。
+            const macroSource = String(m[1]);
+            const macroKey = autoInitChatId() + '|' + (typeof core.stableHash === 'function' ? core.stableHash(macroSource) : macroSource);
+            if (greetingMacroCache[macroKey]) {
+                parsed = greetingMacroCache[macroKey];
+            } else if (/<(?:USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/i.test(macroSource) || /\{\{[\s\S]*?\}\}/.test(macroSource)) {
+                if (typeof ctx.substituteParams !== 'function' || typeof core.resolveInitDataMacros !== 'function') {
+                    dbgWarn(' 开场分支含宏，但 SillyTavern substituteParams 尚未就绪，等待轮询重试。');
+                    return;
+                }
+                parsed = core.resolveInitDataMacros(
+                    parsed,
+                    ctx.substituteParams.bind(ctx),
+                    greetingDynamicKeyPaths(activeLayout),
+                );
+                greetingMacroCache[macroKey] = parsed;
+            }
             // 按内容指纹去重（不依赖 swipe_id）：前端用 setChatMessages 改写首楼时
             // swipe_id 可能不变，只要 initvar 内容变了就重新注入。
             // 指纹只在写入真正落定后提交：若写入被丢弃/失败（如表格未就绪、运行时被清空），
             // 保留旧指纹让 2s 轮询继续重试，避免“分支值永远不注入”。
             let fp = '';
             try { fp = JSON.stringify(parsed); } catch (e) { fp = ''; }
-            if (fp && fp === lastGreetingInitFp) return;
+            // 重进已有 full checkpoint 的聊天：数据库是权威状态，首次只记录当前
+            // 分支指纹，绝不用开局 initvar 覆盖玩家已发展的存档。之后指纹真正变化
+            // （用户切换开场分支）仍会正常注入。
+            if (greetingState.baselineNext) {
+                greetingState.baselineNext = false;
+                greetingState.appliedFp = fp;
+                greetingState.pendingFp = '';
+                greetingState.pendingAt = 0;
+                dbg('[开场分支] 已有 checkpoint，仅建立当前分支指纹基线，不重写存档。');
+                return;
+            }
+            if (fp && fp === greetingState.appliedFp) return;
+            // 同一指纹正在写入时跳过轮询重复提交。60s 租约只是异常兜底：
+            // 若一次写入的回调真的丢失，一分钟后允许重试，而不是永久卡死。
+            if (fp && fp === greetingState.pendingFp && Date.now() - greetingState.pendingAt < 60000) return;
+            greetingState.pendingFp = fp;
+            greetingState.pendingAt = Date.now();
             dbg('[开场分支] 按当前分支注入 <initvar>（swipe=' + String(first.swipe_id == null ? 0 : first.swipe_id) + '，顶层组 ' + Object.keys(parsed).join('、') + '）。');
             scheduleWindowStatOverlay(parsed, (ok) => {
-                if (ok) lastGreetingInitFp = fp;
+                // 期间若切换到新分支，旧回调不得覆盖新 pending 状态。
+                if (greetingState.pendingFp !== fp) return;
+                greetingState.pendingFp = '';
+                greetingState.pendingAt = 0;
+                if (ok) greetingState.appliedFp = fp;
                 else dbgWarn(' 开场分支 <initvar> 注入未落定（写入被丢弃或失败），保留指纹待轮询重试。');
             });
         } catch (e) {
@@ -23409,6 +23700,60 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         } catch (e) {}
     }
 
+    // EJS 会在 CHAT_CHANGED 的同步提示词构建阶段执行，比 autoInitDatabase
+    // 的延时完整卡加载更早。这里直接从当前角色扩展标记同步恢复布局，
+    // 否则 getAllVariables 的早期读取会因 activeLayout 未就绪返回空 stat_data。
+    function ensureActiveLayoutLazy() {
+        try {
+            if (activeLayout && layoutBelongsToCurrentCard(activeLayoutCardKey)) return true;
+            const ch = currentCharacter();
+            if (!ch || !isConvertedMvuCard(ch)) return false;
+            const ext = charExtensions(ch);
+            const mk = ext && ext.mvu2shujuku;
+            if (!mk || !mk.layout) return false;
+            const parsed = typeof mk.layout === 'string' ? JSON.parse(mk.layout) : mk.layout;
+            if (!Array.isArray(parsed) || !parsed.length) return false;
+            activeLayout = parsed;
+            activeLayoutCardKey = cardCacheKey(ch);
+            activePlaceholderNeeded = detectPlaceholderFor(ch);
+            // 同步解码卡内模板作为回放未就绪时的结构/初值兜底。
+            try { cachedTemplateForCurrentCard(); } catch (e) {}
+            dbg(' EJS 早期读取：已从当前卡标记惰性恢复布局（' + parsed.length + ' 项）。');
+            return true;
+        } catch (e) { return false; }
+    }
+
+    function ejsVariablesSafe() {
+        let current = null;
+        try { if (typeof window.getAllVariables === 'function') current = window.getAllVariables(); } catch (e) {}
+        try {
+            if (!ensureActiveLayoutLazy()) return current && current.stat_data ? current : { stat_data: {}, display_data: {} };
+            const core = window.MVU2SHUJUKU_CORE;
+            if (!core || typeof core.statDataFromTables !== 'function') return current || { stat_data: {}, display_data: {} };
+            // 重进聊天时 checkpoint 比旧桥/尚未回放的运行时更可靠；优先从持久化帧
+            // 重建，避免用模板初值（如 SFW）覆盖存档的当前场景（如 NSFW）。
+            try {
+                const persisted = readPersistedTableData();
+                if (persisted) return core.statDataFromTables(activeLayout, persisted);
+            } catch (e) {}
+            // 先用空表+布局构造“必定存在的结构骨架”，再用实际读取覆盖。
+            // 这只防 undefined 链式访问，不触发任何数据库写入。
+            const base = core.statDataFromTables(activeLayout, {});
+            const merge = (dst, src) => {
+                if (!src || typeof src !== 'object' || Array.isArray(src)) return dst;
+                for (const k of Object.keys(src)) {
+                    const sv = src[k];
+                    if (sv && typeof sv === 'object' && !Array.isArray(sv) && dst[k] && typeof dst[k] === 'object' && !Array.isArray(dst[k])) merge(dst[k], sv);
+                    else dst[k] = sv;
+                }
+                return dst;
+            };
+            if (current && current.stat_data && typeof current.stat_data === 'object') merge(base.stat_data, current.stat_data);
+            if (current && current.display_data && typeof current.display_data === 'object') base.display_data = current.display_data;
+            return base;
+        } catch (e) { return current || { stat_data: {}, display_data: {} }; }
+    }
+
     function installWindowGetAllVariables() {
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.statDataFromTables !== 'function') return;
@@ -23430,7 +23775,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 }
                 const api = getAcuApi();
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
-                    return { stat_data: {}, display_data: {} };
+                    try {
+                        const persisted0 = readPersistedTableData();
+                        if (persisted0) return core.statDataFromTables(activeLayout || [], persisted0);
+                    } catch (e) {}
+                    return core.statDataFromTables(activeLayout || [], {});
                 }
                 // 运行时优先：插件就绪后运行时即插件完整回放的权威状态（含全部表与溢出字段）。
                 // 持久化重建只是空/跨卡窗口的兜底。判定“就绪”用真实数据行而非表名：
@@ -25109,10 +25458,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         try {
             const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
             if (ejs && ejs.defines && typeof ejs.defines === 'object') {
-                if (typeof ejs.defines.mvu2shujukuGetAllVariables !== 'function') {
-                    ejs.defines.mvu2shujukuGetAllVariables = function () {
-                        try { return window.getAllVariables ? window.getAllVariables() : { stat_data: {} }; } catch (e) { return { stat_data: {} }; }
-                    };
+                const oldDefine = ejs.defines.mvu2shujukuGetAllVariables;
+                if (typeof oldDefine !== 'function' || oldDefine.__mvu2shujukuBridge || oldDefine.__mvu2shujuku) {
+                    const safeDefine = function () { return ejsVariablesSafe(); };
+                    safeDefine.__mvu2shujuku = true;
+                    ejs.defines.mvu2shujukuGetAllVariables = safeDefine;
                     dbg(' 扩展侧注册 mvu2shujukuGetAllVariables 完成');
                 }
                 defineTimer = null;
