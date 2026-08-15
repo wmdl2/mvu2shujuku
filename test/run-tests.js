@@ -965,6 +965,41 @@ test('条目字段全是叶子的字典应判为行表（修复误判为单例�
     assert.ok(t.content[0].includes('亲密'), '列应含条目字段');
 });
 
+test('writeStatDiffToDb：同一既有行多字段合并 updateRow，失败时逐格回退', async () => {
+    const layout = [{ kind: 'singleton', group: '主角', table: '主角表', keyCol: '名称', keyValue: '主角', cols: [
+        ['名称', 'text', '', '', '', ''], ['姓名', 'text', '', '', '', ''], ['境界', 'text', '', '', '', ''], ['年龄', 'number', '', '', '', ''],
+    ], writePaths: [], mirrors: [] }];
+    const makeTables = () => ({ mate: { type: 'chatSheets', version: 1 }, sheet_1: {
+        name: '主角表', content: [['row_id', '名称', '姓名', '境界', '年龄'], [1, '主角', '未知', '凡人', 18]],
+    } });
+    const prev = { 主角: { 姓名: '未知', 境界: '凡人', 年龄: 18 } };
+    const next = { 主角: { 姓名: '玄微', 境界: '筑基', 年龄: 21 } };
+
+    const tables = makeTables();
+    let rowCalls = 0; let cellCalls = 0;
+    const api = {
+        exportTableAsJson: () => tables,
+        updateRow: async (tn, ri, payload) => { rowCalls++; const s = tables.sheet_1; for (const [col, val] of Object.entries(payload)) s.content[ri][s.content[0].indexOf(col)] = val; return true; },
+        updateCell: async () => { cellCalls++; return true; }, insertRow: async () => 1, deleteRow: async () => true,
+    };
+    await core.writeStatDiffToDb(api, layout, prev, next);
+    assert.strictEqual(rowCalls, 1, '同一行三个字段应只持久化一次');
+    assert.strictEqual(cellCalls, 0, 'updateRow 成功后不应逐格写入');
+    assert.deepStrictEqual(tables.sheet_1.content[1].slice(2), ['玄微', '筑基', 21]);
+
+    const fallbackTables = makeTables();
+    let failedRows = 0; const fallbackCells = [];
+    const fallbackApi = {
+        exportTableAsJson: () => fallbackTables,
+        updateRow: async () => { failedRows++; return false; },
+        updateCell: async (tn, ri, col, val) => { fallbackCells.push(col); const s = fallbackTables.sheet_1; s.content[ri][s.content[0].indexOf(col)] = val; return true; },
+        insertRow: async () => 1, deleteRow: async () => true,
+    };
+    await core.writeStatDiffToDb(fallbackApi, layout, prev, next);
+    assert.ok(failedRows >= 1, '应尝试行更新');
+    assert.deepStrictEqual(new Set(fallbackCells), new Set(['姓名', '境界', '年龄']), '行更新失败后不得漏字段');
+});
+
 test('行表条目自带「名称」字段时键列改名，表头不得重复（技能熟练度类结构）', () => {
     const makeCard = (initvar) => ({
         spec: 'chara_card_v3',
@@ -2726,6 +2761,12 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
     assert.ok(index.includes('return ejsVariablesSafe();'), 'EJS define 应使用结构安全的变量读取');
     assert.ok(index.includes('fp === greetingState.pendingFp'), '大型 initvar 写入在途时应按指纹去重');
     assert.ok(index.includes('hadFullCheckpointBeforeInit'), '重进已有 checkpoint 的聊天不应重放开局 initvar');
+    assert.ok(index.includes('await scheduleWindowStatOverlay(nextStat)'), 'Mvu.replaceMvuData 必须等待扩展合并写入真正落定');
+    assert.ok(index.includes('await scheduleStatOverlay(nextStat)'), '卡内桥的 Mvu.replaceMvuData 也必须等待写入落定');
+    assert.ok(index.includes('function recoverOpeningContinuity(reason)'), '扩展应具备开场 checkpoint 载体丢失恢复');
+    assert.ok(index.includes('es.on(et.MESSAGE_DELETED'), '首楼被 /cut 删除时应触发持久化连续性检查');
+    assert.ok(index.includes("if (mvu2shujukuChatHasFullCheckpoint()) return;"), '仍有 checkpoint 时不得误重建');
+    assert.ok(index.includes("if (readPersistedTableData()) return;"), '仍有可回放数据时不得误重建');
 });
 
 /* ---------------- 对照金标准 ---------------- */
@@ -6362,7 +6403,7 @@ test('全新聊天运行时仅表头且无 checkpoint：读侧退回布局默认
         '全新聊天仅表头时主角表应返回布局默认值，实际=' + JSON.stringify(gv.stat_data.主角 && gv.stat_data.主角.姓名));
 });
 
-test('首楼替换清空运行时后开场注入仍完整落库：延迟重跑合并、不产生重复行（道渊开场部分注入回归）', async () => {
+test('道渊开场：replaceMvuData 等待真正落定，/cut 删除 checkpoint 载体后在存活楼恢复', async () => {
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -6383,24 +6424,41 @@ test('首楼替换清空运行时后开场注入仍完整落库：延迟重跑�
     const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
     const extIndex = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline })['index.js'];
 
-    // 运行时：主角表已有模板行（初始已物化），其它表仅表头；无 checkpoint
+    // 全新聊天：运行时只有表头，initGameSession 会物化模板并在首楼建 checkpoint。
     const tables = JSON.parse(JSON.stringify(r.template));
     for (const k of Object.keys(tables)) {
-        if (k.indexOf('sheet_') === 0 && tables[k] && Array.isArray(tables[k].content) && tables[k].name !== '主角表') {
+        if (k.indexOf('sheet_') === 0 && tables[k] && Array.isArray(tables[k].content)) {
             tables[k].content = [tables[k].content[0]];
         }
     }
+    const initiallyMissing = Object.keys(tables).find(k => k.indexOf('sheet_') === 0);
+    delete tables[initiallyMissing]; // 强制走 initGameSession，而不是“仅表头补单例行”快路径
     const log = [];
     let cleared = false;
+    let initCalls = 0;
+    let context = null;
     const fakeApi = Object.assign(applyingApi(tables), {
+        initGameSession: async () => {
+            initCalls += 1;
+            const fresh = JSON.parse(JSON.stringify(r.template));
+            for (const k of Object.keys(tables)) delete tables[k];
+            Object.assign(tables, fresh);
+            const msg = context.chat[context.chat.length - 1];
+            msg.TavernDB_ACU_IsolatedData = JSON.stringify({
+                系统: { storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', data: fresh, ts: Date.now() } } },
+            });
+            return { success: true, runtimeReady: true };
+        },
         updateCell: async (tableName, rowIndex, col, value) => {
             const s = Object.values(tables).find(x => x && x.name === tableName);
             // 第一次单元格写入时模拟“首楼替换”清空运行时：主角表行被清掉
             if (tableName === '主角表' && !cleared) {
                 cleared = true;
                 const zj = Object.values(tables).find(x => x && x.name === '主角表');
+                const replayRow = JSON.parse(JSON.stringify(zj.content[1]));
                 zj.content = [zj.content[0]];
                 log.push('clear');
+                setTimeout(() => { if (zj.content.length === 1) zj.content.push(replayRow); }, 400);
                 return false;
             }
             if (!s || !s.content[rowIndex]) return false;
@@ -6427,8 +6485,8 @@ test('首楼替换清空运行时后开场注入仍完整落库：延迟重跑�
             },
         },
     };
-    const context = {
-        chatId: 'c-replace', name: '测试', chat: [],
+    context = {
+        chatId: 'c-replace', name: '测试', chat: [{ message_id: 0, mes: '[重塑仙缘]', is_user: false, name: '道渊' }],
         characters: [converted], characterId: 0,
         extensionSettings: { mvu2shujuku: { debug: false } },
         eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
@@ -6476,11 +6534,10 @@ test('首楼替换清空运行时后开场注入仍完整落库：延迟重跑�
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
     await new Promise(res => setTimeout(res, 2600));
-    await win.Mvu.replaceMvuData({ stat_data: {
+    const replaceOk = await win.Mvu.replaceMvuData({ stat_data: {
         主角: { 姓名: '斯维姆', 性别: '男', 容貌: '相貌丑陋', 身形: '未知', 衣着: '未知', 境界: '凡人', 宗门: '无', 宗门贡献: 0 },
     } });
-    // 等首次合并失败 → 延迟重跑合并（1.5s）→ 补行/重写全部完成
-    await new Promise(res => setTimeout(res, 3500));
+    assert.strictEqual(replaceOk, true, 'replaceMvuData 应在延迟重跑真正落定后才 resolve true');
     assert.ok(log.indexOf('clear') !== -1, '模拟首楼替换应真的清空过一次运行时');
     const zj = Object.values(tables).find(s => s && s.name === '主角表');
     const hdr = zj.content[0];
@@ -6489,6 +6546,53 @@ test('首楼替换清空运行时后开场注入仍完整落库：延迟重跑�
     assert.strictEqual(zj.content[1][hdr.indexOf('性别')], '男', '开场性别应落库');
     assert.strictEqual(zj.content[1][hdr.indexOf('容貌')], '相貌丑陋', '开场容貌应落库');
     assert.strictEqual(zj.content[1][hdr.indexOf('境界')], '凡人', '开场境界应落库');
+
+    // 模拟原卡 `/sys ... | /cut 0 | /trigger`：新 System 楼存活，原首楼连同 checkpoint 被删，
+    // 插件回放窗口暂时只剩表头。MESSAGE_DELETED 应触发一次原生重建+快照恢复。
+    context.chat = [{ message_id: 0, mes: '[仙缘已定]', is_user: false, name: 'System' }];
+    for (const k of Object.keys(tables)) {
+        if (k.indexOf('sheet_') === 0 && tables[k] && Array.isArray(tables[k].content)) tables[k].content = [tables[k].content[0]];
+    }
+    (handlers['deleted'] || []).forEach(fn => fn(0));
+    await new Promise(res => setTimeout(res, 1800));
+    assert.strictEqual(initCalls, 2, '首楼 checkpoint 随 /cut 消失后应且只应重建一次');
+    const zjRecovered = Object.values(tables).find(s => s && s.name === '主角表');
+    const hdrRecovered = zjRecovered.content[0];
+    assert.strictEqual(zjRecovered.content[1][hdrRecovered.indexOf('姓名')], '斯维姆', '重建后必须恢复用户捏人姓名，不能回到模板默认');
+    assert.strictEqual(zjRecovered.content[1][hdrRecovered.indexOf('性别')], '男', '重建后必须恢复用户捏人性别');
+    assert.ok(context.chat[0].TavernDB_ACU_IsolatedData, '存活 System 楼应由插件公开 API 建立新 checkpoint');
+
+    // 真实开场可以“先 setChatMessage 切换捏人页，后 /cut 捏人页”，
+    // 第一次恢复不能立即解除保护。
+    context.chat = [{ message_id: 0, mes: '[仙途开启中]', is_user: false, name: 'System' }];
+    for (const k of Object.keys(tables)) {
+        if (k.indexOf('sheet_') === 0 && tables[k] && Array.isArray(tables[k].content)) tables[k].content = [tables[k].content[0]];
+    }
+    (handlers['deleted'] || []).forEach(fn => fn(0));
+    await new Promise(res => setTimeout(res, 1800));
+    assert.strictEqual(initCalls, 3, '同一开场的第二次载体替换也应恢复（切页 + /cut 链）');
+    const zjRecoveredAgain = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.strictEqual(zjRecoveredAgain.content[1][zjRecoveredAgain.content[0].indexOf('姓名')], '斯维姆', '连续第二次重建仍必须保留捏人数据');
+
+    // 真实日志顺序：卡内桥先建 checkpoint 并完成写入，扩展还没 armed，原卡随即
+    // 删除首楼。删除事件到达时 checkpoint 已不存在，只能从桥共享的 fresh 标记和
+    // OpeningStatCandidate 迟到接管，不能要求扩展先完成 autoInitDatabase。
+    context.chatId = 'c-late-bridge';
+    context.chat = [{ message_id: 0, mes: '[桥先写入后已替换的存活楼]', is_user: false, name: 'System' }];
+    for (const k of Object.keys(tables)) {
+        if (k.indexOf('sheet_') === 0 && tables[k] && Array.isArray(tables[k].content)) tables[k].content = [tables[k].content[0]];
+    }
+    const lateStat = {
+        主角: { 姓名: '迟到接管', 性别: '女', 容貌: '清丽', 身形: '未知', 衣着: '未知', 境界: '凡人', 宗门: '无', 宗门贡献: 0 },
+    };
+    win.__mvu2shujukuFreshOpeningCheckpoint = { chatKey: context.chatId, at: Date.now() };
+    win.__mvu2shujukuOpeningStatCandidate = { chatKey: context.chatId, stat: lateStat, at: Date.now() };
+    (handlers['deleted'] || []).forEach(fn => fn(0));
+    await new Promise(res => setTimeout(res, 2200));
+    assert.strictEqual(initCalls, 4, '扩展未预先 armed 时，删除事件也应迟到接管并重建一次');
+    const zjLate = Object.values(tables).find(s => s && s.name === '主角表');
+    assert.strictEqual(zjLate.content[1][zjLate.content[0].indexOf('姓名')], '迟到接管', '迟到接管必须恢复桥已成功写入的开场快照');
+    assert.strictEqual(win.__mvu2shujukuFreshOpeningCheckpoint, null, '迟到接管后应消费 fresh 标记，避免重复恢复');
 });
 
 test('首楼替换丢失插件作用域字段后重进：拷回 InternalSheetGuide/ScopedConfig 并把冻结模板名恢复为当前卡模板名', async () => {

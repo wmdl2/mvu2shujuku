@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.2.3';
+    const VERSION = '0.2.6';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -5137,11 +5137,16 @@
             return 0;
         });
 
-        // 逐条写入（对齐参考卡原生 CRUD）：updateCell/insertRow/deleteRow → 插件持久化为
+        // 原生 CRUD 写入：同一既有行的多个单元格优先合并为一次 updateRow，避免插件为
+        // 每个 updateCell 都执行一次完整 V2 持久化；旧版插件或行更新失败时逐格回退。
+        // insertRow/deleteRow 仍逐条执行，保持行结构变更与回放语义不变。
         // row_upsert/row_delete 操作，回放确定性恢复。不使用 executeSqlBatch——那会存成
         // sql_sheet_batch（回放重跑 SQL），且批量 DELETE 误删时无法恢复（实测丢行根因）。
         // 批量性能由插件的提交管线与酒馆保存防抖兜底。
+        const consumedCellUpdates = new Set();
+        let updateRowUsable = typeof api.updateRow === 'function';
         for (const r of resolved) {
+            if (consumedCellUpdates.has(r)) continue;
             const L = r.layout;
             try {
                 if (r.kind === 'row-delete') {
@@ -5219,7 +5224,24 @@
                             }
                         }
                     }
-                    const ok = await Promise.resolve(api.updateCell(L.table, r.rowIndex, r.colZh, r.value));
+                    // updateRow 的 payload 是 { 列名: 新值 }。仅合并同表同一现有行的普通
+                    // cell 操作；INSERT/DELETE/数组替换与动态 JSON 合并继续保持原顺序。
+                    const sameRow = resolved.filter(x => x !== r && !consumedCellUpdates.has(x) &&
+                        x.kind === 'cell' && !x.newRowObj && x.layout &&
+                        x.layout.table === L.table && x.rowIndex === r.rowIndex);
+                    let ok = false;
+                    if (sameRow.length > 0 && updateRowUsable) {
+                        const payload = { [r.colZh]: r.value };
+                        for (const x of sameRow) payload[x.colZh] = x.value;
+                        try {
+                            ok = !!(await Promise.resolve(api.updateRow(L.table, r.rowIndex, payload)));
+                        } catch (e) { ok = false; }
+                        if (ok) for (const x of sameRow) consumedCellUpdates.add(x);
+                        else updateRowUsable = false;
+                    }
+                    if (!ok) {
+                        ok = !!(await Promise.resolve(api.updateCell(L.table, r.rowIndex, r.colZh, r.value)));
+                    }
                     if (!ok) {
                         statWriteHadFailure = true;
                         if (mvu2shujukuDebugOn()) {
@@ -5455,6 +5477,7 @@
             `var pendingStatOverlay=null;`,
             `var statOverlayTimer=null;`,
             `var statOverlayGen=0;`,
+            `var statOverlayPromise=null;var statOverlayResolve=null;`,
             `function mvuWrap(stat){return {stat_data:stat,display_data:stat,delta_data:{},initialized_lorebooks:{}};}`,
             `function flushStatOverlay(){`,
             `  statOverlayTimer=null;`,
@@ -5462,6 +5485,7 @@
             `  if(target===null)return;`,
             `  var gen=statOverlayGen;`,
             `  (async function(){`,
+            `    var settled=false;`,
             `    try{`,
             `      // 对齐参考卡：写库直接 diff 落表，不做锚点重建/表重置（运行时保持最小）`,
             `      try{API=getApi();}catch(e){}`,
@@ -5469,15 +5493,19 @@
             `      var n2=await writeDiffToDb(prev,target);`,
             `      // 只有真正有差异操作才广播：无差异回声写广播会让前端重渲染后再回声，形成循环`,
             `      if(n2>0)broadcastBridgeEvent(mvuWrap(target),mvuWrap(prev));`,
+            `      settled=true;`,
             `    }catch(e){console.warn('['+BRIDGE_NAME+'] 合并写库异常:',e);}`,
-            `    finally{if(statOverlayGen===gen)pendingStatOverlay=null;}`,
+            `    finally{if(statOverlayGen===gen){pendingStatOverlay=null;var done=statOverlayResolve;statOverlayResolve=null;statOverlayPromise=null;if(done)done(settled);}}`,
             `  })();`,
             `}`,
             `function scheduleStatOverlay(next){`,
+            `  if(!statOverlayPromise)statOverlayPromise=new Promise(function(resolve){statOverlayResolve=resolve;});`,
+            `  var wait=statOverlayPromise;`,
             `  statOverlayGen++;`,
             `  pendingStatOverlay=next;`,
             `  if(statOverlayTimer)clearTimeout(statOverlayTimer);`,
             `  statOverlayTimer=setTimeout(flushStatOverlay,150);`,
+            `  return wait;`,
             `}`,
             '',
             // 先登记各窗口“真原始值”再接管：getAllVariables 在脚本顶部定义，
@@ -5836,6 +5864,14 @@
             `function pathParts(pathStr){return String(pathStr).split('.');}`,
             '',
             `async function writeDiffToDb(prev,next){`,
+            `  // 扩展核心在场时复用同一套差异规划与同一行 updateRow 合并；卡内旧实现仅作`,
+            `  // 独立/旧环境兜底，避免前端一次写多个字段时每格触发一次完整 V2 持久化。`,
+            `  try{`,
+            `    var sharedCore=(rootWindow&&rootWindow.MVU2SHUJUKU_CORE)||(window&&window.MVU2SHUJUKU_CORE);`,
+            `    if(sharedCore&&typeof sharedCore.writeStatDiffToDb==='function'){`,
+            `      return await sharedCore.writeStatDiffToDb(API,SD_LAYOUT,prev,next);`,
+            `    }`,
+            `  }catch(sharedWriteError){console.warn('['+BRIDGE_NAME+'] 共享写入核心失败，回退卡内写入:',sharedWriteError);}`,
             `  var ops=[];`,
             `  function collect(prevObj,nextObj,pathStr){`,
             `    var keys=Object.keys(nextObj||{});`,
@@ -6237,8 +6273,9 @@
             `      }`,
             `    };`,
             `    mvuFake.replaceMvuData=async function(data,opts){`,
-            `      scheduleStatOverlay((data&&data.stat_data)||{});`,
-            `      return true;`,
+            `      var nextStat=(data&&data.stat_data)||{};var ok=!!(await scheduleStatOverlay(nextStat));`,
+            `      if(ok){try{rootWindow.__mvu2shujukuOpeningStatCandidate={chatKey:currentChatKey(),stat:JSON.parse(JSON.stringify(nextStat)),at:Date.now()};}catch(e){}}`,
+            `      return ok;`,
             `    };`,
             `    mvuFake.parseMessage=async function(message,old_data){`,
             `      try{`,
@@ -6370,6 +6407,7 @@
             `    // 每次现取 API（插件可能晚于脚本加载就绪；捕获的 API 可能为 null）`,
             `    var apiNow=getApi();`,
             `    if(!apiNow){console.warn('['+BRIDGE_NAME+'] 插件 API 未就绪，稍后重试建表');initState.running=false;if(initRetries<15){initRetries++;setTimeout(ensureTemplateInit,3000);}return;}`,
+            `    var hadCheckpointBeforeInit=hasFullCheckpoint();`,
             `    var out=await mvu2shujukuEnsureInit(apiNow,TEMPLATE_B64,currentCharName()+'模板');`,
             `    if(out&&out.template)TEMPLATE=out.template;`,
             `    console.log('['+BRIDGE_NAME+'] ensureTemplateInit 结果:', out.status, out.message);`,
@@ -6382,6 +6420,7 @@
             `      console.log('['+BRIDGE_NAME+'] '+out.message);`,
             `      initRetries=0;`,
             `      initState.done=true;`,
+            `      if(!hadCheckpointBeforeInit&&hasFullCheckpoint()){try{rootWindow.__mvu2shujukuFreshOpeningCheckpoint={chatKey:key,at:Date.now()};}catch(e){}}`,
             `      // 建表/初始化成功 ≈ MVU 的 VARIABLE_INITIALIZED 时机，广播给前端`,
             `      try{var curStat2=currentStat();emitMvuEvent('mag_variable_initialized',mvuWrap(curStat2));}catch(e){}`,
             `    }`,
@@ -7912,6 +7951,146 @@ ${DB_INIT_SNIPPET}
         } catch (e) {}
     }
 
+    // 开场持久化连续性：有些卡会在捏人完成后删除/替换首楼，
+    // 而 SP·数据库的 full checkpoint 正挂在该消息上。消息与帧一起被删后，
+    // 仅修复 ScopedConfig/Guide 无法找回用户刚填的数据。这里只在“本次会话
+    // 新建 checkpoint + 开场短窗口”内记住最后落定快照；若持久化载体真的
+    // 消失，使用插件公开 initGameSession 在存活楼层建新锚，再经正常 CRUD 恢复。
+    // 不复制 TavernDB_ACU_IsolatedData 原始帧，避免携带旧楼层序号/旧日志。
+    const openingContinuityByChat = Object.create(null);
+    function openingContinuityState(chatKey) {
+        const key = String(chatKey || 'unknown');
+        if (!openingContinuityByChat[key]) {
+            openingContinuityByChat[key] = { armed: false, snapshot: null, expiresAt: 0, recovering: false, attempts: 0, recoveries: 0 };
+        }
+        return openingContinuityByChat[key];
+    }
+    function openingChatIsShort() {
+        try {
+            const ctx = getContextSafe();
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            return chat.length > 0 && chat.length <= 3;
+        } catch (e) { return false; }
+    }
+    function cloneOpeningStat(stat) {
+        try {
+            const copy = JSON.parse(JSON.stringify(stat || {}));
+            if (copy && typeof copy === 'object') delete copy.$internal;
+            return copy;
+        } catch (e) { return null; }
+    }
+    function armOpeningContinuity(chatKey, stat) {
+        if (!openingChatIsShort()) return;
+        const snapshot = cloneOpeningStat(stat);
+        if (!snapshot) return;
+        const st = openingContinuityState(chatKey);
+        st.armed = true;
+        st.snapshot = snapshot;
+        st.expiresAt = Date.now() + 30 * 60 * 1000;
+        st.attempts = 0;
+        st.recoveries = 0;
+        dbg('[开场连续性] 已记录新建 checkpoint 的最新数据快照。');
+    }
+    function refreshOpeningContinuityAfterWrite(chatKey, stat) {
+        const st = openingContinuityState(chatKey);
+        if (!st.armed || Date.now() > st.expiresAt || !openingChatIsShort()) return;
+        const snapshot = cloneOpeningStat(stat);
+        if (snapshot) {
+            st.snapshot = snapshot;
+            st.expiresAt = Date.now() + 30 * 60 * 1000;
+        }
+    }
+    async function recoverOpeningContinuity(reason) {
+        const chatKey = autoInitChatId();
+        const st = openingContinuityState(chatKey);
+        // 卡内桥可能先于扩展完成 initGameSession + replaceMvuData，随后原卡立刻 /cut
+        // 首楼。此时扩展在 autoInitDatabase 的单次检查中还没来得及 armed，等收到
+        // MESSAGE_DELETED 时 checkpoint 已经消失。恢复入口必须能够“迟到接管”桥留下的
+        // fresh 标记与候选快照，不能要求 st 事先已 armed。
+        try {
+            const freshMark = hostWindow.__mvu2shujukuFreshOpeningCheckpoint;
+            const candidate = hostWindow.__mvu2shujukuOpeningStatCandidate;
+            const freshMatches = !!(freshMark && freshMark.chatKey === chatKey &&
+                Date.now() - Number(freshMark.at || 0) < 30 * 60 * 1000);
+            const candidateMatches = !!(candidate && candidate.chatKey === chatKey &&
+                Date.now() - Number(candidate.at || 0) < 30 * 60 * 1000);
+            if (!st.armed && freshMatches && candidateMatches && openingChatIsShort()) {
+                const lateSnapshot = cloneOpeningStat(candidate.stat);
+                if (lateSnapshot) {
+                    armOpeningContinuity(chatKey, lateSnapshot);
+                    hostWindow.__mvu2shujukuFreshOpeningCheckpoint = null;
+                    dbg('[开场连续性] 已迟到接管卡内桥的新建 checkpoint 快照。');
+                }
+            }
+            if (st.armed && candidate && candidate.chatKey === chatKey && Date.now() - Number(candidate.at || 0) < 30 * 60 * 1000) {
+                const adopted = cloneOpeningStat(candidate.stat);
+                if (adopted) st.snapshot = adopted;
+            }
+        } catch (e) {}
+        if (!st.armed || st.recovering || !st.snapshot) return;
+        if (Date.now() > st.expiresAt || !openingChatIsShort()) { st.armed = false; st.snapshot = null; return; }
+        if (!activeLayout || !layoutBelongsToCurrentCard(activeLayoutCardKey)) return;
+        // 仍有 full checkpoint，或持久化回放仍能重建出数据，都不应重建。
+        if (mvu2shujukuChatHasFullCheckpoint()) return;
+        try { if (readPersistedTableData()) return; } catch (e) {}
+        const ctx = getContextSafe();
+        const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+        if (!chat.some(m => m && !m.is_user)) {
+            if (st.attempts++ < 8) hostWindow.setTimeout(() => recoverOpeningContinuity(reason), 350);
+            return;
+        }
+        const api = getAcuApi();
+        const tpl = cachedTemplateForCurrentCard();
+        if (!api || typeof api.initGameSession !== 'function' || !tpl) {
+            if (st.attempts++ < 8) hostWindow.setTimeout(() => recoverOpeningContinuity(reason), 500);
+            return;
+        }
+        st.recovering = true;
+        st.attempts += 1;
+        const snapshot = cloneOpeningStat(st.snapshot);
+        try {
+            dbg('[开场连续性] 检测到 checkpoint 载体消失（' + String(reason || '消息变更') + '），正在存活楼层重建。');
+            const ch = currentCharacter();
+            const presetName = (characterDisplayName(ch) || '角色') + '模板';
+            const initOut = await Promise.resolve(api.initGameSession({}, {
+                injectTemplate: true,
+                loadPreset: false,
+                templateData: tpl,
+                templatePresetName: presetName,
+            }));
+            if (initOut && initOut.success === false) throw new Error(initOut.message || 'initGameSession 失败');
+            const ready = await waitRuntimeTablesReady(api, activeLayout, 5000);
+            if (!ready) throw new Error('数据库运行时未就绪');
+            overlayFlushRetries = 0;
+            const ok = await scheduleWindowStatOverlay(snapshot);
+            if (!ok) throw new Error('开场数据重写未落定');
+            st.recoveries += 1;
+            st.attempts = 0;
+            // 开场可能先 setChatMessage 切到捏人页，最后又 /cut 掉捏人楼。
+            // 因此一次恢复后继续保护，直到首次生成结束/超时；最多恢复 3 次。
+            if (st.recoveries >= 3) { st.armed = false; st.snapshot = null; }
+            dbg('[开场连续性] 已在存活楼层建立新 checkpoint 并恢复开场数据。');
+        } catch (e) {
+            dbgWarn('[开场连续性] 恢复失败，等待重试:', e && e.message ? e.message : e);
+            if (st.attempts < 8) hostWindow.setTimeout(() => recoverOpeningContinuity(reason), 700);
+        } finally {
+            st.recovering = false;
+        }
+    }
+    function scheduleOpeningContinuityRecovery(reason) {
+        hostWindow.setTimeout(() => { recoverOpeningContinuity(reason); }, 80);
+        hostWindow.setTimeout(() => { recoverOpeningContinuity(reason); }, 450);
+    }
+    function disarmOpeningContinuity(chatKey) {
+        const st = openingContinuityState(chatKey);
+        if (st.recovering) {
+            hostWindow.setTimeout(() => disarmOpeningContinuity(chatKey), 1000);
+            return;
+        }
+        st.armed = false;
+        st.snapshot = null;
+    }
+
     // 对应 MVU 的 init 时机：进入聊天/收到首条消息时，若卡内有模板且表格缺失则自动建表。
     // 只处理本转换器产出的卡（extensions.mvu2shujuku 标记 + 世界书 __ACU_TEMPLATE_DATA__ 模板），
     // 其余卡一律不动（别的数据库卡也可能带 __ACU_TEMPLATE_DATA__，但不会有我们的独有标记）。
@@ -8111,6 +8290,20 @@ ${DB_INIT_SNIPPET}
                 installWindowGetAllVariables();
                 installWindowMvuShim();
                 installTableUpdateHook();
+                // 只有“本次进入时尚无 full checkpoint，刚由初始化新建”才开启
+                // 首楼载体连续性保护。重进旧聊天绝不武断恢复开场快照。
+                let freshCheckpointFromBridge = false;
+                try {
+                    const freshMark = hostWindow.__mvu2shujukuFreshOpeningCheckpoint;
+                    freshCheckpointFromBridge = !!(freshMark && freshMark.chatKey === key && Date.now() - Number(freshMark.at || 0) < 120000);
+                } catch (e) {}
+                if ((!hadFullCheckpointBeforeInit || freshCheckpointFromBridge) && mvu2shujukuChatHasFullCheckpoint() && openingChatIsShort()) {
+                    try {
+                        const initAll = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                        armOpeningContinuity(key, initAll && initAll.stat_data ? initAll.stat_data : {});
+                        if (freshCheckpointFromBridge) hostWindow.__mvu2shujukuFreshOpeningCheckpoint = null;
+                    } catch (e) {}
+                }
                 // 建表/初始化成功（或聊天已有 checkpoint 跳过）≈ MVU 的 VARIABLE_INITIALIZED 时机。
                 // 不能立刻广播：插件回放/物化可能尚未完成，此刻 getAllVariables 可能返回空/旧值，
                 // 前端收到后重读会显示默认值并写回。等 stat_data 非空后再派发（见 scheduleDataReadyNotify）。
@@ -8454,6 +8647,7 @@ ${DB_INIT_SNIPPET}
                 });
                 es.on(et.MESSAGE_RECEIVED, () => {
                     hostWindow.setTimeout(autoInitDatabase, 600);
+                    scheduleOpeningContinuityRecovery('MESSAGE_RECEIVED');
                     // 复刻 MVU：AI 回复后追加状态栏占位符，前端注入正则才能命中每条消息
                     ensureWindowStatusPlaceholder();
                 });
@@ -8463,13 +8657,33 @@ ${DB_INIT_SNIPPET}
                         es.on(evName, () => {
                             hostWindow.setTimeout(autoInitDatabase, 300);
                             hostWindow.setTimeout(applyActiveGreetingInitvar, 1200);
+                            scheduleOpeningContinuityRecovery(evName);
                         });
                     }
+                }
+                if (et.MESSAGE_DELETED && typeof et.MESSAGE_DELETED === 'string') {
+                    es.on(et.MESSAGE_DELETED, () => {
+                        scheduleOpeningContinuityRecovery(et.MESSAGE_DELETED);
+                    });
                 }
                 if (et.GENERATION_ENDED) {
                     es.on(et.GENERATION_ENDED, () => {
                         ensureWindowStatusPlaceholder();
                         hostWindow.setTimeout(autoInitDatabase, 100);
+                        // 某些卡的 /cut 与生成启动紧邻，删除事件的恢复任务可能仍在排队。
+                        // 先做最后一次连续性检查，待恢复进入执行阶段后再解除保护。
+                        const endingChatKey = autoInitChatId();
+                        scheduleOpeningContinuityRecovery('GENERATION_ENDED');
+                        hostWindow.setTimeout(() => {
+                            try {
+                                const endingState = openingContinuityState(endingChatKey);
+                                if (endingState.recovering) {
+                                    hostWindow.setTimeout(() => disarmOpeningContinuity(endingChatKey), 1200);
+                                } else {
+                                    disarmOpeningContinuity(endingChatKey);
+                                }
+                            } catch (e) {}
+                        }, 1200);
                     });
                 }
                 autoInitState.inited = true;
@@ -8714,9 +8928,19 @@ ${DB_INIT_SNIPPET}
 
     // 合并写入：前端一次操作常连续触发多次 replaceMvuData（如同步资源+追加操作日志），
     // 短窗口内合并为一次持久化；读路径直接返回待写快照保证写后立即读一致。
-    function scheduleWindowStatOverlay(next, onSettled) {
+    function scheduleWindowStatOverlay(next, onSettled, isRetry) {
         let writeChatKey = '';
         try { writeChatKey = autoInitChatId(); } catch (e) {}
+        // 合并窗口内的所有 replaceMvuData 共用一个落定 Promise。
+        // 这样卡内脚本的 await Mvu.replaceMvuData(...) 不再只等到“排队”，
+        // 而是等到 CRUD、持久化与 saveChat 真正完成。
+        if (!statWriteFlushPromise) {
+            statWriteFlushPromise = new Promise(resolve => { statWriteFlushResolve = resolve; });
+        }
+        const flushPromise = statWriteFlushPromise;
+        if (!isRetry && typeof onSettled === 'function') {
+            flushPromise.then(ok => { try { onSettled(ok); } catch (e) {} });
+        }
         statWriteOverlayGen += 1;
         pendingStatWrite = next;
         // 共享给卡内桥/其他窗口的“最新待写状态”：连续 读-改-写 都基于它累积，
@@ -8730,7 +8954,12 @@ ${DB_INIT_SNIPPET}
             statWriteTimer = null;
             const target = pendingStatWrite;
             if (target === null || target === undefined) {
-                if (typeof onSettled === 'function') hostWindow.setTimeout(() => onSettled(false), 0);
+                if (statWriteFlushResolve) {
+                    const resolveFlush = statWriteFlushResolve;
+                    statWriteFlushResolve = null;
+                    statWriteFlushPromise = null;
+                    resolveFlush(false);
+                }
                 return;
             }
             const gen = statWriteOverlayGen;
@@ -8766,7 +8995,7 @@ ${DB_INIT_SNIPPET}
                             dbg('[流程] 模板缓存/布局未就绪' + (tplCached ? '（布局未匹配）' : '') + '，延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
                                 // 仅当期间没有更新的写入时才重试，避免旧快照覆盖新状态
-                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, null, true);
                             }, 500);
                             retryScheduled = true;
                             return;
@@ -8796,7 +9025,7 @@ ${DB_INIT_SNIPPET}
                             overlayFlushRetries += 1;
                             dbg('[流程] 插件运行时未就绪，延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
-                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, null, true);
                             }, 800);
                             retryScheduled = true;
                             return;
@@ -8821,7 +9050,7 @@ ${DB_INIT_SNIPPET}
                             overlayFlushRetries += 1;
                             dbg('[流程] 插件 SQLite 运行时未完整发布（切换/重载窗口），延后重试写库（#' + overlayFlushRetries + '）。');
                             hostWindow.setTimeout(() => {
-                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, null, true);
                             }, 800);
                             retryScheduled = true;
                             return;
@@ -9032,7 +9261,7 @@ ${DB_INIT_SNIPPET}
                                 overlayFlushRetries += 1;
                                 dbg(' 写入存在失败（运行时被清空/行缺失），稍后重试合并（#' + overlayFlushRetries + '）。');
                                 hostWindow.setTimeout(() => {
-                                    if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, onSettled);
+                                    if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, null, true);
                                 }, 1500);
                                 retryScheduled = true;
                             }
@@ -9080,13 +9309,17 @@ ${DB_INIT_SNIPPET}
                         const ph = (typeof window !== 'undefined' ? window : root);
                         if (ph && ph.__mvu2shujukuPendingStat === target) ph.__mvu2shujukuPendingStat = null;
                     } catch (e) {}
-                    // 通知调用方本次写入是否落定；已安排重试时不通知（重试最终会通知）
-                    if (!retryScheduled && typeof onSettled === 'function') {
-                        hostWindow.setTimeout(() => onSettled(settledOk), 0);
+                    // 已安排重试时保持 Promise pending，由最终重试结算。
+                    if (!retryScheduled && statWriteFlushResolve) {
+                        const resolveFlush = statWriteFlushResolve;
+                        statWriteFlushResolve = null;
+                        statWriteFlushPromise = null;
+                        resolveFlush(settledOk);
                     }
                 }
             }
         }, 150);
+        return flushPromise;
     }
 
     // 扩展侧提供 window.getAllVariables：用卡内布局 + 插件表格实时重建 stat_data（惰性，零冗余）。
@@ -9899,8 +10132,11 @@ ${DB_INIT_SNIPPET}
                         const g0 = data && data.stat_data ? Object.keys(data.stat_data).filter(k => k !== '$internal') : [];
                         dbg(' Mvu.replaceMvuData 调用来源=' + (caller || '未知') + ' | 顶层组=' + g0.join(','));
                     }
-                    scheduleWindowStatOverlay((data && data.stat_data) || {});
-                    return true;
+                    const nextStat = (data && data.stat_data) || {};
+                    const writeChatKey = autoInitChatId();
+                    const ok = await scheduleWindowStatOverlay(nextStat);
+                    if (ok) refreshOpeningContinuityAfterWrite(writeChatKey, nextStat);
+                    return !!ok;
                 } catch (e) {
                     dbgWarn(' Mvu.replaceMvuData 异常:', e);
                     return false;
