@@ -8,6 +8,8 @@
 - 表格模板 JSON（开局自动建表，不需要手动导入）
 - 转换报告（Markdown：自动转换项 / 需人工项 / 警告）
 
+详细支持范围、运行时兼容接口与已知边界见 [MVU 转换与兼容清单](COMPATIBILITY.md)。
+
 ## 安装
 
 1. 前提：已安装 **SP·数据库** 插件。
@@ -76,7 +78,7 @@
 - **命令与显示兼容**：`_.set`（双参/三参 `old,new` 两种格式）、`_.assign`（对象合并/按键赋值）、
   `_.remove/unset/delete`、`_.add`（数值加法带精度处理、日期字符串按毫秒推进转 ISO）；
   `display_data` 在会话内保存 `旧->新(原因)` 镜像（与 MVU 的 display 字符串同格式）。
-- 与 MVU 原版一致，写库后广播 `Mvu.events.VARIABLE_UPDATE_ENDED`（`mag_variable_update_ended`，携带更新前后完整变量），前端原有 `eventOn` 监听直接生效。
+- 公开 MVU 更新事件链由兼容层接管；`COMMAND_PARSED` 监听器可改写或追加命令，`VARIABLE_UPDATE_ENDED` 携带更新前后的完整 `MvuData`。具体参数语义和边界见兼容清单。
 - 数据桥同时提供 `TavernHelper.getVariables()` shim，兼容教程中「纯文本状态栏」的读取写法。
 
 ### 卡片清理
@@ -120,6 +122,7 @@ SillyTavern 原生 `substituteParams` 解析；表名和固定列名不支持运
 | `src/pinyin-data.js` | 拼音字典（由 pinyin-pro 生成，MIT） |
 | `build-extension.js` | 重新构建扩展文件 |
 | `test/run-tests.js` | 自动化测试（无测试卡片时自动跳过卡片相关用例） |
+| `COMPATIBILITY.md` | MVU 转换范围、运行时兼容能力与已知边界 |
 
 ## 开发
 
