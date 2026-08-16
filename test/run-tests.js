@@ -2645,7 +2645,8 @@ test('转换产物齐全', () => {
     assert.ok(r.reportText.includes('# MVU → 数据库 转换报告'));
     const c = r.card.data || r.card;
     assert.ok((c.extensions.tavern_helper.scripts || []).some(s => /数据桥/.test(s.name)), '应有数据桥脚本');
-    assert.ok((c.extensions.regex_scripts || []).every(rx => !/变量更新/.test(rx.scriptName)), '应移除 MVU 专属正则');
+    assert.ok((c.extensions.regex_scripts || []).some(rx => /不发送.*变量更新/.test(rx.scriptName)), '只隐藏更新块的空替换正则应保留');
+    assert.ok(!(c.extensions.regex_scripts || []).some(rx => /美化.*变量更新/.test(rx.scriptName)), 'MVU 更新块美化正则仍应移除');
     assert.ok((c.extensions.regex_scripts || []).some(rx => rx.scriptName === 'XML状态栏'), '非 MVU 显示正则应保留');
     assert.ok(c.extensions.mvu2shujuku, '应有转换标记');
     assert.ok(typeof c.extensions.mvu2shujuku.layout === 'string' && Array.isArray(JSON.parse(c.extensions.mvu2shujuku.layout)), '转换标记应包含布局（供扩展重建 stat_data）');
