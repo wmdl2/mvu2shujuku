@@ -1,6 +1,6 @@
 # MVU 转换与兼容清单
 
-> 适用于 MVU转数据库 v0.2.8。本文用于说明哪些 MVU 内容可以转换、哪些运行时行为由兼容层接管，以及当前无法等价模拟的边界。
+> 适用于 MVU转数据库 v0.2.9。本文用于说明哪些 MVU 内容可以转换、哪些运行时行为由兼容层接管，以及当前无法等价模拟的边界。
 
 这不是对任意 MVU 角色卡“零风险完全兼容”的承诺。转换器会尽可能保留无法静态确认的业务脚本，并在转换报告中列出需要人工核对的项目。依赖 MVU 私有内部状态、未知外部脚本或复杂动态 EJS 的卡，转换后仍应实际测试。
 
@@ -172,6 +172,10 @@ Zod/TS 替代写法的字段基础类型不作为唯一建表依据；实际表�
 - `getVariables(...)`
 - `getAllVariables()`
 - `TavernHelper.getVariables(...)`
+- `getMessageVar('stat_data.…', { defaults: … })`
+- `setMessageVar('stat_data.…', value)`
+- EJS 裸上下文 `variables.stat_data`
+- `setvar('stat_data.…', value, { outscope: 'message' })`（仅默认写入/返回语义）
 - `Mvu.getMvuData(...)`
 - `stat_data` 直接访问
 - `_.get`
@@ -188,7 +192,7 @@ Zod/TS 替代写法的字段基础类型不作为唯一建表依据；实际表�
 - EJS 中数据库数据读取
 - 世界书 `getwi` 等非 MVU 逻辑保留
 
-**部分等价：**静态简单条件可选转为数据库条件；复杂 EJS 保留代码，只替换能安全识别的数据来源。动态路径或无法确定的读取会进入转换报告，不按字段名猜测改写。
+**部分等价：**静态简单条件可选转为数据库条件；复杂 EJS 保留代码，只替换能安全识别的数据来源。`getMessageVar/setMessageVar` 只在首参数明确为 `stat_data` 字面路径时切到数据库；通用 `setvar` 还必须明确且仅指定 `{ outscope: 'message' }`。动态路径、其他作用域及带 `flags/results/withMsg` 等额外语义的调用保持酒馆助手原行为并提示核对，不按字段名猜测改写。
 
 ## 9. 酒馆助手脚本
 
@@ -201,6 +205,8 @@ Zod/TS 替代写法的字段基础类型不作为唯一建表依据；实际表�
 - 删除确认属于 MVU 引擎本体的脚本
 - 删除纯 `registerMvuSchema(...)` Schema 注册脚本
 - 不因文件名或 URL 中简单出现 `mvu` 就删除
+- 混合了剧情/EJS 与 `<UpdateVariable>`/`<JSONPatch>` 的世界书条目完整保留，更新块仍由数据桥执行
+- 仅删除可确认属于初始化或纯 MVU 变量输出管线的世界书条目
 
 已知可识别引擎包括：
 
