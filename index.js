@@ -7119,6 +7119,16 @@
         return /format_message_variable|status_current_variables|<UpdateVariable\b/i.test(content);
     }
 
+    // 这类正则不负责运行 MVU，只在显示/提示词阶段把原始更新块隐藏起来。
+    // 转换后的桥仍需从原始楼层读取 <initvar>/<UpdateVariable>，所以既不能删原始块，
+    // 也不能删掉负责遮蔽它们的空替换正则。
+    function isMvuBlockCleanupRegex(r) {
+        const find = String(r && r.findRegex || '');
+        const replacement = String(r && r.replaceString || '');
+        return replacement === '' &&
+            /update(?:\\?\(\?:variable\\?\)|variable)|json_?patch|status_current_variables?/i.test(find);
+    }
+
     function isMvuScriptContent(content) {
         const s = String(content || '');
         if (/Mvu\s*\.|MagVarUpdate|magvar|registerMvuSchema/i.test(s)) return true;
@@ -7548,6 +7558,11 @@
         const keptRegexes = [];
         for (const r of regexes) {
             const name = String(r.scriptName || '');
+            if (isMvuBlockCleanupRegex(r)) {
+                keptRegexes.push(deepClone(r));
+                report.note(`已保留 MVU 标签清理正则「${name}」：它只隐藏原始更新块，不负责执行 MVU；数据库桥仍从原始楼层读取分支初始化/更新。`);
+                continue;
+            }
             if (isMvuRegex(r)) {
                 report.note(`已移除 MVU 专属正则「${name}」（解析 <UpdateVariable>/format_message_variable 等 MVU 语法）。`);
                 continue;
