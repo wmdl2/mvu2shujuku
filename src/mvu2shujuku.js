@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.2.8';
+    const VERSION = '0.2.9';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -5829,6 +5829,10 @@
             `        var fn=function(){try{if(!bridgeOwnCardActive())return {stat_data:{}};return window.getAllVariables?window.getAllVariables():{stat_data:{}};}catch(e){return {stat_data:{}};}};`,
             `        fn.__mvu2shujukuBridge=true;ej.defines.mvu2shujukuGetAllVariables=fn;`,
             `      }`,
+            `      var getMsg=function(path,opts){var fb=opts&&typeof opts==='object'&&Object.prototype.hasOwnProperty.call(opts,'defaults')?opts.defaults:opts;try{var all=window.getAllVariables?window.getAllVariables():{stat_data:{}};var ps=String(path||'').split('.').filter(function(p){return p!=='';});var cur=all;for(var pi=0;pi<ps.length;pi++){if(cur==null)return fb;cur=cur[ps[pi]];}return cur===undefined?fb:cur;}catch(e){return fb;}};`,
+            `      getMsg.__mvu2shujukuBridge=true;ej.defines.mvu2shujukuGetMessageVar=getMsg;`,
+            `      var setMsg=function(path,value){try{var ps=String(path||'').split('.').filter(function(p){return p!=='';});if(ps[0]!=='stat_data'||ps.length<2)return value;var all=window.getAllVariables?window.getAllVariables():{stat_data:{}};var next=JSON.parse(JSON.stringify(all.stat_data||{}));setPath(next,ps.slice(1),value);scheduleStatOverlay(next);return value;}catch(e){return value;}};`,
+            `      setMsg.__mvu2shujukuBridge=true;ej.defines.mvu2shujukuSetMessageVar=setMsg;`,
             `      installed=true;`,
             `    }catch(e){}`,
             `  }`,
@@ -6866,6 +6870,30 @@
         return -1;
     }
 
+    function splitJsTopLevelArgs(argsStr) {
+        const parts = [];
+        let current = '';
+        let depth = 0;
+        let quote = '';
+        let escaped = false;
+        for (const ch of String(argsStr || '')) {
+            if (quote) {
+                current += ch;
+                if (escaped) escaped = false;
+                else if (ch === '\\') escaped = true;
+                else if (ch === quote) quote = '';
+                continue;
+            }
+            if (ch === '"' || ch === "'" || ch === '`') { quote = ch; current += ch; continue; }
+            if (ch === '(' || ch === '[' || ch === '{') depth++;
+            else if (ch === ')' || ch === ']' || ch === '}') depth--;
+            if (ch === ',' && depth === 0) { parts.push(current.trim()); current = ''; continue; }
+            current += ch;
+        }
+        if (current.trim()) parts.push(current.trim());
+        return parts;
+    }
+
     // 改写函数调用但不执行 JS。balanced-call 扫描允许 fallback 中包含对象、数组或函数调用，
     // 比旧版只接受 getvar("stat_data") 的单条正则覆盖更完整。
     function rewriteStatDataCalls(source) {
@@ -6887,6 +6915,55 @@
             getvarRe.lastIndex = m.index + replacement.length;
         }
 
+        // 酒馆助手的 MessageVar 不属于 Mvu.* 公开 API，但部分 MVU 卡会用它
+        // 直接读写 stat_data。只改写首参数明确为 stat_data 字面量的调用，
+        // getLocalVar/setLocalVar 及其他 MessageVar 保持酒馆助手原语义。
+        for (const spec of [
+            { name: 'getMessageVar', replacement: 'mvu2shujukuGetMessageVar' },
+            { name: 'setMessageVar', replacement: 'mvu2shujukuSetMessageVar' },
+        ]) {
+            const callRe = new RegExp('\\b' + spec.name + '\\s*\\(', 'gi');
+            let cm;
+            while ((cm = callRe.exec(out))) {
+                const open = out.indexOf('(', cm.index);
+                const end = findJsCallEnd(out, open);
+                if (end < 0) break;
+                const args = out.slice(open + 1, end);
+                if (!/^\s*(["'])stat_data(?:\.[^"']*)?\1(?:\s*,|\s*$)/i.test(args)) {
+                    callRe.lastIndex = end + 1;
+                    continue;
+                }
+                out = out.slice(0, cm.index) + spec.replacement + out.slice(open, end + 1) + out.slice(end + 1);
+                count++;
+                callRe.lastIndex = cm.index + spec.replacement.length + (end - open + 1);
+            }
+        }
+
+        // 通用 setvar 只有在静态可证明写入“当前消息变量”、且没有条件写入/历史楼层/
+        // 特殊返回值语义时才等价于数据库 setter。其余形式保持原文，交给人工核对。
+        const setvarRe = /\bsetvar\s*\(/gi;
+        let sm;
+        while ((sm = setvarRe.exec(out))) {
+            const open = out.indexOf('(', sm.index);
+            const end = findJsCallEnd(out, open);
+            if (end < 0) break;
+            const argsText = out.slice(open + 1, end);
+            const args = splitJsTopLevelArgs(argsText);
+            const pathMatch = args[0] && args[0].match(/^\s*(["'])(stat_data(?:\.[^"']*)?)\1\s*$/i);
+            const options = args[2] && args[2].trim();
+            // 目前只接受仅含 outscope:'message' 的对象；加入任何其它选项都可能改变
+            // flags/results/楼层选择等行为，宁可保留也不声称等价。
+            const messageScopeOnly = options && /^\{\s*(?:outscope|["']outscope["'])\s*:\s*(["'])message\1\s*,?\s*\}$/i.test(options);
+            if (!pathMatch || args.length !== 3 || !messageScopeOnly) {
+                setvarRe.lastIndex = end + 1;
+                continue;
+            }
+            const replacement = 'mvu2shujukuSetMessageVar(' + args[0] + ', ' + args[1] + ')';
+            out = out.slice(0, sm.index) + replacement + out.slice(end + 1);
+            count++;
+            setvarRe.lastIndex = sm.index + replacement.length;
+        }
+
         // 这些入口在不同版本的 MVU/提示词模板教程中都出现过。只改写明确读取
         // `.stat_data` 的形式；不碰普通 getVariables()，以免改变非 MVU 变量语义。
         const directReaders = [
@@ -6894,13 +6971,14 @@
             /\bEjsTemplate\s*\.\s*allVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
             /\ballVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
             /\ball_variables\s*\.\s*stat_data\b/gi,
+            /(^|[^\w$.])variables\s*\.\s*stat_data\b/gi,
             /\bTavernHelper\s*\.\s*getVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
             /\bgetVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
         ];
         for (const re of directReaders) {
-            out = out.replace(re, () => {
+            out = out.replace(re, (match, prefix) => {
                 count++;
-                return 'mvu2shujukuGetAllVariables().stat_data';
+                return (prefix || '') + 'mvu2shujukuGetAllVariables().stat_data';
             });
         }
         return { text: out, count };
@@ -6909,11 +6987,20 @@
     function unresolvedEjsDataReads(text) {
         const found = [];
         const blocks = String(text || '').match(/<%[\s\S]*?%>/g) || [];
-        const suspicious = /\b(?:getvar|getAllVariables|getVariables|allVariables)\s*\(|\ball_variables\s*\.\s*stat_data|\bTavernHelper\s*\.\s*getVariables\s*\(/gi;
         for (const block of blocks) {
-            if (!/stat_data/i.test(block)) continue;
-            if (!suspicious.test(block)) { suspicious.lastIndex = 0; continue; }
-            suspicious.lastIndex = 0;
+            // 只报告仍直接访问 stat_data 的旧入口。一个 EJS 块中可能同时含已改写的
+            // stat_data 读取与普通 getvar/动态 MessageVar；后者应继续走酒馆助手原语义，
+            // 不能仅因同块出现 stat_data 字样就误报为“漏接管”。
+            const suspicious =
+                /\b(?:getvar|getMessageVar|setMessageVar)\s*\(\s*(["'])stat_data(?:\.[^"']*)?\1/i.test(block) ||
+                /\b(?:getAllVariables|getVariables|allVariables)\s*\(\s*\)\s*\.\s*stat_data\b/i.test(block) ||
+                /\ball_variables\s*\.\s*stat_data\b/i.test(block) ||
+                /(^|[^\w$.])variables\s*\.\s*stat_data\b/i.test(block) ||
+                /\bTavernHelper\s*\.\s*getVariables\s*\(\s*\)\s*\.\s*stat_data\b/i.test(block) ||
+                /\bsetvar\s*\([\s\S]*?["']stat_data(?:\.|["'])/i.test(block) ||
+                // 动态 getvar 无法静态确认；仅当同块明确把变量设为 stat_data 时报告。
+                (/\bgetvar\s*\(\s*(?!["'])[^)]*\)/i.test(block) && /["']stat_data(?:\.|["'])/i.test(block));
+            if (!suspicious) continue;
             const oneLine = block.replace(/\s+/g, ' ').trim();
             if (!found.includes(oneLine)) found.push(oneLine.slice(0, 240));
         }
@@ -7393,16 +7480,23 @@
             const isPlot = /\[mvu[ _-]?plot\]|\[mvuplot\]/i.test(comment);
             // MVU 变量管道内容特征（更新规则/变量列表/宏注入），用于区分“该删的管道”与“误标成 [mvu_update] 的剧情文本”
             const mvuPlumbing = /format_message_variable|status_current_variables?|get_message_variable|<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]|变量更新规则|变量更新格式|变量列表|输出格式|stat_data\s*[:\n{]/i;
+            const explicitUpdateEntry = /\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment);
+            const dedicatedOutputEntry = /^(?:variables?|output_format)(?:\b|\s|\()/i.test(comment.trim()) || /变量列表|变量输出格式/i.test(comment);
+            const pureStatusOutput = /^\s*<status_current_variables?>[\s\S]*<\/status_current_variables?>\s*$/i.test(content) &&
+                /get_message_variable|stat_data/i.test(content);
             const isMvuUpdate =
                 // 显式 [mvu_update] 标记：内容含管道语法或短标记 → 删；内容为剧情文本（如误标条目）→ 保留
-                (/\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment) && (mvuPlumbing.test(content) || String(content).trim().length < 60)) ||
+                (explicitUpdateEntry && (mvuPlumbing.test(content) || String(content).trim().length < 60)) ||
                 // 变量输出类条目（comment 含“变量列表/变量输出格式”）→ 删
-                (/变量列表|变量输出格式/i.test(comment) && /stat_data|UpdateVariable|JSONPatch|status_current_variable|get_message_variable|format_message_variable/i.test(content)) ||
-                // 蓝灯 D1 类：comment 无标记但内容含 MVU 专属注入宏 → 删（剧情条目除外）
-                (!isPlot && /status_current_variables?|format_message_variable|<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]/i.test(content) && /stat_data|get_message_variable|UpdateVariable|JSONPatch/i.test(content));
+                (dedicatedOutputEntry && /stat_data|UpdateVariable|JSONPatch|status_current_variable|get_message_variable|format_message_variable/i.test(content)) ||
+                // 教程中 comment 可任意命名；整个正文只有变量快照标签时仍是纯输出管线。
+                pureStatusOutput;
             if (isInit || isMvuUpdate) {
                 report.note(`已删除 MVU 世界书条目「${comment}」（${isInit ? '初始变量' : '更新规则'}已迁移为数据库模板/规则）。`);
                 continue;
+            }
+            if (!isPlot && !explicitUpdateEntry && !dedicatedOutputEntry && /<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]/i.test(content)) {
+                report.note(`世界书条目「${comment}」同时含剧情/EJS 与 MVU 更新块，已完整保留；更新块由数据桥在运行时解析。`);
             }
             // EJS 重写
             const rw = rewriteEjsConditions(content, layout, report, {
@@ -11170,7 +11264,10 @@ ${DB_INIT_SNIPPET}
             for (const f of result.files) {
                 const btn = hostDocument.createElement('button');
                 btn.className = 'menu_button';
-                btn.textContent = '下载 ' + f.name;
+                btn.textContent = f.kind === 'bridge' ? '下载数据桥源码（仅供调试）' : ('下载 ' + f.name);
+                if (f.kind === 'bridge') {
+                    btn.title = '该 .js 是已内嵌进转换后角色卡的纯源码备份，无需再导入；它不是酒馆助手要求的 .json 导入包。';
+                }
                 btn.addEventListener('click', () => {
                     // 下载时用最新模板重新生成，保证参数改动一定带进文件
                     try {
@@ -11293,7 +11390,7 @@ ${DB_INIT_SNIPPET}
             '        <button id="mvu2shujuku-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
             '      </div>',
             '      <div class="mvu2shujuku-hint">',
-            '        前提：已安装 SP·数据库 插件（不自动安装，也不迁移旧聊天）。转换只产出 角色卡 + 表格模板 + 转换报告。',
+            '        前提：已安装 SP·数据库插件（不自动安装，也不迁移旧聊天）。数据桥已写入转换后的角色卡，不需要手动导入；单独下载的 .js 只是供开发者查看和调试的源码备份，不是酒馆助手 .json 导入包。',
             '      </div>',
             '    </div>',
             '  </div>',
@@ -11483,8 +11580,39 @@ ${DB_INIT_SNIPPET}
                     const safeDefine = function () { return ejsVariablesSafe(); };
                     safeDefine.__mvu2shujuku = true;
                     ejs.defines.mvu2shujukuGetAllVariables = safeDefine;
-                    dbg(' 扩展侧注册 mvu2shujukuGetAllVariables 完成');
                 }
+                const getMessageDefine = function (path, options) {
+                    const defaultValue = options && typeof options === 'object' && Object.prototype.hasOwnProperty.call(options, 'defaults')
+                        ? options.defaults
+                        : options;
+                    try {
+                        const parts = String(path || '').split('.').filter(Boolean);
+                        let cur = ejsVariablesSafe();
+                        for (const p of parts) { if (cur == null) return defaultValue; cur = cur[p]; }
+                        return cur === undefined ? defaultValue : cur;
+                    } catch (e) { return defaultValue; }
+                };
+                getMessageDefine.__mvu2shujuku = true;
+                ejs.defines.mvu2shujukuGetMessageVar = getMessageDefine;
+                const setMessageDefine = function (path, value) {
+                    try {
+                        const parts = String(path || '').split('.').filter(Boolean);
+                        if (parts[0] !== 'stat_data' || parts.length < 2) return value;
+                        const all = ejsVariablesSafe();
+                        const next = JSON.parse(JSON.stringify((all && all.stat_data) || {}));
+                        let cur = next;
+                        for (let i = 1; i < parts.length - 1; i++) {
+                            if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) cur[parts[i]] = {};
+                            cur = cur[parts[i]];
+                        }
+                        cur[parts[parts.length - 1]] = value;
+                        scheduleWindowStatOverlay(next);
+                        return value;
+                    } catch (e) { return value; }
+                };
+                setMessageDefine.__mvu2shujuku = true;
+                ejs.defines.mvu2shujukuSetMessageVar = setMessageDefine;
+                dbg(' 扩展侧注册 EJS 数据库读写函数完成');
                 defineTimer = null;
             } else if (!defineTimer) {
                 defineTimer = hostWindow.setTimeout(() => { defineTimer = null; ensureTemplateDefine(); }, 2000);

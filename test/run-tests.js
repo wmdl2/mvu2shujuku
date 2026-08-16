@@ -1715,6 +1715,37 @@ test('Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessag
         });
 });
 
+test('剧情/EJS 中内嵌 UpdateVariable 应整条保留，MessageVar(stat_data) 改由数据库函数接管', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '混合剧情卡', description: '', first_mes: '你好',
+            character_book: { entries: [
+                { comment: '[InitVar]', content: '事件:\n  阶段: 开始' },
+                {
+                    comment: '[DLC][事件]剧情本体',
+                    content: "<%_ if (getMessageVar('stat_data.事件.阶段', { defaults: '未知' }) === '开始') { _%>\n这是必须保留的剧情正文。\n<%_ setMessageVar('stat_data.事件.阶段', '进行中'); _%>\n<%_ getvar('local_only'); getMessageVar(ROOM_STATE_KEY, { defaults: {} }); _%>\n<UpdateVariable>_.set('事件.阶段', '结束');//剧情推进</UpdateVariable>\n<%_ } _%>",
+                },
+                { comment: 'variables', content: '<UpdateVariable>stat_data 变量输出管道</UpdateVariable>' },
+            ] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const entries = (r.card.data || r.card).character_book.entries;
+    const plot = entries.find(e => e.comment === '[DLC][事件]剧情本体');
+    assert.ok(plot, '含更新块的剧情条目不得整条删除');
+    assert.ok(plot.content.includes('这是必须保留的剧情正文'), '剧情正文应保留');
+    assert.ok(plot.content.includes('<UpdateVariable>'), '剧情中的更新规则也应保留，交由数据桥解析');
+    assert.ok(plot.content.includes("mvu2shujukuGetMessageVar('stat_data.事件.阶段', { defaults: '未知' })"), '带 defaults 选项的 stat_data getMessageVar 应完整改写');
+    assert.ok(plot.content.includes("mvu2shujukuSetMessageVar('stat_data.事件.阶段'"), 'stat_data setMessageVar 应改写');
+    assert.ok(plot.content.includes("getMessageVar(ROOM_STATE_KEY"), '动态非 stat_data MessageVar 必须保持原语义');
+    assert.strictEqual(r.report.manualReview.length, 0, '同块的普通 getvar/动态 MessageVar 不应被误报为 stat_data 漏接管');
+    assert.ok(!entries.some(e => e.comment === 'variables'), '明确的纯变量输出管道仍应删除');
+    assert.ok(r.bridgeScript.includes('mvu2shujukuGetMessageVar') && r.bridgeScript.includes('mvu2shujukuSetMessageVar'), '卡内桥应注册 MessageVar 数据库函数');
+    assert.ok(r.bridgeScript.includes("hasOwnProperty.call(opts,'defaults')"), '卡内桥 MessageVar getter 应兼容酒馆助手 defaults 选项');
+});
+
 test('Mvu 兼容层：解析事件按官方顺序触发，COMMAND_PARSED 修改命令后真正生效', async () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -2789,6 +2820,8 @@ test('扩展文件齐全且 index.js 语法正确', () => {
     assert.ok(files['style.css']);
     const manifest = JSON.parse(files['manifest.json']);
     assert.strictEqual(manifest.js, 'index.js');
+    assert.ok(files['index.js'].includes('下载数据桥源码（仅供调试）'), '数据桥下载按钮应明确标注为调试源码');
+    assert.ok(files['index.js'].includes('不是酒馆助手 .json 导入包'), '应明确说明 .js 无需导入酒馆助手');
     new Function(files['index.js']);
 });
 
@@ -2915,6 +2948,26 @@ test('EJS 数据入口改写：fallback/getAllVariables/allVariables/TavernHelpe
     assert.strictEqual((rw.text.match(/mvu2shujukuGetAllVariables\(\)\.stat_data/g) || []).length, 6, rw.text);
     assert.ok(rw.text.includes('getvar(key)'), '动态 getvar 不能冒险改写');
     assert.ok(report.manualReview.some(x => x.includes('getvar(key)')), '未识别动态数据入口必须进入人工报告');
+});
+
+test('EJS 安全补全：variables.stat_data 与明确 message 作用域 setvar 接管，其他 setvar 保留', () => {
+    const report = core.createReport();
+    const src = [
+        '<%= variables.stat_data.主角.姓名 %>',
+        "<% setvar('stat_data.主角.姓名', makeName('甲', { x: 1 }), { outscope: 'message' }); %>",
+        "<% setvar('stat_data.主角.修为', 10, { outscope: 'local' }); %>",
+        "<% setvar('stat_data.主角.修为', 20, { outscope: 'message', flags: 'xx' }); %>",
+        "<% setvar(dynamicPath, 30, { outscope: 'message' }); %>",
+        '<%= obj.variables.stat_data %>',
+    ].join('\n');
+    const rw = core.rewriteEjsConditions(src, { entries: [] }, report);
+    assert.ok(rw.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.姓名'), '裸 variables.stat_data 应改为数据库读取');
+    assert.ok(rw.text.includes("mvu2shujukuSetMessageVar('stat_data.主角.姓名', makeName('甲', { x: 1 }))"), '明确 message 作用域且默认语义的 setvar 应改写');
+    assert.ok(rw.text.includes("setvar('stat_data.主角.修为', 10, { outscope: 'local' })"), 'local setvar 不得接管');
+    assert.ok(rw.text.includes("setvar('stat_data.主角.修为', 20, { outscope: 'message', flags: 'xx' })"), '带条件写入语义的 setvar 不得冒险接管');
+    assert.ok(rw.text.includes('setvar(dynamicPath'), '动态路径 setvar 不得接管');
+    assert.ok(rw.text.includes('obj.variables.stat_data'), '对象自身的 variables 属性不得误改');
+    assert.ok(report.manualReview.some(x => x.includes("flags: 'xx'")), '未安全改写的显式 stat_data setvar 应进入人工报告');
 });
 
 test('EJS 兼容端到端：改写后的 if 从数据库重建 stat_data 并得到与原模板一致的输出', () => {
