@@ -1140,6 +1140,86 @@ test('开局按当前分支注入 <initvar>：切到另一分支后表格更新�
     assert.strictEqual(zj.content[1][ki], '金丹一层', '分支2注入后修为应为金丹一层');
 });
 
+test('单例容器列不覆盖展平字段；空动态字典用其它分支样本推断标量列', async () => {
+    const init1 = {
+        主角: {
+            资产: { 场币: 15000, 仓库: {}, 装备: { 头盔: '(绿)头盔' } },
+            状态: { 生命值百分比: 100, BUFF列表: {} },
+        },
+    };
+    const init2 = {
+        主角: {
+            资产: { 场币: 25000, 仓库: { '(金)仿生外骨骼触手': 1 }, 装备: { 头盔: '无' } },
+            状态: { 生命值百分比: 80, BUFF列表: { 流血: true } },
+        },
+    };
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '容器测试卡',
+            description: '',
+            first_mes: '开场\n<initvar>\n' + JSON.stringify(init1) + '\n</initvar>',
+            alternate_greetings: ['开场2\n<initvar>\n' + JSON.stringify(init2) + '\n</initvar>'],
+            character_book: { entries: [] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const lm = r.bridgeScript.match(/var SD_LAYOUT=(\[.*?\]);/);
+    assert.ok(lm, '桥脚本应包含 SD_LAYOUT');
+    const layout = JSON.parse(lm[1]);
+    const zjLayout = layout.find(e => e.table === '主角表');
+    assert.ok(zjLayout, '应有主角表布局');
+    assert.ok(!zjLayout.cols.some(c => c[0] === '资产' || c[0] === '状态'), '不应生成空的容器列（资产/状态），否则读回时会覆盖展平对象');
+    assert.ok(zjLayout.cols.some(c => c[0] === '资产_场币'), '展平列名应带下划线：资产_场币');
+    assert.ok(zjLayout.cols.some(c => c[0] === '资产_装备_头盔'), '展平列名应带下划线：资产_装备_头盔');
+    const tables = JSON.parse(JSON.stringify(r.template));
+    const stat0 = core.statDataFromTables(layout, tables).stat_data;
+    assert.strictEqual(stat0.主角.资产.场币, 15000, '资产.场币 应来自展平列');
+    assert.strictEqual(stat0.主角.资产.装备.头盔, '(绿)头盔', '资产.装备.头盔 应来自展平列');
+    assert.strictEqual(stat0.主角.状态.生命值百分比, 100, '状态.生命值百分比 应来自展平列');
+    assert.deepStrictEqual(stat0.主角.状态.BUFF列表, {}, '状态.BUFF列表 应保持空字典');
+    const ckLayout = layout.find(e => e.table === '主角_资产_仓库表');
+    assert.ok(ckLayout, '应有仓库子表布局');
+    assert.strictEqual(ckLayout.scalarValueCol, '数值', '空动态字典应按其它分支样本推断数值标量列');
+    const buffLayout = layout.find(e => e.table === '主角_状态_BUFF列表表');
+    assert.ok(buffLayout, '应有 BUFF列表子表布局');
+    assert.strictEqual(buffLayout.scalarValueCol, '数值', '空动态字典应按其它分支样本推断布尔标量列');
+    const buffCol = buffLayout.cols.find(c => c[0] === '数值');
+    assert.ok(buffCol && buffCol[1] === 'boolean', '布尔标量列类型应为 boolean');
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        updateCell: async (tableName, rowIndex, col, value) => {
+            const sheet = Object.values(tables).find(x => x && x.name === tableName);
+            if (!sheet || !sheet.content[rowIndex]) return false;
+            const ci = sheet.content[0].indexOf(col);
+            if (ci === -1) return false;
+            sheet.content[rowIndex][ci] = value;
+            return true;
+        },
+        insertRow: async (tableName, obj) => {
+            const sheet = Object.values(tables).find(x => x && x.name === tableName);
+            if (!sheet) return 0;
+            const row = sheet.content[0].map(h => '');
+            for (const k of Object.keys(obj)) {
+                const ci = sheet.content[0].indexOf(k);
+                if (ci >= 0) row[ci] = obj[k];
+            }
+            row[0] = sheet.content.length || 1;
+            sheet.content.push(row);
+            return row[0];
+        },
+        deleteRow: async () => true,
+        updateRow: async () => false,
+    };
+    const n = await core.writeStatDiffToDb(fakeApi, layout, stat0, init2);
+    assert.ok(n > 0, '分支2注入应产生差异写入');
+    const stat2 = core.statDataFromTables(layout, tables).stat_data;
+    assert.strictEqual(stat2.主角.资产.仓库['(金)仿生外骨骼触手'], 1, '仓库标量条目应写为数字并读回数字');
+    assert.strictEqual(stat2.主角.资产.场币, 25000, '资产.场币 应更新为分支2值');
+    assert.strictEqual(stat2.主角.状态.BUFF列表.流血, true, 'BUFF列表布尔条目应读回 true');
+});
+
 test('行表条目内的空嵌套对象不再拆出每条目重复子表', () => {
     const card = {
         spec: 'chara_card_v3',
@@ -2646,7 +2726,8 @@ test('转换产物齐全', () => {
     const c = r.card.data || r.card;
     assert.ok((c.extensions.tavern_helper.scripts || []).some(s => /数据桥/.test(s.name)), '应有数据桥脚本');
     assert.ok((c.extensions.regex_scripts || []).some(rx => /不发送.*变量更新/.test(rx.scriptName)), '只隐藏更新块的空替换正则应保留');
-    assert.ok(!(c.extensions.regex_scripts || []).some(rx => /美化.*变量更新/.test(rx.scriptName)), 'MVU 更新块美化正则仍应移除');
+    assert.ok((c.extensions.regex_scripts || []).some(rx => /美化.*变量更新中/.test(rx.scriptName)), '折叠显示类 MVU 更新块清理正则（美化-加载中）应保留');
+    assert.ok((c.extensions.regex_scripts || []).some(rx => /美化.*完整变量更新/.test(rx.scriptName)), '折叠显示类 MVU 更新块清理正则（美化-完整块）应保留');
     assert.ok((c.extensions.regex_scripts || []).some(rx => rx.scriptName === 'XML状态栏'), '非 MVU 显示正则应保留');
     assert.ok(c.extensions.mvu2shujuku, '应有转换标记');
     assert.ok(typeof c.extensions.mvu2shujuku.layout === 'string' && Array.isArray(JSON.parse(c.extensions.mvu2shujuku.layout)), '转换标记应包含布局（供扩展重建 stat_data）');
@@ -2663,6 +2744,35 @@ test('转换产物齐全', () => {
     assert.ok(typeof tplEntry.content === 'string' && tplEntry.content.length > 100, '模板条目内容应为 base64');
     assert.strictEqual(tplEntry.enabled, false, '模板条目应默认禁用（世界书绿灯关闭），仅作数据载体');
     assert.strictEqual(String(c.first_mes || ''), String((card.data || card).first_mes || ''), '开场白应保持原样（不注入脚本，纯文字开场白可用）');
+});
+
+test('折叠显示类 MVU 更新块清理正则也保留', () => {
+    const card = requireFixture();
+    const data = JSON.parse(JSON.stringify(card.data || card));
+    data.extensions = data.extensions || {};
+    data.extensions.regex_scripts = [
+        {
+            scriptName: '[折叠]变量更新中',
+            findRegex: '/<(update(?:variable)?)>(?!.*<\\/\\1>)\\s*((?:(?!<\\1>).)*)\\s*$/gsi',
+            replaceString: '<details>\n<summary>变量更新中</summary>\n$2\n</details>',
+        },
+        {
+            scriptName: '[折叠]完整变量更新',
+            findRegex: '/<(update(?:variable)?)>\\s*((?:(?!<\\1>).)*)\\s*<\\/\\1>/gsi',
+            replaceString: '<details>\n<summary>变量更新情况</summary>\n$2\n</details>',
+        },
+        {
+            scriptName: '[美化]变量更新',
+            findRegex: '/<UpdateVariable>[\\s\\S]*?<\\/UpdateVariable>/gi',
+            replaceString: '<script>Mvu.getMvuData()</script>',
+        },
+    ];
+    const r = core.convert({ spec: 'chara_card_v3', data }, { mode: 'both' });
+    const out = r.card.data || r.card;
+    const rx = out.extensions.regex_scripts || [];
+    assert.ok(rx.some(x => x.scriptName === '[折叠]变量更新中'), '折叠显示类清理正则（流式未闭合块）应保留');
+    assert.ok(rx.some(x => x.scriptName === '[折叠]完整变量更新'), '折叠显示类清理正则（完整块）应保留');
+    assert.ok(!rx.some(x => x.scriptName === '[美化]变量更新'), '带 MVU API 的美化正则仍应移除');
 });
 
 test('native / sqlite 单模式', () => {

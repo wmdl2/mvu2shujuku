@@ -1,5 +1,5 @@
 // MVU转数据库 · SillyTavern 原生扩展
-// 生成自 转换器/src/mvu2shujuku.js（0.2.9），核心源码内联如下
+// 生成自 转换器/src/mvu2shujuku.js（0.2.11），核心源码内联如下
 // @ts-nocheck
 (function (root) {
 /*
@@ -17,7 +17,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.2.9';
+    const VERSION = '0.2.11';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -1373,6 +1373,9 @@
     function scanGreetingShapeVariation(data, extraBranchSources = []) {
         const dynamicPaths = new Set();
         const dynamicGroups = new Set();
+        // 动态键路径 → 第一个非空样本值（供“首个分支为空字典、其他分支才有条目”的
+        // 动态字典做结构/标量类型推断，例如 仓库 首分支为 {} 但次分支为 {物品: 数量}）。
+        const samples = new Map();
         const sources = [
             data.first_mes,
             ...(Array.isArray(data.alternate_greetings) ? data.alternate_greetings : []),
@@ -1387,7 +1390,7 @@
                 if (p && typeof p === 'object' && !Array.isArray(p)) parsedList.push(p);
             } catch (e) {}
         }
-        if (parsedList.length < 2) return { dynamicPaths, dynamicGroups };
+        if (parsedList.length < 2) return { dynamicPaths, dynamicGroups, samples };
         const keySets = new Map(); // path -> Map<keySetStr, count>
         const walk = (obj, path) => {
             for (const k of Object.keys(obj)) {
@@ -1396,6 +1399,7 @@
                 const p = path.concat([k]);
                 const keyStr = Object.keys(v).sort().join('\u0000');
                 const pStr = p.join('.');
+                if (Object.keys(v).length > 0 && !samples.has(pStr)) samples.set(pStr, v);
                 if (!keySets.has(pStr)) keySets.set(pStr, new Map());
                 const m2 = keySets.get(pStr);
                 m2.set(keyStr, (m2.get(keyStr) || 0) + 1);
@@ -1412,7 +1416,7 @@
                 if (pStr.indexOf('.') >= 0) dynamicPaths.add(pStr);
             }
         }
-        return { dynamicPaths, dynamicGroups };
+        return { dynamicPaths, dynamicGroups, samples };
     }
 
     // 从 YAML 片段提取 “- xxx” 列表项
@@ -2156,7 +2160,7 @@
                 // 容器内若还混有静态叶子，仍展平成父表列并保留完整 path；动态子表本身
                 // 已经由共享 childTables 收集，不会出现在 nested 中。
                 for (const c of nested) {
-                    c.zh = key + c.zh;
+                    c.zh = `${key}_${c.zh}`;
                     c.ident = toIdent(c.zh, usedIdents, 'column');
                     cols.push(c);
                 }
@@ -2192,11 +2196,11 @@
                 continue;
             }
             if (allLeaf) {
-                // 固定子对象 → 展平：key+子键
+                // 固定子对象 → 展平：key_子键（与其它展平列命名一致）
                 for (const subKey of Object.keys(v)) {
                     const sv = v[subKey];
                     const sli = leafInfo(sv);
-                    const flatZh = key + subKey;
+                    const flatZh = `${key}_${subKey}`;
                     cols.push({
                         zh: flatZh,
                         path: [...path, subKey],
@@ -2402,6 +2406,7 @@
         const dynamicDicts = (shapeInfo && shapeInfo.dynamicDicts) || {};
         const dynamicPaths = (shapeInfo && shapeInfo.dynamicPaths) || new Set();
         const dynamicGroups = (shapeInfo && shapeInfo.dynamicGroups) || new Set();
+        const dynamicPathSamples = (shapeInfo && shapeInfo.dynamicPathSamples) || new Map();
         const isDynamicPath = (pathArr) => {
             if (!Array.isArray(pathArr) || !pathArr.length) return false;
             if (dynamicPaths.has(pathArr.join('.'))) return true;
@@ -2940,10 +2945,22 @@
                         for (const k of Object.keys(sv)) nestedSubKeys.add(k);
                     }
                 }
+                // 容器字段（如 主角.资产/主角.状态）已经由展平列（资产_场币、状态_生命值百分比）
+                // 或子表（资产.仓库、状态.BUFF列表）表示时，不得再按 usage/shape 补一个
+                // 值为空的「容器列」。否则 statDataFromTables 读回时会把已重建好的嵌套对象
+                // 覆盖成空字符串，资产.场币/状态.生命值百分比 等标量字段全部丢失。
+                const representedContainerFields = new Set();
+                for (const c of columns) {
+                    if (c.path && c.path.length > 1 && c.path[0] === groupName) representedContainerFields.add(c.path[1]);
+                }
+                for (const ct of childTables) {
+                    if (ct.path && ct.path.length > 1 && ct.path[0] === groupName) representedContainerFields.add(ct.path[1]);
+                }
                 const usageFields = (usage[groupName] || []).filter(f => (
                     f !== keyCol &&
                     !groupNameSet.has(f) &&
                     !childTables.some(ct => ct.key === f) &&
+                    !representedContainerFields.has(f) &&
                     !nestedSubKeys.has(f) &&
                     !(isPlainObject(raw[f]) && Object.values(raw[f]).every(x => isLeaf(x)))
                 ));
@@ -2965,6 +2982,7 @@
                     f !== keyCol &&
                     !columns.some(c => c.zh === f) &&
                     !childTables.some(ct => ct.key === f) &&
+                    !representedContainerFields.has(f) &&
                     !nestedSubKeys.has(f)
                 ));
                 for (const f of shapeFieldsForSingleton) {
@@ -3128,32 +3146,46 @@
                 const fieldDescs = {};
                 let sawScalarEntries = false;
                 let sawObjectEntries = false;
-                let scalarIsNumber = false;
+                // 标量条目字典的值类型：number -> 数值列（INTEGER）；boolean -> 数值列
+                // （INTEGER，logicalType=boolean，读回 true/false）；string/mixed -> 描述列
+                // （TEXT）。mixed 时数值会按文本读回，形状保持 {键: 值} 且不丢“装备名”这类文本。
+                let scalarKind = '';
                 if (relationValueSchema && relationValueSchema.kind !== 'object') {
                     sawScalarEntries = true;
-                    scalarIsNumber = relationValueSchema.kind === 'number';
+                    scalarKind = relationValueSchema.kind === 'number' || relationValueSchema.kind === 'boolean' ? relationValueSchema.kind : 'text';
                 }
                 // 标量条目（如 世界系统.修仙秘闻: { 标题: 内容 }）的行表标记：
                 // 读回时还原为 {键: 标量}，写入时标量落在「描述/数值」列。
                 let ctScalarValueCol = '';
+                let inferOnly = false;
                 if (isPlainObject(ct.value)) {
+                    // 动态字典的首分支可能为空（如 仓库: {}），但其它分支有 {物品: 数量}。
+                    // 用非空样本推断标量/对象列和值类型；实际模板行仍保持首分支为空。
+                    let valueForInference = ct.value;
+                    if (ct.dynamic && Object.keys(ct.value).length === 0) {
+                        const samplePath = (ct.path || []).join('.');
+                        const sample = dynamicPathSamples.get(samplePath);
+                        if (sample && isPlainObject(sample) && Object.keys(sample).length > 0) {
+                            valueForInference = sample;
+                            inferOnly = true;
+                        }
+                    }
                     const sourceEntries = [];
                     if (ct.parentRows) {
-                        for (const parentKey of Object.keys(ct.value)) {
-                            const childDict = ct.value[parentKey];
+                        for (const parentKey of Object.keys(valueForInference)) {
+                            const childDict = valueForInference[parentKey];
                             if (!isPlainObject(childDict)) continue;
                             for (const entryName of Object.keys(childDict)) {
                                 sourceEntries.push({ parentKey, entryName, entry: childDict[entryName] });
                             }
                         }
                     } else {
-                        for (const entryName of Object.keys(ct.value)) sourceEntries.push({ parentKey: '', entryName, entry: ct.value[entryName] });
+                        for (const entryName of Object.keys(valueForInference)) sourceEntries.push({ parentKey: '', entryName, entry: valueForInference[entryName] });
                     }
                     for (const sourceEntry of sourceEntries) {
                         const { parentKey, entryName, entry } = sourceEntry;
                         if (!isPlainObject(entry)) {
                             sawScalarEntries = true;
-                            scalarIsNumber = scalarIsNumber || typeof entry === 'number';
                             entryRows.push({ [parentKeyCol]: parentKey, [rowsKeyCol]: entryName, value: entry, __scalar: true });
                             continue;
                         }
@@ -3188,6 +3220,14 @@
                             }
                         }
                         entryRows.push(row);
+                    }
+                    if (sawScalarEntries && !sawObjectEntries) {
+                        const scalarValues = entryRows.filter(r => r.__scalar).map(r => r.value).filter(v => v !== null && v !== undefined && v !== '');
+                        if (scalarValues.length) {
+                            scalarKind = scalarValues.every(v => typeof v === 'number') ? 'number'
+                                : scalarValues.every(v => typeof v === 'boolean') ? 'boolean'
+                                : scalarValues.every(v => typeof v === 'string') ? 'string' : 'mixed';
+                        }
                     }
                 }
                 for (const [subKey, node] of Object.entries(shapeObjectSchemas[ct.key] || {})) {
@@ -3229,7 +3269,7 @@
                     ident: toIdent('描述', used, 'column'),
                 });
                 if (sawScalarEntries) {
-                    const scalarZh = scalarIsNumber ? '数值' : '描述';
+                    const scalarZh = (scalarKind === 'number' || scalarKind === 'boolean') ? '数值' : '描述';
                     ctScalarValueCol = scalarZh;
                     // 标量条目的值补进「描述/数值」列（此前只挂在 r.value 上，
                     // 建行时取 r[列名] 取不到，值会静默丢失）。
@@ -3238,12 +3278,13 @@
                     }
                     if (!columns.some(c => c.zh === scalarZh)) {
                         columns.push({
-                        zh: scalarZh,
-                        path: [...ct.path, scalarZh],
-                        itemPath: [scalarZh],
+                            zh: scalarZh,
+                            path: [...ct.path, scalarZh],
+                            itemPath: [scalarZh],
                             value: '',
-                            desc: scalarIsNumber ? '条目数值' : '条目描述',
-                            type: scalarIsNumber ? 'INTEGER' : 'TEXT',
+                            desc: scalarKind === 'number' ? '条目数值' : scalarKind === 'boolean' ? '条目布尔值（1=true，0=false）' : scalarKind === 'mixed' ? '条目值（文本与数字混合，统一按文本读写）' : '条目描述',
+                            type: (scalarKind === 'number' || scalarKind === 'boolean') ? 'INTEGER' : 'TEXT',
+                            logicalType: scalarKind === 'boolean' ? 'boolean' : '',
                             range: null,
                             ident: toIdent(scalarZh, used, 'column'),
                         });
@@ -3264,6 +3305,7 @@
                         jsonKind: 'object',
                     });
                 }
+                if (inferOnly) entryRows.length = 0;
                 const rows = entryRows.map(r => {
                     const rowArr = [r.__rowId || (columns.length + 1)];
                     for (const c of columns) {
@@ -4370,6 +4412,11 @@
                     if (c[0] === '_扩展数据') continue;
                     const vj = idxs[j] >= 0 ? row[idxs[j]] : undefined;
                     const cp = c.length > 3 && c[3] && c[3].length ? c[3] : [L.group, c[0]];
+                    // 兼容旧布局里值为空的容器列（如 主角.资产）：它只是“该对象已拆
+                    // 列/子表”的占位，不应覆盖前面已经重建好的嵌套对象，否则
+                    // 资产.场币/状态.生命值百分比 等标量字段会全部丢失。
+                    const existingAt = getPath(sd, cp);
+                    if (existingAt && typeof existingAt === 'object' && !Array.isArray(existingAt) && (vj === undefined || vj === null || vj === '')) continue;
                     setPath(sd, cp, convertCell(c[1], vj, c[2], c[5]));
                 }
                 const sovIdx = header.indexOf('_扩展数据');
@@ -7119,14 +7166,22 @@
         return /format_message_variable|status_current_variables|<UpdateVariable\b/i.test(content);
     }
 
-    // 这类正则不负责运行 MVU，只在显示/提示词阶段把原始更新块隐藏起来。
+    // 这类正则不负责运行 MVU，只在显示/提示词阶段把原始更新块隐藏或折叠起来。
     // 转换后的桥仍需从原始楼层读取 <initvar>/<UpdateVariable>，所以既不能删原始块，
-    // 也不能删掉负责遮蔽它们的空替换正则。
+    // 也不能删掉负责遮蔽/折叠它们的显示层清理正则。
+    // 两种安全形态：
+    //   1. 空替换：把原始更新块从显示中移除；
+    //   2. 折叠替换：用 <details>/<summary> 等静态 HTML 包住匹配到的更新块（$1/$2），
+    //      不含脚本、MVU API、变量宏或事件逻辑，只影响显示。
     function isMvuBlockCleanupRegex(r) {
         const find = String(r && r.findRegex || '');
         const replacement = String(r && r.replaceString || '');
-        return replacement === '' &&
-            /update(?:\\?\(\?:variable\\?\)|variable)|json_?patch|status_current_variables?/i.test(find);
+        const targetsUpdateBlock = /update(?:variable)?|json_?patch|status_current_variables?/i.test(find);
+        if (!targetsUpdateBlock) return false;
+        if (replacement === '') return true;
+        return /<(?:details|summary|div|span|section)[\s>]/i.test(replacement) &&
+            /\$\d/.test(replacement) &&
+            !/<script|javascript:|Mvu\s*\.|format_message_variable|status_current_variables|get_message_variable|eventOn|eventSource|=>|function\s*\(/i.test(replacement);
     }
 
     function isMvuScriptContent(content) {
@@ -7418,6 +7473,7 @@
             const gv = scanGreetingShapeVariation(data, branchEntrySources.map(e => String(e.content || '')));
             for (const dp of gv.dynamicPaths) shapeInfo.dynamicPaths.add(dp);
             for (const dg of gv.dynamicGroups) shapeInfo.dynamicGroups.add(dg);
+            shapeInfo.dynamicPathSamples = gv.samples || new Map();
             if (shapeInfo.dynamicPaths.size || Object.keys(shapeInfo.dynamicDicts || {}).length) {
                 const dynDescs = [];
                 for (const g of Object.keys(shapeInfo.dynamicDicts || {})) {
@@ -7560,7 +7616,8 @@
             const name = String(r.scriptName || '');
             if (isMvuBlockCleanupRegex(r)) {
                 keptRegexes.push(deepClone(r));
-                report.note(`已保留 MVU 标签清理正则「${name}」：它只隐藏原始更新块，不负责执行 MVU；数据库桥仍从原始楼层读取分支初始化/更新。`);
+                const cleanupKind = String(r.replaceString || '') === '' ? '隐藏' : '折叠显示';
+                report.note(`已保留 MVU 标签清理正则「${name}」：它只${cleanupKind}原始更新块，不负责执行 MVU；数据库桥仍从原始楼层读取分支初始化/更新。`);
                 continue;
             }
             if (isMvuRegex(r)) {
