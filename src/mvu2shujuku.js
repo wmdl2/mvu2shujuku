@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.2.11';
+    const VERSION = '0.2.13';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -305,12 +305,23 @@
      * 使用内联的同款库（yaml@2.8 / json5@2.2 / jsonrepair@3.13），
      * 支持注释、行内对象、中英混合键、merge keys、成对数组等全部官方写法。
      * ================================================================ */
+    // 容错作者写错的 `key:{{user}}` / `key:<USER>`（冒号后没空格）：YAML 会把整行
+    // 当成列名而不是“键: 宏值”，导致宏进入固定列名、自动初始化被“固定列名不支持宏”拦掉。
+    // 这里只在宏值前补一个空格，不影响正常 YAML/JSON 写法。
+    function normalizeNoSpaceMacroValues(text) {
+        return String(text || '').replace(
+            /^([ \t]*)([\u4e00-\u9fffA-Za-z_$][\u4e00-\u9fff\w$]*):(\{\{[\s\S]*?\}\}|<[A-Za-z][^>\n]*>)/gm,
+            '$1$2: "$3"'
+        );
+    }
+
     function parseInitVar(content) {
         const text = String(content || '').replace(/^\uFEFF/, '');
-        const trimmed = text.trim();
+        const jsonFirst = /^[[{]/s.test(text.trim());
+        const normalized = jsonFirst ? text : normalizeNoSpaceMacroValues(text);
+        const trimmed = normalized.trim();
         if (!trimmed) return {};
         const libs = getMvuYamlLibs();
-        const jsonFirst = /^[[{]/s.test(trimmed);
         const parseYaml = () => libs.YAML.parseDocument(trimmed, { merge: true }).toJS();
         try {
             if (jsonFirst) throw new Error('json-first');
@@ -1702,6 +1713,10 @@
         let pendingField = null;
         let pendingFieldDynamic = false;
         const collectDepth = () => (hasDynamicKey ? 2 : 1);
+        const RESERVED_SCHEMA_TYPE_NAMES = new Set([
+            'string', 'number', 'boolean', 'object', 'array', 'any', 'unknown',
+            'never', 'void', 'null', 'undefined', 'integer', 'bigint', 'symbol',
+        ]);
         function flushField() {
             const t = buf.trim();
             buf = '';
@@ -1710,8 +1725,12 @@
             // 逐段提取，不能只取第一段（否则对象值动态字典的条目字段只建出第一列）。
             const segments = String(t).split(/[;,]/).map(s => s.trim()).filter(Boolean);
             for (const seg of segments) {
+                // `[货币名: string]: number` / `[物品名: string]: {...}` 是动态字典声明，
+                // 值类型 number/string 不是字段名，不能收进 shapes。
+                if (/^\[.*?\]\s*:/.test(seg)) continue;
                 let name = seg.replace(/^\[.*?\]\s*:\s*/, '').trim();
                 name = name.split(':')[0].replace(/^["']|["']$/g, '').trim();
+                if (RESERVED_SCHEMA_TYPE_NAMES.has(name)) continue;
                 if (name && isSchemaFieldName(name) && !fields.includes(name)) fields.push(name);
             }
         }
@@ -3561,6 +3580,21 @@
     // ident、也没有消歧机制。转换器在生成模板前做同款消歧：后出现的冲突列名追加
     // 数字后缀（山西→山西2），读回路径（c.path）保持原中文 → stat_data 形状不变；
     // 桥写库与 AI 填表按新列名流转，DDL 注释与表头保持逐字一致。
+    function sanitizeMacroColumnZh(zh) {
+        // 兜底：即使 initvar/规则解析后仍有宏进入列名，也必须在生成模板前清洗，
+        // 否则自动初始化会被“固定列名不支持运行时宏”拦截。
+        const orig = String(zh == null ? '' : zh);
+        let cleaned = orig
+            .replace(/<[^>]*>/g, '')
+            .replace(/\{\{[\s\S]*?\}\}/g, '')
+            .replace(/[:\s]+/g, '_')
+            .replace(/_+/g, '_')
+            .replace(/^_+|_+$/g, '') || '字段';
+        // 保留 _ 前缀内部状态列（_扩展数据 等），不能被清洗成普通列名。
+        if (orig.startsWith('_') && !cleaned.startsWith('_')) cleaned = '_' + cleaned;
+        return cleaned;
+    }
+
     function disambiguateColumnSlugs(groups, report) {
         const pluginSlug = (zh) => {
             let out = '';
@@ -3583,8 +3617,9 @@
         for (const g of groups) {
             const used = new Set(['row_id']);
             for (const c of g.columns || []) {
-                let zh = String(c.zh == null ? '' : c.zh);
+                let zh = sanitizeMacroColumnZh(c.zh);
                 if (!zh) { c.zh = '列'; zh = '列'; }
+                if (zh !== String(c.zh == null ? '' : c.zh)) c.zh = zh;
                 const slug = pluginSlug(zh);
                 if (!used.has(slug)) {
                     used.add(slug);
@@ -3677,15 +3712,38 @@
             const range = c.range || null;
             const extras = Array.isArray(group.extraAllowed && group.extraAllowed[c.ident]) ? group.extraAllowed[c.ident] : [];
             let dv = c.value;
-            // 默认值若越界也加入放行列表（不修改初始值）
-            if (range && typeof dv === 'number' && (dv < range[0] || dv > range[1]) && !extras.includes(dv)) extras.push(dv);
+            // 默认值若越界也加入放行列表（不修改初始值）；非数字哨兵（如“无”）同样放行
+            if (range) {
+                if (typeof dv === 'number' && (dv < range[0] || dv > range[1]) && !extras.includes(dv)) extras.push(dv);
+                if (typeof dv === 'string') {
+                    const nv = Number(dv);
+                    const numericInRange = dv.trim() !== '' && Number.isFinite(nv) && nv >= range[0] && nv <= range[1];
+                    if (!numericInRange) {
+                        const allowedVal = dv.trim() !== '' && Number.isFinite(nv) ? nv : dv;
+                        if (!extras.includes(allowedVal)) extras.push(allowedVal);
+                    }
+                }
+            }
             if (c.type === 'INTEGER') {
-                const num = dv === undefined || dv === null || dv === '' ? 0 : Number(dv);
-                def += ` NOT NULL DEFAULT ${Number.isFinite(num) ? num : 0}`;
+                let defaultExpr = 0;
+                if (typeof dv === 'number' && Number.isFinite(dv)) {
+                    defaultExpr = dv;
+                } else if (typeof dv === 'string' && dv.trim() !== '') {
+                    const nv = Number(dv);
+                    defaultExpr = Number.isFinite(nv) ? nv : `'${sqlQuote(dv)}'`;
+                } else if (range) {
+                    // 空/缺省值不能用 0 做默认，否则 CHECK(1~100) 会在 INSERT 省略该列时失败；
+                    // 改为合法区间下限作为安全默认。
+                    defaultExpr = range[0];
+                }
+                def += ` NOT NULL DEFAULT ${defaultExpr}`;
                 if (isKey) def += ' UNIQUE';
                 if (range && includeCheck) {
                     def += ` CHECK(${c.ident} BETWEEN ${range[0]} AND ${range[1]}`;
-                    if (extras.length) def += ` OR ${c.ident} IN (${extras.join(', ')})`;
+                    if (extras.length) {
+                        const allowed = extras.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`);
+                        def += ` OR ${c.ident} IN (${allowed.join(', ')})`;
+                    }
                     def += ')';
                 }
             } else {
@@ -4065,6 +4123,14 @@
                     const v = r[ci + 1];
                     if (c.range && typeof v === 'number' && (v < c.range[0] || v > c.range[1])) {
                         if (!extraAllowed[c.ident].includes(v)) extraAllowed[c.ident].push(v);
+                    }
+                    if (c.range && typeof v === 'string') {
+                        const nv = Number(v);
+                        const numericInRange = v.trim() !== '' && Number.isFinite(nv) && nv >= c.range[0] && nv <= c.range[1];
+                        if (!numericInRange) {
+                            const allowedVal = v.trim() !== '' && Number.isFinite(nv) ? nv : v;
+                            if (!extraAllowed[c.ident].includes(allowedVal)) extraAllowed[c.ident].push(allowedVal);
+                        }
                     }
                     if (c.enum && c.enum.length && typeof v === 'string' && !c.enum.includes(v)) {
                         if (!extraAllowed[c.ident].includes(v)) extraAllowed[c.ident].push(v);

@@ -2775,6 +2775,124 @@ test('折叠显示类 MVU 更新块清理正则也保留', () => {
     assert.ok(!rx.some(x => x.scriptName === '[美化]变量更新'), '带 MVU API 的美化正则仍应移除');
 });
 
+test('INTEGER range 初始值为非数字哨兵时 DDL 放行且默认值保留哨兵', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '哨兵卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '角色:\n  姓名: 无名\n  天赋:\n    等级: 无' },
+                    { comment: '[mvu_update]变量更新规则', content: '变量更新规则:\n  角色:\n    天赋:\n      等级:\n        type: number\n        range: 1~100' },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const t = Object.values(r.template).find(s => s && s.name === '角色表');
+    assert.ok(t, '应有角色表');
+    assert.ok(t.sourceData.ddl.includes("tianfu_dengji INTEGER NOT NULL DEFAULT '无' CHECK(tianfu_dengji BETWEEN 1 AND 100 OR tianfu_dengji IN ('无'))"), '非数字哨兵应作为默认值并在 CHECK 中放行');
+});
+
+test('INTEGER range 空表默认值不应违反 CHECK', () => {
+    const schema = [{
+        name: '宠物',
+        tableName: '角色_宠物表',
+        ident: 'juese_chongwubiao',
+        kind: 'rows',
+        keyCol: '键名',
+        keyValue: '',
+        columns: [
+            { zh: '键名', path: ['角色', '宠物'], value: '', desc: '', type: 'TEXT', ident: 'jianming' },
+            { zh: '等级', path: ['角色', '宠物', '等级'], value: '', desc: '', type: 'INTEGER', range: [1, 100], ident: 'dengji' },
+            { zh: '_扩展数据', path: ['角色', '宠物', '_扩展数据'], value: '', desc: '', type: 'TEXT', isObject: true, jsonKind: 'object', ident: 'kuozhanshuju' },
+        ],
+        rows: [],
+        childTables: [],
+        source: 'test',
+        reminders: [],
+    }];
+    const r = core.generateTemplate(schema, { mode: 'both' });
+    const t = r['sheet_juese_chongwubiao'];
+    assert.ok(t, '应生成宠物表模板');
+    assert.ok(t.sourceData.ddl.includes('dengji INTEGER NOT NULL DEFAULT 1 CHECK(dengji BETWEEN 1 AND 100'), '空表数值 range 默认值应取区间下限，避免 DEFAULT 0 违反 CHECK');
+});
+
+test('initvar 容错 key:{{user}} 无空格，不把宏带进列名', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '宏值卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '角色:\n  姓名: 无名\n  ID:\n    真名:{{user}}' },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const init = card.data.character_book.entries[0].content;
+    const parsed = core.parseInitVar(init);
+    assert.strictEqual(parsed.角色.ID.真名, '{{user}}', '无空格宏值应解析为 真名 字段的值');
+    const r = core.convert(card, { mode: 'both' });
+    const t = Object.values(r.template).find(s => s && s.name === '角色表');
+    assert.ok(t, '应有角色表');
+    assert.ok(t.content[0].includes('ID_真名'), '列名应为 ID_真名');
+    assert.ok(!t.content[0].some(h => /\{\{[\s\S]*?\}\}/.test(String(h))), '表头不应含宏');
+    const ci = t.content[0].indexOf('ID_真名');
+    assert.strictEqual(t.content[1][ci], '{{user}}', '宏值应保留在单元格中');
+});
+
+test('宏列名兜底清洗：即使解析后仍有宏列名也会被 sanitize', () => {
+    const init = { 角色: { 姓名: '无名', ID: { '真名:{{user}}': null } } };
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '宏列名兜底卡',
+            description: '',
+            first_mes: '你好',
+            character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify(init) }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const t = Object.values(r.template).find(s => s && s.name === '角色表');
+    assert.ok(t, '应有角色表');
+    assert.ok(t.content[0].includes('ID_真名'), '宏列名应清洗为 ID_真名');
+    assert.ok(!t.content[0].some(h => /\{\{[\s\S]*?\}\}/.test(String(h))), '清洗后表头不应含宏');
+});
+
+test('动态字典值类型 number 不残留为字段列（YAML 回退路径）', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '动态类型回退卡',
+            description: '',
+            first_mes: '你好',
+            character_book: {
+                entries: [
+                    { comment: '[InitVar]', content: '角色:\n  姓名: 无名\n  资源: {}' },
+                    {
+                        comment: '[mvu_update]变量更新规则',
+                        content: '变量更新规则:\n  世界:\n    天气:\n      format: \'晴朗\'|\'阴天\'|\'雨\'\n  角色:\n    资源:\n      type: |-\n        {\n          [货币名: string]: number;\n        }',
+                    },
+                ],
+            },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card, core.createReport());
+    assert.ok(!(si.shapes['角色'] || []).includes('number'), '动态字典值类型 number 不应作为角色字段');
+    const r = core.convert(card, { mode: 'both' });
+    const role = Object.values(r.template).find(s => s && s.name === '角色表');
+    assert.ok(role && !role.content[0].includes('number'), '角色表不应出现 number 残留列');
+});
+
 test('native / sqlite 单模式', () => {
     const card = requireFixture();
     const rn = core.convert(card, { mode: 'native' });
