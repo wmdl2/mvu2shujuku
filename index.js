@@ -452,20 +452,21 @@
         return bytes;
     }
 
-    // 从 PNG 字节解析角色卡
+    // 从 PNG 字节解析角色卡。v3 卡 PNG 同时含 chara 与 ccv3 文本块，SillyTavern
+    // 读取时 ccv3 优先（V3 takes precedence）——转换输入按同一优先级取卡，
+    // 才能保证“酒馆里看到的原卡”与“实际转换的数据”是同一份；仅含 chara 的
+    // 老卡与仅含 ccv3 的卡都兼容。
     function parseCardPng(buffer) {
         const chunks = readPngChunks(buffer);
-        for (const chunk of chunks) {
-            if (chunk.type !== 'tEXt' && chunk.type !== 'iTXt') continue;
+        const decodeTextChunk = (chunk) => {
             const nul = chunk.data.indexOf(0);
-            if (nul === -1) continue;
+            if (nul === -1) return null;
             const keyword = latin1ToString(chunk.data.slice(0, nul));
-            if (keyword !== 'chara') continue;
             const payload = chunk.data.slice(nul + 1);
             // iTXt: keyword\0 compression(1) method(1) language\0 translated\0 text
             let text;
             if (chunk.type === 'iTXt') {
-                if (payload[0] !== 0) throw new Error('chara iTXt 使用了压缩，暂不支持');
+                if (payload[0] !== 0) throw new Error(keyword + ' iTXt 使用了压缩，暂不支持');
                 // iTXt: compression_flag(1) compression_method(1) language\0 translated_keyword\0 text
                 let p = 2; // 跳过压缩标志与方法
                 while (p < payload.length && payload[p] !== 0) p++; // 跳过 language（空则立即停）
@@ -476,10 +477,21 @@
             } else {
                 text = latin1ToString(payload);
             }
-            const json = JSON.parse(atobSafe(text));
-            return { card: json, chunks, text };
+            return { keyword: keyword.toLowerCase(), text };
+        };
+        let charaText = null;
+        let ccv3Text = null;
+        for (const chunk of chunks) {
+            if (chunk.type !== 'tEXt' && chunk.type !== 'iTXt') continue;
+            const decoded = decodeTextChunk(chunk);
+            if (!decoded) continue;
+            if (decoded.keyword === 'ccv3' && ccv3Text === null) ccv3Text = decoded.text;
+            if (decoded.keyword === 'chara' && charaText === null) charaText = decoded.text;
         }
-        throw new Error('PNG 中未找到 chara 文本块');
+        const text = ccv3Text !== null ? ccv3Text : charaText;
+        if (text === null) throw new Error('PNG 中未找到 chara/ccv3 文本块');
+        const json = JSON.parse(atobSafe(text));
+        return { card: json, chunks, text };
     }
 
     function atobSafe(b64) {
@@ -502,7 +514,11 @@
         return typeof Buffer !== 'undefined' ? Buffer.from(String(str), 'utf8').toString('base64') : btoaSafe(str);
     }
 
-    // 把新角色卡写回 PNG（替换原 chara 块，无则插入 IEND 前）
+    // 把新角色卡写回 PNG（替换原 chara 块，无则插入 IEND 前）。
+    // v3 卡 PNG 同时含 chara（v2 数据）与 ccv3（v3 数据）两个文本块，而 SillyTavern
+    // 导入时 ccv3 优先（src/character-card-parser.js: V3 takes precedence）。只替换
+    // chara 会让酒馆读到 ccv3 里残留的原卡数据——下载导入后"卡名无后缀、世界书还是
+    // MVU 条目"。与酒馆自己的写卡策略一致（只写 chara，删除 ccv3 以免不一致）。
     function writeCardPng(originalBuffer, card) {
         const chunks = readPngChunks(originalBuffer);
         const charaText = btoaSafe(JSON.stringify(card));
@@ -513,22 +529,31 @@
             ? concatBytes(keyword, new Uint8Array([0]), hasBuffer ? Buffer.from(charaText, 'latin1') : new TextEncoder().encode(charaText))
             : concatBytes(keyword, new Uint8Array([0, 0, 0, 0, 0]), new TextEncoder().encode(charaText));
         const chunkData = buildChunk(type, payload);
+        const textKeyword = (chunk) => {
+            if (chunk.type !== 'tEXt' && chunk.type !== 'iTXt') return '';
+            const nul = chunk.data.indexOf(0);
+            if (nul === -1) return '';
+            // 不得用 bytes.toString('latin1')：浏览器端 chunk.data 是 Uint8Array，
+            // 其 toString 返回 "99,104,..." 永远匹配不上（Node Buffer 才支持编码参数），
+            // 会让 chara 替换与 ccv3 清理在扩展环境里全部失效。
+            return latin1ToString(chunk.data.slice(0, nul)).toLowerCase();
+        };
         const out = [];
         out.push(originalBuffer.slice(0, 8));
         let replaced = false;
         for (const chunk of chunks) {
+            const kw = textKeyword(chunk);
+            // ccv3 与多余的重复 chara 块一律移除：保留它们 = 给读卡方留下新旧数据不一致的入口
+            if (kw === 'ccv3' || (kw === 'chara' && replaced)) continue;
             // 无现有 chara 块时，把新块插在 IEND 之前（IEND 之后的块解析器读不到）
             if (chunk.type === 'IEND' && !replaced) {
                 out.push(chunkData);
                 replaced = true;
             }
-            if (!replaced && (chunk.type === 'tEXt' || chunk.type === 'iTXt')) {
-                const nul = chunk.data.indexOf(0);
-                if (nul !== -1 && chunk.data.slice(0, nul).toString('latin1') === 'chara') {
-                    out.push(chunkData);
-                    replaced = true;
-                    continue;
-                }
+            if (!replaced && kw === 'chara') {
+                out.push(chunkData);
+                replaced = true;
+                continue;
             }
             out.push(originalBuffer.slice(chunk.offset, chunk.offset + 12 + chunk.data.length));
         }

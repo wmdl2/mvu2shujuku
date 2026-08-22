@@ -3350,6 +3350,133 @@ test('PNG 解析 → 转换 → 回写 → 再解析', () => {
     assert.strictEqual(again.card.data.name, String(parsed.card.data.name) + '_数据库');
 });
 
+test('v3 双块卡（chara+ccv3）：读取按 ccv3 优先，回写移除 ccv3 与重复块（下载导入变原卡回归）', () => {
+    if (!fs.existsSync(PNG)) {
+        console.log('    （跳过：缺少 PNG 参考卡）');
+        return;
+    }
+    const buf = fs.readFileSync(PNG);
+    // fixture 本身就带 chara+ccv3 双块：先移除原 ccv3，再插入内容不同的“标记 ccv3”，
+    // 构造出两块内容可区分的双块卡
+    const crcTable = new Int32Array(256).map((_, n) => {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        return c;
+    });
+    const crc32 = (bytes) => {
+        let c = -1;
+        for (const b of bytes) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+        return (c ^ -1) >>> 0;
+    };
+    const chunkKeyword = (src, off) => {
+        const l = src.readUInt32BE(off);
+        const t = src.toString('ascii', off + 4, off + 8);
+        if (t !== 'tEXt' && t !== 'iTXt') return '';
+        const d = src.slice(off + 8, off + 8 + l);
+        const nul = d.indexOf(0);
+        return nul === -1 ? '' : d.slice(0, nul).toString('latin1').toLowerCase();
+    };
+    const removeTextChunks = (png, keyword) => {
+        const src = Buffer.from(png);
+        const parts = [src.slice(0, 8)];
+        let off = 8;
+        while (off < src.length) {
+            const l = src.readUInt32BE(off);
+            const t = src.toString('ascii', off + 4, off + 8);
+            if (t !== 'IEND' && chunkKeyword(src, off) === keyword) { off += 12 + l; continue; }
+            parts.push(src.slice(off, off + 12 + l));
+            off += 12 + l;
+            if (t === 'IEND') break;
+        }
+        return Buffer.concat(parts);
+    };
+    const insertTextChunkBefore = (png, keyword, b64Text) => {
+        const type = Buffer.from('tEXt', 'latin1');
+        const data = Buffer.concat([Buffer.from(keyword + '\0', 'latin1'), Buffer.from(b64Text, 'latin1')]);
+        const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([type, data])));
+        const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+        const chunk = Buffer.concat([len, type, data, crc]);
+        const src = Buffer.from(png);
+        let off = 8, iendAt = -1;
+        while (off < src.length) {
+            const l = src.readUInt32BE(off);
+            if (src.toString('ascii', off + 4, off + 8) === 'IEND') { iendAt = off; break; }
+            off += 12 + l;
+        }
+        assert.ok(iendAt > 0, '测试 PNG 应含 IEND');
+        return Buffer.concat([src.slice(0, iendAt), chunk, src.slice(iendAt)]);
+    };
+    const markerCard = { spec: 'chara_card_v3', spec_version: '3.0', data: { name: 'ccv3标记卡', description: '', first_mes: 'hi' } };
+    const dual = insertTextChunkBefore(removeTextChunks(buf, 'ccv3'), 'ccv3', Buffer.from(JSON.stringify(markerCard)).toString('base64'));
+    // 读取优先级：ccv3 优先（与 SillyTavern character-card-parser 一致）
+    const parsed = core.parseCardPng(dual);
+    assert.strictEqual(parsed.card.data.name, 'ccv3标记卡', '双块卡应按 ccv3 优先解析');
+    // 回写：替换 chara + 删除 ccv3/重复块，任何读卡方（含酒馆）都只能读到新卡
+    const out = core.writeCardPng(dual, markerCard);
+    const scan = [];
+    {
+        const src = Buffer.from(out);
+        let off = 8;
+        while (off < src.length) {
+            const l = src.readUInt32BE(off);
+            const t = src.toString('ascii', off + 4, off + 8);
+            if (t === 'tEXt' || t === 'iTXt') {
+                const d = src.slice(off + 8, off + 8 + l);
+                const kw = d.slice(0, d.indexOf(0)).toString('latin1');
+                scan.push(kw.toLowerCase());
+            }
+            off += 12 + l;
+            if (t === 'IEND') break;
+        }
+    }
+    assert.ok(!scan.includes('ccv3'), '回写后不得残留 ccv3 块（酒馆优先读 ccv3，残留=导入原卡）');
+    assert.strictEqual(scan.filter(k => k === 'chara').length, 1, '应恰好保留一个 chara 块');
+    const again = core.parseCardPng(out);
+    assert.strictEqual(again.card.data.name, 'ccv3标记卡', '回写后解析应得到写入的新卡');
+});
+
+test('仅 ccv3 的 v3 卡可解析并正确转换', () => {
+    if (!fs.existsSync(PNG)) {
+        console.log('    （跳过：缺少 PNG 参考卡）');
+        return;
+    }
+    const buf = fs.readFileSync(PNG);
+    // 从 fixture 生成一张只有 chara 的转换 PNG，再把 chara 复制为 ccv3 并删除原 chara：
+    // 直接用双块卡回写结果（ccv3 已删）不可行——这里手工构造仅 ccv3 的 PNG。
+    const crcTable = new Int32Array(256).map((_, n) => {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        return c;
+    });
+    const crc32 = (bytes) => {
+        let c = -1;
+        for (const b of bytes) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+        return (c ^ -1) >>> 0;
+    };
+    const mkTextChunk = (keyword, b64Text) => {
+        const type = Buffer.from('tEXt', 'latin1');
+        const data = Buffer.concat([Buffer.from(keyword + '\0', 'latin1'), Buffer.from(b64Text, 'latin1')]);
+        const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([type, data])));
+        const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+        return Buffer.concat([len, type, data, crc]);
+    };
+    const src = Buffer.from(buf);
+    let off = 8, sigEnd = -1;
+    const parts = [src.slice(0, 8)];
+    while (off < src.length) {
+        const l = src.readUInt32BE(off);
+        const t = src.toString('ascii', off + 4, off + 8);
+        if (t === 'IEND') { sigEnd = off; break; }
+        parts.push(src.slice(off, off + 12 + l));
+        off += 12 + l;
+    }
+    assert.ok(sigEnd > 0, '测试 PNG 应含 IEND');
+    const orig = core.parseCardPng(buf).card;
+    const ccv3Only = Buffer.concat([...parts, mkTextChunk('ccv3', Buffer.from(JSON.stringify(orig)).toString('base64')), src.slice(sigEnd)]);
+    const parsed = core.parseCardPng(ccv3Only);
+    assert.strictEqual(parsed.card.data.name, orig.data.name, '仅 ccv3 的卡应能解析');
+});
+
 test('JSON 输入 + asPng:true → 产出可解析的 PNG 卡（输出格式对 JSON 输入也生效）', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both', asPng: true });
@@ -3401,9 +3528,32 @@ test('浏览器环境（无 Buffer）PNG 回写正常', () => {
     const core = sandbox.MVU2SHUJUKU_CORE;
     const buf = fs.readFileSync(PNG);
     const parsed = core.parseCardPng(buf);
-    const out = core.writeCardPng(buf, parsed.card);
+    // 写入一张改名卡：若浏览器端关键字匹配失效（Uint8Array.toString('latin1')），
+    // 回写会退化为“尾部追加重复块”，重解析仍读到原 chara/ccv3——此断言即失败。
+    const renamed = JSON.parse(JSON.stringify(parsed.card));
+    renamed.data.name = '浏览器回写标记卡';
+    const out = core.writeCardPng(buf, renamed);
     const again = core.parseCardPng(out);
-    assert.strictEqual(again.card.data.name, parsed.card.data.name);
+    assert.strictEqual(again.card.data.name, '浏览器回写标记卡', '无 Buffer 环境必须真正替换 chara 块');
+    // 恰一个 chara 文本块、无 ccv3 残留
+    const scan = [];
+    {
+        const s = new Uint8Array(out);
+        let off = 8;
+        while (off + 12 <= s.length) {
+            const len = s[off] * 0x1000000 + s[off + 1] * 0x10000 + s[off + 2] * 0x100 + s[off + 3];
+            const t = String.fromCharCode(s[off + 4], s[off + 5], s[off + 6], s[off + 7]);
+            if (t === 'tEXt' || t === 'iTXt') {
+                let kw = '';
+                for (let i = off + 8; s[i] !== 0 && i < off + 8 + len; i++) kw += String.fromCharCode(s[i]);
+                scan.push(kw.toLowerCase());
+            }
+            off += 12 + len;
+            if (t === 'IEND') break;
+        }
+    }
+    assert.strictEqual(scan.filter(k => k === 'chara').length, 1, '应恰有一个 chara 块');
+    assert.ok(!scan.includes('ccv3'), '不得残留 ccv3 块');
 });
 
 /* ---------------- 扩展装配 ---------------- */
