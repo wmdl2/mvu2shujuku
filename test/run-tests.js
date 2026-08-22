@@ -900,6 +900,36 @@ test('writeStatDiffToDb：值未变化时跳过写入，不产生持久化', asy
     assert.strictEqual(crudCalls, 0, '不应调用任何逐条写入');
 });
 
+test('writeStatDiffToDb：布尔↔数字存储归一化不产生回声写（圣樱学院-RE 开场 19 条无效写回归）', async () => {
+    const layout = [
+        { kind: 'singleton', group: '校规', table: '校规表', keyCol: '名称', keyValue: '校规', cols: [['名称', 'text', '', '', '', ''], ['开关', 'boolean', '', '', '', '']], writePaths: [], mirrors: [] },
+        { kind: 'rows', group: '建筑', table: '地图_建筑表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['启用', 'boolean', '', '', '', '']], writePaths: [['建筑']], mirrors: [] },
+    ];
+    const tables = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_1: { name: '校规表', content: [['row_id', '名称', '开关'], [1, '校规', 1]] },
+        sheet_2: { name: '地图_建筑表', content: [['row_id', '名称', '启用'], [1, '宿舍', 1], [2, '操场', 0]] },
+    };
+    let crudCalls = 0;
+    const api = {
+        exportTableAsJson: () => tables,
+        updateCell: async () => { crudCalls++; return true; },
+        insertRow: async () => { crudCalls++; return 1; },
+        deleteRow: async () => { crudCalls++; return true; },
+    };
+    // prev = 运行时读回（SP 单元格里布尔已归一化为 1/0），target = 前端快照（布尔）
+    const prev = { 校规: { 开关: 1 }, 建筑: { 宿舍: { 启用: 1 }, 操场: { 启用: 0 } } };
+    const target = { 校规: { 开关: true }, 建筑: { 宿舍: { 启用: true }, 操场: { 启用: false } } };
+    const n = await core.writeStatDiffToDb(api, layout, prev, target);
+    assert.strictEqual(n, 0, '1↔true / 0↔false 是存储归一化差异，不应产生写入');
+    assert.strictEqual(crudCalls, 0, '不应调用任何逐条写入');
+    // 真实变化仍必须写入：操场 false → true
+    const target2 = { 校规: { 开关: true }, 建筑: { 宿舍: { 启用: true }, 操场: { 启用: true } } };
+    const n2 = await core.writeStatDiffToDb(api, layout, prev, target2);
+    assert.ok(n2 >= 1, 'false→true 是真实变化，应产生写入');
+    assert.ok(crudCalls >= 1, '真实变化应调用逐条写入');
+});
+
 test('writeStatDiffToDb：小批量（1~4 条）保持逐格增量写入，不触发批量', async () => {
     const layout = [
         { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前MC点', 'number', '', '', '', '']], writePaths: [], mirrors: [] },
