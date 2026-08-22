@@ -5183,9 +5183,17 @@
             return -1;
         };
         const sameValue = (a, b) => {
-            const sa = a === undefined || a === null ? '' : String(a);
-            const sb = b === undefined || b === null ? '' : String(b);
-            return sa === sb;
+            const na = a === undefined || a === null ? '' : a;
+            const nb = b === undefined || b === null ? '' : b;
+            // SP 单元格不能存布尔（SyncBridge 归一化 true→1/false→0），而快照/读回侧仍是
+            // 布尔。布尔与数字按数值等价比较，否则 1↔true 每轮都被判为差异，形成
+            // “写入 true → 存为 1 → 下轮再判差异”的回声（圣樱学院-RE 开场 19 条无效写）。
+            const aIsBool = typeof na === 'boolean';
+            const bIsBool = typeof nb === 'boolean';
+            if ((aIsBool || bIsBool) && (aIsBool || typeof na === 'number') && (bIsBool || typeof nb === 'number')) {
+                return Number(na) === Number(nb);
+            }
+            return String(na) === String(nb);
         };
         const ops = [];
         const collect = (prevObj, nextObj, pathStr) => {
@@ -10580,6 +10588,11 @@ ${DB_INIT_SNIPPET}
     async function waitRuntimeTablesReady(api, layoutEntries, timeoutMs) {
         const expected = new Set((Array.isArray(layoutEntries) ? layoutEntries : []).map(L => L.table));
         if (!expected.size) return true;
+        // 读侧规格（单例/JSON 表必须有数据行，tableSnapshotCoversLayout）在写侧只能作为
+        // 限时快速路径的加强条件：运行时会长期处于“仅表头 + seedRows/持久化帧待物化”
+        // 状态（新聊天 native 初始化、切换开场分支的重载窗口），写路径自身的补行与
+        // 持久化对账守卫才是这种状态下正确性的保障——硬性阻塞行校验会把 initvar 注入
+        // 永久挡在门外（v0.3.1 回归）。行未齐时最多再等 1.5s，超时后退回仅表名校验。
         const needRows = new Set();
         for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
             if ((L.kind === 'singleton' || L.kind === 'json') && L.table) needRows.add(String(L.table));
@@ -10593,6 +10606,9 @@ ${DB_INIT_SNIPPET}
             }
         } catch (e) {}
         const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+        const rowDeadline = Date.now() + 1500;
+        let missingNames = null;
+        let missingRows = null;
         while (Date.now() < deadline) {
             try {
                 const cur = api.exportTableAsJson() || {};
@@ -10600,16 +10616,32 @@ ${DB_INIT_SNIPPET}
                 for (const k in cur) {
                     if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) byName[String(cur[k].name)] = cur[k];
                 }
-                let allPresent = true;
-                for (const n of expected) {
-                    const sheet = byName[n];
-                    if (!sheet) { allPresent = false; break; }
-                    if (needRows.has(n) && (!Array.isArray(sheet.content) || sheet.content.length <= 1)) { allPresent = false; break; }
+                missingNames = [];
+                for (const n of expected) { if (!byName[n]) missingNames.push(n); }
+                if (missingNames.length) {
+                    await new Promise(res => hostWindow.setTimeout(res, 150));
+                    continue;
                 }
-                if (allPresent) return true;
-            } catch (e) {}
-            await new Promise(res => hostWindow.setTimeout(res, 150));
+                if (Date.now() >= rowDeadline) return true; // 表名齐全：行等待窗口已过，交由写路径守卫
+                missingRows = [];
+                for (const n of needRows) {
+                    const sheet = byName[n];
+                    if (sheet && (!Array.isArray(sheet.content) || sheet.content.length <= 1)) missingRows.push(n);
+                }
+                if (missingRows.length) {
+                    await new Promise(res => hostWindow.setTimeout(res, 150));
+                    continue;
+                }
+                return true;
+            } catch (e) {
+                await new Promise(res => hostWindow.setTimeout(res, 150));
+            }
         }
+        if (missingNames && !missingNames.length) {
+            dbg('[流程] 运行时表名齐全但单例/JSON 表缺数据行（' + (missingRows || []).slice(0, 6).join('、') + '），按仅表名就绪放行写路径（由补行/对账守卫兜底）。');
+            return true;
+        }
+        dbg('[流程] 运行时就绪等待超时：缺表=' + ((missingNames || expected).slice(0, 6).join('、') || '?'));
         return false;
     }
 
@@ -10985,7 +11017,42 @@ ${DB_INIT_SNIPPET}
                                 n = 1;
                                 dbg(' 开局整表初始化快速路径完成（一次整表原子提交，跳过逐格 CRUD）。');
                             } else {
-                                n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget, persistedForWrite);
+                                // 差异明细诊断：包一层 API 代理记录每个 CRUD 的表/行/列与前后值。
+                                // 用于排查“duplicate_snapshot 已判定快照相同、diff 却产生多条操作”的
+                                // 读回形状偏差（历史案例：圣樱学院-RE 开场最终快照 19 条逐格补写）。
+                                let diffApi = api;
+                                if (mvu2shujukuDebugOn() && api && typeof api.updateCell === 'function') {
+                                    const clip = (v) => { try { const s = typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v); return s.length > 60 ? s.slice(0, 60) + '…' : s; } catch (e) { return String(v); } };
+                                    const cellNow = (t, ri, col) => {
+                                        try {
+                                            const all = api.exportTableAsJson() || {};
+                                            const s = Object.values(all).find(x => x && x.name === t);
+                                            const row = s && Array.isArray(s.content) ? s.content[ri] : null;
+                                            const hdr = s && s.content ? s.content[0] : [];
+                                            const ci = hdr.indexOf(col);
+                                            return row && ci >= 0 ? clip(row[ci]) : '(定位失败)';
+                                        } catch (e) { return '(读取失败)'; }
+                                    };
+                                    diffApi = Object.assign({}, api, {
+                                        updateCell: async (t, ri, col, v) => {
+                                            dbg('[差异明细] updateCell ' + t + '[' + ri + '].' + col + ' : ' + cellNow(t, ri, col) + ' → ' + clip(v));
+                                            return api.updateCell(t, ri, col, v);
+                                        },
+                                        updateRow: async (t, ri, p) => {
+                                            dbg('[差异明细] updateRow ' + t + '[' + ri + '] {' + Object.keys(p || {}).join('、') + '}');
+                                            return api.updateRow(t, ri, p);
+                                        },
+                                        insertRow: async (t, o) => {
+                                            dbg('[差异明细] insertRow ' + t + ' {' + Object.keys(o || {}).join('、') + '}');
+                                            return api.insertRow(t, o);
+                                        },
+                                        deleteRow: async (t, ri) => {
+                                            dbg('[差异明细] deleteRow ' + t + '[' + ri + ']');
+                                            return api.deleteRow(t, ri);
+                                        },
+                                    });
+                                }
+                                n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(diffApi, activeLayout, prev, effectiveTarget, persistedForWrite);
                             }
                         } finally {
                             if (tableBroadcastSuppressed) {
@@ -26715,6 +26782,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     async function waitRuntimeTablesReady(api, layoutEntries, timeoutMs) {
         const expected = new Set((Array.isArray(layoutEntries) ? layoutEntries : []).map(L => L.table));
         if (!expected.size) return true;
+        // 读侧规格（单例/JSON 表必须有数据行，tableSnapshotCoversLayout）在写侧只能作为
+        // 限时快速路径的加强条件：运行时会长期处于“仅表头 + seedRows/持久化帧待物化”
+        // 状态（新聊天 native 初始化、切换开场分支的重载窗口），写路径自身的补行与
+        // 持久化对账守卫才是这种状态下正确性的保障——硬性阻塞行校验会把 initvar 注入
+        // 永久挡在门外（v0.3.1 回归）。行未齐时最多再等 1.5s，超时后退回仅表名校验。
         const needRows = new Set();
         for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
             if ((L.kind === 'singleton' || L.kind === 'json') && L.table) needRows.add(String(L.table));
@@ -26728,6 +26800,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             }
         } catch (e) {}
         const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+        const rowDeadline = Date.now() + 1500;
+        let missingNames = null;
+        let missingRows = null;
         while (Date.now() < deadline) {
             try {
                 const cur = api.exportTableAsJson() || {};
@@ -26735,16 +26810,32 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 for (const k in cur) {
                     if (k.indexOf('sheet_') === 0 && cur[k] && cur[k].name) byName[String(cur[k].name)] = cur[k];
                 }
-                let allPresent = true;
-                for (const n of expected) {
-                    const sheet = byName[n];
-                    if (!sheet) { allPresent = false; break; }
-                    if (needRows.has(n) && (!Array.isArray(sheet.content) || sheet.content.length <= 1)) { allPresent = false; break; }
+                missingNames = [];
+                for (const n of expected) { if (!byName[n]) missingNames.push(n); }
+                if (missingNames.length) {
+                    await new Promise(res => hostWindow.setTimeout(res, 150));
+                    continue;
                 }
-                if (allPresent) return true;
-            } catch (e) {}
-            await new Promise(res => hostWindow.setTimeout(res, 150));
+                if (Date.now() >= rowDeadline) return true; // 表名齐全：行等待窗口已过，交由写路径守卫
+                missingRows = [];
+                for (const n of needRows) {
+                    const sheet = byName[n];
+                    if (sheet && (!Array.isArray(sheet.content) || sheet.content.length <= 1)) missingRows.push(n);
+                }
+                if (missingRows.length) {
+                    await new Promise(res => hostWindow.setTimeout(res, 150));
+                    continue;
+                }
+                return true;
+            } catch (e) {
+                await new Promise(res => hostWindow.setTimeout(res, 150));
+            }
         }
+        if (missingNames && !missingNames.length) {
+            dbg('[流程] 运行时表名齐全但单例/JSON 表缺数据行（' + (missingRows || []).slice(0, 6).join('、') + '），按仅表名就绪放行写路径（由补行/对账守卫兜底）。');
+            return true;
+        }
+        dbg('[流程] 运行时就绪等待超时：缺表=' + ((missingNames || expected).slice(0, 6).join('、') || '?'));
         return false;
     }
 
@@ -27120,7 +27211,42 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 n = 1;
                                 dbg(' 开局整表初始化快速路径完成（一次整表原子提交，跳过逐格 CRUD）。');
                             } else {
-                                n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(api, activeLayout, prev, effectiveTarget, persistedForWrite);
+                                // 差异明细诊断：包一层 API 代理记录每个 CRUD 的表/行/列与前后值。
+                                // 用于排查“duplicate_snapshot 已判定快照相同、diff 却产生多条操作”的
+                                // 读回形状偏差（历史案例：圣樱学院-RE 开场最终快照 19 条逐格补写）。
+                                let diffApi = api;
+                                if (mvu2shujukuDebugOn() && api && typeof api.updateCell === 'function') {
+                                    const clip = (v) => { try { const s = typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v); return s.length > 60 ? s.slice(0, 60) + '…' : s; } catch (e) { return String(v); } };
+                                    const cellNow = (t, ri, col) => {
+                                        try {
+                                            const all = api.exportTableAsJson() || {};
+                                            const s = Object.values(all).find(x => x && x.name === t);
+                                            const row = s && Array.isArray(s.content) ? s.content[ri] : null;
+                                            const hdr = s && s.content ? s.content[0] : [];
+                                            const ci = hdr.indexOf(col);
+                                            return row && ci >= 0 ? clip(row[ci]) : '(定位失败)';
+                                        } catch (e) { return '(读取失败)'; }
+                                    };
+                                    diffApi = Object.assign({}, api, {
+                                        updateCell: async (t, ri, col, v) => {
+                                            dbg('[差异明细] updateCell ' + t + '[' + ri + '].' + col + ' : ' + cellNow(t, ri, col) + ' → ' + clip(v));
+                                            return api.updateCell(t, ri, col, v);
+                                        },
+                                        updateRow: async (t, ri, p) => {
+                                            dbg('[差异明细] updateRow ' + t + '[' + ri + '] {' + Object.keys(p || {}).join('、') + '}');
+                                            return api.updateRow(t, ri, p);
+                                        },
+                                        insertRow: async (t, o) => {
+                                            dbg('[差异明细] insertRow ' + t + ' {' + Object.keys(o || {}).join('、') + '}');
+                                            return api.insertRow(t, o);
+                                        },
+                                        deleteRow: async (t, ri) => {
+                                            dbg('[差异明细] deleteRow ' + t + '[' + ri + ']');
+                                            return api.deleteRow(t, ri);
+                                        },
+                                    });
+                                }
+                                n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(diffApi, activeLayout, prev, effectiveTarget, persistedForWrite);
                             }
                         } finally {
                             if (tableBroadcastSuppressed) {
