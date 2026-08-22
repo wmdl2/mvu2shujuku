@@ -8,7 +8,7 @@
 - 表格模板 JSON（开局自动建表，不需要手动导入）
 - 转换报告（Markdown：自动转换项 / 需人工项 / 警告）
 
-详细支持范围、运行时兼容接口与已知边界见 [MVU 转换与兼容清单](COMPATIBILITY.md)。
+本版变更见 [更新日志](CHANGELOG.md)；详细支持范围、运行时兼容接口与已知边界见 [MVU 转换与兼容清单](COMPATIBILITY.md)。
 
 转换器只会整条删除可确认属于 `[InitVar]` 或纯 MVU 变量输出管线的世界书条目。若条目同时包含剧情、EJS 和更新块，会完整保留；其中 `stat_data` 的 `getMessageVar/setMessageVar` 调用由数据库兼容函数接管，其他消息变量仍按酒馆助手原语义运行。
 
@@ -74,7 +74,7 @@
 `_强制更新提醒` → “每次回复必须维护”。填表 AI 会按这些规则决定何时增改删。
 - `getAllVariables()` shim：数据库表格 → `stat_data` 嵌套形状（含 `[值,条件]` 还原、`display_data` 镜像）——**状态栏 HTML 不用改**。
 - `Mvu.getMvuData / Mvu.replaceMvuData` 兼容层：旧脚本 diff 写库。
-- 运行时解析 `<UpdateVariable>` / `<json_patch>` 块（`_.set/add/remove/assign`、JSON Patch）写库。
+- 运行时解析 `<UpdateVariable>` / `<json_patch>` 块（`_.set/add/remove/assign`、JSON Patch）写库；开场同楼的 initvar 与更新块按 MVU 顺序合并为最终初始化快照。
 - **问候语 `<UpdateVariable>` 覆盖初始值**：MVU 允许额外问候语里的更新语句覆盖 `[InitVar]`；
   转换后桥脚本在开局建表完成后再应用开场白里的更新块，等效于 MVU 的覆盖行为。
 - **命令与显示兼容**：`_.set`（双参/三参 `old,new` 两种格式）、`_.assign`（对象合并/按键赋值）、
@@ -114,6 +114,8 @@ st-prompt-template 的模板上下文（`EjsTemplate.defines`），因此只导�
 
 初始数据中的 `<user>`、`{{user}}`、`<char>` 等宏会在进入当前聊天后调用
 SillyTavern 原生 `substituteParams` 解析；表名和固定列名不支持运行时宏。
+表格提示词中的 `{{getvar::...}}` 等只读宏也会在每次生成请求时解析；作用于
+`WORLD_INFO` 的 promptOnly 静态查找正则会迁移到表格提示链，并保留原正则的运行时启用状态。
 
 ## 目录
 
@@ -124,6 +126,7 @@ SillyTavern 原生 `substituteParams` 解析；表名和固定列名不支持运
 | `src/pinyin-data.js` | 拼音字典（由 pinyin-pro 生成，MIT） |
 | `build-extension.js` | 重新构建扩展文件 |
 | `test/run-tests.js` | 自动化测试（无测试卡片时自动跳过卡片相关用例） |
+| `CHANGELOG.md` | 面向用户的版本更新日志 |
 | `COMPATIBILITY.md` | MVU 转换范围、运行时兼容能力与已知边界 |
 
 ## 开发

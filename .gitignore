@@ -11,3 +11,7 @@ node_modules/
 *.log
 *.tgz
 DOCUMENTATION.md
+DOCUMENTATION_HISTORY.md
+
+# 本地 Codex 指令，不提交到仓库
+AGENTS.md
