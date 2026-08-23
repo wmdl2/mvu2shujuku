@@ -107,6 +107,34 @@
         throw new Error('缺少 MVU 解析库（src/vendor/mvu-yaml-libs.js 未内联/未安装）');
     }
 
+    // 对齐 MVU/TH {{format_message_variable::路径}} 的展示语义：
+    // 标量直接输出，对象/数组输出 YAML，以 $ 开头的字段不向 AI 展示。
+    function formatMessageVariableValue(value) {
+        if (value === undefined) return '';
+        if (value === null) return 'null';
+        if (typeof value !== 'object') return String(value);
+        const seen = new WeakSet();
+        const clean = (input) => {
+            if (input === null || typeof input !== 'object') return input;
+            if (seen.has(input)) return null;
+            seen.add(input);
+            if (Array.isArray(input)) return input.map(clean);
+            const out = {};
+            for (const [key, child] of Object.entries(input)) {
+                if (String(key).startsWith('$')) continue;
+                out[key] = clean(child);
+            }
+            return out;
+        };
+        const cleaned = clean(value);
+        try {
+            return String(getMvuYamlLibs().YAML.stringify(cleaned)).replace(/\n$/, '');
+        } catch (e) {
+            // JSON 是 YAML 1.2 的合法子集，仅在极端缺库环境下兜底。
+            try { return JSON.stringify(cleaned, null, 2); } catch (e2) { return ''; }
+        }
+    }
+
     // JSON 容错解析：AI/前端常写尾逗号、单引号、注释等非严格 JSON（尤其 JSON 表内容列、
     // _扩展数据 溢出列）。严格 JSON.parse 失败会静默丢整组数据——表格里能看到原始 JSON
     // 文本，读回 stat_data 却是空对象，前端面板自然不显示。用 jsonrepair 兜底修复。
@@ -4767,6 +4795,24 @@
         return '<%- mvu2shujukuResolveMacro(' + JSON.stringify(String(body || '')) + ') %>';
     }
 
+    function formatMessageVariableEjs(path) {
+        return '<%- mvu2shujukuFormatMessageVariable(' + JSON.stringify(String(path || '').trim()) + ') %>';
+    }
+
+    function rewriteFormatMessageVariableMacros(text, report, sourceLabel) {
+        let count = 0;
+        const rewritten = String(text == null ? '' : text).replace(
+            /\{\{\s*format_message_variable\s*::([\s\S]*?)\}\}/gi,
+            (whole, path) => {
+                if (!String(path || '').trim()) return whole;
+                count += 1;
+                return formatMessageVariableEjs(path);
+            }
+        );
+        if (count && report) report.auto(`${sourceLabel || '提示文本'}中的 ${count} 处 format_message_variable 已改为数据库变量的运行时 YAML 展示。`);
+        return rewritten;
+    }
+
     function expandWorldInfoReplacement(replacement, args) {
         const groups = args.length && args[args.length - 1] && typeof args[args.length - 1] === 'object'
             ? args[args.length - 1]
@@ -4782,7 +4828,8 @@
     function rewriteRuntimePromptMacros(text, report, sourceLabel) {
         let changed = 0;
         let unsafe = 0;
-        const rewritten = String(text == null ? '' : text)
+        const formatted = rewriteFormatMessageVariableMacros(text, report, sourceLabel);
+        const rewritten = formatted
             .replace(/\{\{([\s\S]*?)\}\}/g, (whole, body) => {
                 const name = String(body || '').trim().split(/:{1,2}/, 1)[0].trim().toLowerCase();
                 if (!SAFE_PROMPT_MACROS.has(name)) {
@@ -6877,6 +6924,8 @@
             `      }`,
             `      var getMsg=function(path,opts){var fb=opts&&typeof opts==='object'&&Object.prototype.hasOwnProperty.call(opts,'defaults')?opts.defaults:opts;try{var all=window.getAllVariables?window.getAllVariables():{stat_data:{}};var ps=String(path||'').split('.').filter(function(p){return p!=='';});var cur=all;for(var pi=0;pi<ps.length;pi++){if(cur==null)return fb;cur=cur[ps[pi]];}return cur===undefined?fb:cur;}catch(e){return fb;}};`,
             `      getMsg.__mvu2shujukuBridge=true;ej.defines.mvu2shujukuGetMessageVar=getMsg;`,
+            `      var formatMsg=function(path){try{var value=getMsg(path);var core=(rootWindow&&rootWindow.MVU2SHUJUKU_CORE)||(window&&window.MVU2SHUJUKU_CORE);if(core&&typeof core.formatMessageVariableValue==='function')return core.formatMessageVariableValue(value);if(value===undefined)return '';if(value===null)return 'null';if(typeof value!=='object')return String(value);var seen=[];var clean=function(v){if(v===null||typeof v!=='object')return v;if(seen.indexOf(v)>=0)return null;seen.push(v);if(Array.isArray(v))return v.map(clean);var o={};Object.keys(v).forEach(function(k){if(String(k).charAt(0)!=='$')o[k]=clean(v[k]);});return o;};return JSON.stringify(clean(value),null,2);}catch(e){return '';}};`,
+            `      formatMsg.__mvu2shujukuBridge=true;ej.defines.mvu2shujukuFormatMessageVariable=formatMsg;`,
             `      var setMsg=function(path,value){try{var ps=String(path||'').split('.').filter(function(p){return p!=='';});if(ps[0]!=='stat_data'||ps.length<2)return value;var all=window.getAllVariables?window.getAllVariables():{stat_data:{}};var next=JSON.parse(JSON.stringify(all.stat_data||{}));setPath(next,ps.slice(1),value);scheduleStatOverlay(next);return value;}catch(e){return value;}};`,
             `      setMsg.__mvu2shujukuBridge=true;ej.defines.mvu2shujukuSetMessageVar=setMsg;`,
             `      var resolveMacro=function(body){var raw='{{'+String(body==null?'':body)+'}}';try{var cx=getContext();var fn=cx&&cx.substituteParams;if(typeof fn==='function')return String(fn.call(cx,raw));}catch(e){}try{if(typeof rootWindow.substituteParams==='function')return String(rootWindow.substituteParams(raw));}catch(e){}return raw;};`,
@@ -8792,8 +8841,9 @@
                 }
             }
             const copy = deepClone(e);
-            const afterMacros = rewritePlotMacros(rw.text);
-            if (afterMacros !== rw.text) {
+            const afterFormatMacros = rewriteFormatMessageVariableMacros(rw.text, report, `条目「${comment}」`);
+            const afterMacros = rewritePlotMacros(afterFormatMacros);
+            if (afterMacros !== afterFormatMacros) {
                 report.auto(`条目「${comment}」的 MVU 宏 {{get_message_variable::…}} 已改写为数据库表引用（剧情条目保留）。`);
             }
             copy.content = afterMacros;
@@ -14285,6 +14335,14 @@ ${DB_INIT_SNIPPET}
                 };
                 getMessageDefine.__mvu2shujuku = true;
                 ejs.defines.mvu2shujukuGetMessageVar = getMessageDefine;
+                const formatMessageDefine = function (path) {
+                    const coreNow = window.MVU2SHUJUKU_CORE;
+                    return coreNow && typeof coreNow.formatMessageVariableValue === 'function'
+                        ? coreNow.formatMessageVariableValue(getMessageDefine(path))
+                        : '';
+                };
+                formatMessageDefine.__mvu2shujuku = true;
+                ejs.defines.mvu2shujukuFormatMessageVariable = formatMessageDefine;
                 const setMessageDefine = function (path, value) {
                     try {
                         const parts = String(path || '').split('.').filter(Boolean);
@@ -14505,6 +14563,8 @@ ${DB_INIT_SNIPPET}
         buildLayout,
         generateTemplate,
         migrateTemplatePromptRuntime,
+        formatMessageVariableValue,
+        rewriteFormatMessageVariableMacros,
         mergeTemplates,
         generateBridgeScript,
         statDataFromTables,
@@ -30483,6 +30543,14 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 };
                 getMessageDefine.__mvu2shujuku = true;
                 ejs.defines.mvu2shujukuGetMessageVar = getMessageDefine;
+                const formatMessageDefine = function (path) {
+                    const coreNow = window.MVU2SHUJUKU_CORE;
+                    return coreNow && typeof coreNow.formatMessageVariableValue === 'function'
+                        ? coreNow.formatMessageVariableValue(getMessageDefine(path))
+                        : '';
+                };
+                formatMessageDefine.__mvu2shujuku = true;
+                ejs.defines.mvu2shujukuFormatMessageVariable = formatMessageDefine;
                 const setMessageDefine = function (path, value) {
                     try {
                         const parts = String(path || '').split('.').filter(Boolean);
