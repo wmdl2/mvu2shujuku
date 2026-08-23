@@ -31,6 +31,7 @@
 - 对可静态证明为“读取 chat 根变量、修改已知 MVU 顶层组、原对象写回”的旧镜像事务，自动改写为数据库 `Mvu.getMvuData/replaceMvuData`；普通 chat 脚本设置仍保留原作用域。
 - 纯 Zod Schema 脚本即使把 `registerMvuSchema` 压缩改名导入，也会被识别并移除；含 `Mvu.*` 业务逻辑的混合脚本仍保留。
 - 只在 mount 时读取一次 message `stat_data` 的内联 module 开场前端，会先等待数据库 `getVariables` shim 安装再启动，避免初始化竞态把衣柜、选项列表等状态永久固化为空。
+- 兼容旧 MVU 状态栏直接读取 `getChatMessages(...)[0].data.stat_data` 的写法：返回消息的只读副本会投影当前数据库状态，不修改真实聊天记录；切换到非转换卡时恢复原始函数。
 
 ## v0.3.1（2026-08-22）
 

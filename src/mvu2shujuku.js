@@ -6782,7 +6782,7 @@
             `  var reg=mvuBridgeSharedState();if(!reg)return null;`,
             `  var rec=null;`,
             `  for(var i=0;i<reg.list.length;i++){if(reg.list[i].w===gw){rec=reg.list[i];break;}}`,
-            `  if(!rec){rec={w:gw,get:undefined,hasGet:false,upd:undefined,hasUpd:false,rep:undefined,hasRep:false,ins:undefined,hasIns:false,mvu:undefined,hasMvu:false,gav:undefined,hasGav:false,wait:undefined,hasWait:false};reg.list.push(rec);}`,
+            `  if(!rec){rec={w:gw,get:undefined,hasGet:false,upd:undefined,hasUpd:false,rep:undefined,hasRep:false,ins:undefined,hasIns:false,mvu:undefined,hasMvu:false,gav:undefined,hasGav:false,wait:undefined,hasWait:false,msg:undefined,hasMsg:false};reg.list.push(rec);}`,
             `  try{`,
             `    if(!rec.hasGet&&typeof gw.getVariables==='function'&&!mvuBridgeIsOurs(gw.getVariables)){rec.get=gw.getVariables;rec.hasGet=true;}`,
             `    if(!rec.hasUpd&&typeof gw.updateVariablesWith==='function'&&!mvuBridgeIsOurs(gw.updateVariablesWith)){rec.upd=gw.updateVariablesWith;rec.hasUpd=true;}`,
@@ -6791,6 +6791,7 @@
             `    if(!rec.hasMvu&&gw.Mvu&&!mvuBridgeIsOurs(gw.Mvu)&&!gw.Mvu.__mvu2shujukuBridgeFake&&!gw.Mvu.__mvu2shujukuFake){rec.mvu=gw.Mvu;rec.hasMvu=true;}`,
             `    if(!rec.hasGav&&typeof gw.getAllVariables==='function'&&!mvuBridgeIsOurs(gw.getAllVariables)){rec.gav=gw.getAllVariables;rec.hasGav=true;}`,
             `    if(!rec.hasWait&&typeof gw.waitGlobalInitialized==='function'&&!mvuBridgeIsOurs(gw.waitGlobalInitialized)){rec.wait=gw.waitGlobalInitialized;rec.hasWait=true;}`,
+            `    if(!rec.hasMsg&&typeof gw.getChatMessages==='function'&&!mvuBridgeIsOurs(gw.getChatMessages)){rec.msg=gw.getChatMessages;rec.hasMsg=true;}`,
             `  }catch(e){}`,
             `  return rec;`,
             `}`,
@@ -6806,6 +6807,7 @@
             `      if(gw.getAllVariables&&mvuBridgeIsOurs(gw.getAllVariables)){if(rec.hasGav)gw.getAllVariables=rec.gav;else delete gw.getAllVariables;}`,
             `      if(gw.Mvu&&(gw.Mvu.__mvu2shujukuBridgeFake||gw.Mvu.__mvu2shujukuFake)){if(rec.hasMvu)gw.Mvu=rec.mvu;else delete gw.Mvu;}`,
             `      if(mvuBridgeIsOurs(gw.waitGlobalInitialized)){if(rec.hasWait)gw.waitGlobalInitialized=rec.wait;else delete gw.waitGlobalInitialized;}`,
+            `      if(mvuBridgeIsOurs(gw.getChatMessages)){if(rec.hasMsg)gw.getChatMessages=rec.msg;else delete gw.getChatMessages;}`,
             `    }catch(e){}`,
             `  }`,
             `}`,
@@ -6817,6 +6819,13 @@
             `    var gw=roots[gi];`,
             `    if(!gw)continue;`,
             `    try{mvuBridgeNoteOriginal(gw);}catch(e){}`,
+            `    try{`,
+            `      var msgRec=mvuBridgeNoteOriginal(gw);`,
+            `      if(msgRec&&msgRec.hasMsg&&(typeof gw.getChatMessages!=='function'||!mvuBridgeIsOurs(gw.getChatMessages))){`,
+            `        var fnMsg=(function(rec){return function(){var result=rec.msg.apply(this,arguments);var decorate=function(list){if(!Array.isArray(list))return list;var stat=mvuBridgeStat();return list.map(function(item){if(!item||typeof item!=='object')return item;var copy=Object.assign({},item);copy.data=Object.assign({},item.data||{},{stat_data:stat});return copy;});};return result&&typeof result.then==='function'?result.then(decorate):decorate(result);};})(msgRec);`,
+            `        fnMsg.__mvu2shujukuBridge=true;gw.getChatMessages=fnMsg;`,
+            `      }`,
+            `    }catch(e){}`,
             `    try{`,
             `      var curG=gw.getVariables;`,
             `      if(typeof curG!=='function'||mvuBridgeIsOurs(curG)){`,
@@ -12676,7 +12685,7 @@ ${DB_INIT_SNIPPET}
             const reg = sharedStateWindow.__mvu2shujukuGlobalState || (sharedStateWindow.__mvu2shujukuGlobalState = { list: [] });
             let rec = reg.list.find(r => r.w === w);
             if (!rec) {
-                rec = { w, get: undefined, hasGet: false, upd: undefined, hasUpd: false, rep: undefined, hasRep: false, ins: undefined, hasIns: false, mvu: undefined, hasMvu: false, gav: undefined, hasGav: false, wait: undefined, hasWait: false };
+                rec = { w, get: undefined, hasGet: false, upd: undefined, hasUpd: false, rep: undefined, hasRep: false, ins: undefined, hasIns: false, mvu: undefined, hasMvu: false, gav: undefined, hasGav: false, wait: undefined, hasWait: false, msg: undefined, hasMsg: false };
                 reg.list.push(rec);
             }
             if (!rec.hasGet && typeof w.getVariables === 'function' && !isOursShimFn(w.getVariables)) { rec.get = w.getVariables; rec.hasGet = true; }
@@ -12686,6 +12695,7 @@ ${DB_INIT_SNIPPET}
             if (!rec.hasMvu && w.Mvu && !isOursShimFn(w.Mvu) && !w.Mvu.__mvu2shujukuBridgeFake && !w.Mvu.__mvu2shujukuFake) { rec.mvu = w.Mvu; rec.hasMvu = true; }
             if (!rec.hasGav && typeof w.getAllVariables === 'function' && !isOursShimFn(w.getAllVariables)) { rec.gav = w.getAllVariables; rec.hasGav = true; }
             if (!rec.hasWait && typeof w.waitGlobalInitialized === 'function' && !isOursShimFn(w.waitGlobalInitialized)) { rec.wait = w.waitGlobalInitialized; rec.hasWait = true; }
+            if (!rec.hasMsg && typeof w.getChatMessages === 'function' && !isOursShimFn(w.getChatMessages)) { rec.msg = w.getChatMessages; rec.hasMsg = true; }
             return rec;
         } catch (e) { return null; }
     }
@@ -12704,6 +12714,7 @@ ${DB_INIT_SNIPPET}
                     if (w.getAllVariables && isOursShimFn(w.getAllVariables)) { if (rec.hasGav) w.getAllVariables = rec.gav; else delete w.getAllVariables; }
                     if (w.Mvu && (w.Mvu === windowMvuFake || w.Mvu.__mvu2shujukuFake || w.Mvu.__mvu2shujukuBridgeFake)) { if (rec.hasMvu) w.Mvu = rec.mvu; else delete w.Mvu; }
                     if (isOursShimFn(w.waitGlobalInitialized)) { if (rec.hasWait) w.waitGlobalInitialized = rec.wait; else delete w.waitGlobalInitialized; }
+                    if (isOursShimFn(w.getChatMessages)) { if (rec.hasMsg) w.getChatMessages = rec.msg; else delete w.getChatMessages; }
                 } catch (e) {}
             }
         } catch (e) {}
@@ -12895,6 +12906,28 @@ ${DB_INIT_SNIPPET}
                 // 覆盖前先登记真原始值（Mvu/getAllVariables/三个全局函数），
                 // 切卡还原时从共享注册表取回，绝不把桥/扩展自己的接管当原始值。
                 const originalRec = noteGlobalOriginals(w);
+                // 旧 MVU 状态栏常直接读 getChatMessages(id)[0].data.stat_data，
+                // 而数据库不再把当前状态物理存入消息 data。只在读取结果的
+                // 浅副本上投影 stat_data，不污染真实聊天消息，并兼容同步/异步 TH API。
+                if (originalRec && originalRec.hasMsg && !isOursShimFn(w.getChatMessages)) {
+                    const messageReadDefine = function () {
+                        const result = originalRec.msg.apply(this, arguments);
+                        const decorate = (list) => {
+                            if (!Array.isArray(list)) return list;
+                            const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                            const stat = pendingStatWrite && typeof pendingStatWrite === 'object'
+                                ? pendingStatWrite
+                                : ((all && all.stat_data) || {});
+                            return list.map((item) => {
+                                if (!item || typeof item !== 'object') return item;
+                                return Object.assign({}, item, { data: Object.assign({}, item.data || {}, { stat_data: stat }) });
+                            });
+                        };
+                        return result && typeof result.then === 'function' ? result.then(decorate) : decorate(result);
+                    };
+                    messageReadDefine.__mvu2shujuku = true;
+                    w.getChatMessages = messageReadDefine;
+                }
                 const oldM = w.Mvu;
                 if (oldM && typeof oldM === 'object' && oldM !== windowMvuFake) {
                     const SKIP = { getMvuData: 1, replaceMvuData: 1, setMvuVariable: 1, getMvuVariable: 1, getRecordFromMvuData: 1, parseMessage: 1, reloadInitVar: 1, getCurrentMvuData: 1, replaceCurrentMvuData: 1, isDuringExtraAnalysis: 1, events: 1 };
