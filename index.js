@@ -11625,6 +11625,17 @@ ${DB_INIT_SNIPPET}
     // 基底取最后一个 full checkpoint 或 data_replace 完整后态；随后按 logEntries 顺序应用
     // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁），即“数据库原始真相”。
     let persistedReadCache = { key: '', data: null };
+    function persistedFrameFingerprint(value) {
+        let source = '';
+        try { source = typeof value === 'string' ? value : JSON.stringify(value); } catch (e) { source = String(value || ''); }
+        // FNV-1a：避免“新旧 storageFrame JSON 恰好等长”时误用旧缓存。
+        let hash = 2166136261;
+        for (let i = 0; i < source.length; i++) {
+            hash ^= source.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return source.length + ':' + (hash >>> 0).toString(16);
+    }
     // SP 表更新回调的参数是事务已提交的新快照，但紧接着的
     // exportTableAsJson() 可能仍处在 replay/物化窗口而返回旧值。
     // 状态栏在更新回调后立即重读时，必须看到与回调事件同一份 after；
@@ -11666,7 +11677,7 @@ ${DB_INIT_SNIPPET}
                 const msg = chat[mi];
                 if (!msg || typeof msg !== 'object') continue;
                 const iso = msg.TavernDB_ACU_IsolatedData;
-                key += (typeof iso === 'string' ? iso.length : (iso ? JSON.stringify(iso).length : 0)) + ',';
+                key += persistedFrameFingerprint(iso) + ',';
             }
             if (persistedReadCache.key === key) return persistedReadCache.data;
             let base = null;
@@ -11872,11 +11883,28 @@ ${DB_INIT_SNIPPET}
             if (!ensureActiveLayoutLazy()) return current && current.stat_data ? current : { stat_data: {}, display_data: {} };
             const core = window.MVU2SHUJUKU_CORE;
             if (!core || typeof core.statDataFromTables !== 'function') return current || { stat_data: {}, display_data: {} };
-            // 重进聊天时 checkpoint 比旧桥/尚未回放的运行时更可靠；优先从持久化帧
-            // 重建，避免用模板初值（如 SFW）覆盖存档的当前场景（如 NSFW）。
+            // 世界书 EJS 与状态栏必须共享同一读优先级：
+            // 待写快照 > SP 已提交回调 > 完整运行时表 > 持久化帧 > 结构骨架。
+            // 旧逻辑无条件优先 checkpoint，当 checkpoint 仍是开局快照而当前表已更新时，
+            // format_message_variable/getvar 会偶发读到默认初始值。
+            if (pendingStatWrite && typeof pendingStatWrite === 'object') {
+                return { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
+            }
+            const committed = readFrontendCommittedMvuRead();
+            if (committed && committed.stat_data) return committed;
+            try {
+                const api = getAcuApi();
+                const runtime = api && typeof api.exportTableAsJson === 'function' ? (api.exportTableAsJson() || {}) : null;
+                if (runtime && tableSnapshotCoversLayout(runtime, activeLayout)) {
+                    return statDataFromTablesCached(activeLayout, runtime);
+                }
+            } catch (e) {}
+            // 运行时表尚未完整回放时，checkpoint/log 才是更可靠的当前聊天真相。
             try {
                 const persisted = readPersistedTableData();
-                if (persisted) return core.statDataFromTables(activeLayout, persisted);
+                if (persisted && tableSnapshotCoversLayout(persisted, activeLayout)) {
+                    return statDataFromTablesCached(activeLayout, persisted);
+                }
             } catch (e) {}
             // 先用空表+布局构造“必定存在的结构骨架”，再用实际读取覆盖。
             // 这只防 undefined 链式访问，不触发任何数据库写入。
@@ -14345,17 +14373,9 @@ ${DB_INIT_SNIPPET}
         } catch (e) {}
         return original;
     }
-    function ensureTemplateDefine() {
-        try {
-            const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
-            if (ejs && ejs.defines && typeof ejs.defines === 'object') {
-                const oldDefine = ejs.defines.mvu2shujukuGetAllVariables;
-                if (typeof oldDefine !== 'function' || oldDefine.__mvu2shujukuBridge || oldDefine.__mvu2shujuku) {
-                    const safeDefine = function () { return ejsVariablesSafe(); };
-                    safeDefine.__mvu2shujuku = true;
-                    ejs.defines.mvu2shujukuGetAllVariables = safeDefine;
-                }
-                const getMessageDefine = function (path, options) {
+    function templateDatabaseDefines() {
+        const safeDefine = function () { return ejsVariablesSafe(); };
+        const getMessageDefine = function (path, options) {
                     const defaultValue = options && typeof options === 'object' && Object.prototype.hasOwnProperty.call(options, 'defaults')
                         ? options.defaults
                         : options;
@@ -14365,18 +14385,14 @@ ${DB_INIT_SNIPPET}
                         for (const p of parts) { if (cur == null) return defaultValue; cur = cur[p]; }
                         return cur === undefined ? defaultValue : cur;
                     } catch (e) { return defaultValue; }
-                };
-                getMessageDefine.__mvu2shujuku = true;
-                ejs.defines.mvu2shujukuGetMessageVar = getMessageDefine;
-                const formatMessageDefine = function (path) {
+        };
+        const formatMessageDefine = function (path) {
                     const coreNow = window.MVU2SHUJUKU_CORE;
                     return coreNow && typeof coreNow.formatMessageVariableValue === 'function'
                         ? coreNow.formatMessageVariableValue(getMessageDefine(path))
                         : '';
-                };
-                formatMessageDefine.__mvu2shujuku = true;
-                ejs.defines.mvu2shujukuFormatMessageVariable = formatMessageDefine;
-                const setMessageDefine = function (path, value) {
+        };
+        const setMessageDefine = function (path, value) {
                     try {
                         const parts = String(path || '').split('.').filter(Boolean);
                         if (parts[0] !== 'stat_data' || parts.length < 2) return value;
@@ -14391,17 +14407,69 @@ ${DB_INIT_SNIPPET}
                         scheduleWindowStatOverlay(next);
                         return value;
                     } catch (e) { return value; }
-                };
-                setMessageDefine.__mvu2shujuku = true;
-                ejs.defines.mvu2shujukuSetMessageVar = setMessageDefine;
-                const resolveMacroDefine = function (body) { return resolvePromptMacroRuntime(body); };
-                resolveMacroDefine.__mvu2shujuku = true;
-                ejs.defines.mvu2shujukuResolveMacro = resolveMacroDefine;
-                const applyWorldInfoRegexDefine = function (name, original, encodedReplacement, initiallyEnabled) {
-                    return applyWorldInfoRegexRuntime(name, original, encodedReplacement, initiallyEnabled);
-                };
-                applyWorldInfoRegexDefine.__mvu2shujuku = true;
-                ejs.defines.mvu2shujukuApplyWorldInfoRegex = applyWorldInfoRegexDefine;
+        };
+        const resolveMacroDefine = function (body) { return resolvePromptMacroRuntime(body); };
+        const applyWorldInfoRegexDefine = function (name, original, encodedReplacement, initiallyEnabled) {
+            return applyWorldInfoRegexRuntime(name, original, encodedReplacement, initiallyEnabled);
+        };
+        const defines = {
+            mvu2shujukuGetAllVariables: safeDefine,
+            mvu2shujukuGetMessageVar: getMessageDefine,
+            mvu2shujukuFormatMessageVariable: formatMessageDefine,
+            mvu2shujukuSetMessageVar: setMessageDefine,
+            mvu2shujukuResolveMacro: resolveMacroDefine,
+            mvu2shujukuApplyWorldInfoRegex: applyWorldInfoRegexDefine,
+        };
+        for (const fn of Object.values(defines)) fn.__mvu2shujuku = true;
+        return defines;
+    }
+    function ensureEjsEvalContextBridge(ejs) {
+        try {
+            if (!ejs || typeof ejs.evalTemplate !== 'function') return false;
+            if (ejs.evalTemplate.__mvu2shujukuContextBridge) return true;
+            const originalEvalTemplate = ejs.evalTemplate;
+            const wrappedEvalTemplate = async function (code, context, options) {
+                // 只介入包含本转换器 helper 的模板，其他卡/模板完全走原调用。
+                if (!/\bmvu2shujuku(?:GetAllVariables|GetMessageVar|FormatMessageVariable|SetMessageVar|ResolveMacro|ApplyWorldInfoRegex)\b/.test(String(code || ''))) {
+                    return originalEvalTemplate.apply(this, arguments);
+                }
+                const defines = templateDatabaseDefines();
+                let actualContext = context;
+                if (!actualContext || typeof actualContext !== 'object') {
+                    // SP·数据库 v8.9.2 直接 evalTemplate(finalContent)，不传 context。
+                    // 显式 prepare 才能保证本次执行环境拿到 helper，不依赖
+                    // defines 何时被复制，也不依赖 prompt_template_prepare 事件是否对外发布。
+                    actualContext = typeof ejs.prepareContext === 'function'
+                        ? await ejs.prepareContext(defines)
+                        : defines;
+                } else {
+                    Object.assign(actualContext, defines);
+                }
+                if (actualContext && typeof actualContext === 'object') Object.assign(actualContext, defines);
+                return originalEvalTemplate.call(this, code, actualContext, options);
+            };
+            wrappedEvalTemplate.__mvu2shujuku = true;
+            wrappedEvalTemplate.__mvu2shujukuContextBridge = true;
+            wrappedEvalTemplate.__mvu2shujukuOriginal = originalEvalTemplate;
+            ejs.evalTemplate = wrappedEvalTemplate;
+            return true;
+        } catch (e) { return false; }
+    }
+    function ensureTemplateDefine() {
+        try {
+            const roots = [];
+            const addRoot = (w) => { try { if (w && roots.indexOf(w) === -1) roots.push(w); } catch (e) {} };
+            addRoot(window); addRoot(hostWindow);
+            try { addRoot(window.parent); } catch (e) {}
+            try { addRoot(window.top); } catch (e) {}
+            let installed = false;
+            for (const w of roots) {
+                const ejs = w && w.EjsTemplate;
+                if (!ejs) continue;
+                if (ejs.defines && typeof ejs.defines === 'object') Object.assign(ejs.defines, templateDatabaseDefines());
+                if (ensureEjsEvalContextBridge(ejs) || (ejs.defines && typeof ejs.defines === 'object')) installed = true;
+            }
+            if (installed) {
                 dbg(' 扩展侧注册 EJS 数据库读写函数完成');
                 defineTimer = null;
             } else if (!defineTimer) {
@@ -14418,6 +14486,11 @@ ${DB_INIT_SNIPPET}
             // 只在首次 prepare 时打一行确认，避免每次生成都刷屏
             let firstPreparedLogged = false;
             es.on('prompt_template_prepare', (prepared) => {
+                // defines 是插件级默认上下文；填表插件会自行调用
+                // evalTemplate(finalContent)，不同窗口/缓存时它可能不带当前 defines。
+                // prepare 事件上再直接注入实际执行上下文，避免任意一个 helper
+                // ReferenceError 使 SP 整份提示退回未处理原文。
+                if (prepared && typeof prepared === 'object') Object.assign(prepared, templateDatabaseDefines());
                 if (firstPreparedLogged) return;
                 firstPreparedLogged = true;
                 const pageEjs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
@@ -27857,6 +27930,17 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
     // 基底取最后一个 full checkpoint 或 data_replace 完整后态；随后按 logEntries 顺序应用
     // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁），即“数据库原始真相”。
     let persistedReadCache = { key: '', data: null };
+    function persistedFrameFingerprint(value) {
+        let source = '';
+        try { source = typeof value === 'string' ? value : JSON.stringify(value); } catch (e) { source = String(value || ''); }
+        // FNV-1a：避免“新旧 storageFrame JSON 恰好等长”时误用旧缓存。
+        let hash = 2166136261;
+        for (let i = 0; i < source.length; i++) {
+            hash ^= source.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return source.length + ':' + (hash >>> 0).toString(16);
+    }
     // SP 表更新回调的参数是事务已提交的新快照，但紧接着的
     // exportTableAsJson() 可能仍处在 replay/物化窗口而返回旧值。
     // 状态栏在更新回调后立即重读时，必须看到与回调事件同一份 after；
@@ -27898,7 +27982,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 const msg = chat[mi];
                 if (!msg || typeof msg !== 'object') continue;
                 const iso = msg.TavernDB_ACU_IsolatedData;
-                key += (typeof iso === 'string' ? iso.length : (iso ? JSON.stringify(iso).length : 0)) + ',';
+                key += persistedFrameFingerprint(iso) + ',';
             }
             if (persistedReadCache.key === key) return persistedReadCache.data;
             let base = null;
@@ -28104,11 +28188,28 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             if (!ensureActiveLayoutLazy()) return current && current.stat_data ? current : { stat_data: {}, display_data: {} };
             const core = window.MVU2SHUJUKU_CORE;
             if (!core || typeof core.statDataFromTables !== 'function') return current || { stat_data: {}, display_data: {} };
-            // 重进聊天时 checkpoint 比旧桥/尚未回放的运行时更可靠；优先从持久化帧
-            // 重建，避免用模板初值（如 SFW）覆盖存档的当前场景（如 NSFW）。
+            // 世界书 EJS 与状态栏必须共享同一读优先级：
+            // 待写快照 > SP 已提交回调 > 完整运行时表 > 持久化帧 > 结构骨架。
+            // 旧逻辑无条件优先 checkpoint，当 checkpoint 仍是开局快照而当前表已更新时，
+            // format_message_variable/getvar 会偶发读到默认初始值。
+            if (pendingStatWrite && typeof pendingStatWrite === 'object') {
+                return { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
+            }
+            const committed = readFrontendCommittedMvuRead();
+            if (committed && committed.stat_data) return committed;
+            try {
+                const api = getAcuApi();
+                const runtime = api && typeof api.exportTableAsJson === 'function' ? (api.exportTableAsJson() || {}) : null;
+                if (runtime && tableSnapshotCoversLayout(runtime, activeLayout)) {
+                    return statDataFromTablesCached(activeLayout, runtime);
+                }
+            } catch (e) {}
+            // 运行时表尚未完整回放时，checkpoint/log 才是更可靠的当前聊天真相。
             try {
                 const persisted = readPersistedTableData();
-                if (persisted) return core.statDataFromTables(activeLayout, persisted);
+                if (persisted && tableSnapshotCoversLayout(persisted, activeLayout)) {
+                    return statDataFromTablesCached(activeLayout, persisted);
+                }
             } catch (e) {}
             // 先用空表+布局构造“必定存在的结构骨架”，再用实际读取覆盖。
             // 这只防 undefined 链式访问，不触发任何数据库写入。
@@ -30577,17 +30678,9 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         } catch (e) {}
         return original;
     }
-    function ensureTemplateDefine() {
-        try {
-            const ejs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
-            if (ejs && ejs.defines && typeof ejs.defines === 'object') {
-                const oldDefine = ejs.defines.mvu2shujukuGetAllVariables;
-                if (typeof oldDefine !== 'function' || oldDefine.__mvu2shujukuBridge || oldDefine.__mvu2shujuku) {
-                    const safeDefine = function () { return ejsVariablesSafe(); };
-                    safeDefine.__mvu2shujuku = true;
-                    ejs.defines.mvu2shujukuGetAllVariables = safeDefine;
-                }
-                const getMessageDefine = function (path, options) {
+    function templateDatabaseDefines() {
+        const safeDefine = function () { return ejsVariablesSafe(); };
+        const getMessageDefine = function (path, options) {
                     const defaultValue = options && typeof options === 'object' && Object.prototype.hasOwnProperty.call(options, 'defaults')
                         ? options.defaults
                         : options;
@@ -30597,18 +30690,14 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         for (const p of parts) { if (cur == null) return defaultValue; cur = cur[p]; }
                         return cur === undefined ? defaultValue : cur;
                     } catch (e) { return defaultValue; }
-                };
-                getMessageDefine.__mvu2shujuku = true;
-                ejs.defines.mvu2shujukuGetMessageVar = getMessageDefine;
-                const formatMessageDefine = function (path) {
+        };
+        const formatMessageDefine = function (path) {
                     const coreNow = window.MVU2SHUJUKU_CORE;
                     return coreNow && typeof coreNow.formatMessageVariableValue === 'function'
                         ? coreNow.formatMessageVariableValue(getMessageDefine(path))
                         : '';
-                };
-                formatMessageDefine.__mvu2shujuku = true;
-                ejs.defines.mvu2shujukuFormatMessageVariable = formatMessageDefine;
-                const setMessageDefine = function (path, value) {
+        };
+        const setMessageDefine = function (path, value) {
                     try {
                         const parts = String(path || '').split('.').filter(Boolean);
                         if (parts[0] !== 'stat_data' || parts.length < 2) return value;
@@ -30623,17 +30712,69 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                         scheduleWindowStatOverlay(next);
                         return value;
                     } catch (e) { return value; }
-                };
-                setMessageDefine.__mvu2shujuku = true;
-                ejs.defines.mvu2shujukuSetMessageVar = setMessageDefine;
-                const resolveMacroDefine = function (body) { return resolvePromptMacroRuntime(body); };
-                resolveMacroDefine.__mvu2shujuku = true;
-                ejs.defines.mvu2shujukuResolveMacro = resolveMacroDefine;
-                const applyWorldInfoRegexDefine = function (name, original, encodedReplacement, initiallyEnabled) {
-                    return applyWorldInfoRegexRuntime(name, original, encodedReplacement, initiallyEnabled);
-                };
-                applyWorldInfoRegexDefine.__mvu2shujuku = true;
-                ejs.defines.mvu2shujukuApplyWorldInfoRegex = applyWorldInfoRegexDefine;
+        };
+        const resolveMacroDefine = function (body) { return resolvePromptMacroRuntime(body); };
+        const applyWorldInfoRegexDefine = function (name, original, encodedReplacement, initiallyEnabled) {
+            return applyWorldInfoRegexRuntime(name, original, encodedReplacement, initiallyEnabled);
+        };
+        const defines = {
+            mvu2shujukuGetAllVariables: safeDefine,
+            mvu2shujukuGetMessageVar: getMessageDefine,
+            mvu2shujukuFormatMessageVariable: formatMessageDefine,
+            mvu2shujukuSetMessageVar: setMessageDefine,
+            mvu2shujukuResolveMacro: resolveMacroDefine,
+            mvu2shujukuApplyWorldInfoRegex: applyWorldInfoRegexDefine,
+        };
+        for (const fn of Object.values(defines)) fn.__mvu2shujuku = true;
+        return defines;
+    }
+    function ensureEjsEvalContextBridge(ejs) {
+        try {
+            if (!ejs || typeof ejs.evalTemplate !== 'function') return false;
+            if (ejs.evalTemplate.__mvu2shujukuContextBridge) return true;
+            const originalEvalTemplate = ejs.evalTemplate;
+            const wrappedEvalTemplate = async function (code, context, options) {
+                // 只介入包含本转换器 helper 的模板，其他卡/模板完全走原调用。
+                if (!/\bmvu2shujuku(?:GetAllVariables|GetMessageVar|FormatMessageVariable|SetMessageVar|ResolveMacro|ApplyWorldInfoRegex)\b/.test(String(code || ''))) {
+                    return originalEvalTemplate.apply(this, arguments);
+                }
+                const defines = templateDatabaseDefines();
+                let actualContext = context;
+                if (!actualContext || typeof actualContext !== 'object') {
+                    // SP·数据库 v8.9.2 直接 evalTemplate(finalContent)，不传 context。
+                    // 显式 prepare 才能保证本次执行环境拿到 helper，不依赖
+                    // defines 何时被复制，也不依赖 prompt_template_prepare 事件是否对外发布。
+                    actualContext = typeof ejs.prepareContext === 'function'
+                        ? await ejs.prepareContext(defines)
+                        : defines;
+                } else {
+                    Object.assign(actualContext, defines);
+                }
+                if (actualContext && typeof actualContext === 'object') Object.assign(actualContext, defines);
+                return originalEvalTemplate.call(this, code, actualContext, options);
+            };
+            wrappedEvalTemplate.__mvu2shujuku = true;
+            wrappedEvalTemplate.__mvu2shujukuContextBridge = true;
+            wrappedEvalTemplate.__mvu2shujukuOriginal = originalEvalTemplate;
+            ejs.evalTemplate = wrappedEvalTemplate;
+            return true;
+        } catch (e) { return false; }
+    }
+    function ensureTemplateDefine() {
+        try {
+            const roots = [];
+            const addRoot = (w) => { try { if (w && roots.indexOf(w) === -1) roots.push(w); } catch (e) {} };
+            addRoot(window); addRoot(hostWindow);
+            try { addRoot(window.parent); } catch (e) {}
+            try { addRoot(window.top); } catch (e) {}
+            let installed = false;
+            for (const w of roots) {
+                const ejs = w && w.EjsTemplate;
+                if (!ejs) continue;
+                if (ejs.defines && typeof ejs.defines === 'object') Object.assign(ejs.defines, templateDatabaseDefines());
+                if (ensureEjsEvalContextBridge(ejs) || (ejs.defines && typeof ejs.defines === 'object')) installed = true;
+            }
+            if (installed) {
                 dbg(' 扩展侧注册 EJS 数据库读写函数完成');
                 defineTimer = null;
             } else if (!defineTimer) {
@@ -30650,6 +30791,11 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             // 只在首次 prepare 时打一行确认，避免每次生成都刷屏
             let firstPreparedLogged = false;
             es.on('prompt_template_prepare', (prepared) => {
+                // defines 是插件级默认上下文；填表插件会自行调用
+                // evalTemplate(finalContent)，不同窗口/缓存时它可能不带当前 defines。
+                // prepare 事件上再直接注入实际执行上下文，避免任意一个 helper
+                // ReferenceError 使 SP 整份提示退回未处理原文。
+                if (prepared && typeof prepared === 'object') Object.assign(prepared, templateDatabaseDefines());
                 if (firstPreparedLogged) return;
                 firstPreparedLogged = true;
                 const pageEjs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
