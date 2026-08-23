@@ -136,9 +136,13 @@ SillyTavern 原生 `substituteParams` 解析；表名和固定列名不支持运
 ## 开发
 
 ```bash
-node test/run-tests.js   # 跑测试
+node test/run-tests.js                    # 全量测试：默认只输出数量和汇总
+node test/run-tests.js --grep "桥|扩展"  # 只跑相关用例
+node test/run-tests.js --verbose          # 诊断时显示每条用例和完整桥日志
 node build-extension.js  # 重新构建扩展文件
 ```
+
+默认模式会抑制通过用例的 VM/数据桥日志；用例失败时自动回放最后 20 条截断日志。也可使用 `TEST_VERBOSE=1` 开启详细模式。
 
 ## 许可
 

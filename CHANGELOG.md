@@ -25,6 +25,8 @@
 - 世界书清理不再把 `format_message_variable`、`get_message_variable` 或普通 `getvar(stat_data...)` 读取当成删除证据；带 `[mvu_update]` 的剧情机制、条件规则和格式指南会保留，只有 InitVar、结构更新规则及明确的写入/输出管道才整条删除。
 - EJS 中完整字面路径的 `getvar('stat_data.组.字段')` 改用数据库安全路径函数：任意中间组缺失时返回 `undefined`，并保留 `{ defaults: ... }`，不再因生成连续属性访问而抛出 “Cannot read properties of undefined”；同时修复其他直接读取入口改写时可能误把字符串位置数字拼进 EJS 代码的问题。
 - `{{format_message_variable::路径}}` 不再原样残留：世界书正文与表格 `note/check` 统一改为生成时从数据库取值；标量直接输出，对象/数组按 YAML 输出，并按 MVU 规则递归隐藏以 `$` 开头的键。
+- 修复世界书 EJS/格式化宏无条件优先读取开局 checkpoint、偶发得到初始值的问题。统一读取顺序为“待写快照 → SP 提交回调 → 完整运行时表 → 持久化帧 → 结构骨架”；持久化缓存也改用内容指纹，不再把等长的新旧帧当成同一份数据。
+- 填表插件单独调用 `EjsTemplate.evalTemplate(finalContent)` 时，数据库 helper 现在同时注册到所有同源 EJS 实例、注入 `prompt_template_prepare` 上下文，并对“包含转换器 helper 且未传 context”的直接 `evalTemplate` 显式调用 `prepareContext`。避免 helper `ReferenceError` 导致 SP 放弃整份 EJS 处理、把 `<%- mvu2shujuku… %>` 原样发给模型；普通 EJS 模板不介入。
 
 ### 脚本迁移
 

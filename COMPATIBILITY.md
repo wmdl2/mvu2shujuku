@@ -202,6 +202,9 @@ Zod/TS 替代写法的字段基础类型不作为唯一建表依据；实际表�
 
 **支持改写或兼容：**
 
+EJS 世界书、`format_message_variable`、状态栏与前端共用实时读取优先级：待写快照、SP 已提交回调、完整运行时表、持久化 checkpoint/log、结构骨架。只有运行时表尚未完成回放时才使用持久化帧，不会因开局 checkpoint 滞后而读回初始值。
+填表插件独立调用 st-prompt-template 时，兼容 helper 会注入实际 `prompt_template_prepare` 上下文；若调用方直接执行 `evalTemplate(finalContent)` 而没有传 context，则仅在内容包含转换器 helper 时显式准备上下文。因此不仅依赖某一个窗口的 `EjsTemplate.defines` 或事件是否发布。
+
 - `getvar(...)`
 - `getVariables(...)`
 - `getAllVariables()`

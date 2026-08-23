@@ -5,7 +5,10 @@
  *   node test/run-tests.js                     # 全量
  *   node test/run-tests.js --grep 桥           # 只跑名称含“桥”的测试
  *   node test/run-tests.js --list [--grep 扩展] # 列出测试名
+ *   node test/run-tests.js --verbose                # 显示通过用例和数据桥详细日志
  *   环境变量 TEST_FILTER 等价于 --grep
+ *   环境变量 TEST_VERBOSE=1 等价于 --verbose
+ * 默认只打印数量/汇总；失败时回放该用例最后 20 条截断日志。
  */
 'use strict';
 
@@ -15,10 +18,12 @@ const {
     requireFixture, applyingApi, parseSqlValue, splitSqlValues, applySqlToTables, bridgeSandbox, waitBridgeFlush,
 } = require('./helpers');
 
-console.log('MVU→数据库 转换器测试\n');
+const SHOW_TEST_SECTIONS = process.argv.includes('--verbose') || process.argv.includes('-v') || /^(?:1|true|yes)$/i.test(String(process.env.TEST_VERBOSE || ''));
+const section = (...args) => { if (SHOW_TEST_SECTIONS) console.log(...args); };
+section('MVU→数据库 转换器测试\n');
 
 /* ---------------- parseInitVar ---------------- */
-console.log('parseInitVar');
+section('parseInitVar');
 test('YAML 树（嵌套 + 数组 + 空容器）', () => {
     const yaml = [
         '世界:',
@@ -214,7 +219,7 @@ test('旧 MVU chat 根变量镜像脚本仅在可证明事务内改写为数据�
 });
 
 /* ---------------- parseMvuShapes ---------------- */
-console.log('parseMvuShapes');
+section('parseMvuShapes');
 test('从 [mvu_update] 提取结构声明', () => {
     const card = requireFixture();
     const si = core.parseMvuShapes(card);
@@ -758,7 +763,7 @@ test('相邻顶层组不被跳过 + check 机制词清洗（op/delta/replace/分
 });
 
 /* ---------------- scanStatusUsage ---------------- */
-console.log('scanStatusUsage');
+section('scanStatusUsage');
 test('道渊状态栏字段扫描', () => {
     const card = requireFixture();
     const initEntry = card.data.character_book.entries.find(e => /\[initvar\]/i.test(String(e.comment || '')));
@@ -771,7 +776,7 @@ test('道渊状态栏字段扫描', () => {
 });
 
 /* ---------------- buildSchema / generateTemplate ---------------- */
-console.log('buildSchema / generateTemplate');
+section('buildSchema / generateTemplate');
 test('道渊：15 张表（含关系子表），结构正确', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -1852,7 +1857,7 @@ test('<%_ if %>（EJS 吞空白写法）也能重写为 <if cell>，且仅 EJS �
 });
 
 /* ---------------- EJS 重写 ---------------- */
-console.log('rewriteEjsConditions');
+section('rewriteEjsConditions');
 test('getvar 数值比较 → mvu2shujukuGetMessageVar() 安全取值（EJS 保留）', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -1920,7 +1925,7 @@ test('官方教程规范写法：getvar("stat_data").组["字段"][0] 与 _.has'
 });
 
 /* ---------------- 数据桥脚本 ---------------- */
-console.log('generateBridgeScript');
+section('generateBridgeScript');
 test('脚本语法与 SD_LAYOUT 结构', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -1995,7 +2000,7 @@ test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
 });
 
 /* ---------------- Mvu 兼容层（通用 API 面，不依赖任何具体卡） ---------------- */
-console.log('Mvu 兼容层');
+section('Mvu 兼容层');
 
 test('Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessage/事件名）', () => {
     const card = requireFixture();
@@ -2273,7 +2278,7 @@ test('扩展产物：index.js 应包含完整 Mvu 兼容层（事件名/接管/�
 });
 
 /* ---------------- 空字典组 / 未声明动态字段（通用 JSON 兜底） ---------------- */
-console.log('JSON 兜底（空字典组 / 未声明字段）');
+section('JSON 兜底（空字典组 / 未声明字段）');
 
 test('空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删除均可还原', () => {
     const vm = require('vm');
@@ -3074,7 +3079,7 @@ test('status_current_variable 单数条目也应识别为 MVU 并删除', () => 
 });
 
 /* ---------------- convert 输出 ---------------- */
-console.log('convert');
+section('convert');
 test('转换产物齐全', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -3484,7 +3489,7 @@ test('INSERT 示例优先用卡内真实初始值，空表退回列名占位', (
 });
 
 /* ---------------- PNG 往返 ---------------- */
-console.log('PNG');
+section('PNG');
 test('PNG 解析 → 转换 → 回写 → 再解析', () => {
     if (!fs.existsSync(PNG)) {
         console.log('    （跳过：缺少 PNG 参考卡）');
@@ -3707,7 +3712,7 @@ test('浏览器环境（无 Buffer）PNG 回写正常', () => {
 });
 
 /* ---------------- 扩展装配 ---------------- */
-console.log('assembleExtension');
+section('assembleExtension');
 test('扩展文件齐全且 index.js 语法正确', () => {
     const coreSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
     const files = core.assembleExtension({ coreSource });
@@ -3980,7 +3985,7 @@ test('扩展 owner 端到端：仅含 JSONPatch 的首楼合并初始化、保�
 });
 
 /* ---------------- 对照金标准 ---------------- */
-console.log('通用性验证');
+section('通用性验证');
 test('合成卡：与参考卡无关的组名也能转换（含 [value,desc] 叶子 / EJS / UpdateVariable）', () => {
     const synthetic = {
         spec: 'chara_card_v3',
@@ -5138,6 +5143,7 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
 
     const tables = JSON.parse(JSON.stringify(r.template));
     let initialized = false;
+    let tableUpdateCallback = null;
     const fakeApi = {
         getTemplatePresetNames: () => [],
         exportTableAsJson: () => (initialized ? tables : {}),
@@ -5157,7 +5163,7 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
         insertRow: async () => 1,
         updateCell: async () => true,
         deleteRow: async () => true,
-        registerTableUpdateCallback: () => true,
+        registerTableUpdateCallback: (fn) => { tableUpdateCallback = fn; return true; },
     };
     const handlers = {};
     let characters = [converted];
@@ -5207,6 +5213,8 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
         querySelector: () => fakeEl(), getElementById: () => fakeEl(), createElement: () => fakeEl(),
         createTextNode: () => fakeEl(), addEventListener: () => {}, body: fakeEl(),
     };
+    let lastEvalContext;
+    let prepareContextCalls = 0;
     const win = {
         top: null, parent: null, document: doc, console,
         setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (t) => clearTimeout(t),
@@ -5216,6 +5224,18 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
         SillyTavern: { getContext: () => context },
         AutoCardUpdaterAPI: fakeApi,
         eventEmit: () => {}, toastr: undefined,
+        EjsTemplate: {
+            defines: {},
+            prepareContext: async (additional) => {
+                prepareContextCalls++;
+                return Object.assign({}, additional || {});
+            },
+            evalTemplate: async (code, evalContext) => {
+                lastEvalContext = evalContext;
+                if (!evalContext) return 'plain-original';
+                return evalContext.mvu2shujukuFormatMessageVariable('stat_data.主角.姓名');
+            },
+        },
         getContext: () => context,
         getVariables: realGet,
         updateVariablesWith: realUpd,
@@ -5246,6 +5266,31 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
     assert.strictEqual(projectedMessage.data.stat_data.主角.姓名, '张三', '旧状态栏直读 message.data.stat_data 时应看到数据库当前状态');
     assert.strictEqual(projectedMessage.data.原生附加, 1, '消息 data 的其他原生字段必须保留');
     assert.strictEqual(realMessages()[0].data.stat_data, undefined, '数据库投影不得污染原聊天消息');
+    // 持久化 checkpoint 仍是开局“张三”，运行时表已更为“李四”：
+    // 世界书 EJS 必须与状态栏一样读当前完整表，不能无条件回退到初始 checkpoint。
+    const initialCheckpoint = JSON.parse(JSON.stringify(r.template));
+    context.chat[0].TavernDB_ACU_IsolatedData = {
+        test: { storageFrame: { version: 2, checkpoint: { kind: 'full', data: initialCheckpoint }, logEntries: [] } },
+    };
+    const mainSheet = Object.values(tables).find(s => s && s.name === '主角表');
+    const nameCol = mainSheet.content[0].indexOf('姓名');
+    mainSheet.content[1][nameCol] = '李四';
+    assert.strictEqual(typeof tableUpdateCallback, 'function', '测试环境应捕获 SP 表更新回调');
+    tableUpdateCallback(tables);
+    const ejsAll = win.EjsTemplate.defines.mvu2shujukuGetAllVariables;
+    assert.strictEqual(typeof ejsAll, 'function', '扩展应注册世界书 EJS 数据入口');
+    assert.strictEqual(ejsAll().stat_data.主角.姓名, '李四', '完整运行时表必须优先于滞后的初始 checkpoint');
+    const preparedPromptContext = {};
+    (handlers.prompt_template_prepare || []).forEach(fn => fn(preparedPromptContext));
+    assert.strictEqual(typeof preparedPromptContext.mvu2shujukuFormatMessageVariable, 'function', '填表自行 evalTemplate 时应向实际 prepare 上下文直接注入 helper');
+    assert.strictEqual(preparedPromptContext.mvu2shujukuFormatMessageVariable('stat_data.主角.姓名'), '李四', '填表上下文中的格式化 helper 应读当前表格值');
+    const directEvalResult = await win.EjsTemplate.evalTemplate('<%- mvu2shujukuFormatMessageVariable("stat_data.主角.姓名") %>');
+    assert.strictEqual(directEvalResult, '李四', '填表直接 evalTemplate 且未传 context 时也应显式准备并注入 helper');
+    assert.strictEqual(typeof lastEvalContext.mvu2shujukuFormatMessageVariable, 'function', '直接 evalTemplate 应收到完整 helper 上下文');
+    assert.ok(prepareContextCalls > 0, '直接 evalTemplate 应调用 EjsTemplate.prepareContext');
+    const prepareCallsBeforePlain = prepareContextCalls;
+    assert.strictEqual(await win.EjsTemplate.evalTemplate('plain text'), 'plain-original', '不含转换器 helper 的模板必须原样委派');
+    assert.strictEqual(prepareContextCalls, prepareCallsBeforePlain, '普通模板不应触发转换器上下文桥');
     await win.insertOrAssignVariables({ adaptive_regex_names: ['命定核心-艾莉亚对话美化'] }, { type: 'chat' });
     assert.deepStrictEqual(Array.from(win.getVariables({ type: 'chat' }).adaptive_regex_names), ['命定核心-艾莉亚对话美化'],
         'chat 变量必须交还 TavernHelper，动态正则写入后要能立即读回');
