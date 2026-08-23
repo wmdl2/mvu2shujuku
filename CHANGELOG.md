@@ -23,6 +23,7 @@
 - YAML 规则中的 `${A|B}` 与 `${A/B}` 模板键会展开为完整逻辑路径，其下的 `type`、`check`、`range`、`format` 和枚举不再被跳过。
 - 固定容器的表级 `check` 会按路径传播到实际承载数据的动态子表；MVU 的 `remove旧键+insert新键` 修改 value 措辞会转换为数据库行更新语义。
 - 世界书清理不再把 `format_message_variable`、`get_message_variable` 或普通 `getvar(stat_data...)` 读取当成删除证据；带 `[mvu_update]` 的剧情机制、条件规则和格式指南会保留，只有 InitVar、结构更新规则及明确的写入/输出管道才整条删除。
+- EJS 中完整字面路径的 `getvar('stat_data.组.字段')` 改用数据库安全路径函数：任意中间组缺失时返回 `undefined`，并保留 `{ defaults: ... }`，不再因生成连续属性访问而抛出 “Cannot read properties of undefined”；同时修复其他直接读取入口改写时可能误把字符串位置数字拼进 EJS 代码的问题。
 
 ### 脚本迁移
 

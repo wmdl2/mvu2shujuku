@@ -1815,7 +1815,7 @@ test('误标 [mvu_update] 的剧情文本条目应保留，纯变量管道仍删
     assert.ok(entries.some(e => e.comment.includes('匿名版介绍')), '剧情文本（即使带 [mvu_update] 标记）应保留');
     const mechanism = entries.find(e => e.comment.includes('条件机制'));
     assert.ok(mechanism, '带 [mvu_update] 的业务机制不得因读取变量宏而整条删除');
-    assert.ok(mechanism.content.includes('mvu2shujukuGetAllVariables().stat_data.系统.开关'), '保留机制中的 EJS getvar 读取应改写到数据库数据源');
+    assert.ok(mechanism.content.includes('mvu2shujukuGetMessageVar("stat_data.系统.开关")'), '保留机制中的 EJS getvar 读取应改写为数据库安全取值');
     assert.ok(!entries.some(e => e.comment.includes('变量更新格式')), '纯变量管道应删除');
     assert.ok(!entries.some(e => e.comment.includes('变量列表开始')), '短标记应删除');
 });
@@ -1842,7 +1842,7 @@ test('<%_ if %>（EJS 吞空白写法）也能重写为 <if cell>，且仅 EJS �
     const r = core.convert(card, { mode: 'both' });
     const entries = (r.card.data || r.card).character_book.entries;
     const plot = entries.find(e => e.comment.includes('人设'));
-    assert.ok(plot.content.includes('mvu2shujukuGetAllVariables().stat_data.角色.苏苏.发情值 < 20'), '吞空白 EJS 应改数据源为 mvu2shujukuGetAllVariables');
+    assert.ok(plot.content.includes("mvu2shujukuGetMessageVar('stat_data.角色.苏苏.发情值') < 20"), '吞空白 EJS 应改为数据库安全取值');
     assert.ok(plot.content.includes('<%_'), 'EJS 吞空白写法应保留');
     assert.ok(!plot.content.includes('<if cell='), '不应转换为 <if cell>（EJS 整体保留）');
     const t = Object.values(r.template).find(s => s && s.name === '角色表');
@@ -1851,23 +1851,25 @@ test('<%_ if %>（EJS 吞空白写法）也能重写为 <if cell>，且仅 EJS �
 
 /* ---------------- EJS 重写 ---------------- */
 console.log('rewriteEjsConditions');
-test('getvar 数值比较 → mvu2shujukuGetAllVariables()（EJS 保留）', () => {
+test('getvar 数值比较 → mvu2shujukuGetMessageVar() 安全取值（EJS 保留）', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const layout = core.buildLayout(r.schema);
     const text = '<% if (getvar(\'stat_data.主角.生命\') >= 50) { %>生命充沛<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(out.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.生命 >= 50'), out.text);
+    assert.ok(out.text.includes("mvu2shujukuGetMessageVar('stat_data.主角.生命') >= 50"), out.text);
     assert.ok(out.text.includes('<% if'), 'EJS 结构应保留');
+    const withDefault = core.rewriteEjsConditions("<% if (getvar('stat_data.缺失组.字段', { defaults: 7 }) === 7) { %>默认值<% } %>", layout, core.createReport());
+    assert.ok(withDefault.text.includes("mvu2shujukuGetMessageVar('stat_data.缺失组.字段', { defaults: 7 }) === 7"), '完整路径缺失时应保留 getvar defaults 语义');
 });
 
-test('嵌套路径（子表条目）→ getAllVariables()', () => {
+test('嵌套路径（子表条目）→ 安全路径取值', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const layout = core.buildLayout(r.schema);
     const text = '<% if (getvar(\'stat_data.主角.储物袋.铁剑.数量\') > 0) { %>有铁剑<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(out.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.储物袋.铁剑.数量 > 0'), out.text);
+    assert.ok(out.text.includes("mvu2shujukuGetMessageVar('stat_data.主角.储物袋.铁剑.数量') > 0"), out.text);
 });
 
 test('聚合计数（Object.keys）→ getAllVariables()', () => {
@@ -1876,7 +1878,7 @@ test('聚合计数（Object.keys）→ getAllVariables()', () => {
     const layout = core.buildLayout(r.schema);
     const text = '<% if (Object.keys(getvar(\'stat_data.道侣\')).length > 3) { %>道侣众多<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(out.text.includes('Object.keys(mvu2shujukuGetAllVariables().stat_data.道侣).length > 3'), out.text);
+    assert.ok(out.text.includes("Object.keys(mvu2shujukuGetMessageVar('stat_data.道侣')).length > 3"), out.text);
 });
 
 test('else 分支 EJS 保留', () => {
@@ -1886,7 +1888,7 @@ test('else 分支 EJS 保留', () => {
     const text = '<% if (getvar(\'stat_data.主角.修为\') < 100) { %>修炼中<% } else { %>可突破<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
     assert.ok(out.text.includes('<% } else { %>可突破<% } %>'), 'else 分支应保留为 EJS');
-    assert.ok(out.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.修为 < 100'), out.text);
+    assert.ok(out.text.includes("mvu2shujukuGetMessageVar('stat_data.主角.修为') < 100"), out.text);
 });
 
 test('else-if 链 EJS 整体保留，仅改数据源', () => {
@@ -1895,12 +1897,12 @@ test('else-if 链 EJS 整体保留，仅改数据源', () => {
     const layout = core.buildLayout(r.schema);
     const text = '<% if (getvar(\'stat_data.主角.修为\') >= 100) { %>大乘<% } else if (getvar(\'stat_data.主角.修为\') >= 50) { %>中阶<% } else { %>初阶<% } %>';
     const out = core.rewriteEjsConditions(text, layout, core.createReport());
-    assert.ok(out.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.修为 >= 100'), out.text);
-    assert.ok(out.text.includes('else if (mvu2shujukuGetAllVariables().stat_data.主角.修为 >= 50)'), 'else-if 应保留为 EJS');
+    assert.ok(out.text.includes("mvu2shujukuGetMessageVar('stat_data.主角.修为') >= 100"), out.text);
+    assert.ok(out.text.includes("else if (mvu2shujukuGetMessageVar('stat_data.主角.修为') >= 50)"), 'else-if 应保留为 EJS');
     assert.ok(out.text.includes('<% } else { %>初阶<% } %>'), 'else 分支应保留');
     const text2 = '<% if (getvar(\'stat_data.主角.生命\') > 0) { %>存活<% } else if (getvar(\'stat_data.主角.生命\') === 0) { %>濒死<% } %>';
     const out2 = core.rewriteEjsConditions(text2, layout, core.createReport());
-    assert.ok(out2.text.includes('mvu2shujukuGetAllVariables().stat_data.主角.生命 === 0'), out2.text);
+    assert.ok(out2.text.includes("mvu2shujukuGetMessageVar('stat_data.主角.生命') === 0"), out2.text);
 });
 
 test('官方教程规范写法：getvar("stat_data").组["字段"][0] 与 _.has', () => {
@@ -4061,7 +4063,9 @@ test('EJS 数据入口改写：fallback/getAllVariables/allVariables/TavernHelpe
         '<% const key = "stat_data"; print(getvar(key)); %>',
     ].join('\n');
     const rw = core.rewriteEjsConditions(src, { entries: [] }, report);
-    assert.strictEqual((rw.text.match(/mvu2shujukuGetAllVariables\(\)\.stat_data/g) || []).length, 6, rw.text);
+    assert.strictEqual((rw.text.match(/mvu2shujukuGetAllVariables\(\)\.stat_data/g) || []).length, 5, rw.text);
+    assert.ok(rw.text.includes('mvu2shujukuGetMessageVar("stat_data.世界.时间", null)'), '完整字面路径应安全取值并保留 fallback');
+    assert.doesNotMatch(rw.text, /\d+mvu2shujukuGetAllVariables/, '直接读取入口改写不得把 replace 回调 offset 拼进代码');
     assert.ok(rw.text.includes('getvar(key)'), '动态 getvar 不能冒险改写');
     assert.ok(report.manualReview.some(x => x.includes('getvar(key)')), '未识别动态数据入口必须进入人工报告');
 });
