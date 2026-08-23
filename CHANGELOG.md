@@ -1,5 +1,35 @@
 # 更新日志
 
+## v0.3.2（2026-08-23）
+
+> 修复含 MVU 官方 `$meta` 的角色卡结构转换。此类卡需要用新版本重新转换并新开聊天。
+
+### 官方 InitVar 元数据
+
+- 按本地 MVU 官方源码的 `generateSchema` / `cleanUpMetadata` 顺序处理 `$meta`、`$arrayMeta` 与数组魔法标记 `$__META_EXTENSIBLE__$`：元数据只参与结构推导，不再生成 `$meta_required` 等错误业务表或 `$meta` 列。
+- 支持 `extensible`、`recursiveExtensible`、`required`、`template` 以及根级 `strictTemplate`、`strictSet`、`concatTemplateArray` 的初始化解析；父级递归开放与数组元数据遵循官方代码的实际传播规则。
+- `template` 可为初始为空的动态字典提供通用条目结构；多开场分支中的元数据也参与结构并集推导，显式固定对象不会再被文本启发式误判为动态字典。
+
+### 表结构与数据往返
+
+- 修复多层分类字典被合并到同一子表的问题；衣柜、服装状态、背包等同形但不同路径的容器现在按完整逻辑路径独立建表。
+- 动态字典 `type` 中的索引签名名称（如 `[物品名称: string]`）现在作为行表业务键列名，不再一律显示为“键名”；若与 value 对象字段重名则自动消歧。
+- 修复嵌套字段被状态栏扫描再次补成顶层同名列，以及子条目字段被错误提升到父表的问题。
+- 混合字符串、数字、布尔值与 `null` 的标量字典改用 JSON 标量单元格，初始化、更新与新增时均保留原始类型，不再统一退化为字符串。
+- 通配路径识别改为校验合法路径段，描述文本中的小数点不再产生虚假的人工核对警告。
+
+### 规则提示
+
+- YAML 规则中的 `${A|B}` 与 `${A/B}` 模板键会展开为完整逻辑路径，其下的 `type`、`check`、`range`、`format` 和枚举不再被跳过。
+- 固定容器的表级 `check` 会按路径传播到实际承载数据的动态子表；MVU 的 `remove旧键+insert新键` 修改 value 措辞会转换为数据库行更新语义。
+- 世界书清理不再把 `format_message_variable`、`get_message_variable` 或普通 `getvar(stat_data...)` 读取当成删除证据；带 `[mvu_update]` 的剧情机制、条件规则和格式指南会保留，只有 InitVar、结构更新规则及明确的写入/输出管道才整条删除。
+
+### 脚本迁移
+
+- 对可静态证明为“读取 chat 根变量、修改已知 MVU 顶层组、原对象写回”的旧镜像事务，自动改写为数据库 `Mvu.getMvuData/replaceMvuData`；普通 chat 脚本设置仍保留原作用域。
+- 纯 Zod Schema 脚本即使把 `registerMvuSchema` 压缩改名导入，也会被识别并移除；含 `Mvu.*` 业务逻辑的混合脚本仍保留。
+- 只在 mount 时读取一次 message `stat_data` 的内联 module 开场前端，会先等待数据库 `getVariables` shim 安装再启动，避免初始化竞态把衣柜、选项列表等状态永久固化为空。
+
 ## v0.3.1（2026-08-22）
 
 > 运行时健壮性与性能修复，无需重新转换卡片，刷新 SillyTavern 即可生效。

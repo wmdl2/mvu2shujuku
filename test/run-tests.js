@@ -74,6 +74,145 @@ test('初始数据宏：动态键替换后冲突时拒绝静默覆盖', () => {
     );
 });
 
+test('MVU 官方元数据：$meta/数组标记只生成结构提示，清理后不污染 stat_data', () => {
+    const analyzed = core.analyzeMvuInitMetadata({
+        $meta: { strictTemplate: true, strictSet: true, concatTemplateArray: false },
+        系统: {
+            $meta: { extensible: false, required: ['时间'] },
+            时间: 1,
+            背包: { $meta: { extensible: true, template: { 数量: 0, 标签: [] } } },
+        },
+        记忆: ['$__META_EXTENSIBLE__$', '初见'],
+        日志: [
+            { $arrayMeta: true, $meta: { extensible: true, template: ['默认'] } },
+            { 内容: '开始' },
+        ],
+    });
+    assert.deepStrictEqual(analyzed.data, {
+        系统: { 时间: 1, 背包: {} },
+        记忆: ['初见'],
+        日志: [{ 内容: '开始' }],
+    });
+    assert.strictEqual(analyzed.metadata.get('系统').extensible, false);
+    assert.deepStrictEqual(analyzed.metadata.get('系统').required, ['时间']);
+    assert.strictEqual(analyzed.metadata.get('').strictTemplate, true, '根 $meta 的官方全局模板选项应被收集');
+    assert.strictEqual(analyzed.metadata.get('').strictSet, true, '根 $meta.strictSet 应被收集');
+    assert.strictEqual(analyzed.metadata.get('').concatTemplateArray, false, '根数组模板合并选项应被收集');
+    assert.ok(analyzed.dynamicPaths.has('系统.背包'), '带 template 的开放对象应作为动态条目容器');
+    assert.strictEqual(analyzed.metadata.get('记忆').extensible, true, '数组魔法字符串应转成数组元数据');
+    assert.deepStrictEqual(analyzed.metadata.get('日志').template, ['默认']);
+
+    const recursive = core.analyzeMvuInitMetadata({
+        根: {
+            $meta: { recursiveExtensible: true },
+            子: { $meta: { extensible: false }, 固定值: 1 },
+            数组: [{ $arrayMeta: true, $meta: { extensible: false, recursiveExtensible: false } }, '值'],
+        },
+    });
+    assert.strictEqual(recursive.metadata.get('根.子').extensible, true, '父级 recursiveExtensible 按官方 OR 规则向后代传播');
+    assert.strictEqual(recursive.metadata.get('根.数组').extensible, true, '父级递归开放同样传播到数组');
+    assert.strictEqual(recursive.metadata.get('根.数组').recursiveExtensible, true, '数组自身元元素不覆盖父级 recursiveExtensible');
+});
+
+test('MVU $meta 通用转换：固定对象、动态子表、template 与混合标量字典往返完全等价', async () => {
+    const init = {
+        主角: {
+            $meta: { extensible: false },
+            状态: {
+                $meta: { extensible: true, required: ['等级', '开关'] },
+                等级: 2,
+                开关: false,
+            },
+            衣柜: {
+                $meta: { extensible: false },
+                上装: { $meta: { extensible: true }, T恤: '白色' },
+                下装: { $meta: { extensible: true }, 短裙: '蓝色' },
+            },
+        },
+        环境: {
+            元素: { $meta: { extensible: true }, 床: '单人床', 台灯: 1, 窗户: true },
+        },
+        联系人: {
+            $meta: { extensible: true, template: { 关系: '陌生', 未读: { $meta: { extensible: true } } } },
+        },
+    };
+    const card = {
+        spec: 'chara_card_v3', spec_version: '3.0',
+        data: {
+            name: '官方元数据测试卡', first_mes: '开始',
+            character_book: { entries: [
+                { comment: '[InitVar]', content: JSON.stringify(init) },
+                {
+                    comment: '[mvu_update]',
+                    content: [
+                        '变量更新规则:',
+                        '  主角:',
+                        '    衣柜:',
+                        '      ${上装/下装}:',
+                        '        type: |-',
+                        '          {',
+                        '            [服装名称: string]: string;',
+                        '          }',
+                        '        check:',
+                        '          - 穿上服装时新增对应记录',
+                        '          - 脱下服装时移除对应记录',
+                        '          - 更新时通过remove旧键+insert新键修改对应条目的value描述',
+                    ].join('\n'),
+                },
+            ] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const names = r.meta.tableNames;
+    assert.ok(!names.some(n => /\$meta|required|extensible|template/.test(n)), '元数据不得生成业务表');
+    assert.ok(names.includes('主角_衣柜_上装表') && names.includes('主角_衣柜_下装表'), '分类动态字典应各自拆表');
+    assert.ok(names.includes('联系人表'), '带 template 的顶层动态字典应生成行表');
+    const layout = JSON.parse((r.card.data || r.card).extensions.mvu2shujuku.layout);
+    for (const tableName of ['主角_衣柜_上装表', '主角_衣柜_下装表']) {
+        const entry = layout.find(x => x.table === tableName);
+        const sheet = Object.values(r.template).find(x => x && x.name === tableName);
+        assert.strictEqual(entry.keyCol, '服装名称', '索引签名中的业务键名应成为动态行表键列名');
+        assert.ok(sheet.sourceData.note.includes('服装名称'), '行表说明应使用业务键名，而非泛化“键名”');
+        assert.ok(sheet.sourceData.note.includes('穿上服装时新增对应记录'), '固定容器上的 check 应传播到实际动态子表');
+        assert.ok(sheet.sourceData.note.includes('脱下服装时移除对应记录'), '容器级 check 不得在拆表后丢失');
+        assert.ok(sheet.sourceData.note.includes('更新时直接更新对应条目记录的描述'), 'MVU 键替换机制应翻译成数据库行更新语义');
+        assert.doesNotMatch(sheet.sourceData.note, /remove旧键|insert新键|value描述/i, '提示词不得残留该 MVU 键替换机制措辞');
+    }
+    const expected = core.analyzeMvuInitMetadata(init).data;
+    assert.deepStrictEqual(core.statDataFromTables(layout, r.template).stat_data, expected, '初始模板往返必须严格等价');
+
+    const next = JSON.parse(JSON.stringify(expected));
+    next.环境.元素.台灯 = false;
+    next.环境.元素.新增数值 = 3;
+    const tables = JSON.parse(JSON.stringify(r.template));
+    await core.writeStatDiffToDb(applyingApi(tables), layout, expected, next);
+    assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, next, '混合标量字典增改后仍须保留实际类型');
+});
+
+test('旧 MVU chat 根变量镜像脚本仅在可证明事务内改写为数据库 Mvu API', () => {
+    const card = {
+        spec: 'chara_card_v3', spec_version: '3.0',
+        data: {
+            name: 'chat 镜像测试卡', first_mes: '开始',
+            character_book: { entries: [{ comment: '[InitVar]', content: '主角:\n  学分: 10' }] },
+            extensions: {
+                regex_scripts: [],
+                tavern_helper: { scripts: [
+                    { type: 'script', name: '旧镜像', enabled: true, content: "const d=getVariables({type:'chat'});const n=_.get(d,'主角.学分');_.set(d,'主角.学分',n-1);replaceVariables(d,{type:'chat'});" },
+                    { type: 'script', name: '普通设置', enabled: true, content: "const d=getVariables({type:'chat'});_.set(d,'script_settings.theme','dark');replaceVariables(d,{type:'chat'});" },
+                ] },
+            },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const scripts = (r.card.data || r.card).extensions.tavern_helper.scripts;
+    const legacy = scripts.find(s => s.name === '旧镜像').content;
+    const settings = scripts.find(s => s.name === '普通设置').content;
+    assert.ok(legacy.includes('Mvu.getMvuData') && legacy.includes('Mvu.replaceMvuData'), '可证明的旧镜像事务应改写');
+    assert.ok(settings.includes("getVariables({type:'chat'})") && settings.includes("replaceVariables(d,{type:'chat'})"), '普通 chat 设置不得改绑数据库');
+});
+
 /* ---------------- parseMvuShapes ---------------- */
 console.log('parseMvuShapes');
 test('从 [mvu_update] 提取结构声明', () => {
@@ -271,6 +410,8 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
                             '    range: 0~100',
                             '    check:',
                             '      - 与NPC互动时更新，单次 ±(2~5)',
+                            '  服装说明:',
+                            '    [材质]纯棉,厚0.8mm,低弹[设计基准]胸围差13/腰围68[基础外观]颜色: 米白',
                         ].join('\n'),
                     },
                 ],
@@ -281,6 +422,7 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     const si = core.parseMvuShapes(card);
     assert.ok(si.wildcardFields.has('户.<门牌>.妻.好感值'), '通配路径字段应被识别');
     assert.ok(si.wildcardFields.has('户.<门牌>.夫.当前情绪'), '多个通配路径字段都应被识别');
+    assert.ok(![...si.wildcardFields].some(k => k.includes('0.8mm')), '描述文本中的小数点不得误判为 MVU 路径');
     assert.ok(Array.isArray(si.wildcardRules['人物']) && si.wildcardRules['人物'][0].range[0] === 0, '通配规则应按路径首段归组并提取范围');
     const r = core.convert(card, { mode: 'both' });
     assert.ok(r.report.toMarkdown().includes('通配路径规则'), '转换报告应显式警告通配路径规则');
@@ -1659,6 +1801,7 @@ test('误标 [mvu_update] 的剧情文本条目应保留，纯变量管道仍删
             character_book: {
                 entries: [
                     { comment: '[mvu_update]匿名版介绍', content: '<匿名版介绍>\nMChan匿名版是一群使用催眠APP的用户自行搭建的地下匿名版，只有使用者能进入。板块包括公告区、新手引导区、综合讨论区、成果展示区、求助区，语言风格为2chan/4chan式。' },
+                    { comment: '[mvu_update]条件机制', content: '<条件机制>\n当{{format_message_variable::stat_data.系统.当前时间}}为夜晚时启用。\n<% if (getvar("stat_data.系统.开关")) { %>保持警戒<% } %>' },
                     { comment: '[mvu_update]变量更新格式', content: '格式: _.set(\'路径\', 旧值, 新值);//原因' },
                     { comment: '[mvu_update]变量列表开始', content: '🔻' },
                     { comment: '[InitVar]', content: '{"系统":{"当前时间":"09:00"}}' },
@@ -1670,6 +1813,9 @@ test('误标 [mvu_update] 的剧情文本条目应保留，纯变量管道仍删
     const r = core.convert(card, { mode: 'both' });
     const entries = (r.card.data || r.card).character_book.entries;
     assert.ok(entries.some(e => e.comment.includes('匿名版介绍')), '剧情文本（即使带 [mvu_update] 标记）应保留');
+    const mechanism = entries.find(e => e.comment.includes('条件机制'));
+    assert.ok(mechanism, '带 [mvu_update] 的业务机制不得因读取变量宏而整条删除');
+    assert.ok(mechanism.content.includes('mvu2shujukuGetAllVariables().stat_data.系统.开关'), '保留机制中的 EJS getvar 读取应改写到数据库数据源');
     assert.ok(!entries.some(e => e.comment.includes('变量更新格式')), '纯变量管道应删除');
     assert.ok(!entries.some(e => e.comment.includes('变量列表开始')), '短标记应删除');
 });
@@ -4121,6 +4267,7 @@ test('仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部 import 与 Mvu
                     scripts: [
                         { name: 'MVU', enabled: true, content: "import 'https://testingcf.jsdelivr.net/gh/NLKASHEI/MVU-offline@v1.0.2/mvu_bundle_full.js'" },
                         { name: 'ZOD Schema', enabled: true, content: "import { registerMvuSchema } from 'https://example.test/schema.js';\nconst schema = {};\nregisterMvuSchema(schema);" },
+                        { name: '压缩 ZOD Schema', enabled: true, content: "import{registerMvuSchema as r}from'https://example.test/mvu_zod.js';const e=z,n=e.z.object({值:e.z.string()});$(()=>{r(n)});export{n as Schema};" },
                         { name: '某卡 mvu zod', enabled: true, content: "import 'https://cdn.example.test/card/dist/data_schema/index.js'" },
                         { name: '某卡 mvu zod 业务混合', enabled: true, content: "import 'https://cdn.example.test/card/dist/data_schema/index.js';\nwindow.afterSchemaLoaded = true;" },
                         { name: '用户倒计时', enabled: true, content: "const data = Mvu.getMvuData();\ndata.stat_data.系统.剩余时间 = 10;\nawait Mvu.replaceMvuData(data);" },
@@ -4136,6 +4283,7 @@ test('仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部 import 与 Mvu
     const thScripts = (d.extensions && d.extensions.tavern_helper && d.extensions.tavern_helper.scripts) || [];
     assert.ok(!thScripts.some(s => String(s.content || '').includes('MVU-offline')), '应移除离线 MVU 引擎 import 脚本');
     assert.ok(!thScripts.some(s => String(s.name || '') === 'ZOD Schema'), '纯 registerMvuSchema 声明脚本应由数据库 Schema 替代');
+    assert.ok(!thScripts.some(s => String(s.name || '') === '压缩 ZOD Schema'), '别名调用的压缩纯 Schema 脚本也应移除');
     assert.ok(!thScripts.some(s => String(s.name || '') === '某卡 mvu zod'),
         '名称、URL 和脚本形态三重确认的纯 MVU data_schema 启动脚本应由数据库 Schema 替代');
     assert.ok(thScripts.some(s => String(s.name || '') === '某卡 mvu zod 业务混合'), '带其他业务代码的 Schema import 不得连带删除');
@@ -4157,6 +4305,26 @@ test('仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部 import 与 Mvu
     const sb = (d.extensions && d.extensions.regex_scripts || []).find(rx => String(rx.scriptName || '') === 'MVU状态栏');
     assert.ok(sb && String(sb.replaceString || '').includes('window.eventOn(window.Mvu.events.VARIABLE_UPDATE_ENDED'), '状态栏事件监听应原样保留（靠数据桥广播 mag_variable_update_ended 驱动）');
     assert.ok(!String(sb.replaceString || '').includes("(() => { if (window.addEventListener)"), '不应出现损坏状态栏脚本的事件改写');
+});
+
+test('内联 module 前端首次读取 message 变量前等待数据库 getVariables shim', () => {
+    const frontend = '<script type="module">const vars=getVariables({type:"message",message_id:getCurrentMessageId()});window.items=vars.stat_data.主角.衣柜;</script>';
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '一次性读取前端卡', first_mes: '[初始化]',
+            character_book: { entries: [{ comment: '[InitVar]', content: '主角:\n  衣柜:\n    上装:\n      T恤: 白色' }] },
+            extensions: {
+                regex_scripts: [{ scriptName: '开场前端', findRegex: '/\\[初始化]/g', replaceString: frontend, disabled: false }],
+                tavern_helper: { scripts: [] },
+            },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const script = (r.card.data || r.card).extensions.regex_scripts.find(x => x.scriptName === '开场前端').replaceString;
+    assert.ok(script.includes('__mvu2shujukuAwaitMessageVariables'), '一次性读取消息变量的内联 module 应注入就绪门禁');
+    assert.ok(script.indexOf('__mvu2shujukuAwaitMessageVariables') < script.indexOf('const vars=getVariables'), '门禁必须在原前端首次读取变量之前执行');
+    assert.ok(script.includes("fn.__mvu2shujuku||fn.__mvu2shujukuBridge"), '门禁应等待转换器接管函数，而非猜测业务字段是否非空');
 });
 
 test('VARIABLE_UPDATE_ENDED 载荷与 MVU 原版一致：携带更新前后的完整 MvuData', async () => {
@@ -5314,7 +5482,7 @@ test('动态键字典子对象所在组不展平为行表：天下地图.地区�
     const k = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '天下地图_地区态势表');
     assert.ok(k, '应生成地区态势子行表');
     const s = r.template[k];
-    assert.deepStrictEqual(s.content[0], ['row_id', '键名', '名义归属', '实控势力', '_扩展数据'], '地区态势表列应来自 type 声明字段');
+    assert.deepStrictEqual(s.content[0], ['row_id', '地区', '名义归属', '实控势力', '_扩展数据'], '地区态势表列与业务键名应来自 type 声明');
     const rows = s.content.slice(1).map(row => row[1]);
     assert.ok(rows.includes('山西') && rows.includes('陕西'), '地区态势应为行条目（键名=地区名）');
     // 读回形状：stat_data.天下地图.地区态势.山西/陕西 均还原
@@ -5479,7 +5647,7 @@ test('组级 type 块标量（{ [键]: {...} } 动态键字典）必须解析：
     const r = core.convert(card, { mode: 'both' });
     const zj = Object.values(r.template).find(s => s && s.name === '宗门表');
     assert.ok(zj, '应生成宗门表');
-    assert.deepStrictEqual(zj.content[0], ['row_id', '键名', '名称', '主角职务', '主角贡献点', '_扩展数据'], '宗门表应为动态键字典行表（列来自 type 声明）');
+    assert.deepStrictEqual(zj.content[0], ['row_id', '宗门键名', '名称', '主角职务', '主角贡献点', '_扩展数据'], '宗门表应为动态键字典行表（业务键与列来自 type 声明）');
     const ls = Object.values(r.template).find(s => s && s.name === '灵兽栏表');
     assert.ok(ls && ls.content[0].includes('种族') && ls.content[0].includes('境界'), '灵兽栏表应为行表（种族/境界列）');
     // 写嵌套数据 → 读回 EJS 兼容（{宗门名: {主角职务,…}}）
@@ -8266,7 +8434,7 @@ test('[mvu_update] 动态键字典（{ [键]: value }）拆成子行表而非固
     const ws = layout.entries.find(x => x.table === '世界系统表');
     assert.ok(ws.cols.every(c => c.zh !== '修仙秘闻诡异阵纹' && c.zh !== '修仙秘闻半夜声响'), '修仙秘闻不得展平成固定列');
     const t = Object.values(r.template).find(s => s && s.name === '世界系统_修仙秘闻表');
-    assert.deepStrictEqual(t.content[0], ['row_id', '键名', '描述', '_扩展数据'], '修仙秘闻表头应为 键名/描述');
+    assert.deepStrictEqual(t.content[0], ['row_id', '键名', '描述', '_扩展数据'], '非法 YAML 外壳无法可靠定位索引签名时应回退为 键名/描述');
     // 读回保持 {键: 值} 原形（z.record(z.string(), z.string()) 兼容）
     const lj = layout.entries.map(e => ({
         kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
@@ -8316,14 +8484,14 @@ test('数值型动态字典的键名不继承值规则，模板键不得膨胀�
     const r = core.convert(card, { mode: 'both' });
     const g = r.schema.find(x => x.tableName === '主角_五维表');
     assert.ok(g, '五维应生成标量字典子表');
-    assert.deepStrictEqual(g.columns.map(c => c.zh), ['键名', '数值', '_扩展数据']);
-    const key = g.columns.find(c => c.zh === '键名');
+    assert.deepStrictEqual(g.columns.map(c => c.zh), ['能力属性', '数值', '_扩展数据']);
+    const key = g.columns.find(c => c.zh === '能力属性');
     assert.strictEqual(key.type, 'TEXT');
     assert.strictEqual(key.range, null);
     assert.deepStrictEqual(key.check, []);
     const sheet = Object.values(r.template).find(s => s && s.name === '主角_五维表');
-    assert.match(sheet.sourceData.ddl, /jianming TEXT NOT NULL/);
-    assert.doesNotMatch(sheet.sourceData.ddl, /jianming[^\n]*CHECK/);
+    assert.match(sheet.sourceData.ddl, /nenglishuxing TEXT NOT NULL/);
+    assert.doesNotMatch(sheet.sourceData.ddl, /nenglishuxing[^\n]*CHECK/);
     assert.deepStrictEqual(sheet.content.slice(1).map(row => row.slice(1, 3)), [
         ['生命', 80], ['武力', 15], ['统率', 5], ['智谋', 45], ['政治', 15],
     ]);
@@ -8423,7 +8591,7 @@ test('行条目内动态字典用具体实体关联键+键名关系表，嵌套�
     assert.strictEqual(shentong.scalarValueCol, '描述');
     const gongfaSheet = Object.values(r.template).find(s => s && s.name === '寻缘蝶_功法表');
     const butterflySheet = Object.values(r.template).find(s => s && s.name === '寻缘蝶表');
-    assert.match(gongfaSheet.sourceData.note, /寻缘蝶_键名.*寻缘蝶表\.键名/);
+    assert.match(gongfaSheet.sourceData.note, /寻缘蝶_键名.*寻缘蝶表\.蝶名/, '关系列应引用父表由索引签名声明的业务键列');
     assert.match(gongfaSheet.sourceData.note, /功法提升时更新/, '完整动态路径下的字段规则应迁入关系表');
     assert.match(gongfaSheet.sourceData.note, /维护本表时，同时遵循对应寻缘蝶记录中与「功法」相关的整体规则/);
     assert.doesNotMatch(gongfaSheet.sourceData.note, /键名：每只寻缘蝶最多/, '集合整体规则不得误挂到关系表键名列');
@@ -8915,7 +9083,7 @@ test('规则声明但 initvar 无数据的动态键字典（路遇道友录式�
     const r = core.convert(card, { mode: 'both' });
     const s = Object.values(r.template).find(x => x && x.name === '人际交往_路遇道友录表');
     assert.ok(s, '应生成路遇道友录空子表（initvar 无数据但有规则声明）');
-    assert.deepStrictEqual(s.content[0], ['row_id', '键名', '好感度数值', '关系标签', '_扩展数据'], '空子表列应来自 type 声明的条目字段');
+    assert.deepStrictEqual(s.content[0], ['row_id', 'NPC名字', '好感度数值', '关系标签', '_扩展数据'], '空子表业务键与条目列应来自 type 声明');
     assert.ok(s.sourceData.note.includes('好感度数值用 delta'), '空子表 note 应含整表 check');
     assert.ok(s.sourceData.note.includes('已正式见面'), '空子表 note 应含规则全文');
 });
@@ -9036,7 +9204,7 @@ test('非法 YAML（format 带裸 | 联合）时回退正则，功法式动态�
     assert.deepStrictEqual(si.shapes['功法'], ['名称', '品阶', '修炼层数', '效果'], '功法条目字段应来自 type 声明');
     const r = core.convert(card, { mode: 'both' });
     const gf = Object.values(r.template).find(s => s && s.name === '主角_功法表');
-    assert.deepStrictEqual(gf && gf.content[0], ['row_id', '键名', '名称', '品阶', '修炼层数', '效果', '_扩展数据'], '功法表列应为 type 声明字段，而非只剩 _扩展数据');
+    assert.deepStrictEqual(gf && gf.content[0], ['row_id', '功法键名', '名称', '品阶', '修炼层数', '效果', '_扩展数据'], '功法表业务键与条目列应来自 type 声明，而非只剩 _扩展数据');
 });
 
 test('组内子字段通配（首段非组名）挂到所在组，format 一并带出（大荒回归）', () => {
