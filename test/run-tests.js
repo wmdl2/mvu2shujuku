@@ -1816,6 +1816,8 @@ test('误标 [mvu_update] 的剧情文本条目应保留，纯变量管道仍删
     const mechanism = entries.find(e => e.comment.includes('条件机制'));
     assert.ok(mechanism, '带 [mvu_update] 的业务机制不得因读取变量宏而整条删除');
     assert.ok(mechanism.content.includes('mvu2shujukuGetMessageVar("stat_data.系统.开关")'), '保留机制中的 EJS getvar 读取应改写为数据库安全取值');
+    assert.ok(mechanism.content.includes('mvu2shujukuFormatMessageVariable("stat_data.系统.当前时间")'), '保留机制中的 format_message_variable 应改为数据库 YAML 展示入口');
+    assert.ok(!mechanism.content.includes('{{format_message_variable::'), '世界书正文不应残留失效的 MVU 格式化宏');
     assert.ok(!entries.some(e => e.comment.includes('变量更新格式')), '纯变量管道应删除');
     assert.ok(!entries.some(e => e.comment.includes('变量列表开始')), '短标记应删除');
 });
@@ -4068,6 +4070,19 @@ test('EJS 数据入口改写：fallback/getAllVariables/allVariables/TavernHelpe
     assert.doesNotMatch(rw.text, /\d+mvu2shujukuGetAllVariables/, '直接读取入口改写不得把 replace 回调 offset 拼进代码');
     assert.ok(rw.text.includes('getvar(key)'), '动态 getvar 不能冒险改写');
     assert.ok(report.manualReview.some(x => x.includes('getvar(key)')), '未识别动态数据入口必须进入人工报告');
+});
+
+test('format_message_variable 按 MVU 语义输出标量/YAML 并隐藏 $ 字段', () => {
+    assert.strictEqual(core.formatMessageVariableValue('墨墨'), '墨墨');
+    assert.strictEqual(core.formatMessageVariableValue(35), '35');
+    const yaml = core.formatMessageVariableValue({
+        名字: '墨墨',
+        $internal: '不应展示',
+        着装: { 上装: '白衬衫', $note: '隐藏' },
+    });
+    assert.match(yaml, /名字:\s*墨墨/);
+    assert.match(yaml, /上装:\s*白衬衫/);
+    assert.ok(!yaml.includes('$internal') && !yaml.includes('$note'), '以 $ 开头的键必须递归隐藏');
 });
 
 test('EJS 安全补全：variables.stat_data 与明确 message 作用域 setvar 接管，其他 setvar 保留', () => {
@@ -9126,7 +9141,7 @@ test('MVU 规则 YAML 中未引用的 {{getvar}} 标量保留语义，并改为�
             name: '模板宏规则卡', description: '', first_mes: '你好',
             character_book: { entries: [
                 { comment: '[InitVar]', content: '新闻:\n  速报: ""' },
-                { comment: '[mvu_update]变量更新规则', content: '变量更新规则:\n  新闻:\n    note: {{getvar::爆料风格}}\n    速报:\n      check:\n        - 根据正文更新' },
+                { comment: '[mvu_update]变量更新规则', content: '变量更新规则:\n  新闻:\n    note: {{getvar::爆料风格}}\n    速报:\n      check:\n        - 根据 {{format_message_variable::stat_data.新闻}} 更新' },
             ] },
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
@@ -9137,6 +9152,8 @@ test('MVU 规则 YAML 中未引用的 {{getvar}} 标量保留语义，并改为�
     const sheet = Object.values(r.template).find(s => s && s.name === '新闻表');
     assert.ok(sheet && sheet.sourceData.note.includes('mvu2shujukuResolveMacro("getvar::爆料风格")'), '生成表提示词应在请求时解析 getvar');
     assert.ok(!sheet.sourceData.note.includes('{{getvar::爆料风格}}'), '不得把原始酒馆宏交给 SP 的表格占位符解析器');
+    assert.ok(sheet.sourceData.note.includes('mvu2shujukuFormatMessageVariable("stat_data.新闻")'), '表格 check/note 中的 MVU 格式化宏应在请求时从数据库读取');
+    assert.ok(!sheet.sourceData.note.includes('{{format_message_variable::'), '表格提示词不应残留 MVU 格式化宏');
 });
 
 test('WORLD_INFO promptOnly 正则迁移到表格提示词，replacement 中 random 宏保持运行时求值且原正则保留', () => {
@@ -9164,6 +9181,7 @@ test('WORLD_INFO promptOnly 正则迁移到表格提示词，replacement 中 ran
     assert.ok(!sheet.sourceData.note.includes('{{random:'), '不得把原始 random 宏留给 SP 表格占位符链');
     assert.ok(r.card.data.extensions.regex_scripts.some(x => x.scriptName === '绝色候选'), '原正则仍应保留供其他世界书内容使用');
     assert.ok(r.bridgeScript.includes('mvu2shujukuResolveMacro'), '卡内桥应注册提示词宏解析入口');
+    assert.ok(r.bridgeScript.includes('mvu2shujukuFormatMessageVariable'), '卡内桥应注册 MVU YAML 格式化入口');
 });
 
 test('非法 YAML（format 带裸 | 联合）时回退正则，功法式动态字典仍正确拆表（大荒回归）', () => {
