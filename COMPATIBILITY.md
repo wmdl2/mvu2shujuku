@@ -247,6 +247,7 @@ Zod/TS 替代写法的字段基础类型不作为唯一建表依据；实际表�
 - 混合了剧情/EJS 与 `<UpdateVariable>`/`<JSONPatch>` 的世界书条目完整保留，更新块仍由数据桥执行
 - 仅删除可确认属于初始化或纯 MVU 变量输出管线的世界书条目
 - `format_message_variable`、`get_message_variable` 与 `getvar(stat_data...)` 属于读取证据，本身不会触发整条删除；即使 comment 带 `[mvu_update]`，业务机制正文仍保留
+- `getvar('stat_data.完整.路径', { defaults: ... })` 迁移为安全路径读取，中间对象缺失时与原函数一样返回 `undefined`/默认值；只读取 `getvar('stat_data')` 根对象的官方教程写法仍返回完整对象
 
 TavernHelper 变量作用域不会被统一改成数据库：仅默认/消息作用域的 `stat_data` 由数据库接管；动态正则使用的 `chat` 变量、脚本/扩展/角色/全局变量均保留原生读写。消息变量中与 `stat_data` 并存的辅助键也会保留。
 

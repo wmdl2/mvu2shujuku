@@ -7948,7 +7948,7 @@
      * EJS 数据源重写（rewriteEjsConditions）
      *
      * 世界书条目里的 EJS 结构整体保留，只把 MVU 的数据读取位置改为扩展注册的函数：
-     *   getvar('stat_data.组.字段')        → mvu2shujukuGetAllVariables().stat_data.组.字段
+     *   getvar('stat_data.组.字段')        → mvu2shujukuGetMessageVar('stat_data.组.字段')
      *   getvar("stat_data").组["字段"][0]  → mvu2shujukuGetAllVariables().stat_data.组["字段"][0]
      *   _.has(getvar("stat_data"), '路径') → _.has(mvu2shujukuGetAllVariables().stat_data, '路径')
      * 扩展启动时把 mvu2shujukuGetAllVariables 注册进 st-prompt-template 模板上下文
@@ -8012,8 +8012,15 @@
             const args = out.slice(open + 1, end);
             const first = args.match(/^\s*(["'])(stat_data(?:\.[^"']*)?)\1(?:\s*,[\s\S]*)?$/i);
             if (!first) { getvarRe.lastIndex = end + 1; continue; }
-            const suffix = first[2].slice('stat_data'.length).replace(/^\./, '');
-            const replacement = 'mvu2shujukuGetAllVariables().stat_data' + (suffix ? '.' + suffix : '');
+            const path = first[2];
+            const suffix = path.slice('stat_data'.length).replace(/^\./, '');
+            const topArgs = splitJsTopLevelArgs(args);
+            // 完整字面路径必须保留 TavernHelper getvar 的安全取值语义：任意中间层
+            // 缺失时返回 undefined/defaults，而不是生成 a.b.c 连续访问并在 b 缺失时抛错。
+            // 只读取 stat_data 根对象的官方教程写法仍返回整个对象，供后续属性链/_.has 使用。
+            const replacement = suffix
+                ? `mvu2shujukuGetMessageVar(${topArgs[0]}${topArgs[1] ? ', ' + topArgs[1] : ''})`
+                : 'mvu2shujukuGetAllVariables().stat_data';
             out = out.slice(0, m.index) + replacement + out.slice(end + 1);
             count++;
             getvarRe.lastIndex = m.index + replacement.length;
@@ -8082,7 +8089,9 @@
         for (const re of directReaders) {
             out = out.replace(re, (match, prefix) => {
                 count++;
-                return (prefix || '') + 'mvu2shujukuGetAllVariables().stat_data';
+                // 只有 variables.stat_data 那条正则有 prefix 捕获组；其余正则的第二个
+                // replace 回调参数是数字 offset，绝不能拼到输出前面（会生成 123mvu...）。
+                return (typeof prefix === 'string' ? prefix : '') + 'mvu2shujukuGetAllVariables().stat_data';
             });
         }
         return { text: out, count };
@@ -8185,8 +8194,8 @@
         out = rewritten.text;
         if (rewritten.count) {
             const count = rewritten.count;
-            items.push({ original: 'getvar(\'stat_data…\')', rewritten: 'mvu2shujukuGetAllVariables().stat_data…', status: 'auto' });
-            report.auto(`已把 ${count} 处 MVU/EJS 数据读取入口改为 mvu2shujukuGetAllVariables().stat_data…（EJS 结构保留，函数由扩展或卡内桥注册进模板上下文并惰性读取表格）。`);
+            items.push({ original: 'getvar(\'stat_data…\')', rewritten: 'mvu2shujukuGetMessageVar(...) / mvu2shujukuGetAllVariables().stat_data', status: 'auto' });
+            report.auto(`已把 ${count} 处 MVU/EJS 数据读取入口改为数据库安全取值函数（完整路径保留缺失返回/defaults 语义；stat_data 根读取保留对象访问；函数由扩展或卡内桥注册进模板上下文）。`);
         }
         // 非 MVU 的 getwi 等引用：保留并提示
         const orphanRe = /<%[-=]\s*await\s+getwi[\s\S]*?-?%>/g;
