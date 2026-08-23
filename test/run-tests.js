@@ -5111,6 +5111,7 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
         return realGet(opts);
     }
     function realGav() { return { stat_data: { 真: 1 } }; }
+    function realMessages() { return [{ role: 'assistant', data: { 原生附加: 1 } }]; }
     const realMvu = { getMvuData() { return 'REAL_MVU'; }, custom: 42 };
 
     // 组装扩展 index.js（与 build-extension.js 相同内联方式）
@@ -5221,6 +5222,7 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
         replaceVariables: realRep,
         insertOrAssignVariables: realIns,
         getAllVariables: realGav,
+        getChatMessages: realMessages,
         Mvu: realMvu,
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
@@ -5238,7 +5240,12 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
     assert.ok(ours(win.replaceVariables), 'replaceVariables 应被接管');
     assert.ok(ours(win.insertOrAssignVariables), 'insertOrAssignVariables 应被接管');
     assert.ok(ours(win.getAllVariables), 'getAllVariables 应被接管');
+    assert.ok(ours(win.getChatMessages), '转换卡激活后 getChatMessages 应投影数据库 stat_data');
     assert.ok(oursMvu(win.Mvu), 'Mvu 应被接管');
+    const projectedMessage = win.getChatMessages(-1)[0];
+    assert.strictEqual(projectedMessage.data.stat_data.主角.姓名, '张三', '旧状态栏直读 message.data.stat_data 时应看到数据库当前状态');
+    assert.strictEqual(projectedMessage.data.原生附加, 1, '消息 data 的其他原生字段必须保留');
+    assert.strictEqual(realMessages()[0].data.stat_data, undefined, '数据库投影不得污染原聊天消息');
     await win.insertOrAssignVariables({ adaptive_regex_names: ['命定核心-艾莉亚对话美化'] }, { type: 'chat' });
     assert.deepStrictEqual(Array.from(win.getVariables({ type: 'chat' }).adaptive_regex_names), ['命定核心-艾莉亚对话美化'],
         'chat 变量必须交还 TavernHelper，动态正则写入后要能立即读回');
@@ -5259,6 +5266,7 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
     assert.strictEqual(win.replaceVariables, realRep, 'replaceVariables 应还原为原始函数');
     assert.strictEqual(win.insertOrAssignVariables, realIns, 'insertOrAssignVariables 应还原为原始函数');
     assert.strictEqual(win.getAllVariables, realGav, 'getAllVariables 应还原为原始函数');
+    assert.strictEqual(win.getChatMessages, realMessages, 'getChatMessages 应还原为原始函数');
     assert.strictEqual(win.Mvu, realMvu, 'Mvu 应还原为原始对象');
 
     // 阶段3：切回转换卡——重新接管
@@ -5269,6 +5277,7 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
     await new Promise(res => setTimeout(res, 2200));
     assert.ok(ours(win.getVariables), '切回转换卡后 getVariables 应重新接管');
     assert.ok(ours(win.getAllVariables), '切回转换卡后 getAllVariables 应重新接管');
+    assert.ok(ours(win.getChatMessages), '切回转换卡后 getChatMessages 应重新投影 stat_data');
     assert.ok(oursMvu(win.Mvu), '切回转换卡后 Mvu 应重新接管');
 });
 

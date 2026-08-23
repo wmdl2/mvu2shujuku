@@ -207,6 +207,7 @@ Zod/TS 替代写法的字段基础类型不作为唯一建表依据；实际表�
 - `getAllVariables()`
 - `TavernHelper.getVariables(...)`
 - `getMessageVar('stat_data.…', { defaults: … })`
+- `getChatMessages(...)[0].data.stat_data`（旧状态栏读法；在返回副本上投影当前数据库状态）
 - `setMessageVar('stat_data.…', value)`
 - EJS 裸上下文 `variables.stat_data`
 - `setvar('stat_data.…', value, { outscope: 'message' })`（仅默认写入/返回语义）
