@@ -3732,6 +3732,25 @@ test('扩展文件齐全且 index.js 语法正确', () => {
     new Function(files['index.js']);
 });
 
+test('转换 UI：角色列表可刷新，配置零操作保存并以来源限定外部表身份', () => {
+    const coreSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
+    const index = core.assembleExtension({ coreSource })['index.js'];
+    assert.ok(index.includes('id="mvu2shujuku-char-refresh"'), '角色下拉旁应有手动刷新按钮');
+    assert.ok(index.includes('currentCharacterListFingerprint'), '应使用最新角色列表指纹自动检测增删');
+    assert.ok(index.includes('characterOptionKey(previousCharacter)'), '列表下标变化后应按角色身份保留选择');
+    assert.ok(index.includes('id="mvu2shujuku-profile-select"') && index.includes('id="mvu2shujuku-profile-delete"'), '配置应可选择和删除');
+    assert.ok(index.includes("format: 'mvu2shujuku-conversion-profile'"), '自动保存应使用带版本的独立配置格式');
+    assert.ok(index.includes("await autoSaveConversionProfile();"), '下载/保存产物时应自动保存配置');
+    assert.ok(index.includes('if (unchanged) {'), '同一次转换先下载再保存时，未变配置应幂等跳过重复写入');
+    assert.ok(index.includes('matchedConfigNames.length / configNames.length < 0.5'), '配置表大部分不匹配时应触发异常确认');
+    assert.ok(index.includes("return { template: baseTemplate, notes: ['用户已取消应用所选配置。'], applied: false"), '用户拒绝后应回到本次新生成的基础模板');
+    assert.ok(index.includes('let name = activeProfileAppliedToLastResult ? activeProfileName :'), '只有实际应用/绑定本转换的配置才能在产出时被覆盖');
+    assert.ok(index.includes("x.source.value === ref.source.value && x.name === ref.name"), '外部表记录必须包含来源，不得把单表 UID 当全局身份');
+    assert.ok(index.includes("String(sheet.name || '') !== String(ref.name || '')"), 'UID 命中时仍必须校验表名，防止来源内 UID 被复用');
+    assert.ok(!index.includes("opt('default', 'SP·数据库默认模板')"), 'SP 未公开默认模板读取 API，新选择列表不应展示不可靠来源');
+    assert.ok(index.includes("return null;\n        }\n        let scope = sourceValue === 'chat'"), '已存旧配置的 default 引用读取失败时不应伪装成全局模板');
+});
+
 test('写库合并路径无 chatKeyNow TDZ（const 声明必须先于首次使用）', () => {
     const coreSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
     const files = core.assembleExtension({ coreSource });
