@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.3.2';
+    const VERSION = '0.3.3';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -10569,7 +10569,11 @@ ${DB_INIT_SNIPPET}
                 debug: false,
             };
         }
-        return context.extensionSettings[SETTINGS_KEY];
+        const settings = context.extensionSettings[SETTINGS_KEY];
+        if (!settings.conversionProfiles || typeof settings.conversionProfiles !== 'object' || Array.isArray(settings.conversionProfiles)) {
+            settings.conversionProfiles = {};
+        }
+        return settings;
     }
 
     function saveSettings() {
@@ -10616,14 +10620,29 @@ ${DB_INIT_SNIPPET}
         return null;
     }
 
-    function populateCharacterSelect(panel, context) {
+    function characterOptionKey(ch) {
+        if (!ch) return '';
+        return String(ch.avatar || (ch.data && ch.data.avatar) || '') + '|' + characterDisplayName(ch);
+    }
+
+    function currentCharacterListFingerprint(context) {
+        const chars = context && Array.isArray(context.characters) ? context.characters : [];
+        return chars.map(characterOptionKey).join('\n');
+    }
+
+    function populateCharacterSelect(panel) {
         const sel = panel.querySelector('#mvu2shujuku-char-select');
         if (!sel) return;
+        const context = getContextSafe();
         const chars = Array.isArray(context.characters) ? context.characters : [];
         const currentIdx = context.characterId != null ? context.characterId : -1;
         const prevValue = sel.value;
+        const previousChars = Array.isArray(panel.__mvu2shujukuChars) ? panel.__mvu2shujukuChars : [];
+        const previousCharacter = prevValue !== '' && prevValue !== '-1' ? previousChars[Number(prevValue)] : null;
+        const previousKey = characterOptionKey(previousCharacter);
         panel.__mvu2shujukuChars = chars;
         panel.__mvu2shujukuCurrentIdx = currentIdx;
+        characterListFingerprint = currentCharacterListFingerprint(context);
         const searchBox = panel.querySelector('#mvu2shujuku-char-search');
         const keyword = searchBox ? String(searchBox.value || '').trim().toLowerCase() : '';
         sel.innerHTML = '';
@@ -10643,9 +10662,26 @@ ${DB_INIT_SNIPPET}
             opt.textContent = (ch && ch.name) ? ch.name : ('角色 ' + i);
             sel.appendChild(opt);
         });
-        // 保留原选择；否则优先选当前角色
-        if (prevValue !== '' && filtered.some(f => String(f.i) === prevValue)) sel.value = prevValue;
+        // 列表增删会改变数组下标：按 avatar+名称保留原选择，不按旧下标误选其他卡。
+        const same = previousKey ? filtered.find(f => characterOptionKey(f.ch) === previousKey) : null;
+        if (same) sel.value = String(same.i);
         else if (currentIdx >= 0 && filtered.some(f => f.i === currentIdx)) sel.value = String(currentIdx);
+        else if (filtered.length) sel.value = String(filtered[0].i);
+    }
+
+    function startCharacterListRefresh(panel) {
+        if (characterRefreshTimer) return;
+        const tick = () => {
+            characterRefreshTimer = null;
+            try {
+                if (!hostDocument.getElementById(PANEL_ID)) return;
+                const context = getContextSafe();
+                const next = currentCharacterListFingerprint(context);
+                if (next !== characterListFingerprint) populateCharacterSelect(panel);
+            } catch (e) {}
+            characterRefreshTimer = hostWindow.setTimeout(tick, 2500);
+        };
+        characterRefreshTimer = hostWindow.setTimeout(tick, 2500);
     }
 
     function selectedCharacter(panel) {
@@ -10702,7 +10738,11 @@ ${DB_INIT_SNIPPET}
 
     let lastResult = null;
     let lastInput = null;
-    const mergeState = { sourceTemplate: null, source: '' };
+    const mergeState = { sourceTemplate: null, source: '', appliedRefs: [] };
+    let activeProfileName = '';
+    let activeProfileAppliedToLastResult = false;
+    let characterListFingerprint = '';
+    let characterRefreshTimer = null;
     let activeLayout = null;
     // activeLayout 归属的卡（卡名|头像）：切卡空窗期用旧卡布局读新卡表格会产生错形状数据，
     // 读路径与写路径都以它为门槛，布局未就绪时返回空/重试
@@ -10710,6 +10750,226 @@ ${DB_INIT_SNIPPET}
     // 当前卡是否依赖 <StatusPlaceHolderImpl/>（前端注入正则）；由扩展本体维护占位符，
     // 不依赖 tavern_helper 桥是否运行
     let activePlaceholderNeeded = false;
+
+    function conversionProfiles() {
+        return getSettings().conversionProfiles;
+    }
+
+    function originalResultName(result) {
+        try {
+            const d = result && result.card && (result.card.data || result.card);
+            const marker = d && d.extensions && d.extensions.mvu2shujuku;
+            return String(marker && marker.originalName || d && d.name || '角色').replace(/_数据库$/, '').trim() || '角色';
+        } catch (e) { return '角色'; }
+    }
+
+    function populateProfileSelect(panel) {
+        const sel = panel && panel.querySelector('#mvu2shujuku-profile-select');
+        if (!sel) return;
+        const profiles = conversionProfiles();
+        const wanted = activeProfileName || sel.value || '';
+        sel.innerHTML = '';
+        const none = hostDocument.createElement('option');
+        none.value = '';
+        none.textContent = '（不使用已有配置）';
+        sel.appendChild(none);
+        Object.keys(profiles).sort((a, b) => a.localeCompare(b, 'zh-CN')).forEach(name => {
+            const opt = hostDocument.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            sel.appendChild(opt);
+        });
+        sel.value = Object.prototype.hasOwnProperty.call(profiles, wanted) ? wanted : '';
+        activeProfileName = sel.value;
+        const del = panel.querySelector('#mvu2shujuku-profile-delete');
+        if (del) del.disabled = !activeProfileName;
+    }
+
+    function sheetFingerprint(sheet) {
+        const core = window.MVU2SHUJUKU_CORE;
+        return core && typeof core.stableHash === 'function' ? core.stableHash(sheet) : JSON.stringify(sheet || {});
+    }
+
+    async function readTemplateSource(source) {
+        const sourceValue = typeof source === 'string' ? source : String(source && source.value || '');
+        const api = getAcuApi();
+        if (!api || typeof api.getTableTemplate !== 'function') return null;
+        if (sourceValue === 'default') {
+            try {
+                const res = await fetch('/TavernDB_template_默认模板.json');
+                if (res.ok) {
+                    const tpl = await res.json();
+                    return tpl && typeof tpl === 'object' ? tpl : null;
+                }
+            } catch (e) {}
+            return null;
+        }
+        let scope = sourceValue === 'chat' ? 'chat' : 'global';
+        let presetName = '';
+        if (sourceValue.indexOf('preset:') === 0) presetName = sourceValue.slice(7);
+        try { return api.getTableTemplate({ scope, presetName }) || null; } catch (e) { return null; }
+    }
+
+    function captureConversionProfile(name) {
+        const tableConfigs = {};
+        for (const { sheet } of updateParamSheetRows(lastResult || { template: {} })) {
+            const cfg = {};
+            for (const option of UPDATE_PARAM_OPTIONS) cfg[option.key] = getUpdateParam(sheet, option.key);
+            tableConfigs[String(sheet.name || '')] = cfg;
+        }
+        return {
+            format: 'mvu2shujuku-conversion-profile',
+            version: 1,
+            name,
+            tableConfigs,
+            externalTables: JSON.parse(JSON.stringify(mergeState.appliedRefs || [])),
+            updatedAt: new Date().toISOString(),
+        };
+    }
+
+    async function autoSaveConversionProfile() {
+        if (!lastResult) return false;
+        const profiles = conversionProfiles();
+        // 选中了配置但本次匹配校验被用户拒绝时，绝不覆盖该配置。
+        let name = activeProfileAppliedToLastResult ? activeProfileName : '';
+        if (!name) {
+            name = originalResultName(lastResult);
+            if (Object.prototype.hasOwnProperty.call(profiles, name)) {
+                const replace = hostWindow.confirm('已存在同名转换配置「' + name + '」。\n\n确定：替换已有配置\n取消：重命名后保存');
+                if (!replace) {
+                    let suggested = name + ' (2)';
+                    let n = 2;
+                    while (Object.prototype.hasOwnProperty.call(profiles, suggested)) suggested = name + ' (' + (++n) + ')';
+                    const renamed = hostWindow.prompt('请输入新的配置名称：', suggested);
+                    if (renamed === null) return false;
+                    name = String(renamed || '').trim();
+                    if (!name) return false;
+                    if (Object.prototype.hasOwnProperty.call(profiles, name)) {
+                        toast('配置名称仍已存在，本次未保存配置', 'error');
+                        return false;
+                    }
+                }
+            }
+        }
+        const nextProfile = captureConversionProfile(name);
+        const previous = profiles[name];
+        const unchanged = previous && JSON.stringify({
+            tableConfigs: previous.tableConfigs || {},
+            externalTables: previous.externalTables || [],
+        }) === JSON.stringify({
+            tableConfigs: nextProfile.tableConfigs,
+            externalTables: nextProfile.externalTables,
+        });
+        if (unchanged) {
+            activeProfileName = name;
+            activeProfileAppliedToLastResult = true;
+            populateProfileSelect(hostDocument.getElementById(PANEL_ID));
+            return true;
+        }
+        profiles[name] = nextProfile;
+        activeProfileName = name;
+        activeProfileAppliedToLastResult = true;
+        saveSettings();
+        populateProfileSelect(hostDocument.getElementById(PANEL_ID));
+        toast('已自动保存转换配置：' + name, 'success');
+        return true;
+    }
+
+    async function applySelectedProfile(template) {
+        if (!activeProfileName) return { template, notes: [], applied: false, summary: '' };
+        const profile = conversionProfiles()[activeProfileName];
+        if (!profile) return { template, notes: [], applied: false, summary: '' };
+        const baseTemplate = JSON.parse(JSON.stringify(template || {}));
+        let next = JSON.parse(JSON.stringify(baseTemplate));
+        const notes = [];
+        const configs = profile.tableConfigs || {};
+        const configNames = Object.keys(configs).filter(Boolean);
+        const newTableNames = Object.keys(next).filter(k => k.startsWith('sheet_')).map(k => String(next[k] && next[k].name || '')).filter(Boolean);
+        const matchedConfigNames = configNames.filter(name => newTableNames.indexOf(name) >= 0);
+        const missingConfigNames = configNames.filter(name => newTableNames.indexOf(name) < 0);
+        const addedTableNames = newTableNames.filter(name => configNames.indexOf(name) < 0);
+        for (const key of Object.keys(next).filter(k => k.startsWith('sheet_'))) {
+            const sheet = next[key];
+            const cfg = sheet && configs[String(sheet.name || '')];
+            if (!cfg) continue;
+            for (const option of UPDATE_PARAM_OPTIONS) {
+                if (Object.prototype.hasOwnProperty.call(cfg, option.key)) setUpdateParam(sheet, option.key, cfg[option.key]);
+            }
+        }
+        mergeState.appliedRefs = [];
+        const refsBySource = new Map();
+        for (const ref of Array.isArray(profile.externalTables) ? profile.externalTables : []) {
+            const value = String(ref && ref.source && ref.source.value || '');
+            if (!value) continue;
+            if (!refsBySource.has(value)) refsBySource.set(value, []);
+            refsBySource.get(value).push(ref);
+        }
+        const core = window.MVU2SHUJUKU_CORE;
+        let externalRequested = 0;
+        let externalAdded = 0;
+        let externalProblems = 0;
+        for (const [sourceValue, refs] of refsBySource) {
+            externalRequested += refs.length;
+            const sourceTemplate = await readTemplateSource(sourceValue);
+            if (!sourceTemplate) { notes.push('来源不可用：' + sourceValue); externalProblems += refs.length; continue; }
+            const selected = [];
+            const resolvedRefs = [];
+            for (const ref of refs) {
+                let uid = String(ref.uid || '');
+                let sheet = uid && sourceTemplate[uid];
+                if (!sheet || String(sheet.name || '') !== String(ref.name || '')) {
+                    const matches = Object.keys(sourceTemplate).filter(k => k.startsWith('sheet_') && sourceTemplate[k] && String(sourceTemplate[k].name || '') === String(ref.name || ''));
+                    if (matches.length !== 1) { notes.push('未找到外部表：' + ref.name); externalProblems++; continue; }
+                    uid = matches[0];
+                    sheet = sourceTemplate[uid];
+                }
+                selected.push(uid);
+                const latest = { source: { value: sourceValue }, uid, name: String(sheet.name || uid), fingerprint: sheetFingerprint(sheet) };
+                resolvedRefs.push(latest);
+                if (ref.fingerprint && ref.fingerprint !== latest.fingerprint) notes.push('来源已更新：' + latest.name);
+            }
+            if (selected.length) {
+                const merged = core.mergeTemplates(next, sourceTemplate, selected);
+                next = merged.template;
+                for (const ref of resolvedRefs) {
+                    if (merged.added.indexOf(ref.name) >= 0) { mergeState.appliedRefs.push(ref); externalAdded++; }
+                    else { notes.push('同名冲突已跳过：' + ref.name + '（' + sourceValue + '）'); externalProblems++; }
+                }
+            }
+        }
+        // 外部表并入后再应用一次参数，保留用户对已合并表做的自动化调整。
+        for (const key of Object.keys(next).filter(k => k.startsWith('sheet_'))) {
+            const sheet = next[key];
+            const cfg = sheet && configs[String(sheet.name || '')];
+            if (!cfg) continue;
+            for (const option of UPDATE_PARAM_OPTIONS) {
+                if (Object.prototype.hasOwnProperty.call(cfg, option.key)) setUpdateParam(sheet, option.key, cfg[option.key]);
+            }
+        }
+        const summaryLines = [
+            '配置：' + activeProfileName,
+            '自动化参数匹配：' + matchedConfigNames.length + '/' + configNames.length + ' 张表',
+            '配置中本次不存在：' + (missingConfigNames.length ? missingConfigNames.join('、') : '无'),
+            '本次新表：' + (addedTableNames.length ? addedTableNames.join('、') : '无'),
+            '外部表：成功 ' + externalAdded + '/' + externalRequested + (externalProblems ? '，异常 ' + externalProblems : ''),
+        ];
+        const mostlyMissing = configNames.length > 0 && matchedConfigNames.length / configNames.length < 0.5;
+        const emptyProfile = configNames.length === 0 && externalRequested === 0;
+        const needsConfirm = emptyProfile || mostlyMissing || externalProblems > 0;
+        if (needsConfirm) {
+            const accepted = hostWindow.confirm(
+                '所选转换配置与本次结果可能不完全匹配：\n\n' +
+                summaryLines.join('\n') +
+                (notes.length ? '\n\n' + notes.join('\n') : '') +
+                '\n\n确定：仍应用可匹配部分\n取消：本次不使用该配置'
+            );
+            if (!accepted) {
+                mergeState.appliedRefs = [];
+                return { template: baseTemplate, notes: ['用户已取消应用所选配置。'], applied: false, summary: summaryLines.join('\n') };
+            }
+        }
+        return { template: next, notes, applied: true, summary: summaryLines.join('\n') };
+    }
     function acceptBridgeRegistration(payload) {
         try {
             const ch = currentCharacter();
@@ -13383,7 +13643,19 @@ ${DB_INIT_SNIPPET}
         if (settings.installMvuShim !== 'auto') {
             opts.installMvuShim = settings.installMvuShim === 'yes';
         }
-        const result = core.convert(inputBytes, opts);
+        let result = core.convert(inputBytes, opts);
+        mergeState.appliedRefs = [];
+        activeProfileAppliedToLastResult = false;
+        if (activeProfileName) {
+            const applied = await applySelectedProfile(result.template);
+            if (applied.applied) {
+                opts.template = applied.template;
+                result = core.convert(inputBytes, opts);
+                activeProfileAppliedToLastResult = true;
+            }
+            result.reportText += '\n\n## 配置应用摘要\n\n' + applied.summary;
+            if (applied.notes.length) result.reportText += '\n\n- ' + applied.notes.join('\n- ');
+        }
         lastInput = inputBytes;
         if (inputBytes instanceof Uint8Array || inputBytes instanceof ArrayBuffer) {
             result.meta.avatarBytes = inputBytes;
@@ -13410,7 +13682,6 @@ ${DB_INIT_SNIPPET}
         opt('', '（选择模板来源）');
         opt('chat', '当前聊天模板');
         opt('global', '全局模板（当前选中）');
-        opt('default', '默认模板（插件内置）');
         const api = getAcuApi();
         let presetCount = 0;
         let presetOk = false;
@@ -13497,28 +13768,10 @@ ${DB_INIT_SNIPPET}
             toast('未找到 SP·数据库 插件 API', 'error');
             return;
         }
-        let scope = 'global';
-        let presetName = '';
-        if (v === 'chat') scope = 'chat';
-        else if (v === 'global') scope = 'global';
-        else if (v === 'default') scope = 'default';
-        else if (v.indexOf('preset:') === 0) { scope = 'global'; presetName = v.slice(7); }
-        let tpl = null;
-        if (scope === 'default') {
-            // 内置默认模板由插件服务器提供（插件自身也从该路径加载默认模板）
-            try {
-                const res = await fetch('/TavernDB_template_默认模板.json');
-                if (res.ok) tpl = await res.json();
-            } catch (e) { tpl = null; }
-            if (!tpl || typeof tpl !== 'object') {
-                try { tpl = api.getTableTemplate({ scope: 'global' }) || null; } catch (e2) { tpl = null; }
-            }
-        } else {
-            try { tpl = api.getTableTemplate({ scope, presetName }) || null; } catch (e) { tpl = null; }
-        }
-        dbg(' loadMergeTables: scope=' + scope + ' | presetName=' + presetName + ' | 读到的模板=' + !!tpl + ' | sheet 数=' + (tpl ? Object.keys(tpl).filter(k => k.indexOf('sheet_') === 0).length : 0));
+        const tpl = await readTemplateSource(v);
+        dbg(' loadMergeTables: source=' + v + ' | 读到的模板=' + !!tpl + ' | sheet 数=' + (tpl ? Object.keys(tpl).filter(k => k.indexOf('sheet_') === 0).length : 0));
         if (!tpl || typeof tpl !== 'object') {
-            toast('未读取到模板（该来源为空或插件未就绪）', 'error');
+            toast(v === 'default' ? 'SP·数据库默认模板不可用（不会回退为全局模板）' : '未读取到模板（该来源为空或插件未就绪）', 'error');
             return;
         }
         mergeState.sourceTemplate = tpl;
@@ -13592,12 +13845,21 @@ ${DB_INIT_SNIPPET}
         if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
         toast('正在合并并重新转换…');
         try {
+            const priorRefs = Array.isArray(mergeState.appliedRefs) ? mergeState.appliedRefs.slice() : [];
+            for (const uid of checked) {
+                const sheet = mergeState.sourceTemplate[uid];
+                if (!sheet || merged.added.indexOf(String(sheet.name || uid)) === -1) continue;
+                const ref = { source: { value: mergeState.source }, uid, name: String(sheet.name || uid), fingerprint: sheetFingerprint(sheet) };
+                const same = priorRefs.findIndex(x => x && x.source && x.source.value === ref.source.value && x.name === ref.name);
+                if (same >= 0) priorRefs[same] = ref; else priorRefs.push(ref);
+            }
             const result = core.convert(lastInput, opts);
             if (lastInput instanceof Uint8Array || lastInput instanceof ArrayBuffer) {
                 result.meta.avatarBytes = lastInput;
                 result.meta.avatarMime = lastInput instanceof Uint8Array && lastInput.length > 8 && lastInput[0] === 0x89 ? 'image/png' : 'application/json';
             }
             lastResult = result;
+            mergeState.appliedRefs = priorRefs;
             renderResult(result);
             dbg(' applyMergeTables 重新转换完成: meta.tableCount=' + result.meta.tableCount + ' | tableNames=' + result.meta.tableNames.join('、'));
             const msg = '合并完成：新增 ' + merged.added.length + ' 张表' + (merged.skipped.length ? '，跳过重名：' + merged.skipped.join('、') : '');
@@ -13709,7 +13971,7 @@ ${DB_INIT_SNIPPET}
             if (typeof context.getCharacters === 'function') {
                 try {
                     await context.getCharacters();
-                    if (panel) populateCharacterSelect(panel, context);
+                    if (panel) populateCharacterSelect(panel);
                 } catch (e) {}
             }
         } catch (e) {
@@ -13718,6 +13980,7 @@ ${DB_INIT_SNIPPET}
             for (const f of lastResult.files) {
                 if (f.kind === 'card') download(f.name, f.mime, f.data);
             }
+            await autoSaveConversionProfile();
             showInfoPopup('保存失败', '角色卡保存失败，已回退到下载。\n\n' + msg + '\n\n如需排查请把此日志发给开发者。');
             return false;
         }
@@ -13749,6 +14012,7 @@ ${DB_INIT_SNIPPET}
                 ? '\n\n进入新聊天且表格为空时会自动建表，无需手动切换；模板已存为插件预设「' + presetName + '」备用，也可在插件模板面板手动切换。'
                 : ''));
         showInfoPopup(hasError ? '保存完成（有失败项）' : '保存完成', body);
+        await autoSaveConversionProfile();
         return !hasError;
     }
 
@@ -14037,15 +14301,17 @@ ${DB_INIT_SNIPPET}
                 if (f.kind === 'bridge') {
                     btn.title = '该 .js 是已内嵌进转换后角色卡的纯源码备份，无需再导入；它不是酒馆助手要求的 .json 导入包。';
                 }
-                btn.addEventListener('click', () => {
+                btn.addEventListener('click', async () => {
                     // 下载时用最新模板重新生成，保证参数改动一定带进文件
                     try {
                         if (f.kind === 'template') {
                             download(f.name, f.mime, JSON.stringify(lastResult.template, null, 2));
+                            await autoSaveConversionProfile();
                         } else if (f.kind === 'card') {
                             refreshConvertedResult();
                             const fresh = (lastResult.files || []).find(x => x.kind === 'card');
                             download(f.name, f.mime, (fresh && fresh.data) || f.data);
+                            await autoSaveConversionProfile();
                         } else {
                             download(f.name, f.mime, lastResult.reportText || f.data);
                         }
@@ -14096,6 +14362,7 @@ ${DB_INIT_SNIPPET}
             '          <label class="mvu2shujuku-label" for="mvu2shujuku-char-select">选择角色卡</label>',
             '          <input id="mvu2shujuku-char-search" type="text" placeholder="搜索角色…" title="输入角色名过滤下拉列表" />',
             '          <select id="mvu2shujuku-char-select" title="从酒馆角色列表选择要转换的角色卡"></select>',
+            '          <button id="mvu2shujuku-char-refresh" class="menu_button" title="重新读取 SillyTavern 角色列表">刷新角色列表</button>',
             '        </div>',
             '      </div>',
             '      <div id="mvu2shujuku-file-area" class="mvu2shujuku-source-area" style="display:none">',
@@ -14110,6 +14377,12 @@ ${DB_INIT_SNIPPET}
             '        <span class="mvu2shujuku-label" title="模板同时写入 DDL 与 SQL 示例；AI 实际输出 insertRow DSL 还是 SQL，由 SP·数据库 插件自身的填表模式决定，转换器无需选择">填表模式</span>',
             '        <span class="mvu2shujuku-hint">双模式（跟随插件当前设置）</span>',
             '      </div>',
+            '      <div class="mvu2shujuku-row">',
+            '        <label class="mvu2shujuku-label" for="mvu2shujuku-profile-select">转换配置</label>',
+            '        <select id="mvu2shujuku-profile-select" title="可选：把已保存的表格更新参数和外部表来源应用到本次新转换"></select>',
+            '        <button id="mvu2shujuku-profile-delete" class="menu_button" disabled title="只删除转换配置，不删除角色卡或数据库预设">删除配置</button>',
+            '      </div>',
+            '      <div class="mvu2shujuku-help">新卡无需选择配置：下载角色卡/模板或保存到 SillyTavern 时，会按原角色卡名自动保存。重新转换时可在此主动选择已有配置。</div>',
             '      <div class="mvu2shujuku-row">',
             '        <label class="mvu2shujuku-check-label" title="控制生成的表格 DDL 是否带 CHECK 约束（数值范围、枚举、JSON 表 json_valid）。关闭后仅保留列类型与默认值，新建聊天时 SQLite 不再做这些校验；改动需重新转换生效"><input type="checkbox" id="mvu2shujuku-ddl-check" ' + (settings.ddlIncludeCheck !== false ? 'checked' : '') + ' /> 转换时在表格 DDL 中加入 CHECK 约束（数值范围/枚举/json_valid）</label>',
             '      </div>',
@@ -14175,13 +14448,45 @@ ${DB_INIT_SNIPPET}
                 el.addEventListener('click', fn);
             }
         };
-        populateCharacterSelect(panel, context);
+        populateCharacterSelect(panel);
+        startCharacterListRefresh(panel);
+        populateProfileSelect(panel);
         populateMergeSource(panel);
         const searchBox = panel.querySelector('#mvu2shujuku-char-search');
         if (searchBox && searchBox.dataset.bound !== 'true') {
             searchBox.dataset.bound = 'true';
-            searchBox.addEventListener('input', () => populateCharacterSelect(panel, context));
+            searchBox.addEventListener('input', () => populateCharacterSelect(panel));
         }
+        bind('#mvu2shujuku-char-refresh', async () => {
+            try {
+                const latest = getContextSafe();
+                if (typeof latest.getCharacters === 'function') await latest.getCharacters();
+                populateCharacterSelect(panel);
+                const count = Array.isArray(getContextSafe().characters) ? getContextSafe().characters.length : 0;
+                toast('角色列表已刷新，共 ' + count + ' 张', 'success');
+            } catch (e) { toast('刷新角色列表失败：' + (e && e.message ? e.message : e), 'error'); }
+        });
+        const profileSel = panel.querySelector('#mvu2shujuku-profile-select');
+        if (profileSel && profileSel.dataset.bound !== 'true') {
+            profileSel.dataset.bound = 'true';
+            profileSel.addEventListener('change', () => {
+                activeProfileName = profileSel.value || '';
+                // 转换完后又切到另一配置，不能把旧结果覆盖进新选配置。
+                activeProfileAppliedToLastResult = false;
+                const del = panel.querySelector('#mvu2shujuku-profile-delete');
+                if (del) del.disabled = !activeProfileName;
+            });
+        }
+        bind('#mvu2shujuku-profile-delete', () => {
+            if (!activeProfileName) return;
+            if (!hostWindow.confirm('确定删除转换配置「' + activeProfileName + '」？\n不会删除角色卡或数据库预设。')) return;
+            delete conversionProfiles()[activeProfileName];
+            activeProfileName = '';
+            activeProfileAppliedToLastResult = false;
+            saveSettings();
+            populateProfileSelect(panel);
+            toast('转换配置已删除', 'success');
+        });
         // 输入来源二选一：切换时只显示对应来源区域，并启用对应的转换按钮
         const applySource = (value) => {
             const isChar = value === 'character';
