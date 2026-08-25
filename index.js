@@ -1,5 +1,5 @@
 // MVU转数据库 · SillyTavern 原生扩展
-// 生成自 转换器/src/mvu2shujuku.js（0.3.3），核心源码内联如下
+// 生成自 转换器/src/mvu2shujuku.js（0.3.4），核心源码内联如下
 // @ts-nocheck
 (function (root) {
 /*
@@ -17,7 +17,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.3.3';
+    const VERSION = '0.3.4';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -837,6 +837,35 @@
         ));
     }
 
+    // 将字段键中的模板段展开为真实字段名。MVU 教程不只会写
+    // `${上装|下装}`，也会写 `${露出|扩张}经验` 这种带前/后缀的合并键。
+    // 只接受有限的标识符备选并限制展开数，防止把普通 `${...}` 模板或
+    // 恶意组合当成无限多列。展开后仍由 InitVar 的真实字段决定是否落表。
+    function expandYamlTemplateFieldKey(key, limit = 64) {
+        const source = String(key == null ? '' : key).trim();
+        if (!source.includes('${')) return null;
+        const tokenRe = /\$\{([^{}]+)\}/g;
+        const tokens = [];
+        let last = 0;
+        let m;
+        while ((m = tokenRe.exec(source))) {
+            tokens.push(source.slice(last, m.index));
+            const choices = m[1].split(/[|/]/).map(x => x.trim()).filter(Boolean);
+            if (choices.length < 2 || choices.some(x => !/^[\u4e00-\u9fffA-Za-z_$][\u4e00-\u9fffA-Za-z0-9_$-]{0,31}$/.test(x))) return null;
+            tokens.push(choices);
+            last = m.index + m[0].length;
+        }
+        if (!tokens.some(Array.isArray) || source.slice(last).includes('${')) return null;
+        tokens.push(source.slice(last));
+        let out = [''];
+        for (const token of tokens) {
+            const choices = Array.isArray(token) ? token : [token];
+            if (out.length * choices.length > limit) return null;
+            out = out.flatMap(prefix => choices.map(choice => prefix + choice));
+        }
+        return [...new Set(out.filter(x => /^[\u4e00-\u9fffA-Za-z_$][\u4e00-\u9fffA-Za-z0-9_$-]{0,63}$/.test(x)))];
+    }
+
     // MVU 规则经常把 TavernHelper/EJS 模板式宏直接写在 YAML 标量位置，
     // 如 `note: {{getvar::爆料风格}}`。YAML 1.2 会把未引用的 `{...}` 当作 flow map，
     // 进而将宏误解为“集合键”并丢失原文。只保护“整个行内值就是模板宏”
@@ -936,11 +965,9 @@
                     // YAML 能正确读出这种键，但它不满足普通中文字段名校验；旧逻辑会
                     // 整个跳过，连同其 type/check 一起丢失。这里按声明值展开为实际逻辑
                     // 路径，后续仍由 initvar/完整路径决定落在哪张表，不按业务词猜测。
-                    const templateKey = /^\$\{([^{}]+)\}$/.exec(key);
-                    if (templateKey) {
-                        const expandedKeys = templateKey[1].split(/[|/]/)
-                            .map(x => x.trim())
-                            .filter(x => /^[\u4e00-\u9fffA-Za-z_$][\u4e00-\u9fffA-Za-z0-9_$-]{0,31}$/.test(x));
+                    const expandedTemplateKeys = expandYamlTemplateFieldKey(key);
+                    if (expandedTemplateKeys && expandedTemplateKeys.length) {
+                        const expandedKeys = expandedTemplateKeys;
                         for (const actualKey of [...new Set(expandedKeys)]) {
                             if (typeof val === 'string') {
                                 const vals = parseInlineEnumValues(val);
@@ -1135,6 +1162,11 @@
                 rangeVal = r;
                 acc.ranges[field] = r;
                 acc.numericFields.add(field);
+            } else if (Array.isArray(def.range)) {
+                // 教程用 range 同时表达数值区间和可选值集。非数值数组应作为
+                // 枚举，不能因 yamlParseRange 失败就静默丢弃。
+                const vals = def.range.map(yamlStripQuotes).filter(Boolean);
+                if (vals.length >= 2 && vals.length <= 32) acc.enums[field] = vals;
             }
         }
         if (def.format !== undefined) {
@@ -1182,6 +1214,7 @@
         const reminders = {};
         const groupChecks = {};
         const zodDescs = {};
+        let zodSchemaRoot = null;
         const wildcardFields = new Set();
         const wildcardRules = {};
         const numericFields = new Set();
@@ -1626,12 +1659,355 @@
                 const kind = rawKind === 'record' || rawKind === 'object' ? 'object' : rawKind;
                 (globalFieldKindSets[zm[1]] || (globalFieldKindSets[zm[1]] = new Set())).add(kind);
             }
+            const parsedSchema = parseRegisteredZodSchema(source);
+            if (parsedSchema && parsedSchema.root && parsedSchema.root.kind === 'object') {
+                zodSchemaRoot = mergeZodSchemaNodes(zodSchemaRoot, parsedSchema.root);
+                mergeRegisteredZodIntoShapeInfo(parsedSchema.root, {
+                    shapes, fieldTypes, objectSchemas, ranges, enums, zodDescs,
+                    numericFields, dynamicDicts, dynamicPaths, dynamicGroups, dynamicKeyNames,
+                });
+                if (report) report.note(`已从酒馆助手脚本「${String(script.name || '未命名 Schema')}」提取 Zod 结构与声明式约束。`);
+                const clampCount = countZodSchemaFlag(parsedSchema.root, 'clampTransform');
+                if (clampCount && report) {
+                    report.note(`Zod Schema 中 ${clampCount} 处 _.clamp 已迁移为范围提示与可选数据库 CHECK；数据库越界时由 SP 原有失败/重填流程处理，不模拟 Zod 自动钳制。`);
+                }
+            } else if (/registerMvuSchema/.test(source) && report) {
+                report.manual(`酒馆助手脚本「${String(script.name || '未命名 Schema')}」调用了 registerMvuSchema，但未能静态解析注册对象；转换会继续，InitVar 数据仍可建表，但该脚本中的结构与约束可能降级。`);
+            }
+            if (parsedSchema && parsedSchema.unsupported && parsedSchema.unsupported.length && report) {
+                const uniqueUnsupported = [];
+                const unsupportedSeen = new Set();
+                for (const item of parsedSchema.unsupported) {
+                    const sig = `${item.path}\u0000${item.kind}\u0000${item.expression}`;
+                    if (!unsupportedSeen.has(sig)) { unsupportedSeen.add(sig); uniqueUnsupported.push(item); }
+                }
+                // `.catch(fallback)` 在手写卡里通常大量重复；它影响非法输入的修复方式，
+                // 但不决定字段结构。集中报告，避免二十条 catch 淹没真正无法识别的 Schema。
+                const catchItems = uniqueUnsupported.filter(item => item.kind === 'catch');
+                const detailed = uniqueUnsupported.filter(item => item.kind !== 'catch');
+                if (catchItems.length) {
+                    const samples = catchItems.slice(0, 6).map(item => item.path || '未知路径').join('、');
+                    report.manual(`Zod Schema 有 ${catchItems.length} 处 .catch(fallback) 非法输入回退未模拟（如 ${samples}${catchItems.length > 6 ? ' 等' : ''}）；字段结构、prefault/default 与可声明约束仍已迁移，非法数据库值由 CHECK/填表重试处理。`);
+                }
+                for (const item of detailed.slice(0, 20)) {
+                    report.manual(`Zod 字段「${item.path || '未知路径'}」含无法静态等价迁移的 ${item.kind}：${item.expression}。数据库结构与读写仍保留，但该自定义校验/转换不会执行。`);
+                }
+                if (detailed.length > 20) {
+                    report.manual(`另有 ${detailed.length - 20} 条 Zod 自定义语义未逐条列出，请检查原 Schema 脚本。`);
+                }
+            }
         }
         const globalFieldTypes = {};
         for (const [field, kinds] of Object.entries(globalFieldKindSets)) {
             if (kinds.size === 1) globalFieldTypes[field] = [...kinds][0];
         }
-        return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, dynamicKeyNames, checkPaths };
+        return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, dynamicKeyNames, checkPaths };
+    }
+
+    // 手写 MVU Zod 卡把硬 Schema 放在酒馆助手脚本中。这里仅解析可证明安全的
+    // 声明式子集，绝不 eval 卡内 JavaScript：z.object/record/array、基础类型、enum、
+    // describe、default/prefault、min/max 与官方教程常用的 transform(_.clamp)。
+    function parseRegisteredZodSchema(source) {
+        const text = String(source || '');
+        if (!/registerMvuSchema/.test(text)) return null;
+        const definitions = {};
+        const unsupported = [];
+        const readBalancedEnd = (s, open, openCh, closeCh) => {
+            let depth = 0, quote = '', lineComment = false, blockComment = false;
+            for (let i = open; i < s.length; i++) {
+                const ch = s[i], nx = s[i + 1];
+                if (lineComment) { if (ch === '\n') lineComment = false; continue; }
+                if (blockComment) { if (ch === '*' && nx === '/') { blockComment = false; i++; } continue; }
+                if (quote) { if (ch === '\\') { i++; continue; } if (ch === quote) quote = ''; continue; }
+                if (ch === '/' && nx === '/') { lineComment = true; i++; continue; }
+                if (ch === '/' && nx === '*') { blockComment = true; i++; continue; }
+                if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+                if (ch === openCh) depth++;
+                else if (ch === closeCh && --depth === 0) return i;
+            }
+            return -1;
+        };
+        const readInitializerEnd = (s, start) => {
+            let quote = '', lineComment = false, blockComment = false;
+            const stack = [];
+            const pairs = { '(': ')', '[': ']', '{': '}' };
+            for (let i = start; i < s.length; i++) {
+                const ch = s[i], nx = s[i + 1];
+                if (lineComment) { if (ch === '\n') lineComment = false; continue; }
+                if (blockComment) { if (ch === '*' && nx === '/') { blockComment = false; i++; } continue; }
+                if (quote) { if (ch === '\\') { i++; continue; } if (ch === quote) quote = ''; continue; }
+                if (ch === '/' && nx === '/') { lineComment = true; i++; continue; }
+                if (ch === '/' && nx === '*') { blockComment = true; i++; continue; }
+                if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+                if (pairs[ch]) stack.push(pairs[ch]);
+                else if (stack.length && ch === stack[stack.length - 1]) stack.pop();
+                else if (!stack.length && ch === ';') return i;
+            }
+            return s.length;
+        };
+        const defRe = /\b(?:const|let|var)\s+([A-Za-z_$\u3400-\u9fff][\w$\u3400-\u9fff]*)\s*(?:\:[^=;]+)?=/g;
+        let dm;
+        while ((dm = defRe.exec(text))) {
+            const start = defRe.lastIndex;
+            const end = readInitializerEnd(text, start);
+            definitions[dm[1]] = text.slice(start, end).trim();
+            defRe.lastIndex = Math.max(defRe.lastIndex, end + 1);
+        }
+        const stripOuter = raw => {
+            let s = String(raw || '').trim().replace(/\s+(?:as\s+const|satisfies\s+[\s\S]+)$/g, '').trim();
+            while (s[0] === '(') {
+                const end = readBalancedEnd(s, 0, '(', ')');
+                if (end !== s.length - 1) break;
+                s = s.slice(1, -1).trim();
+            }
+            return s;
+        };
+        const literal = raw => {
+            const s = stripOuter(raw);
+            if (s === 'undefined') return undefined;
+            try { return getMvuYamlLibs().JSON5.parse(s); } catch (e) {}
+            if (/^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(s)) return Number(s);
+            if (s === 'true') return true;
+            if (s === 'false') return false;
+            if (s === 'null') return null;
+            const q = s.match(/^(?:"([\s\S]*)"|'([\s\S]*)')$/);
+            return q ? (q[1] !== undefined ? q[1] : q[2]) : undefined;
+        };
+        const topColon = s => {
+            let quote = '', depth = 0;
+            for (let i = 0; i < s.length; i++) {
+                const ch = s[i];
+                if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue; }
+                if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+                if (ch === '(' || ch === '[' || ch === '{') depth++;
+                else if (ch === ')' || ch === ']' || ch === '}') depth--;
+                else if (ch === ':' && depth === 0) return i;
+            }
+            return -1;
+        };
+        const cloneNode = node => node ? JSON.parse(JSON.stringify(node)) : node;
+        const parseExpr = (raw, path, resolving) => {
+            let s = stripOuter(raw).replace(/^\s*\/\*[\s\S]*?\*\//, '').trim();
+            const ref = s.match(/^([A-Za-z_$\u3400-\u9fff][\w$\u3400-\u9fff]*)(?:\.shape)?\s*$/);
+            if (ref && definitions[ref[1]] && !(resolving || new Set()).has(ref[1])) {
+                const next = new Set(resolving || []); next.add(ref[1]);
+                const node = parseExpr(definitions[ref[1]], path, next);
+                return cloneNode(node);
+            }
+            const lazy = s.match(/^(?:[A-Za-z_$][\w$]*\.)?z\.lazy\s*\(\s*\(\s*\)\s*=>\s*([A-Za-z_$\u3400-\u9fff][\w$\u3400-\u9fff]*)\s*\)/);
+            if (lazy && definitions[lazy[1]] && !(resolving || new Set()).has(lazy[1])) {
+                const next = new Set(resolving || []); next.add(lazy[1]);
+                return parseExpr(definitions[lazy[1]], path, next);
+            }
+            const preprocess = s.match(/^(?:[A-Za-z_$][\w$]*\.)?z\.preprocess\s*\(/);
+            if (preprocess) {
+                const preOpen = s.indexOf('(', preprocess[0].length - 1);
+                const preClose = readBalancedEnd(s, preOpen, '(', ')');
+                if (preClose >= 0) {
+                    const preArgs = splitJsTopLevelArgs(s.slice(preOpen + 1, preClose));
+                    unsupported.push({ path: path.join('.'), kind: 'preprocess', expression: String(preArgs[0] || '').trim().slice(0, 160) });
+                    if (preArgs.length >= 2) return parseExpr(preArgs[preArgs.length - 1] + s.slice(preClose + 1), path, resolving);
+                }
+            }
+            const call = s.match(/^(?:(?:[A-Za-z_$][\w$]*\.)?z\.)?(coerce\.)?(object|record|array|string|number|boolean|enum|literal|any|unknown)\s*\(/);
+            if (!call) return null;
+            const open = s.indexOf('(', call.index + call[0].length - 1);
+            const close = readBalancedEnd(s, open, '(', ')');
+            if (close < 0) return null;
+            const args = splitJsTopLevelArgs(s.slice(open + 1, close));
+            const kind0 = call[2];
+            let node;
+            if (kind0 === 'object') {
+                node = { kind: 'object', fields: {}, dynamic: false };
+                const body = String(args[0] || '').trim();
+                if (body[0] === '{' && body[body.length - 1] === '}') {
+                    for (const rawPart of splitJsTopLevelArgs(body.slice(1, -1))) {
+                        const part = String(rawPart || '').replace(/^\s*(?:\/\*[\s\S]*?\*\/\s*)+/, '').trim();
+                        if (!part) continue;
+                        if (part.startsWith('...')) {
+                            const spreadRaw = part.slice(3).trim().replace(/\.shape$/, '');
+                            const spread = parseExpr(spreadRaw, path, resolving);
+                            if (spread && spread.kind === 'object') Object.assign(node.fields, cloneNode(spread.fields));
+                            else unsupported.push({ path: path.join('.'), kind: '对象展开', expression: part.slice(0, 160) });
+                            continue;
+                        }
+                        const ci = topColon(part);
+                        if (ci < 0) continue;
+                        const key = part.slice(0, ci).trim().replace(/^['"]|['"]$/g, '');
+                        const childRaw = part.slice(ci + 1);
+                        const child = parseExpr(childRaw, [...path, key], resolving);
+                        if (key && child) node.fields[key] = child;
+                        else if (key && /\bz\s*\.|\.z\s*\./.test(childRaw)) unsupported.push({ path: [...path, key].join('.'), kind: 'Schema 表达式', expression: childRaw.trim().slice(0, 160) });
+                    }
+                }
+            } else if (kind0 === 'record') {
+                const valueArg = args.length > 1 ? args[1] : args[0];
+                const keyNode = args.length > 1 ? parseExpr(args[0], [...path, '<键>'], resolving) : null;
+                const valuePath = [...path, '<动态键>'];
+                const valueNode = parseExpr(valueArg, valuePath, resolving);
+                if (!valueNode && /\bz\s*\.|\.z\s*\./.test(String(valueArg || ''))) unsupported.push({ path: valuePath.join('.'), kind: 'Schema 表达式', expression: String(valueArg).trim().slice(0, 160) });
+                node = { kind: 'object', fields: {}, dynamic: true, keySchema: keyNode, value: valueNode || { kind: 'text' } };
+            } else if (kind0 === 'array') {
+                const elementPath = [...path, '<元素>'];
+                const elementNode = parseExpr(args[0], elementPath, resolving);
+                if (!elementNode && /\bz\s*\.|\.z\s*\./.test(String(args[0] || ''))) unsupported.push({ path: elementPath.join('.'), kind: 'Schema 表达式', expression: String(args[0]).trim().slice(0, 160) });
+                node = { kind: 'array', element: elementNode || { kind: 'text' } };
+            } else if (kind0 === 'enum') {
+                const vals = literal(args[0]);
+                node = { kind: 'text', enum: Array.isArray(vals) ? vals : [] };
+            } else if (kind0 === 'literal') {
+                const v = literal(args[0]);
+                node = { kind: typeof v === 'number' ? 'number' : (typeof v === 'boolean' ? 'boolean' : 'text'), enum: [v] };
+            } else {
+                node = { kind: kind0 === 'string' ? 'text' : (kind0 === 'any' || kind0 === 'unknown' ? 'text' : kind0) };
+                if (call[1]) node.coerce = true;
+            }
+            let tail = s.slice(close + 1).trim();
+            while (tail.startsWith('.')) {
+                const mm = tail.match(/^\.([A-Za-z_$][\w$]*)\s*\(/);
+                if (!mm) break;
+                const opOpen = tail.indexOf('(', mm[0].length - 1);
+                const opClose = readBalancedEnd(tail, opOpen, '(', ')');
+                if (opClose < 0) break;
+                const op = mm[1], opRaw = tail.slice(opOpen + 1, opClose), opArgs = splitJsTopLevelArgs(opRaw);
+                if (op === 'min') node.min = Number(literal(opArgs[0]));
+                else if (op === 'max') node.max = Number(literal(opArgs[0]));
+                else if (op === 'describe') node.desc = String(literal(opArgs[0]) ?? '');
+                else if (op === 'default' || op === 'prefault') {
+                    const v = literal(opArgs[0]);
+                    if (v !== undefined) { node.hasDefault = true; node.defaultValue = v; node.defaultKind = op; }
+                    else unsupported.push({ path: path.join('.'), kind: op, expression: opRaw.slice(0, 160) });
+                } else if (op === 'transform') {
+                    const clamp = opRaw.match(/_\.clamp\s*\([^,]+,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*\)/);
+                    if (clamp) { node.min = Number(clamp[1]); node.max = Number(clamp[2]); node.clampTransform = true; }
+                    else unsupported.push({ path: path.join('.'), kind: 'transform', expression: opRaw.slice(0, 160) });
+                } else if (op === 'refine' || op === 'superRefine' || op === 'preprocess' || op === 'pipe') {
+                    unsupported.push({ path: path.join('.'), kind: op, expression: opRaw.slice(0, 160) });
+                } else if (op === 'extend' && node.kind === 'object') {
+                    const ext = parseExpr('z.object(' + String(opArgs[0] || '{}') + ')', path, resolving);
+                    if (ext) Object.assign(node.fields, ext.fields || {});
+                } else if (op === 'merge' && node.kind === 'object') {
+                    const ext = parseExpr(opArgs[0], path, resolving);
+                    if (ext && ext.kind === 'object') Object.assign(node.fields, cloneNode(ext.fields));
+                } else {
+                    unsupported.push({ path: path.join('.'), kind: op, expression: opRaw.slice(0, 160) });
+                }
+                tail = tail.slice(opClose + 1).trim();
+            }
+            return node;
+        };
+        const aliases = ['registerMvuSchema'];
+        const aliasM = text.match(/registerMvuSchema\s+as\s+([A-Za-z_$][\w$]*)/);
+        if (aliasM) aliases.push(aliasM[1]);
+        let root = null;
+        for (const name of aliases) {
+            const re = new RegExp('\\b' + name.replace(/[$]/g, '\\$&') + '\\s*\\(', 'g');
+            let m;
+            while ((m = re.exec(text))) {
+                const open = text.indexOf('(', m.index);
+                const close = readBalancedEnd(text, open, '(', ')');
+                if (close < 0) continue;
+                const args = splitJsTopLevelArgs(text.slice(open + 1, close));
+                const candidate = parseExpr(args[0], [], new Set());
+                if (candidate && candidate.kind === 'object') root = mergeZodSchemaNodes(root, candidate);
+            }
+        }
+        return root ? { root, unsupported } : null;
+    }
+
+    function mergeZodSchemaNodes(base, incoming) {
+        if (!base) return incoming ? JSON.parse(JSON.stringify(incoming)) : null;
+        if (!incoming || base.kind !== incoming.kind) return base;
+        const out = JSON.parse(JSON.stringify(base));
+        if (out.kind === 'object') {
+            out.dynamic = !!(out.dynamic || incoming.dynamic);
+            out.fields = out.fields || {};
+            for (const [key, child] of Object.entries(incoming.fields || {})) out.fields[key] = mergeZodSchemaNodes(out.fields[key], child) || child;
+            if (incoming.value) out.value = mergeZodSchemaNodes(out.value, incoming.value) || incoming.value;
+            if (incoming.keySchema) out.keySchema = mergeZodSchemaNodes(out.keySchema, incoming.keySchema) || incoming.keySchema;
+        }
+        for (const key of ['min', 'max', 'enum', 'desc', 'hasDefault', 'defaultValue', 'defaultKind', 'coerce', 'clampTransform']) {
+            if (incoming[key] !== undefined) out[key] = incoming[key];
+        }
+        return out;
+    }
+
+    function countZodSchemaFlag(root, flag) {
+        let count = 0;
+        const seen = new Set();
+        const walk = node => {
+            if (!node || typeof node !== 'object' || seen.has(node)) return;
+            seen.add(node);
+            if (node[flag]) count++;
+            for (const child of Object.values(node.fields || {})) walk(child);
+            walk(node.keySchema);
+            walk(node.value);
+            walk(node.element);
+        };
+        walk(root);
+        return count;
+    }
+
+    function mergeRegisteredZodIntoShapeInfo(root, acc) {
+        const addNodeFields = (target, node) => {
+            const row = node && node.dynamic && node.value && node.value.kind === 'object' ? node.value : node;
+            if (!row || row.kind !== 'object') return;
+            acc.shapes[target] = acc.shapes[target] || [];
+            acc.fieldTypes[target] = acc.fieldTypes[target] || {};
+            acc.objectSchemas[target] = acc.objectSchemas[target] || {};
+            for (const [field, child] of Object.entries(row.fields || {})) {
+                if (!acc.shapes[target].includes(field)) acc.shapes[target].push(field);
+                acc.fieldTypes[target][field] = child.kind;
+                if (child.kind === 'object' || child.kind === 'array') acc.objectSchemas[target][field] = child;
+                if (child.kind === 'number') acc.numericFields.add(field);
+                if (Number.isFinite(child.min) && Number.isFinite(child.max)) acc.ranges[field] = [child.min, child.max];
+                if (Array.isArray(child.enum) && child.enum.length >= 2) acc.enums[field] = child.enum.slice();
+                if (child.desc) { acc.zodDescs[target] = acc.zodDescs[target] || {}; acc.zodDescs[target][field] = child.desc; }
+                if (child.kind === 'object' && child.dynamic) {
+                    acc.dynamicDicts[target] = acc.dynamicDicts[target] || {};
+                    acc.dynamicDicts[target][field] = true;
+                    const dynamicPath = [target, field].join('.');
+                    acc.dynamicPaths.add(dynamicPath);
+                    if (child.keySchema && child.keySchema.desc && isSchemaFieldName(child.keySchema.desc)) acc.dynamicKeyNames[dynamicPath] = child.keySchema.desc;
+                    addNodeFields(field, child);
+                }
+            }
+        };
+        for (const [group, node] of Object.entries(root.fields || {})) {
+            if (!node) continue;
+            if (node.kind === 'object' && node.dynamic) {
+                acc.dynamicGroups.add(group);
+                acc.dynamicPaths.add(group);
+                if (node.keySchema && node.keySchema.desc && isSchemaFieldName(node.keySchema.desc)) acc.dynamicKeyNames[group] = node.keySchema.desc;
+            }
+            addNodeFields(group, node);
+        }
+    }
+
+    function applyRegisteredZodDefaults(data, root) {
+        let count = 0;
+        const clone = value => {
+            try { return JSON.parse(JSON.stringify(value)); } catch (e) { return value; }
+        };
+        const walk = (value, node) => {
+            if (!node) return value;
+            if (value === undefined && node.hasDefault) { value = clone(node.defaultValue); count++; }
+            if (node.kind === 'object' && value && typeof value === 'object' && !Array.isArray(value)) {
+                if (node.dynamic && node.value) {
+                    for (const key of Object.keys(value)) value[key] = walk(value[key], node.value);
+                } else {
+                    for (const [key, child] of Object.entries(node.fields || {})) {
+                        const next = walk(value[key], child);
+                        if (next !== undefined) value[key] = next;
+                    }
+                }
+            } else if (node.kind === 'array' && Array.isArray(value) && node.element) {
+                for (let i = 0; i < value.length; i++) value[i] = walk(value[i], node.element);
+            }
+            return value;
+        };
+        walk(data, root);
+        return count;
     }
 
     /**
@@ -2724,6 +3100,7 @@
                 const kind = childSchema && childSchema.kind;
                 const isJson = kind === 'object' || kind === 'array' || Array.isArray(childValue) || isPlainObject(childValue);
                 let v = childValue;
+                if (v === undefined && childSchema && childSchema.hasDefault) v = childSchema.defaultValue;
                 if (v === undefined) v = kind === 'array' ? [] : (kind === 'object' ? {} : (kind === 'number' || kind === 'boolean' ? 0 : ''));
                 if (isJson) {
                     try { v = JSON.stringify(v); } catch (e) { v = kind === 'array' ? '[]' : '{}'; }
@@ -2774,6 +3151,7 @@
         const dynamicGroups = (shapeInfo && shapeInfo.dynamicGroups) || new Set();
         const dynamicKeyNames = (shapeInfo && shapeInfo.dynamicKeyNames) || {};
         const dynamicPathSamples = (shapeInfo && shapeInfo.dynamicPathSamples) || new Map();
+        const zodSchemaRoot = shapeInfo && shapeInfo.zodSchemaRoot;
         const isDynamicPath = (pathArr) => {
             if (!Array.isArray(pathArr) || !pathArr.length) return false;
             if (dynamicPaths.has(pathArr.join('.'))) return true;
@@ -2864,9 +3242,22 @@
             return (shapeFieldTypes[group] || {})[field] || globalShapeFieldTypes[field] || '';
         }
 
+        function declaredZodField(group, field) {
+            const groupNode = zodSchemaRoot && zodSchemaRoot.fields && zodSchemaRoot.fields[group];
+            if (!groupNode) return null;
+            const rowNode = groupNode.dynamic && groupNode.value && groupNode.value.kind === 'object'
+                ? groupNode.value : groupNode;
+            return rowNode && rowNode.fields ? rowNode.fields[field] : null;
+        }
+
         function applyDeclaredShape(column, group, field) {
             const kind = declaredFieldKind(group, field);
             const schema = (shapeObjectSchemas[group] || {})[field];
+            const zodField = declaredZodField(group, field);
+            if ((column.value === '' || column.value === undefined) && zodField && zodField.hasDefault) {
+                const dv = zodField.defaultValue;
+                column.value = (dv && typeof dv === 'object') ? JSON.stringify(dv) : dv;
+            }
             if (kind === 'number' || kind === 'boolean') {
                 column.type = 'INTEGER';
                 column.logicalType = kind;
@@ -3583,7 +3974,7 @@
                     const au = new Set(['row_id']);
                     const acols = [];
                     const relationEntity = ct.parentRows ? String(g.name || '上级记录') : '';
-                    const relationKeyCol = ct.parentRows ? `${relationEntity}_键名` : '';
+                    const relationKeyCol = ct.parentRows ? `${relationEntity}_${g.keyCol || '键名'}` : '';
                     if (ct.parentRows) acols.push({ zh: relationKeyCol, path: [g.name], value: '', desc: `关联「${g.tableName}.${g.keyCol}」`, type: 'TEXT', ident: toIdent(relationKeyCol, au, 'column') });
                     acols.push({
                         zh: '内容', path: [...ct.path], value: '', desc: objectItems ? '数组元素（结构未固定，JSON 存储）' : '数组元素',
@@ -3616,7 +4007,7 @@
                 }
                 if (childSamples.some(v => Object.prototype.hasOwnProperty.call(v, rowsKeyCol))) rowsKeyCol += '_键名';
                 const relationEntity = ct.parentRows ? String(g.name || '上级记录') : '';
-                const parentKeyCol = ct.parentRows ? `${relationEntity}_键名` : '';
+                const parentKeyCol = ct.parentRows ? `${relationEntity}_${g.keyCol || '键名'}` : '';
                 // 多层动态关系必须携带完整祖先键链。例如
                 // 关系列表.NPC.背包.物品.效果 需要「关系列表_键名 + 背包_键名」，
                 // 不能只凭物品名归属，否则不同 NPC 的同名物品会串行。
@@ -4261,7 +4652,9 @@
             }
             if (c.type === 'INTEGER') {
                 let defaultExpr = 0;
-                if (typeof dv === 'number' && Number.isFinite(dv)) {
+                if (typeof dv === 'boolean') {
+                    defaultExpr = dv ? 1 : 0;
+                } else if (typeof dv === 'number' && Number.isFinite(dv)) {
                     defaultExpr = dv;
                 } else if (typeof dv === 'string' && dv.trim() !== '') {
                     const nv = Number(dv);
@@ -4407,20 +4800,64 @@
                 const entity = group.relationEntity || String(group.parentKeyCol || '').replace(/_键名$/, '') || '关联记录';
                 L.push(`- 维护本表时，同时遵循对应${entity}记录中与「${group.childKey || group.name}」相关的整体规则`);
             }
-            for (const c of aiCols) {
+            const columnRuleView = (c) => {
                 const parts = [];
                 if (c.range) parts.push(`数值范围 ${c.range[0]}~${c.range[1]}`);
                 if (c.enum) parts.push(`可选值：${c.enum.join(' / ')}`);
                 if (c.format) parts.push(`格式要求：${String(c.format).replace(/\n/g, ' ')}`);
                 if (c.isObject) parts.push('对象以 JSON 存储，读取时还原');
+                const checks = (c.check || []).map(rule => sanitizeCheckRule(rule, { group, column: c })).filter(Boolean);
+                return { parts, checks };
+            };
+            const compactTemplateLabel = (cols) => {
+                const names = cols.map(c => String(c.zh || ''));
+                if (names.length < 2 || names.some(x => !x)) return '';
+                const chars = names.map(x => Array.from(x));
+                let prefix = 0;
+                while (chars.every(x => prefix < x.length && x[prefix] === chars[0][prefix])) prefix++;
+                let suffix = 0;
+                while (chars.every(x => suffix < x.length - prefix && x[x.length - 1 - suffix] === chars[0][chars[0].length - 1 - suffix])) suffix++;
+                const choices = chars.map(x => x.slice(prefix, x.length - suffix).join(''));
+                // 至少共享前缀或后缀，才能证明这是一组可读的模板列；
+                // 不把仅仅恰好有相同枚举/check 的无关列硬拼成 ${A|B}。
+                if ((!prefix && !suffix) || choices.some(x => !x) || new Set(choices).size !== choices.length) return '';
+                return chars[0].slice(0, prefix).join('') + '${' + choices.join('|') + '}' + (suffix ? chars[0].slice(-suffix).join('') : '');
+            };
+            // 模板键会展开为真实列以便绑定 DDL，但提示词不必复制同一套
+            // 规则。仅在同表多列的范围/枚举/格式/check 完全一致时折叠；
+            // 各列自己的 [值,描述] 仍分别展示。
+            const ruleViews = new Map(aiCols.map(c => [c, columnRuleView(c)]));
+            const sameRuleSets = new Map();
+            for (const c of aiCols) {
+                const view = ruleViews.get(c);
+                if (!view.parts.length && !view.checks.length) continue;
+                const sig = JSON.stringify([view.parts, view.checks]);
+                if (!sameRuleSets.has(sig)) sameRuleSets.set(sig, []);
+                sameRuleSets.get(sig).push(c);
+            }
+            const groupedRuleOwner = new Map();
+            for (const cols of sameRuleSets.values()) {
+                const label = compactTemplateLabel(cols);
+                if (!label) continue;
+                groupedRuleOwner.set(cols[0], { label, cols });
+                for (let i = 1; i < cols.length; i++) groupedRuleOwner.set(cols[i], null);
+            }
+            for (const c of aiCols) {
+                const view = ruleViews.get(c);
+                const grouped = groupedRuleOwner.get(c);
+                if (grouped) {
+                    if (view.parts.length) L.push(`- ${grouped.label}：${view.parts.join('；')}`);
+                    for (const rule of view.checks) L.push(`- ${grouped.label}：${rule}`);
+                } else if (grouped !== null) {
+                    if (view.parts.length) L.push(`- ${c.zh}：${view.parts.join('；')}`);
+                    for (const rule of view.checks) L.push(`- ${c.zh}：${rule}`);
+                }
                 // 真实字段说明（如 [值,说明] 的更新条件）；通用描述（唯一标识/键名/JSON 提示）不重复
                 let desc = c.desc ? String(c.desc).replace(/\n/g, ' ').trim() : '';
                 // 关系列的关联含义已经在表级说明中完整表达，不再作为“强制约束”重复一遍。
                 if (group.kind === 'nestedRows' && (c.zh === group.keyCol || (group.ancestorKeyCols || []).some(a => a.col === c.zh) || c.zh === group.parentKeyCol)) desc = '';
                 const generic = desc === '唯一标识' || desc === '对象（JSON 存储，读取时还原）';
-                if (desc && !generic) parts.push(desc);
-                if (parts.length) L.push(`- ${c.zh}：${parts.join('；')}`);
-                for (const rule of (c.check || []).map(rule => sanitizeCheckRule(rule, { group, column: c })).filter(Boolean)) L.push(`- ${c.zh}：${rule}`);
+                if (desc && !generic) L.push(`- ${c.zh}：${desc}`);
             }
             // 子表/动态字典的组级规则（如 世界.动向 的“最多维持2个大事件”）：以表级约束列出
             // 注意：这些行已位于本表自己的 note 内，不再重复表名前缀（避免“道侣表：性别：…”式噪音）
@@ -6826,7 +7263,7 @@
             `    try{`,
             `      var msgRec=mvuBridgeNoteOriginal(gw);`,
             `      if(msgRec&&msgRec.hasMsg&&(typeof gw.getChatMessages!=='function'||!mvuBridgeIsOurs(gw.getChatMessages))){`,
-            `        var fnMsg=(function(rec){return function(){var result=rec.msg.apply(this,arguments);var decorate=function(list){if(!Array.isArray(list))return list;var stat=mvuBridgeStat();return list.map(function(item){if(!item||typeof item!=='object')return item;var copy=Object.assign({},item);copy.data=Object.assign({},item.data||{},{stat_data:stat});return copy;});};return result&&typeof result.then==='function'?result.then(decorate):decorate(result);};})(msgRec);`,
+            `        var fnMsg=(function(rec){return function(){var result=rec.msg.apply(this,arguments);var decorate=function(list){if(!Array.isArray(list))return list;var stat=mvuBridgeStat();return list.map(function(item){if(!item||typeof item!=='object')return item;var copy=Object.assign({},item);copy.data=Object.assign({},item.data||{},{stat_data:stat,display_data:stat});return copy;});};return result&&typeof result.then==='function'?result.then(decorate):decorate(result);};})(msgRec);`,
             `        fnMsg.__mvu2shujukuBridge=true;gw.getChatMessages=fnMsg;`,
             `      }`,
             `    }catch(e){}`,
@@ -8363,6 +8800,26 @@
         return false;
     }
 
+    // 纯外部 Schema 启动器必须与旧 MVU 引擎一起移除，避免它继续按旧 Zod
+    // 拦截数据库桥命令；但导入模块正文不在角色卡内，转换器无法静态迁移其
+    // 独有字段/约束。单独识别这一情形，以便删除时给出明确的人工核对项。
+    function isUninspectableExternalSchemaImport(content, scriptName) {
+        const s = String(content || '');
+        const schemaNamed = /(?:mvu[^\n]*zod|zod[^\n]*mvu|mvu[^\n]*schema|schema[^\n]*mvu)/i.test(String(scriptName || ''));
+        if (!schemaNamed) return false;
+        let found = false;
+        const importRe = /(?:^|\n)\s*(?:import\s+(?:[^'"\n]+?\s+from\s+)?['"]([^'"]+)['"]\s*;?|(?:await\s+)?import\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;?)/gmi;
+        const withoutImports = s.replace(importRe, (whole, spec1, spec2) => {
+            const spec = String(spec1 || spec2 || '');
+            if (/(?:^|[/_.-])(?:data|variable|mvu)[_-]?schema(?:[/_.-]|$)/i.test(spec)) {
+                found = true;
+                return '\n';
+            }
+            return whole;
+        });
+        return found && !withoutImports.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|[;\s]/g, '');
+    }
+
     // 整页注入模式：replaceString 用 $('body').load(...) 把整个前端页面塞进 body。
     // 以 body 内的 DOM 标记判断应用是否实际存在。消息重渲染清空 body 后标记也会消失，
     // 下次正则执行可自动重挂载；loading 标记只防止同一次渲染并发加载。
@@ -8395,6 +8852,30 @@
         const out = t.replace(/<script\b(?=[^>]*\btype\s*=\s*['"]module['"])[^>]*>/i, m => {
             count++;
             return m + prelude;
+        });
+        return { text: out, count };
+    }
+
+    // 旧式状态栏常在 DOMContentLoaded 中只执行一次
+    //   const messages = await getChatMessages(getCurrentMessageId())
+    // 随后直读 message.data.stat_data/display_data。新 iframe 可能比扩展的
+    // getChatMessages 投影 shim 更早执行；第一次空读后又没有事件重试。
+    // 只对“已在 async 上下文中 await getChatMessages，且正文明确读 MVU
+    // message data”的脚本插入门禁；普通消息前端不介入。
+    function guardInlineChatMessageFrontendDataReady(text) {
+        const t = String(text || '');
+        if (!/\bawait\s+getChatMessages\s*\(/.test(t)) return { text: t, count: 0 };
+        if (!/(?:\.data|\[['"]data['"]\])[\s\S]{0,240}(?:stat_data|display_data)|(?:stat_data|display_data)[\s\S]{0,240}(?:\.data|\[['"]data['"]\])/.test(t)) return { text: t, count: 0 };
+        if (t.includes('__mvu2shujukuAwaitChatMessages')) return { text: t, count: 0 };
+        let count = 0;
+        const out = t.replace(/((?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*)await\s+getChatMessages\s*\(/, (_m, decl, offset) => {
+            count++;
+            const enclosing = [...t.slice(0, offset).matchAll(/\basync\s+function\s+([A-Za-z_$][\w$]*)\s*\(/g)].pop();
+            const refreshHook = enclosing
+                ? `try{globalThis.__mvu2shujukuRefreshInlineFrontend=function(){return ${enclosing[1]}();};}catch(e){}\n`
+                : '';
+            const prelude = refreshHook + `await new Promise(function(resolve){var started=Date.now();function check(){try{var fn=globalThis.getChatMessages;if(typeof fn==='function'&&(fn.__mvu2shujuku||fn.__mvu2shujukuBridge))return resolve();}catch(e){}if(Date.now()-started>=12000)return resolve();setTimeout(check,25);}check();});/*__mvu2shujukuAwaitChatMessages*/\n`;
+            return prelude + decl + 'await getChatMessages(';
         });
         return { text: out, count };
     }
@@ -8672,6 +9153,12 @@
         report.note(`状态栏/脚本字段扫描：${Object.keys(usage).map(g => `${g}(${usage[g].length})`).join('、') || '无'}。`);
 
         const shapeInfo = parseMvuShapes(card, report);
+        // Zod prefault/default 是缺值时的声明式初始值。这里只补静态字面量，不执行
+        // 函数或 transform；已有 InitVar 值始终优先，符合 Zod 对已提供输入的处理。
+        if (shapeInfo.zodSchemaRoot) {
+            const filled = applyRegisteredZodDefaults(initvar, shapeInfo.zodSchemaRoot);
+            if (filled) report.note(`已按酒馆助手 Zod Schema 的 prefault/default 补齐 ${filled} 个缺省初始值。`);
+        }
         shapeInfo.mvuMetadata = initMetadata.metadata;
         for (const path of initMetadata.dynamicPaths) shapeInfo.dynamicPaths.add(path);
         for (const [path, sample] of initMetadata.dynamicPathSamples) {
@@ -8743,7 +9230,7 @@
             }
         }
         if (Object.keys(shapeInfo.shapes).length) {
-            report.note(`已从 [mvu_update] 结构声明解析列：${Object.keys(shapeInfo.shapes).map(g => `${g}(${shapeInfo.shapes[g].length})`).join('、')}。`);
+            report.note(`已从 [mvu_update]/Zod 结构声明解析列：${Object.keys(shapeInfo.shapes).map(g => `${g}(${shapeInfo.shapes[g].length})`).join('、')}。`);
         }
         if (shapeInfo.wildcardFields && shapeInfo.wildcardFields.size) {
             report.warn(
@@ -8907,6 +9394,16 @@
                 keptRegexes.push(copy);
                 continue;
             }
+            const chatMessageReady = guardInlineChatMessageFrontendDataReady(r.replaceString || '');
+            if (chatMessageReady.count) {
+                const copy = deepClone(r);
+                copy.replaceString = chatMessageReady.text;
+                report.auto(`正则「${name}」为一次性读取 message.data 的状态栏，已等待数据库消息投影入口就绪后再读取。`);
+                const inj = injectOpeningUserDataSync(copy.replaceString, schema, report);
+                if (inj.injected) copy.replaceString = inj.script;
+                keptRegexes.push(copy);
+                continue;
+            }
             // 前端整页注入（$('body').load(...)）：加一次性守卫，避免消息重渲染反复重启前端
             const guarded = guardBodyLoadFrontend(r.replaceString || '');
             if (guarded.count) {
@@ -8946,6 +9443,9 @@
         for (const s of scripts) {
             const content = String(s.content || '');
             if (isMvuEngineScriptContent(content, s.name)) {
+                if (isUninspectableExternalSchemaImport(content, s.name)) {
+                    report.manual(`已移除纯外部 Schema 导入「${s.name}」以避免旧 Zod 继续拦截数据库更新；导入模块正文不在角色卡内，无法核对其中独有字段、默认值和校验。若转换报告/表格缺少这些内容，请提供该模块源码后人工补入模板。`);
+                }
                 report.note(`已移除 tavern_helper 脚本「${s.name}」（明确识别为 MVU 引擎/Schema 启动脚本：${content.slice(0, 80)}…）。`);
                 continue;
             }
@@ -11057,6 +11557,35 @@ ${DB_INIT_SNIPPET}
         try { return JSON.stringify(v); } catch (e) { return String(v); }
     }
 
+    // 旧 MVU/VWD 在 message stat_data 中可能仍保留 [值, 描述] 叶子。
+    // 开场分支快照合并发生在建表前；若直接把这个数组交给数据库，
+    // TEXT 列会得到 [值,描述] JSON 字符串，并与枚举 CHECK 冲突。
+    // 仅依 layout 中明确的 pair 列拆包，真实 array/object 字段保持不变。
+    function collapseLegacyPairLeaves(stat, layoutEntries) {
+        const out = JSON.parse(JSON.stringify(stat && typeof stat === 'object' ? stat : {}));
+        const getParent = (parts) => {
+            let cur = out;
+            for (let i = 0; i < parts.length - 1; i++) {
+                if (!cur || typeof cur !== 'object') return null;
+                cur = cur[parts[i]];
+            }
+            return cur && typeof cur === 'object' ? cur : null;
+        };
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            for (const col of (L && Array.isArray(L.cols) ? L.cols : [])) {
+                if (!Array.isArray(col) || col[1] !== 'pair' || !Array.isArray(col[3]) || !col[3].length) continue;
+                const parts = col[3].map(String);
+                const parent = getParent(parts);
+                const key = parts[parts.length - 1];
+                const value = parent && parent[key];
+                if (Array.isArray(value) && value.length === 2 && typeof value[1] === 'string') {
+                    parent[key] = value[0];
+                }
+            }
+        }
+        return out;
+    }
+
     // MVU 的原始对象允许省略字段，而数据库会按列类型补齐默认值；两者不能直接
     // JSON.stringify 比较。整表提交的预期值和实际值必须先经过同一 layout 的
     // 表格→stat_data 投影，再做键序无关的确定性比较。
@@ -11075,6 +11604,8 @@ ${DB_INIT_SNIPPET}
         const coreNow = window.MVU2SHUJUKU_CORE;
         if (!coreNow || typeof coreNow.writeStatDiffToDb !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
         const tables = JSON.parse(JSON.stringify(baseTemplate || {}));
+        const normalizedPrevStat = collapseLegacyPairLeaves(prevStat, layoutEntries);
+        const normalizedNextStat = collapseLegacyPairLeaves(nextStat, layoutEntries);
         const fakeApi = {
             exportTableAsJson: () => tables,
             updateCell: async (tableName, rowIndex, col, value) => {
@@ -11127,8 +11658,8 @@ ${DB_INIT_SNIPPET}
         const baseStat = baseWrap && baseWrap.stat_data && typeof baseWrap.stat_data === 'object'
             ? baseWrap.stat_data
             : {};
-        return Promise.resolve(coreNow.writeStatDiffToDb(fakeApi, layoutEntries, baseStat, prevStat, tables))
-            .then(() => coreNow.writeStatDiffToDb(fakeApi, layoutEntries, prevStat, nextStat, tables))
+        return Promise.resolve(coreNow.writeStatDiffToDb(fakeApi, layoutEntries, baseStat, normalizedPrevStat, tables))
+            .then(() => coreNow.writeStatDiffToDb(fakeApi, layoutEntries, normalizedPrevStat, normalizedNextStat, tables))
             .then(() => tables);
     }
 
@@ -12615,9 +13146,18 @@ ${DB_INIT_SNIPPET}
         let count = 0;
         for (const target of targets) {
             try {
-                if (typeof target.__mvu2shujukuReloadFrontend !== 'function') continue;
-                target.__mvu2shujukuReloadFrontend();
-                count++;
+                if (typeof target.__mvu2shujukuReloadFrontend === 'function') {
+                    target.__mvu2shujukuReloadFrontend();
+                    count++;
+                    continue;
+                }
+                // 转换时识别到的一次性内联状态栏不是 body.load 整页前端，
+                // 但已显式暴露无副作用的原生重读函数。只在用户点菜单时调用，
+                // 不通过函数名/按钮文本猜测其他页面。
+                if (typeof target.__mvu2shujukuRefreshInlineFrontend === 'function') {
+                    target.__mvu2shujukuRefreshInlineFrontend();
+                    count++;
+                }
             } catch (e) {}
         }
         // 普通状态栏应通过 MVU 原生更新事件刷新；这里也补发一次，
@@ -13212,7 +13752,10 @@ ${DB_INIT_SNIPPET}
                                 : ((all && all.stat_data) || {});
                             return list.map((item) => {
                                 if (!item || typeof item !== 'object') return item;
-                                return Object.assign({}, item, { data: Object.assign({}, item.data || {}, { stat_data: stat }) });
+                                // 旧 MVU 状态栏常用 display_data || stat_data。数据库只持久化
+                                // 当前状态，因此消息副本中两个视图都投影同一份实时快照；
+                                // 否则原消息残留的空 display_data（空对象也是 truthy）会遮住 stat_data。
+                                return Object.assign({}, item, { data: Object.assign({}, item.data || {}, { stat_data: stat, display_data: stat }) });
                             });
                         };
                         return result && typeof result.then === 'function' ? result.then(decorate) : decorate(result);
@@ -13974,9 +14517,40 @@ ${DB_INIT_SNIPPET}
             log.push('✓ 角色卡已保存：' + displayName);
             if (typeof context.getCharacters === 'function') {
                 try {
-                    await context.getCharacters();
+                    const refreshedCharacters = await context.getCharacters();
+                    // 酒馆助手会在角色创建/切换事件后同步其脚本面板状态。
+                    // 若当前面板仍是原卡，这个延后同步可能把已转换卡的
+                    // tavern_helper.scripts 覆盖回“禁用的旧 mvu”，同时擦掉数据库桥。
+                    // 创建完成并刷新列表后，通过 ST 官方 writeExtensionField
+                    // 对转换标记精确命中的新卡重申最终脚本字段。
+                    const expectedData = cardData && (cardData.data || cardData);
+                    const expectedExt = expectedData && expectedData.extensions;
+                    const expectedMarker = expectedExt && expectedExt.mvu2shujuku;
+                    const refreshedContext = getContextSafe();
+                    const charsNow = Array.isArray(refreshedCharacters)
+                        ? refreshedCharacters
+                        : (Array.isArray(refreshedContext.characters) ? refreshedContext.characters : (Array.isArray(context.characters) ? context.characters : []));
+                    let savedIndex = -1;
+                    for (let ci = charsNow.length - 1; ci >= 0; ci--) {
+                        const ch = charsNow[ci];
+                        const cd = ch && (ch.data || ch);
+                        const marker = cd && cd.extensions && cd.extensions.mvu2shujuku;
+                        if (String(cd && cd.name || ch && ch.name || '') !== displayName) continue;
+                        if (!marker || !expectedMarker || String(marker.convertedAt || '') !== String(expectedMarker.convertedAt || '')) continue;
+                        savedIndex = ci;
+                        break;
+                    }
+                    const writeExtensionField = (refreshedContext && refreshedContext.writeExtensionField) || context.writeExtensionField;
+                    if (savedIndex >= 0 && expectedExt && typeof writeExtensionField === 'function') {
+                        await writeExtensionField(savedIndex, 'tavern_helper', deepClone(expectedExt.tavern_helper || { scripts: [] }));
+                        log.push('✓ 已核对并固化转换卡的酒馆助手脚本（旧 MVU 已移除）');
+                    } else if (expectedExt && expectedExt.tavern_helper) {
+                        log.push('⚠ 角色卡已保存，但未能使用 ST 官方字段接口复核酒馆助手脚本；若面板仍显示旧 MVU，请用下载 PNG 导入。');
+                    }
                     if (panel) populateCharacterSelect(panel);
-                } catch (e) {}
+                } catch (e) {
+                    log.push('⚠ 复核酒馆助手脚本失败：' + (e && e.message ? e.message : e));
+                }
             }
         } catch (e) {
             const msg = (e && e.message ? e.message : e);
@@ -14849,7 +15423,7 @@ ${DB_INIT_SNIPPET}
                 try { applyWindowMvuShim(); } catch (e) {}
                 const count = refreshCurrentCardFrontends();
                 if (count > 0) toast('已刷新 ' + count + ' 个转换卡前端', 'success');
-                else toast('已发送 MVU 刷新事件；未找到可重载的整页前端', 'info');
+                else toast('已发送 MVU 刷新事件；未找到可直接重读的转换卡前端', 'info');
             });
         } catch (e) {
             if (attempt < 10) hostWindow.setTimeout(() => registerMagicWandRefreshButton(attempt + 1), 1000);
@@ -14970,6 +15544,7 @@ ${DB_INIT_SNIPPET}
         stableHash,
         scanStatusUsage,
         parseMvuShapes,
+        parseRegisteredZodSchema,
         buildSchema,
         buildLayout,
         generateTemplate,
@@ -27667,6 +28242,35 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         try { return JSON.stringify(v); } catch (e) { return String(v); }
     }
 
+    // 旧 MVU/VWD 在 message stat_data 中可能仍保留 [值, 描述] 叶子。
+    // 开场分支快照合并发生在建表前；若直接把这个数组交给数据库，
+    // TEXT 列会得到 [值,描述] JSON 字符串，并与枚举 CHECK 冲突。
+    // 仅依 layout 中明确的 pair 列拆包，真实 array/object 字段保持不变。
+    function collapseLegacyPairLeaves(stat, layoutEntries) {
+        const out = JSON.parse(JSON.stringify(stat && typeof stat === 'object' ? stat : {}));
+        const getParent = (parts) => {
+            let cur = out;
+            for (let i = 0; i < parts.length - 1; i++) {
+                if (!cur || typeof cur !== 'object') return null;
+                cur = cur[parts[i]];
+            }
+            return cur && typeof cur === 'object' ? cur : null;
+        };
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            for (const col of (L && Array.isArray(L.cols) ? L.cols : [])) {
+                if (!Array.isArray(col) || col[1] !== 'pair' || !Array.isArray(col[3]) || !col[3].length) continue;
+                const parts = col[3].map(String);
+                const parent = getParent(parts);
+                const key = parts[parts.length - 1];
+                const value = parent && parent[key];
+                if (Array.isArray(value) && value.length === 2 && typeof value[1] === 'string') {
+                    parent[key] = value[0];
+                }
+            }
+        }
+        return out;
+    }
+
     // MVU 的原始对象允许省略字段，而数据库会按列类型补齐默认值；两者不能直接
     // JSON.stringify 比较。整表提交的预期值和实际值必须先经过同一 layout 的
     // 表格→stat_data 投影，再做键序无关的确定性比较。
@@ -27685,6 +28289,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         const coreNow = window.MVU2SHUJUKU_CORE;
         if (!coreNow || typeof coreNow.writeStatDiffToDb !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
         const tables = JSON.parse(JSON.stringify(baseTemplate || {}));
+        const normalizedPrevStat = collapseLegacyPairLeaves(prevStat, layoutEntries);
+        const normalizedNextStat = collapseLegacyPairLeaves(nextStat, layoutEntries);
         const fakeApi = {
             exportTableAsJson: () => tables,
             updateCell: async (tableName, rowIndex, col, value) => {
@@ -27737,8 +28343,8 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         const baseStat = baseWrap && baseWrap.stat_data && typeof baseWrap.stat_data === 'object'
             ? baseWrap.stat_data
             : {};
-        return Promise.resolve(coreNow.writeStatDiffToDb(fakeApi, layoutEntries, baseStat, prevStat, tables))
-            .then(() => coreNow.writeStatDiffToDb(fakeApi, layoutEntries, prevStat, nextStat, tables))
+        return Promise.resolve(coreNow.writeStatDiffToDb(fakeApi, layoutEntries, baseStat, normalizedPrevStat, tables))
+            .then(() => coreNow.writeStatDiffToDb(fakeApi, layoutEntries, normalizedPrevStat, normalizedNextStat, tables))
             .then(() => tables);
     }
 
@@ -29225,9 +29831,18 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         let count = 0;
         for (const target of targets) {
             try {
-                if (typeof target.__mvu2shujukuReloadFrontend !== 'function') continue;
-                target.__mvu2shujukuReloadFrontend();
-                count++;
+                if (typeof target.__mvu2shujukuReloadFrontend === 'function') {
+                    target.__mvu2shujukuReloadFrontend();
+                    count++;
+                    continue;
+                }
+                // 转换时识别到的一次性内联状态栏不是 body.load 整页前端，
+                // 但已显式暴露无副作用的原生重读函数。只在用户点菜单时调用，
+                // 不通过函数名/按钮文本猜测其他页面。
+                if (typeof target.__mvu2shujukuRefreshInlineFrontend === 'function') {
+                    target.__mvu2shujukuRefreshInlineFrontend();
+                    count++;
+                }
             } catch (e) {}
         }
         // 普通状态栏应通过 MVU 原生更新事件刷新；这里也补发一次，
@@ -29822,7 +30437,10 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                                 : ((all && all.stat_data) || {});
                             return list.map((item) => {
                                 if (!item || typeof item !== 'object') return item;
-                                return Object.assign({}, item, { data: Object.assign({}, item.data || {}, { stat_data: stat }) });
+                                // 旧 MVU 状态栏常用 display_data || stat_data。数据库只持久化
+                                // 当前状态，因此消息副本中两个视图都投影同一份实时快照；
+                                // 否则原消息残留的空 display_data（空对象也是 truthy）会遮住 stat_data。
+                                return Object.assign({}, item, { data: Object.assign({}, item.data || {}, { stat_data: stat, display_data: stat }) });
                             });
                         };
                         return result && typeof result.then === 'function' ? result.then(decorate) : decorate(result);
@@ -30584,9 +31202,40 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             log.push('✓ 角色卡已保存：' + displayName);
             if (typeof context.getCharacters === 'function') {
                 try {
-                    await context.getCharacters();
+                    const refreshedCharacters = await context.getCharacters();
+                    // 酒馆助手会在角色创建/切换事件后同步其脚本面板状态。
+                    // 若当前面板仍是原卡，这个延后同步可能把已转换卡的
+                    // tavern_helper.scripts 覆盖回“禁用的旧 mvu”，同时擦掉数据库桥。
+                    // 创建完成并刷新列表后，通过 ST 官方 writeExtensionField
+                    // 对转换标记精确命中的新卡重申最终脚本字段。
+                    const expectedData = cardData && (cardData.data || cardData);
+                    const expectedExt = expectedData && expectedData.extensions;
+                    const expectedMarker = expectedExt && expectedExt.mvu2shujuku;
+                    const refreshedContext = getContextSafe();
+                    const charsNow = Array.isArray(refreshedCharacters)
+                        ? refreshedCharacters
+                        : (Array.isArray(refreshedContext.characters) ? refreshedContext.characters : (Array.isArray(context.characters) ? context.characters : []));
+                    let savedIndex = -1;
+                    for (let ci = charsNow.length - 1; ci >= 0; ci--) {
+                        const ch = charsNow[ci];
+                        const cd = ch && (ch.data || ch);
+                        const marker = cd && cd.extensions && cd.extensions.mvu2shujuku;
+                        if (String(cd && cd.name || ch && ch.name || '') !== displayName) continue;
+                        if (!marker || !expectedMarker || String(marker.convertedAt || '') !== String(expectedMarker.convertedAt || '')) continue;
+                        savedIndex = ci;
+                        break;
+                    }
+                    const writeExtensionField = (refreshedContext && refreshedContext.writeExtensionField) || context.writeExtensionField;
+                    if (savedIndex >= 0 && expectedExt && typeof writeExtensionField === 'function') {
+                        await writeExtensionField(savedIndex, 'tavern_helper', deepClone(expectedExt.tavern_helper || { scripts: [] }));
+                        log.push('✓ 已核对并固化转换卡的酒馆助手脚本（旧 MVU 已移除）');
+                    } else if (expectedExt && expectedExt.tavern_helper) {
+                        log.push('⚠ 角色卡已保存，但未能使用 ST 官方字段接口复核酒馆助手脚本；若面板仍显示旧 MVU，请用下载 PNG 导入。');
+                    }
                     if (panel) populateCharacterSelect(panel);
-                } catch (e) {}
+                } catch (e) {
+                    log.push('⚠ 复核酒馆助手脚本失败：' + (e && e.message ? e.message : e));
+                }
             }
         } catch (e) {
             const msg = (e && e.message ? e.message : e);
@@ -31459,7 +32108,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 try { applyWindowMvuShim(); } catch (e) {}
                 const count = refreshCurrentCardFrontends();
                 if (count > 0) toast('已刷新 ' + count + ' 个转换卡前端', 'success');
-                else toast('已发送 MVU 刷新事件；未找到可重载的整页前端', 'info');
+                else toast('已发送 MVU 刷新事件；未找到可直接重读的转换卡前端', 'info');
             });
         } catch (e) {
             if (attempt < 10) hostWindow.setTimeout(() => registerMagicWandRefreshButton(attempt + 1), 1000);

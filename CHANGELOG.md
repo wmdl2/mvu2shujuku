@@ -1,7 +1,22 @@
 # 更新日志
 
+## v0.3.4（2026-08-25）
+
+- 新增教程标准的酒馆助手 Zod Schema 静态迁移：解析传给 `registerMvuSchema(...)` 的 `z.object/z.record/z.array`、基础类型、`z.coerce.number`、枚举、描述、字面量 `prefault/default`，以及标准 `transform(value => _.clamp(...))` 范围；支持中英文 Schema 变量、`.shape` 展开、`extend/merge`。
+- `z.record` 现在作为动态字典结构证据，空 InitVar 也能按 value Schema 建行表或嵌套关系表；键 Schema 的 `.describe(...)` 会作为业务键列名。`z.array` 继续按转换器既有规则生成有序数组表。Zod 默认值用于补齐缺失初始字段及数据库列默认值，已有 InitVar 值优先。
+- 自定义 `transform/refine/superRefine/preprocess/pipe`、未知组合类型和无法解析的注册对象不再静默丢失，转换报告会列出字段路径和原表达式。转换器不执行角色卡 JavaScript。
+- 删除不可见的纯外部 `data_schema` 启动器时新增显式人工核对项：继续阻止旧 Zod 与数据库双轨运行，同时不再把无法读取的远程 Schema 暗示为已完整迁移。
+- 兼容清单补齐教程附录中的剩余 Zod 边界（`int/regex/or/union/templateLiteral/partialRecord/intersection`），明确区分“按 InitVar 实值仍可建表”和“空结构唯一来源需人工补表”，避免把静态子集解析器误称为完整 Zod 执行器。
+- `_.clamp` 映射为表格范围提示和用户可选的 DDL `CHECK`；越界写入仍交给 SP·数据库原有失败/重填流程，不增加运行时钳制层。
+- 修复布尔字段初始值为 `true` 时 DDL 仍生成 `DEFAULT 0` 的通用问题。
+
 ## v0.3.3（2026-08-24）
 
+- 修复使用“保存角色卡和模板到 SillyTavern”后，酒馆助手可能把原卡脚本面板状态延后回写到新卡，导致已删除的 `mvu` 引擎脚本以禁用状态重现、数据库桥被覆盖。现在创建后使用 ST 官方 `writeExtensionField` 按 `convertedAt` 精确命中新卡，再次固化转换后的 `tavern_helper`。
+- 修复旧式内联状态栏在 `DOMContentLoaded` 时只执行一次 `await getChatMessages(...)[0].data` 的初始化竞态：转换时先等待数据库消息投影 shim 就绪。消息只读副本现同时投影实时 `stat_data` 和 `display_data`，避免残留的空 `display_data` 遮住实时状态；魔法棒“刷新转换卡前端”也可直接调用此类状态栏已识别的原生重读函数，不再只支持 `body.load` 整页前端。
+- 修复开局分支合并时，外部 MVU/VWD 事件监听器交回旧式 `[当前值, 描述]` 叶子，导致 TEXT 列被写成 JSON 数组字符串并触发枚举 `CHECK IN` 失败。现仅对 layout 明确标记为 `pair` 的列在建表边界拆包，真实数组/JSON 业务字段保持不变。
+- 修复 YAML 变量规则中 `${A|B}经验`、`${A|B}分区` 这类带前后缀模板键的 `type/range/check`丢失；非数值 `range` 数组现按枚举转换为表格强制约束和可选 DDL `CHECK IN`。
+- 模板键展开出的同表列若拥有完全相同的范围、枚举、格式和 `check`，表格提示词现折叠为 `${露出|扩张}经验` 式合并规则；实际列、单列描述及每列 DDL 约束仍独立保留。
 - 角色卡下拉使用最新 SillyTavern 上下文和列表指纹自动刷新，并增加手动刷新按钮；列表变动后按 `avatar+角色名`保留选择，不再沿用可能失效的数组下标。
 - 新增可选转换配置。下载角色卡/模板或保存到 SillyTavern 时，按原卡名自动保存各表自动化参数与外部表来源；仅在同名配置冲突时请用户替换或重命名。同一转换连续下载/保存会绑定同一配置，内容未变时幂等跳过重写。配置可主动选择应用到更新版卡，也可删除。
 - 外部表不保存副本，而记录“来源＋单表 UID＋表名＋结构指纹”；重用时从原来源取最新版。UID 只在来源内匹配且同时校验表名，最终合并仍以表名唯一并报告冲突/来源更新。
