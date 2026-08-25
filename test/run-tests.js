@@ -220,10 +220,10 @@ test('旧 MVU chat 根变量镜像脚本仅在可证明事务内改写为数据�
 
 /* ---------------- parseMvuShapes ---------------- */
 section('parseMvuShapes');
-test('从 [mvu_update] 提取结构声明', () => {
+test('从 [mvu_update] 与酒馆助手 Zod Schema 合并结构声明', () => {
     const card = requireFixture();
     const si = core.parseMvuShapes(card);
-    assert.deepStrictEqual(si.shapes['道侣'], ['性别', '种族', '境界', '生命', '灵力', '修为', '道心', '亲密', '性格', '外观', '身高', '背景', '神通', '心声']);
+    assert.deepStrictEqual(si.shapes['道侣'], ['性别', '种族', '境界', '生命', '灵力', '修为', '道心', '亲密', '性格', '外观', '身高', '背景', '神通', '心声', '状态']);
     assert.deepStrictEqual(si.shapes['储物袋'], ['描述', '数量']);
     assert.deepStrictEqual(si.shapes['玉简'], ['性别', '境界', '关系', '好感度', '历史记录']);
     assert.strictEqual(si.objects['玉简']['历史记录'], true);
@@ -294,6 +294,60 @@ test('从 [mvu_update] 提取 check 规则与提醒（含引号项、模板键�
     const world = Object.values(r.template).find(s => s && s.name === '世界表');
     assert.ok(world.sourceData.note.includes('遭遇冷却：如果当前遭遇冷却大于0'), 'note 应包含 check 规则');
     assert.ok(world.sourceData.note.includes('当前地点：必须按层级描述'), 'note 应包含单行引号 check');
+});
+
+test('YAML 带前后缀的 ${A|B}模板键展开 check/range，非数值 range 作为枚举', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '模板合并键卡', description: '', first_mes: '你好',
+            character_book: { entries: [
+                {
+                    comment: '[InitVar]',
+                    content: [
+                        '任务经验:',
+                        '  露出经验: 0',
+                        '  扩张经验: 0',
+                        '  露出分区: 初级区',
+                        '  扩张分区: 初级区',
+                    ].join('\n'),
+                },
+                {
+                    comment: '[mvu_update]变量更新规则',
+                    content: [
+                        '变量更新规则:',
+                        '  任务经验:',
+                        '    "${露出|扩张}经验":',
+                        '      type: number',
+                        '      range: 0~100',
+                        '      check:',
+                        '        - 完成对应任务时增加1',
+                        '    "${露出|扩张}分区":',
+                        '      type: string',
+                        '      range: [初级区, 中级区, 高级区]',
+                        '      check:',
+                        '        - 根据对应经验值更新分区',
+                        '        - 经验为0至20时，分区为“初级区”',
+                    ].join('\n'),
+                },
+            ] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const si = core.parseMvuShapes(card);
+    assert.deepStrictEqual(si.ranges['露出经验'], [0, 100], '带后缀模板键的数值 range 应展开');
+    assert.deepStrictEqual(si.ranges['扩张经验'], [0, 100], '所有备选字段都应获得 range');
+    assert.deepStrictEqual(si.enums['露出分区'], ['初级区', '中级区', '高级区'], '非数值 range 应作为枚举');
+    assert.ok(si.checks['任务经验']['扩张分区'].some(x => x.includes('0至20')), 'check 应附着到每个展开字段');
+
+    const r = core.convert(card, { mode: 'both', ddlIncludeCheck: true });
+    const table = Object.values(r.template).find(s => s && s.name === '任务经验表');
+    assert.ok(table.sourceData.note.includes('${露出|扩张}经验：数值范围 0~100'), '完全相同的展开列约束应在提示词中恢复为紧凑模板键');
+    assert.ok(table.sourceData.note.includes('${露出|扩张}分区：根据对应经验值更新分区'), 'check 应以合并模板键进入对应表的强制约束');
+    assert.ok(table.sourceData.note.includes('${露出|扩张}分区：经验为0至20时'), '合并展示不得丢失详细 check');
+    assert.ok(!table.sourceData.note.includes('露出分区：根据对应经验值'), '同一规则不应再按实际列重复输出');
+    assert.ok(table.sourceData.note.includes('可选值：初级区 / 中级区 / 高级区'), '枚举 range 应进入强制约束');
+    assert.ok(table.sourceData.ddl.includes('CHECK'), '开启 DDL check 时应生成数值/枚举硬约束');
 });
 
 test('组级 check（道侣/灵宠/人物/玉简等整表规则）不应丢失', () => {
@@ -385,6 +439,92 @@ test('format 支持无引号与块标量写法；zod 数值约束提取范围', 
     assert.ok(bya.sourceData.ddl.includes('CHECK(yicundu BETWEEN 0 AND 100)'), 'zod 范围应生成 DDL CHECK');
     assert.ok(bya.sourceData.note.includes('可选值：仙子 / 道友'), 'zod 枚举应进入 note');
     assert.ok(bya.sourceData.note.includes('着装：穿着描述'), 'zod describe 应进入 note 列说明');
+});
+
+test('教程标准 Zod Schema 脚本：record/array/coerce/prefault/clamp/复用结构迁移，任意校验显式报告', () => {
+    const schemaScript = [
+        "import { registerMvuSchema } from 'https://example.test/tavern_resource.js';",
+        'const 基础字段 = z.object({',
+        "  姓名: z.string().prefault('未知'),",
+        '  标签: z.array(z.string()).prefault([]),',
+        '});',
+        'const 角色结构 = z.object({',
+        '  ...基础字段.shape,',
+        '  好感度: z.coerce.number().transform(value => _.clamp(value, 0, 100)).prefault(5),',
+        "  阶段: z.enum(['初识', '熟悉']).describe('当前关系阶段').prefault('初识'),",
+        "  代号: z.string().refine(value => value.length > 0, '不能为空'),",
+        '  复杂字段: z.union([z.string(), z.number()]),',
+        '});',
+        'const Schema = z.object({',
+        "  角色: z.record(z.string().describe('角色名称'), 角色结构).prefault({}),",
+        '  系统: z.object({',
+        '    等级: z.coerce.number().transform(v => _.clamp(v, 1, 10)),',
+        '    模式: z.enum(["A", "B"]).prefault("A"),',
+        '    标题: z.string().default("默认标题"),',
+        '    启用: z.boolean().prefault(true),',
+        '    归一化: z.preprocess(value => String(value), z.string()).prefault(""),',
+        '    物品: z.record(z.string(), z.object({ 数量: z.coerce.number().prefault(1), 说明: z.string().prefault("") })).prefault({}),',
+        '  }),',
+        '});',
+        '$(() => registerMvuSchema(Schema));',
+    ].join('\n');
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '教程Zod卡', description: '', first_mes: '你好',
+            character_book: { entries: [{ comment: '[InitVar]', content: '角色:\n  小明:\n    姓名: 小明\n系统:\n  等级: 3' }] },
+            extensions: {
+                regex_scripts: [],
+                tavern_helper: { scripts: [{ name: '变量结构', type: 'script', enabled: true, content: schemaScript }] },
+            },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const byName = n => Object.values(r.template).find(s => s && s.name === n);
+    const role = byName('角色表');
+    const system = byName('系统表');
+    assert.ok(role, 'z.record 顶层组应转换为动态行表');
+    for (const h of ['角色名称', '姓名', '好感度', '阶段', '代号']) assert.ok(role.content[0].includes(h), `角色表应包含 ${h} 列`);
+    assert.ok(role.sourceData.ddl.includes("xingming TEXT NOT NULL DEFAULT '未知'"), '动态条目字段 prefault 应成为数据库列默认值');
+    assert.ok(role.sourceData.ddl.includes('haogandu INTEGER NOT NULL DEFAULT 5 CHECK(haogandu BETWEEN 0 AND 100)'), 'coerce.number + clamp + prefault 应迁移类型、范围和默认值');
+    assert.ok(role.sourceData.ddl.includes("jieduan TEXT NOT NULL DEFAULT '初识' CHECK(jieduan IN ('初识', '熟悉'))"), 'enum + prefault 应迁移枚举和默认值');
+    const tags = byName('角色_标签表');
+    assert.ok(tags && tags.content[0].includes('角色_角色名称') && tags.content[0].includes('内容'), 'z.array 应按带业务父键名的既有数组规则转换为有序关系子表');
+    assert.strictEqual(tags.content.length, 1, 'prefault([]) 应生成结构完整但没有虚构数据行的空数组表');
+    assert.ok(role.sourceData.note.includes('阶段：当前关系阶段'), 'describe 应进入填写提示');
+    assert.ok(system.sourceData.ddl.includes('CHECK(dengji BETWEEN 1 AND 10)'), '固定对象中的 clamp 范围应迁移');
+    assert.ok(system.sourceData.ddl.includes("moshi TEXT NOT NULL DEFAULT 'A'"), '缺失 InitVar 字段应由静态 prefault 补齐');
+    assert.ok(system.sourceData.ddl.includes("biaoti TEXT NOT NULL DEFAULT '默认标题'"), '静态 default 应迁移为字段默认值');
+    assert.ok(system.sourceData.ddl.includes('qiyong INTEGER NOT NULL DEFAULT 1'), 'boolean prefault 应保留布尔类型和默认值');
+    assert.ok(system.content[0].includes('归一化') && r.reportText.includes('系统.归一化') && r.reportText.includes('preprocess'), 'preprocess 内层结构应保留，自定义预处理本身应报告降级');
+    const items = byName('系统_物品表');
+    assert.ok(items && items.content[0].includes('数量') && items.content[0].includes('说明'), '嵌套 z.record 即使初始为空也应生成带 value Schema 字段的动态子表');
+    assert.ok(r.reportText.includes('无法静态等价迁移的 refine'), '任意 Zod 校验必须进入人工检查报告');
+    assert.ok(r.reportText.includes('角色.<动态键>.复杂字段') && r.reportText.includes('Schema 表达式'), '无法识别的 Zod 类型组合必须带字段路径报告，不能静默丢失');
+    const scripts = r.card.data.extensions.tavern_helper.scripts;
+    assert.ok(!scripts.some(s => s.name === '变量结构'), '已提取的纯 registerMvuSchema 脚本应移除');
+
+    const noCheck = core.convert(card, { mode: 'both', ddlIncludeCheck: false });
+    const noCheckRole = Object.values(noCheck.template).find(s => s && s.name === '角色表');
+    assert.ok(!noCheckRole.sourceData.ddl.includes('CHECK('), '关闭 CHECK 时 Zod 约束只进入提示词，不应强制写入 DDL');
+    assert.ok(noCheckRole.sourceData.note.includes('数值范围 0~100'), '关闭 CHECK 不应删除提供给填表模型的范围提示');
+});
+
+test('动态构造的 registerMvuSchema 无法静态解析时必须报告降级', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '动态Schema卡', first_mes: '你好',
+            character_book: { entries: [{ comment: '[InitVar]', content: '系统:\n  状态: 正常' }] },
+            extensions: {
+                regex_scripts: [],
+                tavern_helper: { scripts: [{ name: '动态变量结构', content: 'const Schema = makeSchemaFromConfig(window.cardConfig); registerMvuSchema(Schema);' }] },
+            },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    assert.ok(r.reportText.includes('调用了 registerMvuSchema，但未能静态解析注册对象'), '无法读取的 Schema 工厂不能静默当作已迁移');
+    assert.ok(Object.values(r.template).some(s => s && s.name === '系统表'), 'Schema 降级不应阻止 InitVar 主体转换');
 });
 
 test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而非静默丢弃', () => {
@@ -790,7 +930,7 @@ test('道渊：15 张表（含关系子表），结构正确', () => {
     const jade = t[byName('玉简表')];
     assert.ok(!jade.content[0].includes('历史记录'), '动态历史记录不应留作 JSON 列');
     const history = t[byName('玉简_历史记录表')];
-    assert.deepStrictEqual(history.content[0].slice(0, 3), ['row_id', '玉简_键名', '键名'], '历史记录应拆为带具体实体关联键的关系表');
+    assert.deepStrictEqual(history.content[0].slice(0, 3), ['row_id', '玉简_好友姓名', '消息标识'], '历史记录应拆为带具体业务名称的实体关联键关系表');
     // 标识符应为拼音 slug（无下划线冲突、可作 SQL 标识符）
     for (const k of Object.keys(t).filter(k => k.startsWith('sheet_'))) {
         assert.ok(/^sheet_[a-z0-9_]+$/.test(k), `sheet key 应为拼音 slug：${k}`);
@@ -1983,7 +2123,8 @@ test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
     // 填入一行道侣数据
     const companions = tables[byName('道侣表')];
     const header = companions.content[0];
-    const row = header.map(h => ({ 键名: '林若悠', 性别: '女', 种族: '人族', 境界: '筑基', 生命: 95, 灵力: 90, 修为: 45, 道心: 60, 亲密: 88, 性格: '温柔' }[h] !== undefined ? { 键名: '林若悠', 性别: '女', 种族: '人族', 境界: '筑基', 生命: 95, 灵力: 90, 修为: 45, 道心: 60, 亲密: 88, 性格: '温柔' }[h] : ''));
+    const companionData = { [header[1]]: '林若悠', 性别: '女', 种族: '人族', 境界: '筑基', 生命: 95, 灵力: 90, 修为: 45, 道心: 60, 亲密: 88, 性格: '温柔' };
+    const row = header.map(h => companionData[h] !== undefined ? companionData[h] : '');
     row[0] = 1;
     companions.content = [header, row];
     const allData = win.getAllVariables();
@@ -1994,7 +2135,7 @@ test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
     assert.strictEqual(sd.世界.当前时间, '未知');
     assert.strictEqual(sd.道侣['林若悠'].亲密, 88);
     assert.strictEqual(sd.道侣['林若悠'].种族, '人族');
-    assert.ok(!Object.prototype.hasOwnProperty.call(sd.道侣['林若悠'], '键名'), '卡内桥不得把数据库键列注入业务对象');
+    assert.ok(!Object.prototype.hasOwnProperty.call(sd.道侣['林若悠'], header[1]), '卡内桥不得把数据库业务键列注入业务对象');
     assert.ok(Array.isArray(sd['$器灵台词']));
     assert.ok(allData.display_data && allData.display_data.主角, '应有 display_data 镜像');
 });
@@ -3749,6 +3890,8 @@ test('转换 UI：角色列表可刷新，配置零操作保存并以来源限�
     assert.ok(index.includes("String(sheet.name || '') !== String(ref.name || '')"), 'UID 命中时仍必须校验表名，防止来源内 UID 被复用');
     assert.ok(!index.includes("opt('default', 'SP·数据库默认模板')"), 'SP 未公开默认模板读取 API，新选择列表不应展示不可靠来源');
     assert.ok(index.includes("return null;\n        }\n        let scope = sourceValue === 'chat'"), '已存旧配置的 default 引用读取失败时不应伪装成全局模板');
+    assert.ok(index.includes("await writeExtensionField(savedIndex, 'tavern_helper'"), '保存到 ST 后应用官方字段接口固化转换后脚本，防止旧 MVU 面板状态回写');
+    assert.ok(index.includes("String(marker.convertedAt || '') !== String(expectedMarker.convertedAt || '')"), '保存后复核必须用转换标记精确命中新卡，不得只按名称覆盖');
 });
 
 test('写库合并路径无 chatKeyNow TDZ（const 声明必须先于首次使用）', () => {
@@ -3863,7 +4006,7 @@ test('扩展 owner 端到端：仅含 JSONPatch 的首楼合并初始化、保�
             ]) + '</JSONPatch></UpdateVariable>',
             character_book: { entries: [{
                 comment: '[InitVar]',
-                content: '世界:\n  时间: 未知\n主角:\n  身份: []\n  生命值:\n    当前: 100\n    上限:\n      _基础: 100\n      额外: 0',
+                content: '世界:\n  时间: 未知\n  天气: ["晴朗", "文本变量，描述当前的天气状况"]\n主角:\n  身份: []\n  生命值:\n    当前: 100\n    上限:\n      _基础: 100\n      额外: 0',
             }, {
                 // 声明了但 initvar/JSONPatch 未显式写入的字段会被数据库补默认值。
                 // 原始稀疏 MVU 目标与读回结果字节不同，但规范化后应当等价。
@@ -3958,7 +4101,14 @@ test('扩展 owner 端到端：仅含 JSONPatch 的首楼合并初始化、保�
         CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
         TextDecoder, atob: s => Buffer.from(s, 'base64').toString('binary'),
         SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: fakeApi,
-        eventEmit: (eventName) => { if (eventName === 'mag_before_message_update') beforeMessageUpdateEvents += 1; },
+        eventEmit: (eventName, payload) => {
+            if (eventName === 'mag_before_message_update') beforeMessageUpdateEvents += 1;
+            // 模拟外部 MVU/VWD 监听器在开局更新周期后仍交回旧式
+            // [当前值, 描述] 叶子；这正是真实卡中天气 CHECK 失败的输入。
+            if (eventName === 'mag_variable_update_ended' && payload && payload.stat_data && payload.stat_data.世界) {
+                payload.stat_data.世界.天气 = ['晴朗', "文本变量，描述当前的天气状况，如'晴朗'、'多云'等。"];
+            }
+        },
         toastr: undefined,
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
@@ -3968,6 +4118,9 @@ test('扩展 owner 端到端：仅含 JSONPatch 的首楼合并初始化、保�
     await new Promise(resolve => setTimeout(resolve, 2800));
     const after = win.MVU2SHUJUKU_CORE.statDataFromTables(layout, tables).stat_data;
     assert.strictEqual(after.世界.时间, '复兴纪元488年', '首楼 replace 应进入最终初始化快照');
+    const worldSheet = Object.values(tables).find(sheet => sheet && sheet.name === '世界表');
+    const weatherCell = worldSheet.content[1][worldSheet.content[0].indexOf('天气')];
+    assert.strictEqual(weatherCell, '晴朗', '布局标记为 pair 的旧式 [值,描述] 应在 SQL 建表边界拆包为标量');
     assert.deepStrictEqual(Array.from(after.主角.身份 || []), ['漂泊者'], '首楼 insert 应只追加一次');
     assert.strictEqual(after.主角.生命值.上限._基础, 525, '对象 value 中的 _基础 不得被递归剥除');
     assert.strictEqual(crudCalls, 0, '首楼 JSONPatch 应走整表初始化，不应退化成逐格 CRUD');
@@ -4309,6 +4462,7 @@ test('仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部 import 与 Mvu
                 tavern_helper: {
                     scripts: [
                         { name: 'MVU', enabled: true, content: "import 'https://testingcf.jsdelivr.net/gh/NLKASHEI/MVU-offline@v1.0.2/mvu_bundle_full.js'" },
+                        { name: 'mvu', enabled: true, content: "import 'https://testingcf.jsdelivr.net/gh/MagicalAstrogy/MagVarUpdate@master/artifact/bundle.js'" },
                         { name: 'ZOD Schema', enabled: true, content: "import { registerMvuSchema } from 'https://example.test/schema.js';\nconst schema = {};\nregisterMvuSchema(schema);" },
                         { name: '压缩 ZOD Schema', enabled: true, content: "import{registerMvuSchema as r}from'https://example.test/mvu_zod.js';const e=z,n=e.z.object({值:e.z.string()});$(()=>{r(n)});export{n as Schema};" },
                         { name: '某卡 mvu zod', enabled: true, content: "import 'https://cdn.example.test/card/dist/data_schema/index.js'" },
@@ -4325,10 +4479,13 @@ test('仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部 import 与 Mvu
     const d = r.card.data || r.card;
     const thScripts = (d.extensions && d.extensions.tavern_helper && d.extensions.tavern_helper.scripts) || [];
     assert.ok(!thScripts.some(s => String(s.content || '').includes('MVU-offline')), '应移除离线 MVU 引擎 import 脚本');
+    assert.ok(!thScripts.some(s => String(s.content || '').includes('MagicalAstrogy/MagVarUpdate')), '应移除官方 MagVarUpdate 引擎 import 脚本');
     assert.ok(!thScripts.some(s => String(s.name || '') === 'ZOD Schema'), '纯 registerMvuSchema 声明脚本应由数据库 Schema 替代');
     assert.ok(!thScripts.some(s => String(s.name || '') === '压缩 ZOD Schema'), '别名调用的压缩纯 Schema 脚本也应移除');
     assert.ok(!thScripts.some(s => String(s.name || '') === '某卡 mvu zod'),
         '名称、URL 和脚本形态三重确认的纯 MVU data_schema 启动脚本应由数据库 Schema 替代');
+    assert.ok(r.reportText.includes('导入模块正文不在角色卡内') && r.reportText.includes('无法核对其中独有字段'),
+        '删除不可见的纯外部 Schema 时必须报告无法静态迁移的边界');
     assert.ok(thScripts.some(s => String(s.name || '') === '某卡 mvu zod 业务混合'), '带其他业务代码的 Schema import 不得连带删除');
     const userScript = thScripts.find(s => String(s.name || '') === '用户倒计时');
     assert.ok(userScript, '调用 Mvu.* 的用户业务脚本不得被当成引擎误删');
@@ -4368,6 +4525,29 @@ test('内联 module 前端首次读取 message 变量前等待数据库 getVaria
     assert.ok(script.includes('__mvu2shujukuAwaitMessageVariables'), '一次性读取消息变量的内联 module 应注入就绪门禁');
     assert.ok(script.indexOf('__mvu2shujukuAwaitMessageVariables') < script.indexOf('const vars=getVariables'), '门禁必须在原前端首次读取变量之前执行');
     assert.ok(script.includes("fn.__mvu2shujuku||fn.__mvu2shujukuBridge"), '门禁应等待转换器接管函数，而非猜测业务字段是否非空');
+});
+
+test('旧式状态栏首次 await getChatMessages 前等待数据库消息投影 shim', () => {
+    const frontend = '<script>async function initDisplay(){const messages=await getChatMessages(getCurrentMessageId());const gameData=messages?.[0]?.data;const characterData=gameData?.display_data||gameData?.stat_data;window.current=characterData;}document.addEventListener("DOMContentLoaded",initDisplay);</script>';
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '一次性消息状态栏卡', first_mes: '<StatusPlaceHolderImpl/>',
+            character_book: { entries: [{ comment: '[InitVar]', content: '世界:\n  天气: 晴朗' }] },
+            extensions: {
+                regex_scripts: [{ scriptName: '状态栏', findRegex: '<StatusPlaceHolderImpl/>', replaceString: frontend, disabled: false }],
+                tavern_helper: { scripts: [] },
+            },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const script = (r.card.data || r.card).extensions.regex_scripts.find(x => x.scriptName === '状态栏').replaceString;
+    assert.ok(script.includes('__mvu2shujukuAwaitChatMessages'), '一次性 message.data 状态栏应注入就绪门禁');
+    assert.ok(script.indexOf('__mvu2shujukuAwaitChatMessages') < script.indexOf('const messages='), '门禁必须在原 getChatMessages 读取前执行');
+    assert.ok(script.includes('globalThis.getChatMessages') && script.includes('fn.__mvu2shujuku||fn.__mvu2shujukuBridge'), '应等待转换器的消息投影函数');
+    assert.ok(script.includes('__mvu2shujukuRefreshInlineFrontend=function(){return initDisplay();}'), '应暴露已确认的原生重读入口供手动刷新菜单调用');
+    const extension = core.assembleExtension({ coreSource: fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8') })['index.js'];
+    assert.ok(extension.includes("typeof target.__mvu2shujukuRefreshInlineFrontend === 'function'"), '扩展手动刷新应识别内联状态栏重读入口');
 });
 
 test('VARIABLE_UPDATE_ENDED 载荷与 MVU 原版一致：携带更新前后的完整 MvuData', async () => {
@@ -5283,8 +5463,10 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
     assert.ok(oursMvu(win.Mvu), 'Mvu 应被接管');
     const projectedMessage = win.getChatMessages(-1)[0];
     assert.strictEqual(projectedMessage.data.stat_data.主角.姓名, '张三', '旧状态栏直读 message.data.stat_data 时应看到数据库当前状态');
+    assert.strictEqual(projectedMessage.data.display_data.主角.姓名, '张三', '优先读 display_data 的旧状态栏也应看到同一份数据库快照');
     assert.strictEqual(projectedMessage.data.原生附加, 1, '消息 data 的其他原生字段必须保留');
     assert.strictEqual(realMessages()[0].data.stat_data, undefined, '数据库投影不得污染原聊天消息');
+    assert.strictEqual(realMessages()[0].data.display_data, undefined, 'display_data 投影也不得污染原聊天消息');
     // 持久化 checkpoint 仍是开局“张三”，运行时表已更为“李四”：
     // 世界书 EJS 必须与状态栏一样读当前完整表，不能无条件回退到初始 checkpoint。
     const initialCheckpoint = JSON.parse(JSON.stringify(r.template));
@@ -6833,7 +7015,7 @@ test('首写缺锚点：写库前 initGameSession 建锚，差异写入把行表
     await new Promise(res => setTimeout(res, 1200));
     assert.strictEqual(initCalls, 0, '首写不再手工 initGameSession（锚点由插件提交管线建立）');
     const qy = Object.values(tables).find(s => s && s.name === '主角_气运表');
-    const ki = qy.content[0].indexOf('键名');
+    const ki = 1; // 动态字典业务键列（Zod keySchema.describe 可命名为“气运名”）
     const contentKeys = qy.content.slice(1).map(r => r && r[ki]).filter(Boolean);
     assert.ok(contentKeys.includes('测试气运'), '首写后行表数据必须落到 content（不留在 seedRows）');
 });
@@ -8679,11 +8861,11 @@ test('行条目内动态字典用具体实体关联键+键名关系表，嵌套�
     const gongfa = r.schema.find(g => g.name === '功法');
     const shentong = r.schema.find(g => g.name === '神通');
     assert.strictEqual(gongfa.kind, 'nestedRows');
-    assert.deepStrictEqual(gongfa.columns.slice(0, 4).map(c => c.zh), ['寻缘蝶_键名', '键名', '等级', '描述']);
+    assert.deepStrictEqual(gongfa.columns.slice(0, 4).map(c => c.zh), ['寻缘蝶_蝶名', '键名', '等级', '描述']);
     assert.strictEqual(shentong.scalarValueCol, '描述');
     const gongfaSheet = Object.values(r.template).find(s => s && s.name === '寻缘蝶_功法表');
     const butterflySheet = Object.values(r.template).find(s => s && s.name === '寻缘蝶表');
-    assert.match(gongfaSheet.sourceData.note, /寻缘蝶_键名.*寻缘蝶表\.蝶名/, '关系列应引用父表由索引签名声明的业务键列');
+    assert.match(gongfaSheet.sourceData.note, /寻缘蝶_蝶名.*寻缘蝶表\.蝶名/, '关系列应沿用父表由索引签名声明的业务键列');
     assert.match(gongfaSheet.sourceData.note, /功法提升时更新/, '完整动态路径下的字段规则应迁入关系表');
     assert.match(gongfaSheet.sourceData.note, /维护本表时，同时遵循对应寻缘蝶记录中与「功法」相关的整体规则/);
     assert.doesNotMatch(gongfaSheet.sourceData.note, /键名：每只寻缘蝶最多/, '集合整体规则不得误挂到关系表键名列');

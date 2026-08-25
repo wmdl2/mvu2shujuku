@@ -1,6 +1,6 @@
 # MVU 转换与兼容清单
 
-> 适用于 MVU转数据库 v0.3.3。本文用于说明哪些 MVU 内容可以转换、哪些运行时行为由兼容层接管，以及当前无法等价模拟的边界。
+> 适用于 MVU转数据库 v0.3.4。本文用于说明哪些 MVU 内容可以转换、哪些运行时行为由兼容层接管，以及当前无法等价模拟的边界。
 
 这不是对任意 MVU 角色卡“零风险完全兼容”的承诺。转换器会尽可能保留无法静态确认的业务脚本，并在转换报告中列出需要人工核对的项目。依赖 MVU 私有内部状态、未知外部脚本或复杂动态 EJS 的卡，转换后仍应实际测试。
 
@@ -57,11 +57,19 @@
 **支持**从 `[mvu_update]`、`[MvuUpdate]` 等条目提取：
 
 - YAML 式 `type` / `format` / `check` / `enum` 声明
-- YAML 模板键 `${A|B}`，并兼容部分角色卡使用的 `${A/B}` 写法；模板键下的规则按展开后的完整路径附着
+- YAML 模板键 `${A|B}`，并兼容部分角色卡使用的 `${A/B}` 写法；支持 `${A|B}经验` 等带前后缀的合并字段，模板键下的规则按展开后的完整路径附着
+- `range` 既支持 `0~100` 数值范围，也支持 `[初级区, 中级区]` 可选值数组；后者按枚举进入 note 和可选 DDL `CHECK IN`
+- 同表中由带前/后缀模板键展开、且列约束完全一致的规则，note 按 `${A|B}后缀` 折叠展示；列不同的变量描述不合并，DDL 仍逐列生成
 - 嵌套 `z.object({...})` 中的组名和字段路径
+- 酒馆助手脚本中传给 `registerMvuSchema(...)` 的静态 Zod Schema；支持中英文变量复用、`...Schema.shape`、`extend`、`merge` 和常见压缩格式
+- `z.record(keySchema, valueSchema)` 动态字典；初始值为空时也会按 value Schema 建动态行表/关系子表，键 Schema 的 `.describe('角色名')` 等业务名称用于行表键列名
+- `z.array(elementSchema)` 数组结构；沿用转换器的有序数组表/关系子表规则
+- `z.string()` / `z.number()` / `z.boolean()` / `z.coerce.number()` 等基础字段类型
 - `z.number().min(...).max(...)` 数值范围
+- 教程推荐的 `.transform(value => _.clamp(value, min, max))` 静态范围
 - `z.enum([...])` 枚举值
 - `.describe(...)` 字段描述
+- 字面量 `.prefault(...)` / `.default(...)` 缺省值
 - Zod/TS 替代写法中 `/** check: ... */` 的规则注释
 - 组级规则
 - 固定容器的表级规则按完整逻辑路径传播到其实际动态子表
@@ -79,9 +87,11 @@
 - `json_valid`
 - 表格填写提示词
 
-Zod/TS 替代写法的字段基础类型不作为唯一建表依据；实际表结构仍综合 `[InitVar]`、规则和前端字段使用推导。同名字段在整份 Schema 中类型唯一时，可作为压缩/对象复用 Schema 的安全类型兜底；存在类型冲突时不猜测。
+Zod/TS 替代写法的字段基础类型不作为唯一建表依据；实际表结构仍综合 `[InitVar]`、规则、已静态解析的 `registerMvuSchema` 和前端字段使用推导。同名字段在整份 Schema 中类型唯一时，可作为压缩/对象复用 Schema 的安全类型兜底；存在类型冲突时不猜测。
 
-**部分等价：**转换时会按官方 InitVar 元数据决定固定对象、动态字典和空字典模板结构，但数据库不保存完整 MVU 原生 `schema` 树。运行时的最终类型、范围和枚举约束由数据库 DDL 与布局负责；未通过更新周期的直接表格编辑不等价于 MVU Schema 自动调和。纯 `registerMvuSchema(...)` 声明脚本会移除，含其他业务逻辑的混合脚本才保留并接收兼容事件。
+**部分等价：**转换时会按官方 InitVar 元数据及可静态证明的 Zod 声明决定固定对象、动态字典、数组、默认值和空容器模板结构，但数据库不保存完整 MVU 原生 `schema` 树。`_.clamp` 转为范围提示与可选 DDL `CHECK`；越界值由 SP·数据库原有失败/重填流程处理，不模拟 Zod 自动钳制。`.catch(fallback)` 的非法输入回退、任意 `transform/refine/superRefine/preprocess/pipe`、无法解析的组合类型和动态 Schema 工厂不会执行，转换报告会列出或汇总字段路径；通常只降级对应校验/格式化，若它是唯一结构来源则需人工核对。纯 `registerMvuSchema(...)` 声明脚本会移除，含其他业务逻辑的混合脚本才保留并接收兼容事件。
+
+教程附录还列出了 `.int()`、`.regex(...)`、`.or(...)` / `z.union(...)`、`z.templateLiteral(...)`、`z.partialRecord(...)` 与 `z.intersection(...)`。这些目前不作完整 Zod 等价执行：有 InitVar 实值时仍按实值建表，并在转换报告中指出未迁移的表达式；若它们是空容器的唯一结构来源（尤其 `partialRecord/intersection`），可能需要人工补表。数据库列、提示词和可选 `CHECK` 能承载的约束才会自动落地，转换器不会加载或执行 Zod 运行时来“验证”角色卡代码。
 
 ## 4. MVU 更新命令
 
@@ -129,6 +139,8 @@ Zod/TS 替代写法的字段基础类型不作为唯一建表依据；实际表�
 同时提供 JSON 修复容错。
 
 开场分支中同楼的 `<initvar>` 与 `<UpdateVariable>/<JSONPatch>` 会按 MVU 原顺序合并后一次性写入最终初始化快照；没有 `<initvar>`、只含 JSON Patch 的开场同样支持。整体替换对象时会保留其中下划线开头的业务键（如 `_基础`）；直接把更新路径指向 `_` 字段仍按兼容层的内部字段保护策略跳过。重进已有 checkpoint 不会重放历史更新块。
+
+开局事件链若交回 MVU/VWD 旧式 `[当前值, 描述]` 叶子，转换器仅对 layout 中明确的 `pair` 列在 SQL 建表边界取当前值。普通数组、对象和 JSON 列不会被该兼容规则拆包。
 
 ## 5.1 表格提示词中的酒馆宏与世界书正则
 
@@ -211,6 +223,7 @@ EJS 世界书、`format_message_variable`、状态栏与前端共用实时读取
 - `TavernHelper.getVariables(...)`
 - `getMessageVar('stat_data.…', { defaults: … })`
 - `getChatMessages(...)[0].data.stat_data`（旧状态栏读法；在返回副本上投影当前数据库状态）
+- `getChatMessages(...)[0].data.display_data || ...stat_data`（两个视图同时投影当前快照，不让空 `display_data` 遮住实时值）
 - `setMessageVar('stat_data.…', value)`
 - EJS 裸上下文 `variables.stat_data`
 - `setvar('stat_data.…', value, { outscope: 'message' })`（仅默认写入/返回语义）
@@ -231,6 +244,7 @@ EJS 世界书、`format_message_variable`、状态栏与前端共用实时读取
 - 对未监听 `VARIABLE_UPDATE_ENDED` 但提供“刷新数据”控件的同源状态栏，SP 自动填表提交后触发其原生重读，不重载整个前端或楼层
 - 前端在 SP 回调后立即重读时，短暂使用回调的已提交快照，避免 replay/物化窗口内又读到旧运行时
 - 对未监听 MVU 更新事件的旧式 `body.load(...)` 整页前端，保留可重载入口；可从魔法棒菜单点击“刷新转换卡前端”手动重读，表格写入不再自动重载整页
+- 一次性读取 `getChatMessages(...).data` 的内联状态栏会暴露转换器专用重读入口；魔法棒手动刷新会调用原状态栏初始化函数，不模糊猜测普通页面函数或按钮
 - EJS 中数据库数据读取
 - 世界书 `getwi` 等非 MVU 逻辑保留
 
@@ -243,8 +257,9 @@ EJS 世界书、`format_message_variable`、状态栏与前端共用实时读取
 - 保留调用 `Mvu.*` 的用户业务脚本
 - 保留普通 JavaScript 脚本
 - 内联 module 前端若在首次 mount 直接读取 message `stat_data`，会等待数据库变量入口接管后再执行；不要求前端自行监听初始化事件
+- 普通内联状态栏若在 async 初始化中仅一次 `await getChatMessages(...)` 后读取 message `stat_data/display_data`，会等待转换器消息投影 shim 就绪后再首读
 - 保留未知外部 `import`
-- 纯外部 Schema import 仅在脚本名、Schema URL 和“只含 import”三重信号同时成立时删除；带业务代码的混合模块保留
+- 纯外部 Schema import 仅在脚本名、Schema URL 和“只含 import”三重信号同时成立时删除；带业务代码的混合模块保留。由于导入模块正文不在角色卡内，其中独有字段/约束无法静态迁移，转换报告会要求人工核对
 - 为缺失类型的正常脚本补 `type: "script"`
 - 删除确认属于 MVU 引擎本体的脚本
 - 删除纯 `registerMvuSchema(...)` Schema 注册脚本
