@@ -1,5 +1,13 @@
 # 更新日志
 
+## v0.3.5（2026-09-02）
+
+- 扩大魔法棒“刷新转换卡前端”的兼容范围：转换时只给明确读取 MVU/消息变量的 HTML 前端标记 `event/direct/control/reload` 能力，运行时依次使用原生重读入口、`VARIABLE_UPDATE_ENDED`、精确声明的刷新控件和受限 iframe 重载。
+- 修复事件型内联状态栏已收到刷新事件、却仍提示“未找到前端”的误导反馈；现在会按直接、事件、控件、重载分别报告处理数量。
+- 手动 reload 仅作用于带转换器标准标记的非主/宿主 iframe；普通 HTML、酒馆主页面和无关 iframe 不会被重载。事件型或直接重读型前端也不会再额外点击同窗口的刷新控件。
+- 修复删除聊天楼层、切换 swipe 或增改消息后，SP·数据库已按历史回放完成表格变化、转换卡前端却仍显示旧状态：除 SP 通用表更新回调外，聊天历史变更现在会等待完整运行时快照确实变化后补发，兼容旧版 SP、重载窗口和回调时序竞争。
+- 所有表更新通知统一驱动 `VARIABLE_UPDATE_ENDED`、`shujuku-table-updated`、已确认无副作用的内联重读入口和精确刷新控件；批量写抑制期间收到的最后回调会延迟重试。自动更新仍不执行整页 `body.load`/iframe reload，避免清空前端局部状态。
+
 ## v0.3.4（2026-08-25）
 
 - 新增教程标准的酒馆助手 Zod Schema 静态迁移：解析传给 `registerMvuSchema(...)` 的 `z.object/z.record/z.array`、基础类型、`z.coerce.number`、枚举、描述、字面量 `prefault/default`，以及标准 `transform(value => _.clamp(...))` 范围；支持中英文 Schema 变量、`.shape` 展开、`extend/merge`。

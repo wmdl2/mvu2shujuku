@@ -96,6 +96,7 @@
   `_.remove/unset/delete`、`_.add`（数值加法带精度处理、日期字符串按毫秒推进转 ISO）；
   `display_data` 在会话内保存 `旧->新(原因)` 镜像（与 MVU 的 display 字符串同格式）。
 - 公开 MVU 更新事件链由兼容层接管；`COMMAND_PARSED` 监听器可改写或追加命令，`VARIABLE_UPDATE_ENDED` 携带更新前后的完整 `MvuData`。具体参数语义和边界见兼容清单。
+- 普通表格 CRUD、自动填表以及删除楼层、切换 swipe、增改消息造成的历史变化，都会在数据库快照稳定后同步转换卡前端；兼容 MVU 更新事件、数据库更新事件、安全内联重读入口和明确刷新控件。
 - 数据桥同时提供 `TavernHelper.getVariables()` shim，兼容教程中「纯文本状态栏」的读取写法。
 - 对只在首次挂载时调用一次 `getVariables({type:'message'})` 的内联开场前端，转换器会等待数据库变量 shim 就绪后再启动，避免选项列表在异步建表窗口读空。
 
