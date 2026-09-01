@@ -2414,6 +2414,9 @@ test('扩展产物：index.js 应包含完整 Mvu 兼容层（事件名/接管/�
     assert.ok(js.includes('global_Mvu_initialized'), 'index.js 应监听真 MVU 初始化事件并接管');
     assert.ok(js.includes("String(name) === 'Mvu'") && js.includes('originalRec.wait.apply'), 'index.js 应仅精确接管 Mvu 的初始化等待');
     assert.ok(js.includes('mvu2shujuku-refresh-frontend-menu-item'), 'index.js 应在魔法棒菜单注册手动刷新入口');
+    assert.ok(js.includes('__mvu2shujukuFrontendMode'), 'index.js 应读取前端模式标记');
+    assert.ok(js.includes('location.reload'), 'index.js 应包含受标准标记限制的 iframe reload 兜底');
+    assert.ok(js.indexOf('dispatchVariableUpdateEnded();') < js.indexOf('target.location.reload()', js.indexOf('dispatchVariableUpdateEnded();')), 'iframe reload 应位于 MVU 事件广播之后');
     assert.ok(js.includes('setMvuVariable'), 'index.js 应实现 setMvuVariable');
     assert.ok(js.includes('parseMessage'), 'index.js 应实现 parseMessage');
 });
@@ -3248,7 +3251,8 @@ test('转换产物齐全', () => {
     assert.ok(tplEntry, '应有 __ACU_TEMPLATE_DATA__ 世界书条目（开局自动建表用）');
     assert.ok(typeof tplEntry.content === 'string' && tplEntry.content.length > 100, '模板条目内容应为 base64');
     assert.strictEqual(tplEntry.enabled, false, '模板条目应默认禁用（世界书绿灯关闭），仅作数据载体');
-    assert.strictEqual(String(c.first_mes || ''), String((card.data || card).first_mes || ''), '开场白应保持原样（不注入脚本，纯文字开场白可用）');
+    const normalizedFirstMes = String(c.first_mes || '').replace(/\sdata-mvu2shujuku-frontend="(?:event|direct|control|reload)"/g, '').replace(/globalThis\.__mvu2shujukuFrontendMode="(?:event|direct|control|reload)";?/g, '');
+    assert.strictEqual(normalizedFirstMes, String((card.data || card).first_mes || ''), '开场白业务内容应保持原样（仅允许添加前端刷新模式标记）');
 });
 
 test('折叠显示类 MVU 更新块清理正则也保留', () => {
@@ -3870,6 +3874,8 @@ test('扩展文件齐全且 index.js 语法正确', () => {
     assert.ok(files['index.js'].includes('[前端迟到挂载]'), '重生成时新状态栏 iframe 晚于数据事件挂载时应补发最近载荷');
     assert.ok(files['index.js'].includes('try { installTableUpdateHook(); } catch (e) {}'), 'SP 晚加载/运行时重建后应周期重申表更新回调');
     assert.ok(files['index.js'].includes('unregisterTableUpdateCallback(tableUpdateHookCallback)'), '切到非转换卡或 API 更换时应注销旧回调');
+    assert.ok(files['index.js'].includes('scheduleChatMutationFrontendSync(et.MESSAGE_DELETED, true)'), '删楼回放应有独立于 SP 回调的前端同步兜底');
+    assert.ok(files['index.js'].includes("emitMvuEvent('shujuku-table-updated', null)"), '表格变化应同时广播数据库原生前端兼容事件');
     new Function(files['index.js']);
 });
 
@@ -4499,16 +4505,18 @@ test('仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部 import 与 Mvu
     assert.ok(front && String(front.replaceString || '').includes('__mvu2shujukuFrontendLoaded'), '整页注入前端应加载守卫');
     assert.ok(String(front.replaceString || '').includes('mvu2shujuku-frontend-mounted'), '加载守卫应依据 DOM 实际挂载标记，body 被清空后可重新加载');
     assert.ok(String(front.replaceString || '').includes('__mvu2shujukuReloadFrontend'), '整页前端应保存可复用的加载函数');
+    assert.ok(String(front.replaceString || '').includes('data-mvu2shujuku-frontend="direct"'), '已识别的 body.load 整页前端应标记为 direct，避免再点击内部刷新控件');
     assert.ok(!String(front.replaceString || '').includes('mvu2shujuku_external_table_update'), '表格写入不应自动重载整页前端');
     assert.ok(r.bridgeScript.includes("initializeGlobal") && r.bridgeScript.includes("'Mvu',mvuFake"), '卡内桥应按 TavernHelper 协议共享 Mvu');
     assert.ok(r.bridgeScript.includes("String(name)==='Mvu'") && r.bridgeScript.includes('original.apply(owner,arguments)'), '卡内桥应仅精确接管 Mvu 的全局初始化等待');
     const sb = (d.extensions && d.extensions.regex_scripts || []).find(rx => String(rx.scriptName || '') === 'MVU状态栏');
     assert.ok(sb && String(sb.replaceString || '').includes('window.eventOn(window.Mvu.events.VARIABLE_UPDATE_ENDED'), '状态栏事件监听应原样保留（靠数据桥广播 mag_variable_update_ended 驱动）');
+    assert.ok(sb && String(sb.replaceString || '').includes('__mvu2shujukuFrontendMode="event"'), 'v5.3 事件型状态栏应标记为 event 模式');
     assert.ok(!String(sb.replaceString || '').includes("(() => { if (window.addEventListener)"), '不应出现损坏状态栏脚本的事件改写');
 });
 
 test('内联 module 前端首次读取 message 变量前等待数据库 getVariables shim', () => {
-    const frontend = '<script type="module">const vars=getVariables({type:"message",message_id:getCurrentMessageId()});window.items=vars.stat_data.主角.衣柜;</script>';
+    const frontend = '<script type="module">const eventName="VARIABLE_UPDATE_ENDED";const vars=getVariables({type:"message",message_id:getCurrentMessageId()});window.items=vars.stat_data.主角.衣柜;</script>';
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -4525,6 +4533,25 @@ test('内联 module 前端首次读取 message 变量前等待数据库 getVaria
     assert.ok(script.includes('__mvu2shujukuAwaitMessageVariables'), '一次性读取消息变量的内联 module 应注入就绪门禁');
     assert.ok(script.indexOf('__mvu2shujukuAwaitMessageVariables') < script.indexOf('const vars=getVariables'), '门禁必须在原前端首次读取变量之前执行');
     assert.ok(script.includes("fn.__mvu2shujuku||fn.__mvu2shujukuBridge"), '门禁应等待转换器接管函数，而非猜测业务字段是否非空');
+    assert.ok(script.includes('__mvu2shujukuFrontendMode="reload"'), '一次性读取变量的前端应标记为 reload 兜底模式');
+});
+
+test('前端刷新模式只按明确能力标记，普通 HTML 保持不变', () => {
+    const card = {
+        spec: 'chara_card_v3', data: { name: '普通HTML卡', first_mes: '<div><script>console.log("hello")</script></div>',
+            character_book: { entries: [{ comment: '[InitVar]', content: '系统:\n  状态: 正常' }] }, extensions: { regex_scripts: [
+                { scriptName: '普通', findRegex: 'x', replaceString: '<div><script>console.log("hello")</script></div>' },
+                { scriptName: '显式控件', findRegex: 'y', replaceString: '<body><button data-mvu-refresh>刷新</button><script>window.current=getAllVariables().stat_data;</script></body>' },
+                { scriptName: 'DOM事件', findRegex: 'z', replaceString: '<html><script>window.addEventListener(window.Mvu.events.VARIABLE_UPDATE_ENDED,()=>window.current=getAllVariables().stat_data);</script></html>' },
+            ], tavern_helper: { scripts: [] } } },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const d = r.card.data || r.card;
+    assert.ok(!String(d.first_mes).includes('data-mvu2shujuku-frontend'), '普通开场 HTML 不应标记');
+    const byName = Object.fromEntries(d.extensions.regex_scripts.map(rx => [rx.scriptName, String(rx.replaceString || '')]));
+    assert.ok(!byName.普通.includes('__mvu2shujukuFrontendMode'), '无数据脚本不应标记');
+    assert.ok(byName.显式控件.includes('data-mvu2shujuku-frontend="control"'), '明确 data-mvu-refresh 控件应标记为 control');
+    assert.ok(byName.DOM事件.includes('data-mvu2shujuku-frontend="event"'), 'addEventListener(Mvu.events.VARIABLE_UPDATE_ENDED) 应标记为 event');
 });
 
 test('旧式状态栏首次 await getChatMessages 前等待数据库消息投影 shim', () => {
@@ -4546,6 +4573,7 @@ test('旧式状态栏首次 await getChatMessages 前等待数据库消息投影
     assert.ok(script.indexOf('__mvu2shujukuAwaitChatMessages') < script.indexOf('const messages='), '门禁必须在原 getChatMessages 读取前执行');
     assert.ok(script.includes('globalThis.getChatMessages') && script.includes('fn.__mvu2shujuku||fn.__mvu2shujukuBridge'), '应等待转换器的消息投影函数');
     assert.ok(script.includes('__mvu2shujukuRefreshInlineFrontend=function(){return initDisplay();}'), '应暴露已确认的原生重读入口供手动刷新菜单调用');
+    assert.ok(script.includes('__mvu2shujukuFrontendMode="direct"'), '已暴露原生重读函数的无 html/body 前端应标记为 direct');
     const extension = core.assembleExtension({ coreSource: fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8') })['index.js'];
     assert.ok(extension.includes("typeof target.__mvu2shujukuRefreshInlineFrontend === 'function'"), '扩展手动刷新应识别内联状态栏重读入口');
 });
@@ -5189,6 +5217,58 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     assert.strictEqual(callbackEnded[1].stat_data.主角.姓名, '回调快照新值', '事件 after 应来自 SP 回调快照，不得被旧 export 覆盖');
     assert.strictEqual(frontendRefreshClicks, 1, '表更新回调应触发同源前端明确的“刷新数据”控件一次');
     assert.strictEqual(frontendRefreshReadName, '回调快照新值', '刷新控件的 getVariables 应读取 SP 已提交快照，不得读到尚未物化的旧 export');
+
+    // 自动表更新也应调用转换时确认过的无副作用内联重读入口；同窗口不再重复点刷新控件。
+    let inlineRefreshCalls = 0;
+    let inlineRefreshReadName = '';
+    frontendWin.__mvu2shujukuRefreshInlineFrontend = () => {
+        inlineRefreshCalls += 1;
+        inlineRefreshReadName = frontendWin.getVariables({ type: 'message', message_id: 2 }).stat_data.主角.姓名;
+    };
+    const directSnapshot = JSON.parse(JSON.stringify(tables));
+    const directMain = Object.values(directSnapshot).find(s => s && s.name === '主角表');
+    directMain.content[1][directMain.content[0].indexOf('姓名')] = '安全直接重读';
+    const clicksBeforeDirect = frontendRefreshClicks;
+    tableUpdateCallback(directSnapshot);
+    await new Promise(res => setTimeout(res, 260));
+    assert.strictEqual(inlineRefreshCalls, 1, 'SP 表更新应自动调用已确认的内联数据重读入口');
+    assert.strictEqual(inlineRefreshReadName, '安全直接重读', '内联重读应看到回调提交快照');
+    assert.strictEqual(frontendRefreshClicks, clicksBeforeDirect, '直接重读窗口不应再重复点击刷新控件');
+    delete frontendWin.__mvu2shujukuRefreshInlineFrontend;
+
+    // 回调撞上扩展内部批量写抑制窗口时不能永久丢弃，应在抑制解除后重试最后快照。
+    const suppressedSnapshot = JSON.parse(JSON.stringify(tables));
+    const suppressedMain = Object.values(suppressedSnapshot).find(s => s && s.name === '主角表');
+    suppressedMain.content[1][suppressedMain.content[0].indexOf('姓名')] = '抑制后仍通知';
+    emittedMvuEvents.length = 0;
+    win.__mvu2shujukuSuppressTableMvuEnded = 1;
+    tableUpdateCallback(suppressedSnapshot);
+    await new Promise(res => setTimeout(res, 180));
+    win.__mvu2shujukuSuppressTableMvuEnded = 0;
+    await new Promise(res => setTimeout(res, 260));
+    const suppressedEnded = emittedMvuEvents.find(e => e[0] === 'mag_variable_update_ended');
+    assert.ok(suppressedEnded, '批量抑制期间收到的最后表快照应延迟而不是丢弃');
+    assert.strictEqual(suppressedEnded[1].stat_data.主角.姓名, '抑制后仍通知', '延迟回调应保留权威提交快照');
+
+    // 模拟旧版 SP/重载竞态：删楼后运行时已经回退，但没有调用注册回调。
+    // 扩展必须根据 MESSAGE_DELETED 前后的完整表快照变化主动补发。
+    const runtimeMain = Object.values(tables).find(s => s && s.name === '主角表');
+    const runtimeNameCol = runtimeMain.content[0].indexOf('姓名');
+    runtimeMain.content[1][runtimeNameCol] = '删除前状态';
+    tableUpdateCallback(JSON.parse(JSON.stringify(tables)));
+    await new Promise(res => setTimeout(res, 260));
+    emittedMvuEvents.length = 0;
+    const clicksBeforeDelete = frontendRefreshClicks;
+    context.chat = [0, 1, 2, 3].map(message_id => ({ message_id, mes: '楼层' + message_id, is_user: message_id % 2 === 1 }));
+    (handlers['deleted'] || []).forEach(fn => fn(3));
+    await new Promise(res => setTimeout(res, 450));
+    runtimeMain.content[1][runtimeNameCol] = '删楼回退状态';
+    await new Promise(res => setTimeout(res, 1350));
+    const rollbackEnded = emittedMvuEvents.find(e => e[0] === 'mag_variable_update_ended');
+    assert.ok(rollbackEnded, 'SP 未回调时 MESSAGE_DELETED 仍应在历史回放完成后补发 VARIABLE_UPDATE_ENDED');
+    assert.strictEqual(rollbackEnded[1].stat_data.主角.姓名, '删楼回退状态', '删楼补发载荷必须是回放后的表格状态');
+    assert.strictEqual(frontendRefreshClicks, clicksBeforeDelete + 1, '删楼回退补发也应驱动明确刷新控件');
+    assert.strictEqual(frontendRefreshReadName, '删楼回退状态', '删楼后的前端同步读取必须看到回退快照');
     // 模拟旧 bug：缓存键被存成“名称|”（完整卡 data 缺 avatar）时，写库仍应通过名称兜底命中
     const initCallsBeforeWrite = initCalls;
     win.__mvu2shujukuTemplateCacheFor = '转换卡|';

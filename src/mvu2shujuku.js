@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.3.4';
+    const VERSION = '0.3.5';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -8876,6 +8876,31 @@
         return { text: out, count };
     }
 
+    // 标记卡内真正的数据前端，供运行时刷新时选择安全入口。只识别含脚本且
+    // 明确读取 MVU/数据库数据的 HTML；普通展示 HTML 保持完全不变。
+    function markCardFrontendMode(text) {
+        const t = String(text || '');
+        if (!/<script\b/i.test(t)) return { text: t, mode: '', count: 0 };
+        const eventRegistration = /(?:eventOn|addEventListener)\s*\(\s*(?:(?:window\s*\.\s*)?Mvu\s*\.\s*events\s*\.\s*VARIABLE_UPDATE_ENDED|["']mag_variable_update_ended["'])/i.test(t);
+        const directRegistration = /__mvu2shujukuReloadFrontend|__mvu2shujukuRefreshInlineFrontend/.test(t);
+        if (!/(?:getVariables|getAllVariables|getChatMessages|Mvu\s*\.\s*getMvuData|\bstat_data\b|\bdisplay_data\b)/i.test(t) && !eventRegistration && !directRegistration) {
+            return { text: t, mode: '', count: 0 };
+        }
+        let mode = 'reload';
+        if (directRegistration) mode = 'direct';
+        else if (eventRegistration) mode = 'event';
+        else if (/data-mvu-refresh|(?:title|aria-label)\s*=\s*["'](?:刷新数据|Refresh data)["']/.test(t)) mode = 'control';
+        const attr = 'data-mvu2shujuku-frontend="' + mode + '"';
+        let out = t;
+        if (/<html\b/i.test(out)) out = out.replace(/<html\b([^>]*)>/i, (m, a) => /data-mvu2shujuku-frontend\s*=/.test(a) ? m : '<html' + a + ' ' + attr + '>');
+        else if (/<body\b/i.test(out)) out = out.replace(/<body\b([^>]*)>/i, (m, a) => /data-mvu2shujuku-frontend\s*=/.test(a) ? m : '<body' + a + ' ' + attr + '>');
+        else if (!/__mvu2shujukuFrontendMode/.test(out)) {
+            out = out.replace(/<script\b(?![^>]*\bsrc\s*=)[^>]*>/i, m => m + '\\n' +
+                'globalThis.__mvu2shujukuFrontendMode="' + mode + '";');
+        }
+        return { text: out, mode, count: out === t ? 0 : 1 };
+    }
+
     // ================================================================
     // 开场白用户数据 → stat_data 直接落库（通用注入）
     // MVU 原版里，捏人开场白把用户填写的数据注入变量；转换后也应把用户
@@ -9366,6 +9391,12 @@
         // 4. 正则处理
         const regexes = Array.isArray(data.extensions && data.extensions.regex_scripts) ? data.extensions.regex_scripts : [];
         const keptRegexes = [];
+        const pushFrontendRegex = (rx) => {
+            const copy = deepClone(rx);
+            const marked = markCardFrontendMode(copy.replaceString || '');
+            copy.replaceString = marked.text;
+            keptRegexes.push(copy);
+        };
         for (const r of regexes) {
             const name = String(r.scriptName || '');
             if (isMvuBlockCleanupRegex(r)) {
@@ -9387,7 +9418,7 @@
                 report.auto(`正则「${name}」为一次性读取消息变量的内联 module 前端，已等待数据库变量入口就绪后再启动。`);
                 const inj = injectOpeningUserDataSync(copy.replaceString, schema, report);
                 if (inj.injected) copy.replaceString = inj.script;
-                keptRegexes.push(copy);
+                pushFrontendRegex(copy);
                 continue;
             }
             const chatMessageReady = guardInlineChatMessageFrontendDataReady(r.replaceString || '');
@@ -9397,7 +9428,7 @@
                 report.auto(`正则「${name}」为一次性读取 message.data 的状态栏，已等待数据库消息投影入口就绪后再读取。`);
                 const inj = injectOpeningUserDataSync(copy.replaceString, schema, report);
                 if (inj.injected) copy.replaceString = inj.script;
-                keptRegexes.push(copy);
+                pushFrontendRegex(copy);
                 continue;
             }
             // 前端整页注入（$('body').load(...)）：加一次性守卫，避免消息重渲染反复重启前端
@@ -9410,7 +9441,7 @@
                 // 开场白用户数据直接落库：捏人前端提交时把用户填写的数据同步进 stat_data
                 const inj = injectOpeningUserDataSync(copy.replaceString, schema, report);
                 if (inj.injected) copy.replaceString = inj.script;
-                keptRegexes.push(copy);
+                pushFrontendRegex(copy);
                 continue;
             }
             // 非整页注入的前端同样尝试注入开场白用户数据同步
@@ -9419,7 +9450,7 @@
                 if (inj.injected) {
                     const copy = deepClone(r);
                     copy.replaceString = inj.script;
-                    keptRegexes.push(copy);
+                    pushFrontendRegex(copy);
                     continue;
                 }
             }
@@ -9428,7 +9459,7 @@
             if (isMvuScriptContent(r.replaceString || '')) {
                 report.manual(`正则「${name}」含 MVU API 调用；转换器保留它并依赖数据桥 MVU 兼容层，若逻辑异常请人工改为数据库 API。`);
             }
-            keptRegexes.push(deepClone(r));
+            pushFrontendRegex(r);
         }
         if (data.extensions) data.extensions.regex_scripts = keptRegexes;
 
@@ -9481,12 +9512,13 @@
         if (typeof data.first_mes === 'string' && /<script/i.test(data.first_mes)) {
             const inj = injectOpeningUserDataSync(data.first_mes, schema, report);
             if (inj.injected) data.first_mes = inj.script;
+            data.first_mes = markCardFrontendMode(data.first_mes).text;
         }
         if (Array.isArray(data.alternate_greetings)) {
             data.alternate_greetings = data.alternate_greetings.map((g, gi) => {
                 if (typeof g !== 'string' || !/<script/i.test(g)) return g;
                 const inj = injectOpeningUserDataSync(g, schema, report);
-                return inj.injected ? inj.script : g;
+                return markCardFrontendMode(inj.injected ? inj.script : g).text;
             });
         }
 
@@ -10899,6 +10931,7 @@ ${DB_INIT_SNIPPET}
         try {
             if (!autoInitState.inited) {
                 es.on(et.CHAT_CHANGED, () => {
+                    cancelChatMutationFrontendSync();
                     autoInitState.retries = 0;
                     // 上一聊天的待写快照不允许落入新聊天：重试链携带原始 key 会被归属
                     // 守卫丢弃，但 150ms 合并窗口内的 pending 状态与挂起的 flush Promise
@@ -10950,11 +10983,19 @@ ${DB_INIT_SNIPPET}
                     hostWindow.setTimeout(autoInitDatabase, 600);
                     hostWindow.setTimeout(applyPendingMessageUpdateBlocks, 900);
                     scheduleOpeningContinuityRecovery('MESSAGE_RECEIVED');
+                    scheduleChatMutationFrontendSync(et.MESSAGE_RECEIVED);
                     // 复刻 MVU：AI 回复后追加状态栏占位符。稍后执行，让卡内
                     // MESSAGE_RECEIVED 动态正则先完成注册/重载；否则此处 setChatMessages
                     // 会与 Ticket/<ellia> 等首次显示正则竞争，把原始标签重新渲染出来。
                     hostWindow.setTimeout(ensureWindowStatusPlaceholder, 1200);
                 });
+                if (et.MESSAGE_SENT && typeof et.MESSAGE_SENT === 'string') {
+                    es.on(et.MESSAGE_SENT, () => {
+                        // 用户楼也可能承载插件持久化帧，或触发卡内脚本改表；普通 API
+                        // 回调仍是主通道，这里只负责回调缺失时的前后快照兜底。
+                        scheduleChatMutationFrontendSync(et.MESSAGE_SENT);
+                    });
+                }
                 // 开场白切换/首楼换 swipe：只补建表/占位符（锚点由插件自身管理）
                 for (const evName of [et.MESSAGE_SWIPED, et.MESSAGE_UPDATED, et.MESSAGE_EDITED]) {
                     if (evName && typeof evName === 'string') {
@@ -10963,12 +11004,17 @@ ${DB_INIT_SNIPPET}
                             hostWindow.setTimeout(applyActiveGreetingInitvar, 1200);
                             hostWindow.setTimeout(applyPendingMessageUpdateBlocks, 1500);
                             scheduleOpeningContinuityRecovery(evName);
+                            scheduleChatMutationFrontendSync(evName, evName === et.MESSAGE_SWIPED);
                         });
                     }
                 }
                 if (et.MESSAGE_DELETED && typeof et.MESSAGE_DELETED === 'string') {
                     es.on(et.MESSAGE_DELETED, () => {
                         scheduleOpeningContinuityRecovery(et.MESSAGE_DELETED);
+                        // 删楼不是普通 CRUD，而是 SP 按剩余聊天历史异步回放表格。
+                        // 部分 SP 版本/重载时序不会把这次变化可靠送到外部回调，独立等待
+                        // 回放后的完整快照并补发，不能在删除事件到达时读取旧运行时。
+                        scheduleChatMutationFrontendSync(et.MESSAGE_DELETED, true);
                     });
                 }
                 if (et.GENERATION_ENDED) {
@@ -10980,6 +11026,7 @@ ${DB_INIT_SNIPPET}
                         // 先做最后一次连续性检查，待恢复进入执行阶段后再解除保护。
                         const endingChatKey = autoInitChatId();
                         scheduleOpeningContinuityRecovery('GENERATION_ENDED');
+                        scheduleChatMutationFrontendSync(et.GENERATION_ENDED);
                         hostWindow.setTimeout(() => {
                             try {
                                 const endingState = openingContinuityState(endingChatKey);
@@ -12824,6 +12871,9 @@ ${DB_INIT_SNIPPET}
     // 只在本转换器产物的卡上广播（activeLayout 仅对转换卡缓存），其他数据库卡即使触发表格更新也不发 MVU 事件。
     let lastVariableUpdateSnapshot = null;
     let lastVariableUpdateChatKey = '';
+    // 历史回放兜底用它区分“当前回退快照以前碰巧广播过”与“本次聊天变更后
+    // 已经由 SP 回调广播过”。只比较 stat_data 指纹无法区分 A→B→A。
+    let variableUpdateDispatchSeq = 0;
     let pendingLateFrontendUpdate = null;
     function armLateFrontendUpdate(after, before) {
         try {
@@ -12851,6 +12901,10 @@ ${DB_INIT_SNIPPET}
                 ? before
                 : (lastVariableUpdateSnapshot || safeAfter);
             emitMvuEvent('mag_variable_update_ended', safeAfter, safeBefore);
+            // 数据库原生前端常用的兼容事件。转换卡前端可能只监听其中一种，
+            // 同一份权威快照同时广播；事件监听型前端仍由各自的事件名自行去重。
+            emitMvuEvent('shujuku-table-updated', null);
+            variableUpdateDispatchSeq += 1;
             // 重生成会先删除旧 AI 消息及其状态栏 iframe。变量更新可能在
             // 新 iframe 挂载前已广播；保留一份 10s 的一次性载荷，新 iframe
             // 出现后定向时序补发。无 iframe 变化时不会多发事件。
@@ -12987,13 +13041,146 @@ ${DB_INIT_SNIPPET}
         return true;
     }
 
+    function mvuDataFromCompleteTableSnapshot(data) {
+        try {
+            if (!activeLayout || !tableSnapshotCoversLayout(data, activeLayout)) return null;
+            const core = window.MVU2SHUJUKU_CORE;
+            if (!core || typeof core.statDataFromTables !== 'function') return null;
+            const after = core.statDataFromTables(activeLayout, data);
+            return after && after.stat_data ? after : null;
+        } catch (e) { return null; }
+    }
+
+    // 所有表格变化共用同一个前端出口：SP 的提交回调、聊天历史回放兜底都必须
+    // 先暂存同一份权威 after，再驱动事件、无副作用的直接重读入口和明确刷新控件。
+    // 整页 body.load/iframe reload 只允许手动执行，避免普通改单元格清空前端局部状态。
+    function publishCommittedTableSnapshot(data, source, force) {
+        const after = mvuDataFromCompleteTableSnapshot(data);
+        if (!after) return false;
+        try {
+            const fp = autoInitChatId() + '|' + canonicalJsonForSync(after.stat_data);
+            if (!force && fp === reentryNotifyFingerprint) {
+                dbg('[' + source + '] 快照未变，已去重。');
+                return false;
+            }
+            reentryNotifyFingerprint = fp;
+            stageFrontendCommittedMvuRead(after);
+            const result = refreshCurrentCardFrontends({
+                after,
+                allowHardReload: false,
+            });
+            dbg('[' + source + '] 已同步前端：直接 ' + result.direct +
+                '、事件 ' + result.event + '、控件 ' + result.control + '。');
+            return true;
+        } catch (e) {
+            dbgWarn(' ' + source + ' 转换/广播快照失败:', e && e.message ? e.message : e);
+            return false;
+        }
+    }
+
+    // 删楼、切 swipe、编辑消息改变的不是某一次 CRUD，而是“剩余聊天历史回放后的
+    // 整体表状态”。SP v8.9.2 会在约 1.2s 后通知回调，但旧版、重载窗口或回调
+    // 容器竞争可能漏掉。记录事件前运行时指纹，随后只接受完整且确实变化的快照；
+    // 回调已经成功广播时用 dispatchSeq 消重，保证 A→B→A 也不会被历史指纹误拦。
+    let chatMutationFrontendSyncGeneration = 0;
+    let chatMutationFrontendSyncState = null;
+    function cancelChatMutationFrontendSync() {
+        chatMutationFrontendSyncGeneration += 1;
+        const state = chatMutationFrontendSyncState;
+        chatMutationFrontendSyncState = null;
+        if (!state || !Array.isArray(state.timers)) return;
+        for (const timer of state.timers) {
+            try { hostWindow.clearTimeout(timer); } catch (e) {}
+        }
+    }
+    function captureCompleteRuntimeTableSnapshot() {
+        try {
+            const api = getAcuApi();
+            if (!api || typeof api.exportTableAsJson !== 'function') return null;
+            const data = api.exportTableAsJson() || {};
+            const after = mvuDataFromCompleteTableSnapshot(data);
+            if (!after) return null;
+            return {
+                data,
+                fingerprint: autoInitChatId() + '|' + canonicalJsonForSync(after.stat_data),
+            };
+        } catch (e) { return null; }
+    }
+    function scheduleChatMutationFrontendSync(reason, forceUnknownBaseline) {
+        let chatKey = '';
+        let cardKey = '';
+        try {
+            chatKey = autoInitChatId();
+            cardKey = cardCacheKey(currentCharacter());
+        } catch (e) {}
+        const now = Date.now();
+        const existing = chatMutationFrontendSyncState;
+        const canMerge = !!(existing && existing.chatKey === chatKey && existing.cardKey === cardKey && existing.expiresAt > now);
+        const captured = canMerge ? null : captureCompleteRuntimeTableSnapshot();
+        let baselineFingerprint = canMerge ? existing.baselineFingerprint : (captured && captured.fingerprint) || '';
+        if (!baselineFingerprint && String(reentryNotifyFingerprint || '').indexOf(chatKey + '|') === 0) {
+            baselineFingerprint = reentryNotifyFingerprint;
+        }
+        const dispatchSeqAtStart = canMerge ? existing.dispatchSeqAtStart : variableUpdateDispatchSeq;
+        const forceUnknown = !!forceUnknownBaseline || !!(canMerge && existing.forceUnknownBaseline);
+
+        cancelChatMutationFrontendSync();
+        const generation = chatMutationFrontendSyncGeneration;
+        const state = {
+            generation,
+            chatKey,
+            cardKey,
+            reason: String(reason || 'chat_mutation'),
+            baselineFingerprint,
+            dispatchSeqAtStart,
+            forceUnknownBaseline: forceUnknown,
+            expiresAt: now + 13000,
+            timers: [],
+        };
+        chatMutationFrontendSyncState = state;
+        const delays = [1600, 3000, 5200, 8000, 12000];
+        const finish = () => {
+            if (chatMutationFrontendSyncState !== state) return;
+            for (const timer of state.timers) {
+                try { hostWindow.clearTimeout(timer); } catch (e) {}
+            }
+            chatMutationFrontendSyncState = null;
+        };
+        delays.forEach((delay, index) => {
+            const timer = hostWindow.setTimeout(() => {
+                if (chatMutationFrontendSyncState !== state || state.generation !== chatMutationFrontendSyncGeneration) return;
+                try {
+                    if (autoInitChatId() !== state.chatKey || cardCacheKey(currentCharacter()) !== state.cardKey) {
+                        finish();
+                        return;
+                    }
+                } catch (e) { finish(); return; }
+                const current = captureCompleteRuntimeTableSnapshot();
+                if (!current) return;
+                const changedFromBaseline = !!state.baselineFingerprint && current.fingerprint !== state.baselineFingerprint;
+                const finalUnknownFallback = !state.baselineFingerprint && state.forceUnknownBaseline && index === delays.length - 1;
+                if (!changedFromBaseline && !finalUnknownFallback) return;
+                // 本次聊天事件之后若已经广播了同一 post-replay 快照，说明 SP 主回调成功，
+                // 这里只结束轮询；否则强制发送，允许状态从 B 回到更早广播过的 A。
+                const alreadyDelivered = variableUpdateDispatchSeq > state.dispatchSeqAtStart &&
+                    reentryNotifyFingerprint === current.fingerprint;
+                if (!alreadyDelivered) publishCommittedTableSnapshot(current.data, '聊天回放兜底/' + state.reason, true);
+                else dbg('[聊天回放兜底/' + state.reason + '] SP 回调已同步同一快照。');
+                finish();
+            }, delay);
+            state.timers.push(timer);
+        });
+    }
+
     // 有些旧式状态栏不监听 VARIABLE_UPDATE_ENDED，只在挂载时或点击自带的
     // “刷新数据”控件时重读 message 变量。SP 自动填表发生在楼层挂载之后，
     // 因此仅在已提交的表更新回调后触发这些明确声明的刷新控件。
     // 不按文本模糊匹配，也不重载 iframe/楼层，避免重置前端局部状态。
-    function refreshExplicitFrontendDataControls() {
+    function refreshExplicitFrontendDataControls(skipWindows) {
+        const skipped = skipWindows || [];
         const windows = [];
         const documents = [];
+        const documentOwners = [];
         const controls = [];
         const visit = (w) => {
             try {
@@ -13001,7 +13188,10 @@ ${DB_INIT_SNIPPET}
                 windows.push(w);
                 const doc = w.document;
                 if (!doc) return;
-                if (documents.indexOf(doc) === -1) documents.push(doc);
+                if (documents.indexOf(doc) === -1) {
+                    documents.push(doc);
+                    documentOwners.push(w);
+                }
                 const frames = typeof doc.querySelectorAll === 'function' ? doc.querySelectorAll('iframe') : [];
                 for (const frame of frames) { try { visit(frame.contentWindow); } catch (e) {} }
             } catch (e) {}
@@ -13018,17 +13208,22 @@ ${DB_INIT_SNIPPET}
             'button[aria-label="Refresh data"]',
             '[data-mvu-refresh]',
         ].join(',');
-        for (const doc of documents) {
+        for (let di = 0; di < documents.length; di++) {
+            const doc = documents[di];
+            const owner = documentOwners[di];
             try {
                 const found = typeof doc.querySelectorAll === 'function' ? doc.querySelectorAll(selector) : [];
                 for (const control of found) {
-                    if (control && controls.indexOf(control) === -1) controls.push(control);
+                    if (control && !controls.some(rec => rec.control === control)) controls.push({ control, owner });
                 }
             } catch (e) {}
         }
         let count = 0;
-        for (const control of controls) {
+        for (const rec of controls) {
             try {
+                const control = rec.control;
+                const owner = rec.owner;
+                if (skipped.indexOf(owner) !== -1) continue;
                 if (control.disabled || typeof control.click !== 'function') continue;
                 control.click();
                 count += 1;
@@ -13038,10 +13233,40 @@ ${DB_INIT_SNIPPET}
         return count;
     }
 
+    function readCardFrontendMode(w) {
+        try {
+            const globalMode = w && w.__mvu2shujukuFrontendMode;
+            if (/^(?:event|direct|control|reload)$/.test(String(globalMode || ''))) return String(globalMode);
+            const doc = w && w.document;
+            const nodes = [doc && doc.documentElement, doc && doc.body];
+            for (const node of nodes) {
+                const mode = node && node.getAttribute && node.getAttribute('data-mvu2shujuku-frontend');
+                if (mode) return String(mode);
+            }
+            const scripts = doc && doc.querySelectorAll ? doc.querySelectorAll('script') : [];
+            for (const script of scripts) {
+                if (script.getAttribute && script.getAttribute('src')) continue;
+                const m = String(script.textContent || script.innerHTML || '').match(/__mvu2shujukuFrontendMode\s*=\s*["'](event|direct|control|reload)["']/);
+                if (m) return m[1];
+            }
+        } catch (e) {}
+        return '';
+    }
+
     function flushTableUpdateHook() {
         tableUpdateHookTimer = null;
         if (!activeLayout) return;
-        try { if (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) > 0) return; } catch (e0) {}
+        try {
+            if (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) > 0) {
+                // 批量 MVU 写入会暂时抑制每个内部 CRUD 的回调。过去这里直接 return，
+                // 恰好重叠的外部表变化也会永久丢通知；保留 pending 快照并等批次结束。
+                if (tableUpdateHookRetryCount < 8) {
+                    tableUpdateHookRetryCount += 1;
+                    tableUpdateHookTimer = hostWindow.setTimeout(flushTableUpdateHook, Math.min(1200, 150 * tableUpdateHookRetryCount));
+                }
+                return;
+            }
+        } catch (e0) {}
         let data = tableUpdateHookPendingData;
         tableUpdateHookPendingData = null;
         try {
@@ -13056,36 +13281,14 @@ ${DB_INIT_SNIPPET}
         // 切换聊天时 SP 会先通知“运行时已清空”。不广播空数据，
         // 但给后续物化留一个有限重试窗口。
         if (!tableSnapshotCoversLayout(data, activeLayout)) {
-            if (tableUpdateHookRetryCount < 4) {
+            if (tableUpdateHookRetryCount < 8) {
                 tableUpdateHookRetryCount += 1;
-                tableUpdateHookTimer = hostWindow.setTimeout(flushTableUpdateHook, 300 * tableUpdateHookRetryCount);
+                tableUpdateHookTimer = hostWindow.setTimeout(flushTableUpdateHook, Math.min(1200, 300 * tableUpdateHookRetryCount));
             }
             return;
         }
         tableUpdateHookRetryCount = 0;
-        try {
-            const core = window.MVU2SHUJUKU_CORE;
-            const after = core && typeof core.statDataFromTables === 'function'
-                ? core.statDataFromTables(activeLayout, data)
-                : null;
-            if (!after || !after.stat_data) return;
-            const fp = autoInitChatId() + '|' + canonicalJsonForSync(after.stat_data);
-            // SP 自动填表收尾会连续 refreshData 两次；同一快照只广播一次。
-            // 与进卡重读共用指纹，也避免开局回调和就绪通知双刷。
-            if (fp === reentryNotifyFingerprint) {
-                dbg('[表格更新回调] 快照未变，已去重。');
-                return;
-            }
-            reentryNotifyFingerprint = fp;
-            dbg('[表格更新回调] 已使用 SP 提交快照派发 VARIABLE_UPDATE_ENDED。');
-            // 先暂存回调的权威 after，再派发事件/点击刷新：前端同步重读时
-            // 不会落回尚未追平的 exportTableAsJson() 旧快照。
-            stageFrontendCommittedMvuRead(after);
-            dispatchVariableUpdateEnded(after);
-            refreshExplicitFrontendDataControls();
-        } catch (e3) {
-            dbgWarn(' 表格更新回调转换快照失败:', e3 && e3.message ? e3.message : e3);
-        }
+        publishCommittedTableSnapshot(data, '表格更新回调', false);
     }
     const tableUpdateHookCallback = (latestTableData) => {
         if (!activeLayout) return;
@@ -13124,7 +13327,9 @@ ${DB_INIT_SNIPPET}
         tableUpdateHookApi = null;
     }
 
-    function refreshCurrentCardFrontends() {
+    function refreshCurrentCardFrontends(options) {
+        const opts = options || {};
+        const allowHardReload = opts.allowHardReload !== false;
         const targets = [];
         const seen = [];
         const visit = (w) => {
@@ -13139,27 +13344,39 @@ ${DB_INIT_SNIPPET}
         visit(window); visit(hostWindow);
         try { visit(window.parent); } catch (e) {}
         try { visit(window.top); } catch (e) {}
-        let count = 0;
+        const result = { direct: 0, event: 0, control: 0, reload: 0 };
+        const occupied = [];
+        const reloadTargets = [];
         for (const target of targets) {
             try {
-                if (typeof target.__mvu2shujukuReloadFrontend === 'function') {
-                    target.__mvu2shujukuReloadFrontend();
-                    count++;
-                    continue;
-                }
-                // 转换时识别到的一次性内联状态栏不是 body.load 整页前端，
-                // 但已显式暴露无副作用的原生重读函数。只在用户点菜单时调用，
-                // 不通过函数名/按钮文本猜测其他页面。
+                const mode = readCardFrontendMode(target);
+                // 已确认只重读数据的内联初始化函数可以安全用于每次表格更新。
+                // body.load 重挂载会清掉页面局部状态，只允许用户手动刷新时调用。
                 if (typeof target.__mvu2shujukuRefreshInlineFrontend === 'function') {
                     target.__mvu2shujukuRefreshInlineFrontend();
-                    count++;
+                    result.direct++;
+                    occupied.push(target);
+                    continue;
                 }
+                if (allowHardReload && typeof target.__mvu2shujukuReloadFrontend === 'function') {
+                    target.__mvu2shujukuReloadFrontend();
+                    result.direct++;
+                    occupied.push(target);
+                    continue;
+                }
+                if (mode === 'event') result.event++;
+                if (mode === 'event') occupied.push(target);
+                else if (allowHardReload && mode === 'reload' && target !== window && target !== hostWindow && target.location && typeof target.location.reload === 'function') reloadTargets.push(target);
             } catch (e) {}
         }
         // 普通状态栏应通过 MVU 原生更新事件刷新；这里也补发一次，
         // 手动按钮因此同时适用于监听式前端和旧式 body.load 整页前端。
-        dispatchVariableUpdateEnded();
-        return count;
+        dispatchVariableUpdateEnded(opts.after, opts.before);
+        result.control += refreshExplicitFrontendDataControls(occupied.concat(reloadTargets));
+        for (const target of reloadTargets) {
+            try { target.location.reload(); result.reload++; } catch (e) {}
+        }
+        return result;
     }
 
     // =================================================================
@@ -15417,9 +15634,10 @@ ${DB_INIT_SNIPPET}
                 }
                 // 先重申运行时兼容对象，再让前端读取，也能修复晚创建 iframe 的 Mvu 等待。
                 try { applyWindowMvuShim(); } catch (e) {}
-                const count = refreshCurrentCardFrontends();
-                if (count > 0) toast('已刷新 ' + count + ' 个转换卡前端', 'success');
-                else toast('已发送 MVU 刷新事件；未找到可直接重读的转换卡前端', 'info');
+                const result = refreshCurrentCardFrontends();
+                const count = result.direct + result.event + result.control + result.reload;
+                if (count > 0) toast('已刷新转换卡前端（直接 ' + result.direct + '、事件 ' + result.event + '、控件 ' + result.control + '、重载 ' + result.reload + '）', 'success');
+                else toast('已广播 MVU 刷新事件；当前前端未声明可确认的重读入口', 'info');
             });
         } catch (e) {
             if (attempt < 10) hostWindow.setTimeout(() => registerMagicWandRefreshButton(attempt + 1), 1000);
