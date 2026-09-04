@@ -105,6 +105,30 @@ test('表名宏静态规范化：保留逻辑路径并对重名表消歧', () =>
     assert.ok(r.reportText.includes('表名宏') && r.reportText.includes('静态规范化'), '转换报告应说明结构宏不再运行时求值');
 });
 
+test('表名静态但 MVU 逻辑路径按当前聊天解析 user 宏', () => {
+    const original = [{
+        kind: 'singleton', group: '{{user}}', table: 'user表', keyCol: '键名', keyValue: '{{user}}',
+        cols: [
+            ['当前地点和动作', 'text', '', ['{{user}}', '当前地点和动作'], false, ''],
+            ['身体', 'text', '', ['{{user}}', '身体'], false, ''],
+        ],
+        writePaths: [['{{user}}']], parentPath: ['{{user}}'], path: ['{{user}}'],
+        mirrors: [{ path: ['{{user}}', '镜像'] }],
+    }];
+    const resolved = core.resolveLayoutMacros(original, s => String(s).replace(/\{\{user\}\}/gi, '林海'));
+    assert.strictEqual(resolved[0].table, 'user表', '数据库表名必须保持稳定');
+    assert.strictEqual(resolved[0].group, '林海');
+    assert.strictEqual(resolved[0].keyValue, '林海');
+    assert.deepStrictEqual(resolved[0].cols[0][3], ['林海', '当前地点和动作']);
+    assert.deepStrictEqual(resolved[0].writePaths[0], ['林海']);
+    assert.deepStrictEqual(resolved[0].mirrors[0].path, ['林海', '镜像']);
+    assert.strictEqual(original[0].group, '{{user}}', '卡内持久化的原始 layout 不得被就地改写');
+    const wrap = core.statDataFromTables(resolved, {
+        sheet_user: { name: 'user表', content: [['row_id', '当前地点和动作', '身体'], [1, '房间', '正常']] },
+    });
+    assert.deepStrictEqual(wrap.stat_data['林海'], { 当前地点和动作: '房间', 身体: '正常' }, '状态栏解析后的用户路径应读到 user表');
+});
+
 test('MVU 官方元数据：$meta/数组标记只生成结构提示，清理后不污染 stat_data', () => {
     const analyzed = core.analyzeMvuInitMetadata({
         $meta: { strictTemplate: true, strictSet: true, concatTemplateArray: false },
@@ -10484,6 +10508,10 @@ test('开局建表：模板数据调用 SillyTavern 原生 substituteParams（�
     assert.strictEqual(system.content[1][system.content[0].indexOf('称呼')], '林海');
     assert.strictEqual(system.content[1][system.content[0].indexOf('备注')], '你是 林海');
     assert.ok(userSheet, '表名中的 {{user}} 应静态规范化后传给 initGameSession');
+    const projected = win.getAllVariables();
+    assert.ok(projected.stat_data['林海'], '状态栏的运行时用户路径应映射到 user表');
+    assert.strictEqual(projected.stat_data['林海']['身份'], '玩家');
+    assert.ok(!Object.prototype.hasOwnProperty.call(projected.stat_data, '{{user}}'), '不应暴露字面量 {{user}} 逻辑路径');
     assert.strictEqual(people.content[1][people.content[0].indexOf('键名')], '林海');
     assert.deepStrictEqual(Array.from(people.content[0]), ['row_id', '键名', '关系', '_扩展数据'], '表头必须保持固定');
     assert.deepStrictEqual(Array.from(companions.content.slice(1), row => row[1]), ['林海', '林海'], '数组允许重复元素，不得误当业务键冲突');

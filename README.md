@@ -135,7 +135,7 @@ st-prompt-template 的模板上下文（`EjsTemplate.defines`），因此只导�
 
 初始数据中的 `<user>`、`{{user}}`、`<char>` 等宏会在进入当前聊天后调用
 SillyTavern 原生 `substituteParams` 解析。表名中的宏不会运行时求值，而会静态规范化为稳定名称，
-例如 `{{user}}表` 转为 `user表`、`{{getvar::阵营}}资料表` 转为 `getvar_阵营资料表`；MVU 逻辑路径仍保留原名。
+例如 `{{user}}表` 转为 `user表`、`{{getvar::阵营}}资料表` 转为 `getvar_阵营资料表`；卡内 MVU 逻辑路径保留原宏，进入聊天后再解析为当前用户/角色名。数据库始终读写 `user表`，状态栏则仍可按 `stat_data.{{user}}`（宏展开后的实际用户名）读取。
 固定列名仍不支持运行时宏。
 表格提示词中的 `{{getvar::...}}` 等只读宏也会在每次生成请求时解析；作用于
 `WORLD_INFO` 的 promptOnly 静态查找正则会迁移到表格提示链，并保留原正则的运行时启用状态。
