@@ -1,5 +1,11 @@
 # 更新日志
 
+## v0.3.6（2026-09-04）
+
+- 修复 SillyTavern 开启 `lazyLoadCharacters` 后，新建角色列表不携带 `extensions.mvu2shujuku` 导致保存后误报“未能使用 ST 官方字段接口复核”。现在先用 `/api/characters/create` 返回的唯一头像名定位新卡，再按需取完整卡校验 `converter + convertedAt`，同名旧卡不会被覆盖。
+- EJS 中直接读取 `window.stat_data` / `globalThis.stat_data` 的写法现会改由数据库 helper 提供实时状态，不再依赖 MVU 注入的窗口全局。
+- 修复 st-prompt-template 把多个世界书条目合并为同一 EJS 源码后，一个条目的 `const/let/class x` 与另一个条目的 `if (typeof x === 'undefined') var x = ...` 触发 `Identifier has already been declared`。转换器只对这一可精确识别的跨条目回退声明添加独立异步 EJS 作用域，并写入转换报告。
+
 ## v0.3.5（2026-09-02）
 
 - 扩大魔法棒“刷新转换卡前端”的兼容范围：转换时只给明确读取 MVU/消息变量的 HTML 前端标记 `event/direct/control/reload` 能力，运行时依次使用原生重读入口、`VARIABLE_UPDATE_ENDED`、精确声明的刷新控件和受限 iframe 重载。

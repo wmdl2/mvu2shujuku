@@ -1,6 +1,6 @@
 # MVU 转换与兼容清单
 
-> 适用于 MVU转数据库 v0.3.5。本文用于说明哪些 MVU 内容可以转换、哪些运行时行为由兼容层接管，以及当前无法等价模拟的边界。
+> 适用于 MVU转数据库 v0.3.6。本文用于说明哪些 MVU 内容可以转换、哪些运行时行为由兼容层接管，以及当前无法等价模拟的边界。
 
 这不是对任意 MVU 角色卡“零风险完全兼容”的承诺。转换器会尽可能保留无法静态确认的业务脚本，并在转换报告中列出需要人工核对的项目。依赖 MVU 私有内部状态、未知外部脚本或复杂动态 EJS 的卡，转换后仍应实际测试。
 
@@ -226,6 +226,7 @@ EJS 世界书、`format_message_variable`、状态栏与前端共用实时读取
 - `getChatMessages(...)[0].data.display_data || ...stat_data`（两个视图同时投影当前快照，不让空 `display_data` 遮住实时值）
 - `setMessageVar('stat_data.…', value)`
 - EJS 裸上下文 `variables.stat_data`
+- EJS 窗口全局 `window.stat_data` / `globalThis.stat_data`
 - `setvar('stat_data.…', value, { outscope: 'message' })`（仅默认写入/返回语义）
 - `Mvu.getMvuData(...)`
 - `stat_data` 直接访问
@@ -248,6 +249,7 @@ EJS 世界书、`format_message_variable`、状态栏与前端共用实时读取
 - 对未监听 MVU 更新事件的旧式 `body.load(...)` 整页前端，保留可重载入口；可从魔法棒菜单点击“刷新转换卡前端”手动重读，表格写入不再自动重载整页
 - 一次性读取 `getChatMessages(...).data` 的内联状态栏会暴露转换器专用重读入口；表格变化与魔法棒手动刷新都会调用该无副作用的原状态栏初始化函数。未声明直接入口时仅点击精确刷新控件；reload 只允许用户主动重载带标准标记的非主/宿主 iframe，不模糊猜测普通页面函数或按钮
 - EJS 中数据库数据读取
+- 多个世界书条目合并编译时，若一个条目以 `const/let/class x` 声明变量，另一个条目以独立 EJS scriptlet 执行 `if (typeof x === 'undefined') var x = ...;` 回退，后者自动隔离到独立异步作用域，避免重复声明
 - 世界书 `getwi` 等非 MVU 逻辑保留
 
 **部分等价：**静态简单条件可选转为数据库条件；复杂 EJS 保留代码，只替换能安全识别的数据来源。`getMessageVar/setMessageVar` 只在首参数明确为 `stat_data` 字面路径时切到数据库；通用 `setvar` 还必须明确且仅指定 `{ outscope: 'message' }`。动态路径、其他作用域及带 `flags/results/withMsg` 等额外语义的调用保持酒馆助手原行为并提示核对，不按字段名猜测改写。
@@ -270,6 +272,7 @@ EJS 世界书、`format_message_variable`、状态栏与前端共用实时读取
 - 仅删除可确认属于初始化或纯 MVU 变量输出管线的世界书条目
 - `format_message_variable`、`get_message_variable` 与 `getvar(stat_data...)` 属于读取证据，本身不会触发整条删除；即使 comment 带 `[mvu_update]`，业务机制正文仍保留
 - `getvar('stat_data.完整.路径', { defaults: ... })` 迁移为安全路径读取，中间对象缺失时与原函数一样返回 `undefined`/默认值；只读取 `getvar('stat_data')` 根对象的官方教程写法仍返回完整对象
+- 直接保存到 SillyTavern 后，按创建接口返回的头像名和完整卡转换标记复核 `tavern_helper`；兼容 `lazyLoadCharacters` 浅列表，也不会误命中同名旧卡
 
 TavernHelper 变量作用域不会被统一改成数据库：仅默认/消息作用域的 `stat_data` 由数据库接管；动态正则使用的 `chat` 变量、脚本/扩展/角色/全局变量均保留原生读写。消息变量中与 `stat_data` 并存的辅助键也会保留。
 

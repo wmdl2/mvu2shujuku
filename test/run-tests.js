@@ -1998,6 +1998,21 @@ test('<%_ if %>（EJS 吞空白写法）也能重写为 <if cell>，且仅 EJS �
 
 /* ---------------- EJS 重写 ---------------- */
 section('rewriteEjsConditions');
+
+function compileMergedEjsScriptlets(...templates) {
+    let body = '';
+    const re = /<%([_#=-]?)([\s\S]*?)(?:[_-]?%>)/g;
+    for (const template of templates) {
+        let m;
+        while ((m = re.exec(String(template || '')))) {
+            if (m[1] === '#') continue;
+            body += (m[1] === '=' || m[1] === '-') ? `void (${m[2]});\n` : `${m[2]}\n`;
+        }
+    }
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    return new AsyncFunction('mvu2shujukuGetAllVariables', 'mvu2shujukuGetMessageVar', 'getvar', 'window', body);
+}
+
 test('getvar 数值比较 → mvu2shujukuGetMessageVar() 安全取值（EJS 保留）', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -2008,6 +2023,47 @@ test('getvar 数值比较 → mvu2shujukuGetMessageVar() 安全取值（EJS 保�
     assert.ok(out.text.includes('<% if'), 'EJS 结构应保留');
     const withDefault = core.rewriteEjsConditions("<% if (getvar('stat_data.缺失组.字段', { defaults: 7 }) === 7) { %>默认值<% } %>", layout, core.createReport());
     assert.ok(withDefault.text.includes("mvu2shujukuGetMessageVar('stat_data.缺失组.字段', { defaults: 7 }) === 7"), '完整路径缺失时应保留 getvar defaults 语义');
+});
+
+test('EJS window/globalThis.stat_data 根读取改由数据库 helper 接管', () => {
+    const report = core.createReport();
+    const src = [
+        '<% const a = window.stat_data || {}; %>',
+        '<% const b = globalThis.stat_data?.世界; %>',
+        '<% const untouched = app.window.stat_data; %>',
+    ].join('\n');
+    const rw = core.rewriteEjsConditions(src, { entries: [] }, report);
+    assert.ok(rw.text.includes('const a = mvu2shujukuGetAllVariables().stat_data || {}'), rw.text);
+    assert.ok(rw.text.includes('const b = mvu2shujukuGetAllVariables().stat_data?.世界'), rw.text);
+    assert.ok(rw.text.includes('app.window.stat_data'), '对象自身的 window.stat_data 属性链不得误改');
+});
+
+test('跨世界书 EJS：其他条目 const 与 typeof+var 回退同名时隔离回退条目作用域', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: 'EJS 声明冲突卡', description: '', first_mes: '你好',
+            character_book: { entries: [
+                { comment: '[InitVar]', content: '世界:\n  天数: 1' },
+                {
+                    comment: '系统主控', enabled: true, constant: true,
+                    content: '<% const shared_day = window.stat_data?.世界?.天数 || 1; %>',
+                },
+                {
+                    comment: '阶段设定', enabled: true, constant: true,
+                    content: "<% if (typeof shared_day === 'undefined') var shared_day = getvar('stat_data.世界.天数', { defaults: 1 }); %>\n<% if (shared_day > 0) { %>正常<% } %>",
+                },
+            ] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const entries = r.card.data.character_book.entries;
+    const master = entries.find(e => e.comment === '系统主控');
+    const stage = entries.find(e => e.comment === '阶段设定');
+    assert.doesNotThrow(() => compileMergedEjsScriptlets(master.content, stage.content));
+    assert.match(stage.content, /await\s*\(async\s*\(\)\s*=>\s*\{/i, '回退条目应在独立异步作用域中执行');
+    assert.ok(r.reportText.includes('独立 EJS 作用域'), '转换报告应记录自动隔离');
 });
 
 test('嵌套路径（子表条目）→ 安全路径取值', () => {
@@ -3897,7 +3953,43 @@ test('转换 UI：角色列表可刷新，配置零操作保存并以来源限�
     assert.ok(!index.includes("opt('default', 'SP·数据库默认模板')"), 'SP 未公开默认模板读取 API，新选择列表不应展示不可靠来源');
     assert.ok(index.includes("return null;\n        }\n        let scope = sourceValue === 'chat'"), '已存旧配置的 default 引用读取失败时不应伪装成全局模板');
     assert.ok(index.includes("await writeExtensionField(savedIndex, 'tavern_helper'"), '保存到 ST 后应用官方字段接口固化转换后脚本，防止旧 MVU 面板状态回写');
-    assert.ok(index.includes("String(marker.convertedAt || '') !== String(expectedMarker.convertedAt || '')"), '保存后复核必须用转换标记精确命中新卡，不得只按名称覆盖');
+    assert.ok(index.includes('findConvertedCharacterIndex(charsNow'), '保存后复核必须通过完整卡的转换标记精确命中新卡，不得只按名称覆盖');
+});
+
+test('保存后复核：ST 浅加载列表缺少 marker 时按新头像取完整卡定位', async () => {
+    const characters = [
+        {
+            shallow: true,
+            name: '转换卡',
+            avatar: '旧的同名卡.png',
+            data: { name: '转换卡', extensions: { fav: false, world: '旧世界书' } },
+        },
+        {
+            shallow: true,
+            name: '转换卡',
+            avatar: '新建转换卡.png',
+            data: { name: '转换卡', extensions: { fav: false, world: '新世界书' } },
+        },
+    ];
+    const loaded = [];
+    const savedIndex = await core.findConvertedCharacterIndex(
+        characters,
+        { displayName: '转换卡', avatar: '新建转换卡.png', convertedAt: '2026-09-04T09:36:10.551Z' },
+        async character => {
+            loaded.push(character.avatar);
+            return {
+                name: character.name,
+                extensions: {
+                    mvu2shujuku: {
+                        converter: 'mvu2shujuku',
+                        convertedAt: character.avatar === '新建转换卡.png' ? '2026-09-04T09:36:10.551Z' : '旧标记',
+                    },
+                },
+            };
+        },
+    );
+    assert.strictEqual(savedIndex, 1);
+    assert.deepStrictEqual(loaded, ['新建转换卡.png'], '已知创建接口返回头像时不得读取同名旧卡');
 });
 
 test('写库合并路径无 chatKeyNow TDZ（const 声明必须先于首次使用）', () => {
