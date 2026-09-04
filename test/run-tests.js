@@ -3865,6 +3865,70 @@ test('内嵌世界书卡：extensions.world 绑定到转换后的世界书名（
     assert.strictEqual(d.extensions.world, d.character_book.name, 'extensions.world 应指向转换后的世界书名，导入时自动绑定');
 });
 
+test('无 MVU 前缀的专用变量规则/处理指令条目被迁移删除，混合 EJS 主控脚本保留', () => {
+    const card = {
+        spec: 'chara_card_v3', spec_version: '3.0',
+        data: {
+            name: '无前缀更新规则卡', first_mes: '开始',
+            character_book: { entries: [
+                { comment: '[InitVar]变量初始化', content: '世界:\n  当前时间: 初始' },
+                {
+                    comment: '变量更新规则',
+                    content: [
+                        '变量更新规则:',
+                        '  世界:',
+                        '    当前时间:',
+                        '      type: string',
+                        '      check:',
+                        '        - 时间流逝后更新',
+                    ].join('\n'),
+                },
+                {
+                    comment: '变量处理指令集',
+                    content: [
+                        '<status_current_variables>{{get_message_variable::stat_data}}</status_current_variables>',
+                        '每轮必须输出变量更新。',
+                        '<UpdateVariable><JSONPatch>[{"op":"replace","path":"/世界/当前时间","value":"下一刻"}]</JSONPatch></UpdateVariable>',
+                    ].join('\n'),
+                },
+                {
+                    comment: '系统主控脚本[EJS]',
+                    content: [
+                        '<% const scene_gate = (window.stat_data?.世界?.当前时间 || "初始"); %>',
+                        '当剧情推进时继续描写；以下 JSONPatch 只用于说明主控脚本的业务约束：',
+                        '<UpdateVariable><JSONPatch>[]</JSONPatch></UpdateVariable>',
+                    ].join('\n'),
+                },
+            ] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+
+    const result = core.convert(card, { mode: 'both' });
+    const data = result.card.data || result.card;
+    const comments = data.character_book.entries.map(entry => entry.comment);
+    assert.ok(!comments.includes('变量更新规则'), '已迁移进表备注的专用规则条目不应继续注入提示词');
+    assert.ok(!comments.includes('变量处理指令集'), '专用 JSONPatch 输出协议不应继续要求模型输出旧 MVU 块');
+    assert.ok(comments.includes('系统主控脚本[EJS]'), '包含业务逻辑的混合 EJS 条目必须保留');
+    const worldSheet = Object.values(result.template).find(sheet => sheet && sheet.name === '世界表');
+    assert.ok(worldSheet && worldSheet.sourceData.note.includes('时间流逝后更新'), '删除世界书规则前必须先把约束迁移进数据库表备注');
+});
+
+test('实际 Zod 卡：转换副本移除无前缀纯 MVU 条目并保留系统主控 EJS', () => {
+    const actualPath = '/mnt/e/Download/MVU_Zod-.png';
+    if (!fs.existsSync(actualPath)) {
+        console.log('    （跳过：缺少实际 Zod 卡）');
+        return;
+    }
+    const result = core.convert(fs.readFileSync(actualPath), { mode: 'both' });
+    const data = result.card.data || result.card;
+    const comments = data.character_book.entries.map(entry => String(entry.comment || ''));
+    assert.ok(!comments.includes('变量更新规则'), '实际卡的规则已迁移，不应重复注入');
+    assert.ok(!comments.includes('变量处理指令集'), '实际卡的旧 JSONPatch 输出协议应移除');
+    assert.ok(comments.includes('系统主控脚本[EJS]'), '实际卡的剧情/校验主控脚本应保留');
+    assert.ok(result.meta.tableNames.includes('李慕雪表') && result.meta.tableNames.includes('沈煜表'), '实际卡规则迁移后仍应生成角色表');
+});
+
 test('浏览器环境（无 Buffer）PNG 回写正常', () => {
     if (!fs.existsSync(PNG)) {
         console.log('    （跳过：缺少 PNG 参考卡）');
@@ -3914,6 +3978,261 @@ test('浏览器环境（无 Buffer）PNG 回写正常', () => {
 
 /* ---------------- 扩展装配 ---------------- */
 section('assembleExtension');
+
+function dbInitSnippetHarness(chat, runtimeTables) {
+    const vm = require('vm');
+    const sourceCard = {
+        spec: 'chara_card_v3', spec_version: '3.0',
+        data: {
+            name: '检查点恢复测试卡', first_mes: '开始',
+            character_book: { entries: [{ comment: '[InitVar]', content: '世界:\n  时间: 初始\n角色:\n  状态: 正常' }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const converted = core.convert(sourceCard, { mode: 'both' });
+    const bridge = converted.bridgeScript;
+    const start = bridge.indexOf('function mvu2shujukuDecodeB64');
+    const end = bridge.indexOf('var SD_LAYOUT=', start);
+    assert.ok(start >= 0 && end > start, '应能提取扩展与桥共用的真实初始化代码');
+    const sandbox = {
+        console, TextDecoder, Uint8Array, Promise,
+        atob: value => Buffer.from(value, 'base64').toString('binary'),
+        setTimeout, clearTimeout,
+    };
+    sandbox.window = sandbox;
+    sandbox.globalThis = sandbox;
+    sandbox.parent = sandbox;
+    sandbox.top = sandbox;
+    sandbox.SillyTavern = { getContext: () => ({ chatId: 'checkpoint-test', chat }) };
+    vm.createContext(sandbox);
+    vm.runInContext(bridge.slice(start, end) + '\nthis.__dbInitTest = { ensure: mvu2shujukuEnsureInit };', sandbox);
+    let initCalls = 0;
+    const api = {
+        exportTableAsJson: () => runtimeTables,
+        initGameSession: async (_input, opts) => {
+            initCalls += 1;
+            for (const key of Object.keys(runtimeTables)) delete runtimeTables[key];
+            Object.assign(runtimeTables, JSON.parse(JSON.stringify(opts.templateData)));
+            return { success: true, runtimeReady: true };
+        },
+        importTemplateFromData: async () => ({ success: true }),
+    };
+    return {
+        ensure: () => sandbox.__dbInitTest.ensure(
+            api,
+            Buffer.from(JSON.stringify(converted.template)).toString('base64'),
+            '检查点恢复测试卡模板',
+            { initMs: 100, importMs: 100 },
+        ),
+        get initCalls() { return initCalls; },
+        expectedNames: converted.meta.tableNames,
+    };
+}
+
+function fullCheckpointField() {
+    return {
+        TavernDB_ACU_IsolatedData: {
+            外来表: {
+                storageFrame: { version: 2, logEntries: [], checkpoint: { kind: 'full', ts: 1 } },
+            },
+        },
+    };
+}
+
+test('新聊天首楼若携带异卡 full checkpoint，则用当前卡模板恢复初始化', async () => {
+    const chat = [{ message_id: 0, is_user: false, mes: '开始', ...fullCheckpointField() }];
+    const runtimeTables = {
+        sheet_dao_lv_biao: { name: '道侣表', content: [['row_id', '姓名'], [1, '外来角色']] },
+    };
+    const harness = dbInitSnippetHarness(chat, runtimeTables);
+
+    const result = await harness.ensure();
+
+    assert.strictEqual(harness.initCalls, 1, '干净首楼里的异卡数据必须被当前卡模板替换');
+    assert.strictEqual(result.replacedFreshForeignCheckpoint, true, '调用方必须能区分恢复初始化与重进旧聊天');
+    const names = Object.keys(runtimeTables)
+        .filter(key => key.startsWith('sheet_'))
+        .map(key => runtimeTables[key] && runtimeTables[key].name);
+    assert.deepStrictEqual(names.sort(), harness.expectedNames.slice().sort(), '恢复后运行时只能使用当前卡的预期表');
+});
+
+test('聊天已有用户楼层时，即使 full checkpoint 与当前卡不匹配也绝不自动覆盖', async () => {
+    const chat = [
+        { message_id: 0, is_user: false, mes: '开始', ...fullCheckpointField() },
+        { message_id: 1, is_user: true, mes: '已经开始游玩' },
+    ];
+    const runtimeTables = {
+        sheet_dao_lv_biao: { name: '道侣表', content: [['row_id', '姓名'], [1, '用户已有数据']] },
+    };
+    const harness = dbInitSnippetHarness(chat, runtimeTables);
+
+    const result = await harness.ensure();
+
+    assert.strictEqual(harness.initCalls, 0, '进展中的聊天不得自动重置数据库');
+    assert.strictEqual(result.status, 'skip');
+    assert.strictEqual(runtimeTables.sheet_dao_lv_biao.content[1][1], '用户已有数据', '已有数据必须原样保留');
+});
+
+test('兼容桥修复新聊天异卡 checkpoint 后发布 fresh 标记供扩展接管开场状态', async () => {
+    const vm = require('vm');
+    const sourceCard = {
+        spec: 'chara_card_v3', spec_version: '3.0',
+        data: {
+            name: '兼容桥异卡恢复测试', first_mes: '开始',
+            character_book: { entries: [{ comment: '[InitVar]', content: '世界:\n  时间: 初始' }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const converted = core.convert(sourceCard, { mode: 'both', appendPlaceholder: false });
+    const tables = {
+        sheet_dao_lv_biao: { name: '道侣表', content: [['row_id', '姓名'], [1, '外来角色']] },
+    };
+    const chat = [{ message_id: 0, is_user: false, mes: '开始', ...fullCheckpointField() }];
+    let initCalls = 0;
+    const fakeApi = {
+        exportTableAsJson: () => tables,
+        initGameSession: async (_input, opts) => {
+            initCalls += 1;
+            for (const key of Object.keys(tables)) delete tables[key];
+            Object.assign(tables, JSON.parse(JSON.stringify(opts.templateData)));
+            return { success: true, runtimeReady: true };
+        },
+        importTemplateFromData: async () => ({ success: true }),
+        registerTableUpdateCallback: () => true,
+        updateCell: async () => true,
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+    };
+    const win = {
+        top: null, parent: null, console,
+        TextDecoder, Uint8Array,
+        atob: value => Buffer.from(value, 'base64').toString('binary'),
+        setTimeout, clearTimeout,
+        CustomEvent: function () {},
+        addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => true,
+        SillyTavern: { getContext: () => ({ chatId: 'bridge-foreign', name: sourceCard.data.name, chat, eventSource: { on: () => {}, emit: () => {} }, event_types: {} }) },
+        AutoCardUpdaterAPI: fakeApi,
+    };
+    win.window = win;
+    win.globalThis = win;
+    win.top = win;
+    win.parent = win;
+    vm.createContext(win);
+    vm.runInContext(converted.bridgeScript, win);
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    assert.strictEqual(initCalls, 1, '兼容桥应执行一次当前卡模板恢复');
+    assert.ok(win.__mvu2shujukuFreshOpeningCheckpoint, '恢复初始化必须发布 fresh 标记，不能被当成旧聊天建立基线');
+    assert.strictEqual(win.__mvu2shujukuFreshOpeningCheckpoint.chatKey, 'bridge-foreign');
+});
+
+test('扩展修复新聊天异卡 checkpoint 后仍应用首楼 JSONPatch，而非建立旧聊天基线', async () => {
+    const vm = require('vm');
+    const sourceCard = {
+        spec: 'chara_card_v3', spec_version: '3.0',
+        data: {
+            name: '扩展异卡恢复测试',
+            first_mes: '<UpdateVariable><JSONPatch>' + JSON.stringify([
+                { op: 'replace', path: '/世界/时间', value: '修复后的第一天' },
+            ]) + '</JSONPatch></UpdateVariable>',
+            character_book: { entries: [{ comment: '[InitVar]', content: '世界:\n  时间: 初始' }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const converted = core.convert(sourceCard, { mode: 'both', appendPlaceholder: false });
+    const card = JSON.parse(JSON.stringify(converted.card.data || converted.card));
+    card.avatar = 'extension-foreign.png';
+    const layout = JSON.parse(card.extensions.mvu2shujuku.layout);
+    const tables = {
+        sheet_dao_lv_biao: { name: '道侣表', content: [['row_id', '姓名'], [1, '外来角色']] },
+    };
+    let initCalls = 0;
+    let importCalls = 0;
+    const fakeApi = {
+        getTemplatePresetNames: () => [],
+        exportTableAsJson: () => tables,
+        initGameSession: async (_input, opts) => {
+            initCalls += 1;
+            for (const key of Object.keys(tables)) delete tables[key];
+            Object.assign(tables, JSON.parse(JSON.stringify(opts.templateData)));
+            return { success: true, runtimeReady: true };
+        },
+        importTemplateFromData: async () => ({ success: true }),
+        importTableAsJson: async json => {
+            importCalls += 1;
+            for (const key of Object.keys(tables)) delete tables[key];
+            Object.assign(tables, JSON.parse(json));
+            return true;
+        },
+        updateCell: async () => true,
+        updateRow: async () => true,
+        insertRow: async () => 1,
+        deleteRow: async () => true,
+        registerTableUpdateCallback: () => true,
+    };
+    const handlers = {};
+    const context = {
+        chatId: 'extension-foreign', name: card.name,
+        chat: [{
+            message_id: 0, role: 'assistant', name: card.name, mes: card.first_mes,
+            is_user: false, swipe_id: 0, ...fullCheckpointField(),
+        }],
+        characters: [card], characterId: 0,
+        extensionSettings: { mvu2shujuku: { debug: false } },
+        eventSource: { on: (event, fn) => { (handlers[event] = handlers[event] || []).push(fn); }, emit: () => {} },
+        event_types: {
+            CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'message_received', MESSAGE_SWIPED: 'swiped',
+            MESSAGE_UPDATED: 'updated', MESSAGE_EDITED: 'edited', MESSAGE_SENT: 'sent', MESSAGE_DELETED: 'deleted',
+            GENERATION_ENDED: 'generation_ended',
+        },
+        saveSettingsDebounced: () => {}, saveChatConditional: async () => {}, saveChat: async () => {},
+        getRequestHeaders: () => ({}), setChatMessages: () => {}, substituteParams: value => value,
+    };
+    const fakeElement = () => {
+        const element = {
+            dataset: {}, style: {}, children: [], _listeners: {}, _value: '',
+            addEventListener: (type, fn) => { (element._listeners[type] = element._listeners[type] || []).push(fn); },
+            removeEventListener: () => {}, dispatchEvent: () => true,
+            appendChild: child => { element.children.push(child); return child; }, removeChild: () => {},
+            querySelector: () => fakeElement(), querySelectorAll: () => [], click: () => {}, focus: () => {}, blur: () => {}, contains: () => false,
+            getBoundingClientRect: () => ({ width: 0, height: 0, top: 0, left: 0 }),
+        };
+        Object.defineProperty(element, 'innerHTML', { get: () => element._html || '', set: value => { element._html = value; } });
+        Object.defineProperty(element, 'textContent', { get: () => '', set: () => {} });
+        Object.defineProperty(element, 'value', { get: () => element._value, set: value => { element._value = value; } });
+        Object.defineProperty(element, 'checked', { get: () => !!element._checked, set: value => { element._checked = value; } });
+        Object.defineProperty(element, 'disabled', { get: () => !!element._disabled, set: value => { element._disabled = value; } });
+        return element;
+    };
+    const document = {
+        querySelector: () => fakeElement(), getElementById: () => fakeElement(), createElement: () => fakeElement(),
+        createTextNode: () => fakeElement(), addEventListener: () => {}, body: fakeElement(),
+    };
+    const coreSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
+    const extensionIndex = core.assembleExtension({ coreSource })['index.js'];
+    const win = {
+        top: null, parent: null, document, console,
+        setTimeout, clearTimeout, setInterval, clearInterval,
+        CustomEvent: function () {}, addEventListener: () => {}, dispatchEvent: () => true,
+        TextDecoder, atob: value => Buffer.from(value, 'base64').toString('binary'),
+        SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: fakeApi,
+        eventEmit: () => {}, toastr: undefined,
+    };
+    win.window = win;
+    win.globalThis = win;
+    win.top = win;
+    win.parent = win;
+    vm.createContext(win);
+    vm.runInContext(extensionIndex, win);
+    for (const handler of handlers.chat_changed || []) handler();
+    await new Promise(resolve => setTimeout(resolve, 2600));
+
+    const stat = win.MVU2SHUJUKU_CORE.statDataFromTables(layout, tables).stat_data;
+    assert.strictEqual(initCalls, 1, '异卡 checkpoint 只能触发一次当前卡模板恢复');
+    assert.strictEqual(stat.世界.时间, '修复后的第一天', '恢复后的首楼 JSONPatch 必须继续写入当前卡表格');
+    assert.strictEqual(importCalls, 1, '首楼更新应在基础模板恢复后执行一次原子快照写入');
+});
+
 test('扩展文件齐全且 index.js 语法正确', () => {
     const coreSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
     const files = core.assembleExtension({ coreSource });
@@ -3990,6 +4309,82 @@ test('保存后复核：ST 浅加载列表缺少 marker 时按新头像取完整
     );
     assert.strictEqual(savedIndex, 1);
     assert.deepStrictEqual(loaded, ['新建转换卡.png'], '已知创建接口返回头像时不得读取同名旧卡');
+});
+
+test('保存后复核：官方字段写入在 UI 独立作用域中使用脱离原对象的脚本副本', async () => {
+    const vm = require('vm');
+    const coreSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
+    let index = core.assembleExtension({ coreSource })['index.js'];
+    const mainCall = [
+        '    try {',
+        '        main();',
+        '    } catch (error) {',
+    ].join('\n');
+    const testHook = [
+        '    window.__mvu2shujukuSaveTest = {',
+        '        setLastResult: function (value) { lastResult = value; },',
+        '        save: saveCardToSillyTavern,',
+        '    };',
+        '    try {',
+        '        // 测试只执行保存流程，不启动扩展定时器。',
+        '    } catch (error) {',
+    ].join('\n');
+    const mainCallAt = index.lastIndexOf(mainCall);
+    assert.ok(mainCallAt >= 0, '应能为真实 UI 保存函数安装测试入口');
+    index = index.slice(0, mainCallAt) + testHook + index.slice(mainCallAt + mainCall.length);
+
+    const marker = { converter: 'mvu2shujuku', convertedAt: '2026-09-04T12:00:00.000Z' };
+    const tavernHelper = { scripts: [{ type: 'script', name: '数据库桥', content: 'bridge();', enabled: true }] };
+    const card = {
+        name: '保存复核测试卡_数据库',
+        avatar: 'saved-card.png',
+        extensions: { mvu2shujuku: marker, tavern_helper: tavernHelper },
+        character_book: { entries: [] },
+    };
+    const writes = [];
+    const context = {
+        characters: [card], characterId: 0,
+        extensionSettings: { mvu2shujuku: { conversionProfiles: {} } },
+        createCharacterData: async () => 'saved-card.png',
+        getCharacters: async () => [card],
+        writeExtensionField: async (index, key, value) => {
+            writes.push({ index, key, value });
+            value.scripts[0].name = '宿主侧临时改写';
+        },
+        saveSettingsDebounced: () => {},
+    };
+    const document = {
+        getElementById: () => null,
+        createElement: () => ({ click: () => {} }),
+        body: { appendChild: () => {}, removeChild: () => {} },
+    };
+    const sandbox = {
+        console, TextDecoder, TextEncoder, Uint8Array, Uint16Array, Uint32Array, DataView, ArrayBuffer, Blob,
+        URL: { createObjectURL: () => 'blob:test', revokeObjectURL: () => {} },
+        document,
+        setTimeout, clearTimeout,
+        alert: () => {}, confirm: () => true, prompt: () => null,
+    };
+    sandbox.window = sandbox;
+    sandbox.globalThis = sandbox;
+    sandbox.parent = sandbox;
+    sandbox.top = sandbox;
+    sandbox.SillyTavern = { getContext: () => context };
+    vm.createContext(sandbox);
+    vm.runInContext(index, sandbox);
+    sandbox.__mvu2shujukuSaveTest.setLastResult({
+        card: { spec: 'chara_card_v3', spec_version: '3.0', data: card },
+        meta: { avatarBytes: new Uint8Array([1, 2, 3]), avatarMime: 'image/png' },
+        template: null,
+        files: [],
+    });
+
+    const ok = await sandbox.__mvu2shujukuSaveTest.save();
+    assert.strictEqual(ok, true, '保存与复核流程应完成');
+    assert.strictEqual(writes.length, 1, '应调用一次 ST 官方字段写入接口，不能被 UI 作用域错误跳过');
+    assert.strictEqual(writes[0].index, 0);
+    assert.strictEqual(writes[0].key, 'tavern_helper');
+    assert.strictEqual(tavernHelper.scripts[0].name, '数据库桥', '传给宿主的对象必须与转换结果脱离引用');
 });
 
 test('写库合并路径无 chatKeyNow TDZ（const 声明必须先于首次使用）', () => {
