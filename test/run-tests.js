@@ -79,6 +79,32 @@ test('初始数据宏：动态键替换后冲突时拒绝静默覆盖', () => {
     );
 });
 
+test('表名宏静态规范化：保留逻辑路径并对重名表消歧', () => {
+    const groups = {
+        '{{user}}': { 状态: '正常' },
+        '<user>': { 状态: '备用' },
+        '<char>': { 状态: '正常' },
+        '{{getvar::阵营}}资料': { 状态: '正常' },
+    };
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '结构宏卡', description: '', first_mes: '你好',
+            character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify(groups) }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const names = Object.values(r.template).filter(s => s && s.name).map(s => s.name);
+    assert.ok(names.includes('user表'), '{{user}} 应静态规范化为 user表');
+    assert.ok(names.includes('user2表'), '<user> 与 {{user}} 规范化后重名应消歧');
+    assert.ok(names.includes('char表'), '<char> 应静态规范化为 char表');
+    assert.ok(names.includes('getvar_阵营资料表'), '带参数宏应把分隔符折叠为下划线');
+    const layout = JSON.parse((r.card.data || r.card).extensions.mvu2shujuku.layout);
+    assert.ok(layout.some(g => g.group === '{{user}}' && g.table === 'user表'), '数据库表名改写后必须保留原 MVU 逻辑组名');
+    assert.ok(r.reportText.includes('表名宏') && r.reportText.includes('静态规范化'), '转换报告应说明结构宏不再运行时求值');
+});
+
 test('MVU 官方元数据：$meta/数组标记只生成结构提示，清理后不污染 stat_data', () => {
     const analyzed = core.analyzeMvuInitMetadata({
         $meta: { strictTemplate: true, strictSet: true, concatTemplateArray: false },
@@ -292,7 +318,7 @@ test('从 [mvu_update] 提取 check 规则与提醒（含引号项、模板键�
     // 落到表格 note：check 规则应出现在填表提示词里
     const r = core.convert(card, { mode: 'both' });
     const world = Object.values(r.template).find(s => s && s.name === '世界表');
-    assert.ok(world.sourceData.note.includes('遭遇冷却：如果当前遭遇冷却大于0'), 'note 应包含 check 规则');
+    assert.ok(world.sourceData.note.includes('- 遭遇冷却：\n') && world.sourceData.note.includes('  - 如果当前遭遇冷却大于0'), 'note 应在字段分组中包含 check 规则');
     assert.ok(world.sourceData.note.includes('当前地点：必须按层级描述'), 'note 应包含单行引号 check');
 });
 
@@ -342,9 +368,9 @@ test('YAML 带前后缀的 ${A|B}模板键展开 check/range，非数值 range �
 
     const r = core.convert(card, { mode: 'both', ddlIncludeCheck: true });
     const table = Object.values(r.template).find(s => s && s.name === '任务经验表');
-    assert.ok(table.sourceData.note.includes('${露出|扩张}经验：数值范围 0~100'), '完全相同的展开列约束应在提示词中恢复为紧凑模板键');
-    assert.ok(table.sourceData.note.includes('${露出|扩张}分区：根据对应经验值更新分区'), 'check 应以合并模板键进入对应表的强制约束');
-    assert.ok(table.sourceData.note.includes('${露出|扩张}分区：经验为0至20时'), '合并展示不得丢失详细 check');
+    assert.ok(table.sourceData.note.includes('- ${露出|扩张}经验：\n  - 数值范围 0~100'), '完全相同的展开列约束应在提示词中恢复为紧凑模板键');
+    assert.ok(table.sourceData.note.includes('  - 根据对应经验值更新分区'), 'check 应进入合并模板键的字段分组');
+    assert.ok(table.sourceData.note.includes('  - 经验为0至20时'), '合并展示不得丢失详细 check');
     assert.ok(!table.sourceData.note.includes('露出分区：根据对应经验值'), '同一规则不应再按实际列重复输出');
     assert.ok(table.sourceData.note.includes('可选值：初级区 / 中级区 / 高级区'), '枚举 range 应进入强制约束');
     assert.ok(table.sourceData.ddl.includes('CHECK'), '开启 DDL check 时应生成数值/枚举硬约束');
@@ -390,6 +416,8 @@ test('format 支持无引号与块标量写法；zod 数值约束提取范围', 
                             '  世界:',
                             '    当前时间:',
                             '      format: YYYY年MM月DD日 星期X HH:MM',
+                            '      check:',
+                            '        - 每次事件推进、休息或旅行后更新',
                             '    当前地点:',
                             '      format: |-',
                             '        层级1·层级2',
@@ -434,6 +462,8 @@ test('format 支持无引号与块标量写法；zod 数值约束提取范围', 
     const byName = (n) => Object.values(r.template).find(s => s && s.name === n);
     const world = byName('世界表');
     assert.ok(world.sourceData.note.includes('格式要求：YYYY年MM月DD日 星期X HH:MM'), 'note 应含无引号格式');
+    assert.ok(world.sourceData.note.includes('- 当前时间：\n  - 格式要求：YYYY年MM月DD日 星期X HH:MM\n  - 每次事件推进、休息或旅行后更新'), '同一字段的多条约束应改为字段分组');
+    assert.strictEqual((world.sourceData.note.match(/- 当前时间：/g) || []).length, 1, '分组后字段名只应出现一次');
     const bya = byName('白娅表');
     assert.ok(bya.sourceData.note.includes('数值范围 0~100'), 'zod 范围应进入 note');
     assert.ok(bya.sourceData.ddl.includes('CHECK(yicundu BETWEEN 0 AND 100)'), 'zod 范围应生成 DDL CHECK');
@@ -491,7 +521,7 @@ test('教程标准 Zod Schema 脚本：record/array/coerce/prefault/clamp/复用
     const tags = byName('角色_标签表');
     assert.ok(tags && tags.content[0].includes('角色_角色名称') && tags.content[0].includes('内容'), 'z.array 应按带业务父键名的既有数组规则转换为有序关系子表');
     assert.strictEqual(tags.content.length, 1, 'prefault([]) 应生成结构完整但没有虚构数据行的空数组表');
-    assert.ok(role.sourceData.note.includes('阶段：当前关系阶段'), 'describe 应进入填写提示');
+    assert.ok(role.sourceData.note.includes('- 阶段：\n') && role.sourceData.note.includes('  - 当前关系阶段'), 'describe 应进入字段分组填写提示');
     assert.ok(system.sourceData.ddl.includes('CHECK(dengji BETWEEN 1 AND 10)'), '固定对象中的 clamp 范围应迁移');
     assert.ok(system.sourceData.ddl.includes("moshi TEXT NOT NULL DEFAULT 'A'"), '缺失 InitVar 字段应由静态 prefault 补齐');
     assert.ok(system.sourceData.ddl.includes("biaoti TEXT NOT NULL DEFAULT '默认标题'"), '静态 default 应迁移为字段默认值');
@@ -685,7 +715,7 @@ test('zod/TS 替代写法：z.object 结构 + /** check: */ 注释应被解析',
     // 落到表格 note
     const r = core.convert(card, { mode: 'both' });
     const bya = Object.values(r.template).find(s => s && s.name === '白娅表');
-    assert.ok(bya.sourceData.note.includes('依存度：根据白娅对<%- mvu2shujukuResolveMacro("user") %>行为的感知和反应调整 ±(3~6)'), 'zod check 应进入填表提示词并在请求时解析 user 宏');
+    assert.ok(bya.sourceData.note.includes('- 依存度：\n') && bya.sourceData.note.includes('  - 根据白娅对<%- mvu2shujukuResolveMacro("user") %>行为的感知和反应调整 ±(3~6)'), 'zod check 应进入字段分组填表提示词并在请求时解析 user 宏');
 });
 
 test('动态 EJS YAML 值不得被识别为静态枚举或写入表格提示词', () => {
@@ -894,7 +924,7 @@ test('相邻顶层组不被跳过 + check 机制词清洗（op/delta/replace/分
     const r = core.convert(card, { mode: 'both' });
     const byName = (n) => Object.values(r.template).find(s => s && s.name === n);
     const worldNote = byName('世界表').sourceData.note;
-    assert.ok(worldNote.includes('遭遇冷却：如果当前遭遇冷却大于0，每推进一次剧情/回合就减1'), '括号机制注释应删除、业务规则保留');
+    assert.ok(worldNote.includes('- 遭遇冷却：\n') && worldNote.includes('  - 如果当前遭遇冷却大于0，每推进一次剧情/回合就减1'), '括号机制注释应删除、业务规则应保留在字段分组中');
     assert.ok(!worldNote.includes('op:') && !worldNote.includes('（op:'), 'note 不应残留 op 机制词');
     assert.ok(worldNote.includes('更新以正文和规则为依据，不得为凑表而虚构数据。'), '通用约束应改为“以正文和规则为依据”，不与每轮强制规则冲突');
     const heroNote = byName('主角表').sourceData.note;
@@ -3030,6 +3060,26 @@ test('行表 SQL 示例排除下划线只读字段', () => {
     assert.ok(!sheet.sourceData.insertNode.includes('_剩余次数'), 'INSERT 示例不应包含 _剩余次数');
     assert.ok(!sheet.sourceData.updateNode.includes('_剩余次数'), 'UPDATE 示例不应包含 _剩余次数');
     assert.ok(sheet.sourceData.insertNode.includes('INSERT INTO'), 'INSERT 示例仍应存在');
+});
+
+test('仅有 _扩展数据的普通行表复用下划线只读提示', () => {
+    const card = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '扩展数据只读卡', description: '', first_mes: '你好',
+            character_book: { entries: [{
+                comment: '[InitVar]',
+                content: JSON.stringify({ 人物: { 甲: { 状态: '正常' }, 乙: { 状态: '忙碌' } } }),
+            }] },
+            extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
+        },
+    };
+    const r = core.convert(card, { mode: 'both' });
+    const sheet = Object.values(r.template).find(s => s && s.name === '人物表');
+    assert.ok(sheet && sheet.content[0].includes('_扩展数据'), '行表应带内部扩展数据列');
+    assert.ok(sheet.sourceData.note.includes('下划线开头字段'), '_扩展数据应触发现有只读提示');
+    assert.ok(!sheet.sourceData.insertNode.includes('_扩展数据'), 'INSERT 示例仍不应包含 _扩展数据');
+    assert.ok(!sheet.sourceData.updateNode.includes('_扩展数据'), 'UPDATE 示例仍不应包含 _扩展数据');
 });
 
 test('读方向只认 content：seedRows 不作为已存在数据展示（删除后不被补回导致 UI 死而复生）', () => {
@@ -10392,7 +10442,7 @@ test('开局建表：模板数据调用 SillyTavern 原生 substituteParams（�
             name: '宏测试卡', description: '', first_mes: '你好',
             character_book: { entries: [{
                 comment: '[InitVar]',
-                content: '系统:\n  称呼: <user>\n  备注: "你是 {{user}}"\n人物:\n  <user>:\n    关系: 本人\n同行者:\n  - <user>\n  - <user>',
+                content: '系统:\n  称呼: <user>\n  备注: "你是 {{user}}"\n"{{user}}":\n  身份: 玩家\n人物:\n  <user>:\n    关系: 本人\n同行者:\n  - <user>\n  - <user>',
             }] },
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
@@ -10428,10 +10478,12 @@ test('开局建表：模板数据调用 SillyTavern 原生 substituteParams（�
     await new Promise(resolve => setTimeout(resolve, 250));
     assert.ok(imported, '应把已解析模板交给 initGameSession');
     const system = Object.values(imported).find(s => s && s.name === '系统表');
+    const userSheet = Object.values(imported).find(s => s && s.name === 'user表');
     const people = Object.values(imported).find(s => s && s.name === '人物表');
     const companions = Object.values(imported).find(s => s && s.name === '同行者表');
     assert.strictEqual(system.content[1][system.content[0].indexOf('称呼')], '林海');
     assert.strictEqual(system.content[1][system.content[0].indexOf('备注')], '你是 林海');
+    assert.ok(userSheet, '表名中的 {{user}} 应静态规范化后传给 initGameSession');
     assert.strictEqual(people.content[1][people.content[0].indexOf('键名')], '林海');
     assert.deepStrictEqual(Array.from(people.content[0]), ['row_id', '键名', '关系', '_扩展数据'], '表头必须保持固定');
     assert.deepStrictEqual(Array.from(companions.content.slice(1), row => row[1]), ['林海', '林海'], '数组允许重复元素，不得误当业务键冲突');
