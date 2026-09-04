@@ -1,5 +1,5 @@
 // MVU转数据库 · SillyTavern 原生扩展
-// 生成自 转换器/src/mvu2shujuku.js（0.3.8），核心源码内联如下
+// 生成自 转换器/src/mvu2shujuku.js（0.3.9），核心源码内联如下
 // @ts-nocheck
 (function (root) {
 /*
@@ -17,7 +17,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.3.8';
+    const VERSION = '0.3.9';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -5623,6 +5623,41 @@
     }
 
     /**
+     * 表名是稳定的数据库标识符，但 layout 中的 MVU 逻辑路径仍需按当前聊天
+     * 解析 user/char/group 宏。始终克隆后解析，避免把当前角色身份写回卡内布局。
+     */
+    function resolveLayoutMacros(layoutEntries, substituteParams) {
+        const entries = JSON.parse(JSON.stringify(Array.isArray(layoutEntries) ? layoutEntries : []));
+        if (typeof substituteParams !== 'function') return entries;
+        const hasMacro = (value) => typeof value === 'string' && /(?:<(?:user|bot|char|charifnotgroup|group)>|\{\{[^{}]+\}\})/i.test(value);
+        const resolveValue = (value) => hasMacro(value) ? String(substituteParams(value)) : value;
+        const resolvePath = (path) => Array.isArray(path) ? path.map(resolveValue) : path;
+        for (const entry of entries) {
+            if (!entry || typeof entry !== 'object') continue;
+            entry.group = resolveValue(entry.group);
+            entry.keyValue = resolveValue(entry.keyValue);
+            entry.childKey = resolveValue(entry.childKey);
+            entry.parentPath = resolvePath(entry.parentPath);
+            entry.path = resolvePath(entry.path);
+            if (Array.isArray(entry.writePaths)) entry.writePaths = entry.writePaths.map(resolvePath);
+            if (Array.isArray(entry.cols)) {
+                entry.cols = entry.cols.map(col => {
+                    if (!Array.isArray(col)) return col;
+                    col[3] = resolvePath(col[3]);
+                    return col;
+                });
+            }
+            if (Array.isArray(entry.mirrors)) {
+                entry.mirrors = entry.mirrors.map(mirror => {
+                    if (mirror && typeof mirror === 'object') mirror.path = resolvePath(mirror.path);
+                    return mirror;
+                });
+            }
+        }
+        return entries;
+    }
+
+    /**
      * 用布局（buildLayoutJson 输出的条目数组）+ 插件表格数据重建 stat_data/display_data。
      * 与卡内数据桥 getAllVariables 同逻辑；扩展侧也用它提供 EJS 数据读取，零冗余（惰性读表格）。
      */
@@ -6920,6 +6955,20 @@
             ...DB_INIT_SNIPPET.split('\n'),
             '',
             `var SD_LAYOUT=${layoutJson};`,
+            `function resolveLayoutMacrosLocal(layout){`,
+            `  var out;try{out=JSON.parse(JSON.stringify(layout||[]));}catch(e){out=[];}`,
+            `  var ctx=getContext();var sub=ctx&&ctx.substituteParams;`,
+            `  if(typeof sub!=='function')return out;`,
+            `  function val(v){if(typeof v!=='string'||!/(?:<(?:user|bot|char|charifnotgroup|group)>|\\{\\{[^{}]+\\}\\})/i.test(v))return v;try{return String(sub.call(ctx,v));}catch(e){return v;}}`,
+            `  function path(p){if(!Array.isArray(p))return p;for(var i=0;i<p.length;i++)p[i]=val(p[i]);return p;}`,
+            `  for(var i=0;i<out.length;i++){var L=out[i];if(!L||typeof L!=='object')continue;`,
+            `    L.group=val(L.group);L.keyValue=val(L.keyValue);L.childKey=val(L.childKey);L.parentPath=path(L.parentPath);L.path=path(L.path);`,
+            `    if(Array.isArray(L.writePaths))for(var j=0;j<L.writePaths.length;j++)L.writePaths[j]=path(L.writePaths[j]);`,
+            `    if(Array.isArray(L.cols))for(var c=0;c<L.cols.length;c++)if(Array.isArray(L.cols[c]))L.cols[c][3]=path(L.cols[c][3]);`,
+            `    if(Array.isArray(L.mirrors))for(var m=0;m<L.mirrors.length;m++)if(L.mirrors[m]&&typeof L.mirrors[m]==='object')L.mirrors[m].path=path(L.mirrors[m].path);`,
+            `  }return out;`,
+            `}`,
+            `SD_LAYOUT=resolveLayoutMacrosLocal(SD_LAYOUT);`,
             '',
             `window.getSheetByName=function(tableName){`,
             `  var all={};try{all=API.exportTableAsJson()||{};}catch(e){}`,
@@ -10459,7 +10508,7 @@ ${DB_INIT_SNIPPET}
             const layoutExt = charExtensions(character);
             const mk = layoutExt && layoutExt.mvu2shujuku;
             if (mk && typeof mk.layout === 'string') {
-                activeLayout = JSON.parse(mk.layout);
+                activeLayout = resolveRuntimeLayout(mk.layout);
                 // 记录布局归属卡：用“读取时会看到的角色对象”（列表对象，带真实头像）
                 let layoutChar = null;
                 try { layoutChar = currentCharacter(); } catch (e) {}
@@ -11275,6 +11324,22 @@ ${DB_INIT_SNIPPET}
         return window.SillyTavern.getContext();
     }
 
+    function resolveRuntimeLayout(rawLayout) {
+        const parsed = typeof rawLayout === 'string'
+            ? JSON.parse(rawLayout)
+            : JSON.parse(JSON.stringify(Array.isArray(rawLayout) ? rawLayout : []));
+        const core = window.MVU2SHUJUKU_CORE;
+        try {
+            const context = getContextSafe();
+            if (core && typeof core.resolveLayoutMacros === 'function' && context && typeof context.substituteParams === 'function') {
+                return core.resolveLayoutMacros(parsed, context.substituteParams.bind(context));
+            }
+        } catch (e) {
+            dbgWarn(' 解析 layout 运行时宏失败，暂用原逻辑路径:', e && e.message ? e.message : e);
+        }
+        return parsed;
+    }
+
     // 查找 SP·数据库 插件暴露的 window.AutoCardUpdaterAPI（兼容 iframe/顶层窗口）
     function getAcuApi() {
         const roots = [];
@@ -11719,8 +11784,7 @@ ${DB_INIT_SNIPPET}
                 dbgWarn('[运行时注册] 忽略非当前卡桥 payload：' + payloadName + '（当前=' + currentName + '）');
                 return false;
             }
-            if (Array.isArray(payload.layout)) activeLayout = JSON.parse(JSON.stringify(payload.layout));
-            else if (typeof payload.layout === 'string') activeLayout = JSON.parse(payload.layout);
+            if (Array.isArray(payload.layout) || typeof payload.layout === 'string') activeLayout = resolveRuntimeLayout(payload.layout);
             else return false;
             activeLayoutCardKey = cardCacheKey(ch);
             activePlaceholderNeeded = !!payload.statusPlaceholderNeeded;
@@ -12889,7 +12953,7 @@ ${DB_INIT_SNIPPET}
             if (!mk || !mk.layout) return false;
             const parsed = typeof mk.layout === 'string' ? JSON.parse(mk.layout) : mk.layout;
             if (!Array.isArray(parsed) || !parsed.length) return false;
-            activeLayout = parsed;
+            activeLayout = resolveRuntimeLayout(parsed);
             activeLayoutCardKey = cardCacheKey(ch);
             activePlaceholderNeeded = detectPlaceholderFor(ch);
             // 同步解码卡内模板作为回放未就绪时的结构/初值兜底。
@@ -14554,8 +14618,7 @@ ${DB_INIT_SNIPPET}
             try {
                 const ext = charExtensions(ch) || {};
                 const marker = ext.mvu2shujuku || {};
-                if (typeof marker.layout === 'string') activeLayout = JSON.parse(marker.layout);
-                else if (Array.isArray(marker.layout)) activeLayout = JSON.parse(JSON.stringify(marker.layout));
+                if (typeof marker.layout === 'string' || Array.isArray(marker.layout)) activeLayout = resolveRuntimeLayout(marker.layout);
                 if (activeLayout) activeLayoutCardKey = cardCacheKey(currentCharacter() || ch);
             } catch (e) {
                 dbgWarn(' 同步运行时：提前解析 layout 失败，等自动建表流程重试:', e && e.message ? e.message : e);
@@ -15963,6 +16026,7 @@ ${DB_INIT_SNIPPET}
         findConvertedCharacterIndex,
         mergeTemplates,
         generateBridgeScript,
+        resolveLayoutMacros,
         statDataFromTables,
         writeStatDiffToDb,
         get lastStatWriteFailed() { return statWriteHadFailure; },
@@ -27343,7 +27407,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             const layoutExt = charExtensions(character);
             const mk = layoutExt && layoutExt.mvu2shujuku;
             if (mk && typeof mk.layout === 'string') {
-                activeLayout = JSON.parse(mk.layout);
+                activeLayout = resolveRuntimeLayout(mk.layout);
                 // 记录布局归属卡：用“读取时会看到的角色对象”（列表对象，带真实头像）
                 let layoutChar = null;
                 try { layoutChar = currentCharacter(); } catch (e) {}
@@ -28159,6 +28223,22 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
         return window.SillyTavern.getContext();
     }
 
+    function resolveRuntimeLayout(rawLayout) {
+        const parsed = typeof rawLayout === 'string'
+            ? JSON.parse(rawLayout)
+            : JSON.parse(JSON.stringify(Array.isArray(rawLayout) ? rawLayout : []));
+        const core = window.MVU2SHUJUKU_CORE;
+        try {
+            const context = getContextSafe();
+            if (core && typeof core.resolveLayoutMacros === 'function' && context && typeof context.substituteParams === 'function') {
+                return core.resolveLayoutMacros(parsed, context.substituteParams.bind(context));
+            }
+        } catch (e) {
+            dbgWarn(' 解析 layout 运行时宏失败，暂用原逻辑路径:', e && e.message ? e.message : e);
+        }
+        return parsed;
+    }
+
     // 查找 SP·数据库 插件暴露的 window.AutoCardUpdaterAPI（兼容 iframe/顶层窗口）
     function getAcuApi() {
         const roots = [];
@@ -28603,8 +28683,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
                 dbgWarn('[运行时注册] 忽略非当前卡桥 payload：' + payloadName + '（当前=' + currentName + '）');
                 return false;
             }
-            if (Array.isArray(payload.layout)) activeLayout = JSON.parse(JSON.stringify(payload.layout));
-            else if (typeof payload.layout === 'string') activeLayout = JSON.parse(payload.layout);
+            if (Array.isArray(payload.layout) || typeof payload.layout === 'string') activeLayout = resolveRuntimeLayout(payload.layout);
             else return false;
             activeLayoutCardKey = cardCacheKey(ch);
             activePlaceholderNeeded = !!payload.statusPlaceholderNeeded;
@@ -29773,7 +29852,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             if (!mk || !mk.layout) return false;
             const parsed = typeof mk.layout === 'string' ? JSON.parse(mk.layout) : mk.layout;
             if (!Array.isArray(parsed) || !parsed.length) return false;
-            activeLayout = parsed;
+            activeLayout = resolveRuntimeLayout(parsed);
             activeLayoutCardKey = cardCacheKey(ch);
             activePlaceholderNeeded = detectPlaceholderFor(ch);
             // 同步解码卡内模板作为回放未就绪时的结构/初值兜底。
@@ -31438,8 +31517,7 @@ async function mvu2shujukuEnsureInit(api,b64,presetName,to){var out={status:"ski
             try {
                 const ext = charExtensions(ch) || {};
                 const marker = ext.mvu2shujuku || {};
-                if (typeof marker.layout === 'string') activeLayout = JSON.parse(marker.layout);
-                else if (Array.isArray(marker.layout)) activeLayout = JSON.parse(JSON.stringify(marker.layout));
+                if (typeof marker.layout === 'string' || Array.isArray(marker.layout)) activeLayout = resolveRuntimeLayout(marker.layout);
                 if (activeLayout) activeLayoutCardKey = cardCacheKey(currentCharacter() || ch);
             } catch (e) {
                 dbgWarn(' 同步运行时：提前解析 layout 失败，等自动建表流程重试:', e && e.message ? e.message : e);
