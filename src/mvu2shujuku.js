@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.3.5';
+    const VERSION = '0.3.6';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -237,6 +237,44 @@
 
     function deepClone(v) {
         return JSON.parse(JSON.stringify(v));
+    }
+
+    /**
+     * 从 ST 刷新后的角色列表精确定位刚创建的转换卡。
+     * lazyLoadCharacters 开启时列表不含 mvu2shujuku marker，需由
+     * loadFullCharacter 按候选卡头像取完整卡再校验 convertedAt。
+     */
+    async function findConvertedCharacterIndex(characters, expected, loadFullCharacter) {
+        const list = Array.isArray(characters) ? characters : [];
+        const target = expected && typeof expected === 'object' ? expected : {};
+        const displayName = String(target.displayName || '');
+        const avatar = String(target.avatar || '');
+        const convertedAt = String(target.convertedAt || '');
+        if (!displayName || !convertedAt) return -1;
+        for (let i = list.length - 1; i >= 0; i--) {
+            const character = list[i];
+            if (!character) continue;
+            const characterAvatar = String(character.avatar || (character.data && character.data.avatar) || '');
+            if (avatar && characterAvatar !== avatar) continue;
+            let data = character.data || character;
+            if (String((data && data.name) || character.name || '') !== displayName) continue;
+            let marker = data && data.extensions && data.extensions.mvu2shujuku;
+            if ((!marker || String(marker.convertedAt || '') !== convertedAt) && typeof loadFullCharacter === 'function') {
+                try {
+                    const full = await loadFullCharacter(character);
+                    const fullData = full && (full.data || full);
+                    if (String((fullData && fullData.name) || '') !== displayName) continue;
+                    data = fullData;
+                    marker = data && data.extensions && data.extensions.mvu2shujuku;
+                } catch (e) {
+                    continue;
+                }
+            }
+            if (!marker || String(marker.converter || '') !== 'mvu2shujuku') continue;
+            if (String(marker.convertedAt || '') !== convertedAt) continue;
+            return i;
+        }
+        return -1;
     }
 
     // 与 MVU correctlyMerge 语义一致：对象深合并，数组/标量由后者覆盖
@@ -8573,6 +8611,7 @@
             /\bEjsTemplate\s*\.\s*allVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
             /\ballVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
             /\ball_variables\s*\.\s*stat_data\b/gi,
+            /(^|[^\w$.])(?:window|globalThis)\s*\.\s*stat_data\b/gi,
             /(^|[^\w$.])variables\s*\.\s*stat_data\b/gi,
             /\bTavernHelper\s*\.\s*getVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
             /\bgetVariables\s*\(\s*\)\s*\.\s*stat_data\b/gi,
@@ -8580,12 +8619,103 @@
         for (const re of directReaders) {
             out = out.replace(re, (match, prefix) => {
                 count++;
-                // 只有 variables.stat_data 那条正则有 prefix 捕获组；其余正则的第二个
-                // replace 回调参数是数字 offset，绝不能拼到输出前面（会生成 123mvu...）。
+                // window/globalThis.stat_data 与 variables.stat_data 的正则有 prefix
+                // 捕获组；其余正则的第二个 replace 回调参数是数字
+                // offset，绝不能拼到输出前面（会生成 123mvu...）。
                 return (typeof prefix === 'string' ? prefix : '') + 'mvu2shujukuGetAllVariables().stat_data';
             });
         }
         return { text: out, count };
+    }
+
+    function ejsScriptBlocks(text) {
+        const blocks = [];
+        const re = /<%([_#=-]?)([\s\S]*?)(?:[_-]?%>)/g;
+        let m;
+        while ((m = re.exec(String(text || '')))) {
+            if (m[1] !== '#') blocks.push(m[2]);
+        }
+        return blocks;
+    }
+
+    // 声明扫描只关心 JS 代码：字符串和注释保留换行但用空格遮蔽，
+    // 避免文案里的“const x”或注释示例误触发作用域隔离。
+    function maskJsStringsAndComments(source) {
+        const s = String(source || '');
+        let out = '';
+        let mode = '';
+        let escaped = false;
+        for (let i = 0; i < s.length; i++) {
+            const ch = s[i];
+            const next = s[i + 1];
+            if (!mode) {
+                if (ch === '/' && next === '/') { out += '  '; i++; mode = 'line'; continue; }
+                if (ch === '/' && next === '*') { out += '  '; i++; mode = 'block'; continue; }
+                if (ch === '"' || ch === "'" || ch === '`') { out += ' '; mode = ch; escaped = false; continue; }
+                out += ch;
+                continue;
+            }
+            if (mode === 'line') {
+                if (ch === '\n' || ch === '\r') { out += ch; mode = ''; }
+                else out += ' ';
+                continue;
+            }
+            if (mode === 'block') {
+                if (ch === '*' && next === '/') { out += '  '; i++; mode = ''; }
+                else out += (ch === '\n' || ch === '\r') ? ch : ' ';
+                continue;
+            }
+            out += (ch === '\n' || ch === '\r') ? ch : ' ';
+            if (escaped) { escaped = false; continue; }
+            if (ch === '\\') { escaped = true; continue; }
+            if (ch === mode) mode = '';
+        }
+        return out;
+    }
+
+    function ejsLexicalDeclarationNames(text) {
+        const names = new Set();
+        for (const block of ejsScriptBlocks(text)) {
+            const code = maskJsStringsAndComments(block);
+            for (const m of code.matchAll(/\b(?:const|let|class)\s+([A-Za-z_$][\w$]*)/g)) names.add(m[1]);
+        }
+        return names;
+    }
+
+    function ejsFallbackVarNames(text) {
+        const names = new Set();
+        for (const block of ejsScriptBlocks(text)) {
+            // 只接受整个 scriptlet 就是该回退声明的形态，不解析任意业务 JS。
+            const m = String(block).trim().match(/^if\s*\(\s*typeof\s+([A-Za-z_$][\w$]*)\s*={2,3}\s*(["'])undefined\2\s*\)\s*var\s+([A-Za-z_$][\w$]*)\s*=\s*[\s\S]+;\s*$/);
+            if (m && m[1] === m[3]) names.add(m[1]);
+        }
+        return names;
+    }
+
+    function isolateCrossEntryEjsFallbacks(entries, report) {
+        const list = Array.isArray(entries) ? entries : [];
+        const active = list.map((entry, index) => ({ entry, index })).filter(({ entry }) => (
+            entry && entry.enabled !== false && entry.disable !== true && String(entry.content || '').includes('<%')
+        ));
+        const lexicalOwners = new Map();
+        for (const { entry, index } of active) {
+            for (const name of ejsLexicalDeclarationNames(entry.content)) {
+                if (!lexicalOwners.has(name)) lexicalOwners.set(name, new Set());
+                lexicalOwners.get(name).add(index);
+            }
+        }
+        for (const { entry, index } of active) {
+            const conflicts = [...ejsFallbackVarNames(entry.content)].filter(name => {
+                const owners = lexicalOwners.get(name);
+                return owners && [...owners].some(owner => owner !== index);
+            });
+            if (!conflicts.length) continue;
+            entry.content = `<%_ await (async () => { _%>\n${String(entry.content || '')}\n<%_ })(); _%>`;
+            if (report) {
+                report.auto(`条目「${String(entry.comment || entry.name || index)}」已放入独立 EJS 作用域，避免 typeof+var 回退变量与其他条目的 const/let 声明冲突：${conflicts.join('、')}。`);
+            }
+        }
+        return list;
     }
 
     function unresolvedEjsDataReads(text) {
@@ -9366,6 +9496,7 @@
             copy.content = afterMacros;
             newEntries.push(copy);
         }
+        isolateCrossEntryEjsFallbacks(newEntries, report);
         // 把模板以 base64 写入世界书条目（keys: __ACU_TEMPLATE_DATA__），供插件/开场页按需导入
         const tplB64 = toBase64(JSON.stringify(template));
         const maxId = entries.reduce((m, e) => Math.max(m, Number(e.id) || 0), 0);
@@ -14678,8 +14809,12 @@ ${DB_INIT_SNIPPET}
 
             // 优先用新版 API；老版本 createCharacterData 是表单状态对象时走直接接口
             let saved = false;
+            let savedAvatar = '';
             if (typeof context.createCharacterData === 'function') {
-                await context.createCharacterData(undefined, avatarBlob || new Blob(), cardData, false);
+                const created = await context.createCharacterData(undefined, avatarBlob || new Blob(), cardData, false);
+                savedAvatar = typeof created === 'string'
+                    ? created.trim()
+                    : String(created && (created.avatar || created.avatarId || created.fileName) || '').trim();
                 saved = true;
             } else {
                 // 直接走 /api/characters/create：必须把角色卡所有字段都放进表单，
@@ -14724,6 +14859,9 @@ ${DB_INIT_SNIPPET}
                     body: formData,
                 });
                 if (!res.ok) throw new Error('HTTP ' + res.status);
+                // ST create 接口返回刚创建卡的唯一头像文件名。同名卡
+                // 可能并存，不能只按显示名反查。
+                savedAvatar = String(await res.text() || '').trim();
                 saved = true;
             }
             if (!saved) throw new Error('角色卡保存失败（未知原因）');
@@ -14743,16 +14881,14 @@ ${DB_INIT_SNIPPET}
                     const charsNow = Array.isArray(refreshedCharacters)
                         ? refreshedCharacters
                         : (Array.isArray(refreshedContext.characters) ? refreshedContext.characters : (Array.isArray(context.characters) ? context.characters : []));
-                    let savedIndex = -1;
-                    for (let ci = charsNow.length - 1; ci >= 0; ci--) {
-                        const ch = charsNow[ci];
-                        const cd = ch && (ch.data || ch);
-                        const marker = cd && cd.extensions && cd.extensions.mvu2shujuku;
-                        if (String(cd && cd.name || ch && ch.name || '') !== displayName) continue;
-                        if (!marker || !expectedMarker || String(marker.convertedAt || '') !== String(expectedMarker.convertedAt || '')) continue;
-                        savedIndex = ci;
-                        break;
-                    }
+                    const coreApi = window.MVU2SHUJUKU_CORE;
+                    const savedIndex = coreApi && typeof coreApi.findConvertedCharacterIndex === 'function'
+                        ? await coreApi.findConvertedCharacterIndex(charsNow, {
+                            displayName,
+                            avatar: savedAvatar,
+                            convertedAt: expectedMarker && expectedMarker.convertedAt,
+                        }, ch => fetchFullCharacter(ch, true))
+                        : -1;
                     const writeExtensionField = (refreshedContext && refreshedContext.writeExtensionField) || context.writeExtensionField;
                     if (savedIndex >= 0 && expectedExt && typeof writeExtensionField === 'function') {
                         await writeExtensionField(savedIndex, 'tavern_helper', deepClone(expectedExt.tavern_helper || { scripts: [] }));
@@ -15765,6 +15901,7 @@ ${DB_INIT_SNIPPET}
         migrateTemplatePromptRuntime,
         formatMessageVariableValue,
         rewriteFormatMessageVariableMacros,
+        findConvertedCharacterIndex,
         mergeTemplates,
         generateBridgeScript,
         statDataFromTables,

@@ -32,7 +32,7 @@
    - **保存角色卡和模板到sillytavern**（转换完成后才出现）：把角色卡写入 SillyTavern 角色列表（自动带原头像），
      并同时把表格模板存为 SP·数据库 插件的“全局模板预设”（预设名 = 卡名 + `模板`）；
      开局进入新聊天会自动建表，无需手动切换；预设仅作备用。失败会弹窗显示日志，
-     角色卡部分失败时自动回退下载；
+     角色卡部分失败时自动回退下载。即使 SillyTavern 开启角色浅加载，也会按新卡头像取完整卡复核转换后的酒馆助手脚本；
    - 或下载 角色卡 + 表格模板 + 转换报告。另有“数据桥源码（仅供调试）” `.js` 备份；数据桥已内嵌到转换后的角卡，无需导入，该 `.js` 也不是酒馆助手的 `.json` 导入包。
 
  > 如果卡片既没有 `[InitVar]` 世界书条目，问候语/其它世界书条目中也没有可解析的 `<initvar>` 分支（不是 MVU 变量卡，或 initvar 缺失），转换会**明确中止**并提示原因，不会产出残缺的转换结果。无 `[InitVar]` 但问候语含 `<initvar>` 时，转换器会以首个含 `<initvar>` 的分支为结构与初始值基准继续转换。
@@ -117,13 +117,16 @@
 循环、函数调用、`<%- %>` 输出等）原样保留，只把 MVU 的数据读取
 `getvar('stat_data.路径')` / `getvar("stat_data").组.字段` / `_.has(getvar("stat_data"), …)`
 改写为 `mvu2shujukuGetAllVariables().stat_data.路径`。转换器同时识别常见的
-`getAllVariables().stat_data`、`allVariables().stat_data`、`all_variables.stat_data` 与
+`getAllVariables().stat_data`、`allVariables().stat_data`、`all_variables.stat_data`、
+`window.stat_data` / `globalThis.stat_data` 与
 `TavernHelper.getVariables().stat_data`。扩展和卡内数据桥都会把该函数注册进
 st-prompt-template 的模板上下文（`EjsTemplate.defines`），因此只导入转换卡时也可读取，并用卡内布局 +
 插件表格**惰性重建** stat_data（每次调用实时读表，数据只存一份、无冗余同步、不依赖卡内桥）。
 唯一名字避免撞名；状态栏用的 `window.getAllVariables` 也由扩展提供。
 仅在 EJS 条件中出现、不在 `[InitVar]` 里的字段（如分段阈值）也会补进列定义。
 无法安全识别的动态读取会列入转换报告的「需人工处理」，不会静默误改。
+若 st-prompt-template 合并多个世界书条目时遇到跨条目的 `const/let/class x` 与
+`if (typeof x === 'undefined') var x = ...;` 回退声明冲突，转换器会只隔离这一精确匹配的回退条目，并在转换报告中记录。
 
 设置面板可选开启“安全的简单 EJS 条件翻译”：仅将无 `else`、无嵌套、静态字段与
 字面量比较的简单 `<% if %>` 转为数据库 `<if db>`；复杂分支、循环和函数仍保留 EJS。
