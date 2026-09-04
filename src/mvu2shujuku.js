@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.3.7';
+    const VERSION = '0.3.8';
 
     // debug 开关：默认关闭。UI 设置面板勾选后写入 window.__mvu2shujukuDebug，
     // 两个执行作用域（转换器核心 / 扩展 UI）的 dbg/dbgWarn 都读这个全局标记。
@@ -51,12 +51,12 @@
         'function mvu2shujukuExpectedColumns(tpl){var map={};if(!tpl||typeof tpl!=="object")return map;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object"||typeof s.name!=="string")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];var cols=[];for(var i=1;i<hdr.length;i++){if(cols.indexOf(hdr[i])===-1)cols.push(hdr[i]);}map[s.name]=cols;}return map;}',
         'function mvu2shujukuMissingColumns(api,expected){var all={};try{all=api.exportTableAsJson()||{};}catch(e){}var have={};for(var k in all){if(k.indexOf("sheet_")===0&&all[k]&&typeof all[k].name==="string")have[all[k].name]=all[k];}var mismatch=[];for(var name in expected){var sheet=have[name];if(!sheet)continue;var hdr=Array.isArray(sheet.content)&&Array.isArray(sheet.content[0])?sheet.content[0]:[];var exp=expected[name];for(var i=0;i<exp.length;i++){if(hdr.indexOf(exp[i])===-1){mismatch.push(name+"(缺列:"+exp[i]+")");break;}}}return mismatch;}',
         // 世界书的 substituteParams 发生在正文注入链上；数据库模板是直接解码导入，必须在这里显式调用同一原生接口。
-        // 仅处理 content 数据行与 seedRows；表名和表头是固定结构，若包含宏则明确报错。
+        // 仅处理 content 数据行与 seedRows；表名中的宏已在转换时静态规范化，表头仍是不可含运行时宏的固定结构。
         'function mvu2shujukuMacroMark(s){s=String(s==null?"":s);return /<(?:USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/i.test(s)||/\\{\\{[\\s\\S]*?\\}\\}/.test(s);}',
         'function mvu2shujukuMacroEnv(){var win=(typeof window!=="undefined"?window:(typeof globalThis!=="undefined"?globalThis:null));var tries=[];function add(w){try{if(w&&tries.indexOf(w)===-1)tries.push(w);}catch(e){}}add(win);if(win){try{add(win.parent);}catch(e){}try{add(win.top);}catch(e){}}for(var i=0;i<tries.length;i++){var w=tries[i],ctx=null;try{if(w.SillyTavern&&typeof w.SillyTavern.getContext==="function")ctx=w.SillyTavern.getContext();}catch(e){}try{if(!ctx&&typeof w.getContext==="function")ctx=w.getContext();}catch(e){}if(ctx&&typeof ctx.substituteParams==="function")return {ctx:ctx,fn:ctx.substituteParams,holder:w};}return null;}',
         'function mvu2shujukuMacroCacheKey(seed,ctx){var s=String(seed||"")+"|"+String(ctx&&(ctx.chatId||ctx.chat_id||ctx.chatFile||ctx.chatFileName)||"unknown");var h=2166136261;for(var i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return String(h>>>0);}',
         'function mvu2shujukuCheckRowKeyCollision(rows,start,sheet){var ddl=String(sheet&&sheet.sourceData&&sheet.sourceData.ddl||"");var um=ddl.match(/\\bUNIQUE\\s*\\(([^)]+)\\)/i);var keyCount=um?um[1].split(",").length:(/\\bUNIQUE\\b/i.test(ddl)?1:0);if(!keyCount||!Array.isArray(rows))return;var seen={};for(var i=start;i<rows.length;i++){var row=rows[i];if(!Array.isArray(row)||row.length<keyCount+1)continue;var vals=[];for(var k=0;k<keyCount;k++)vals.push(String(row[k+1]==null?"":row[k+1]));if(vals.some(function(v){return !v;}))continue;var key=vals.join("\\u0000");if(seen[key])throw new Error("表「"+String(sheet&&sheet.name||"")+"」宏替换后键名冲突："+vals.join(" / "));seen[key]=true;}}',
-        'function mvu2shujukuResolveTemplateMacros(tpl,seed){var has=false;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object")continue;if(mvu2shujukuMacroMark(s.name))return {ok:false,status:"error",message:"表名不支持运行时宏："+s.name};var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];for(var hi=0;hi<hdr.length;hi++)if(mvu2shujukuMacroMark(hdr[hi]))return {ok:false,status:"error",message:"固定列名不支持运行时宏："+hdr[hi]};var lists=[];if(Array.isArray(s.content))lists.push({rows:s.content,start:1});if(Array.isArray(s.seedRows))lists.push({rows:s.seedRows,start:0});for(var li=0;li<lists.length;li++){var rs=lists[li].rows;for(var ri=lists[li].start;ri<rs.length;ri++){var row=rs[ri];if(!Array.isArray(row))continue;for(var ci=0;ci<row.length;ci++)if(typeof row[ci]==="string"&&mvu2shujukuMacroMark(row[ci]))has=true;}}}if(!has)return {ok:true,template:tpl};var env=mvu2shujukuMacroEnv();if(!env)return {ok:false,status:"partial",message:"初始数据含有 SillyTavern 宏，但 substituteParams 尚未就绪，等待重试"};var ck=mvu2shujukuMacroCacheKey(seed,env.ctx);var holder=env.holder||{};var cache=holder.__mvu2shujukuResolvedMacroTemplates||(holder.__mvu2shujukuResolvedMacroTemplates={});if(cache[ck])return {ok:true,template:cache[ck]};var out=JSON.parse(JSON.stringify(tpl));try{for(var k2 in out){if(k2.indexOf("sheet_")!==0)continue;var sh=out[k2];if(!sh||typeof sh!=="object")continue;var sets=[];if(Array.isArray(sh.content))sets.push({rows:sh.content,start:1});if(Array.isArray(sh.seedRows))sets.push({rows:sh.seedRows,start:0});for(var si=0;si<sets.length;si++){var rows=sets[si].rows;for(var r=sets[si].start;r<rows.length;r++){if(!Array.isArray(rows[r]))continue;for(var c=0;c<rows[r].length;c++){if(typeof rows[r][c]==="string")rows[r][c]=String(env.fn.call(env.ctx,rows[r][c]));}}mvu2shujukuCheckRowKeyCollision(rows,sets[si].start,sh);}}}catch(e){return {ok:false,status:"error",message:e&&e.message?e.message:String(e)};}cache[ck]=out;return {ok:true,template:out};}',
+        'function mvu2shujukuResolveTemplateMacros(tpl,seed){var has=false;for(var k in tpl){if(k.indexOf("sheet_")!==0)continue;var s=tpl[k];if(!s||typeof s!=="object")continue;var hdr=Array.isArray(s.content)&&Array.isArray(s.content[0])?s.content[0]:[];for(var hi=0;hi<hdr.length;hi++)if(mvu2shujukuMacroMark(hdr[hi]))return {ok:false,status:"error",message:"固定列名不支持运行时宏："+hdr[hi]};var lists=[];if(Array.isArray(s.content))lists.push({rows:s.content,start:1});if(Array.isArray(s.seedRows))lists.push({rows:s.seedRows,start:0});for(var li=0;li<lists.length;li++){var rs=lists[li].rows;for(var ri=lists[li].start;ri<rs.length;ri++){var row=rs[ri];if(!Array.isArray(row))continue;for(var ci=0;ci<row.length;ci++)if(typeof row[ci]==="string"&&mvu2shujukuMacroMark(row[ci]))has=true;}}}if(!has)return {ok:true,template:tpl};var env=mvu2shujukuMacroEnv();if(!env)return {ok:false,status:"partial",message:"初始数据含有 SillyTavern 宏，但 substituteParams 尚未就绪，等待重试"};var ck=mvu2shujukuMacroCacheKey(seed,env.ctx);var holder=env.holder||{};var cache=holder.__mvu2shujukuResolvedMacroTemplates||(holder.__mvu2shujukuResolvedMacroTemplates={});if(cache[ck])return {ok:true,template:cache[ck]};var out=JSON.parse(JSON.stringify(tpl));try{for(var k2 in out){if(k2.indexOf("sheet_")!==0)continue;var sh=out[k2];if(!sh||typeof sh!=="object")continue;var sets=[];if(Array.isArray(sh.content))sets.push({rows:sh.content,start:1});if(Array.isArray(sh.seedRows))sets.push({rows:sh.seedRows,start:0});for(var si=0;si<sets.length;si++){var rows=sets[si].rows;for(var r=sets[si].start;r<rows.length;r++){if(!Array.isArray(rows[r]))continue;for(var c=0;c<rows[r].length;c++){if(typeof rows[r][c]==="string")rows[r][c]=String(env.fn.call(env.ctx,rows[r][c]));}}mvu2shujukuCheckRowKeyCollision(rows,sets[si].start,sh);}}}catch(e){return {ok:false,status:"error",message:e&&e.message?e.message:String(e)};}cache[ck]=out;return {ok:true,template:out};}',
         // 聊天里是否已存在 full checkpoint：表格数据以持久化的 checkpoint 为准。
         // 插件回放是异步的，刷新/切聊天时运行时表格可能暂时为空，仅凭 exportTableAsJson
         // 判断“缺表”会误触发 initGameSession(默认模板)，把带数据的好 checkpoint 覆盖成默认值。
@@ -3169,6 +3169,7 @@
     function buildSchema(initvar, usage, report, shapeInfo) {
         const groups = [];
         const seenTables = new Set();
+        const reportedStructuralMacros = new Set();
         const usedTableIdents = new Set();
         const shapes = (shapeInfo && shapeInfo.shapes) || {};
         const shapeObjects = (shapeInfo && shapeInfo.objects) || {};
@@ -3311,8 +3312,49 @@
             return column;
         }
 
+        function normalizeStructuralMacroName(value) {
+            const original = String(value == null ? '' : value);
+            let changed = false;
+            const normalizeBody = (body) => {
+                const normalized = String(body == null ? '' : body)
+                    .trim()
+                    .replace(/::+/g, '_')
+                    .replace(/[^A-Za-z0-9_\u3400-\u9fff]+/g, '_')
+                    .replace(/_+/g, '_')
+                    .replace(/^_+|_+$/g, '');
+                return normalized || 'macro';
+            };
+            let normalized = original.replace(/\{\{([\s\S]*?)\}\}/g, (_match, body) => {
+                changed = true;
+                return normalizeBody(body);
+            });
+            normalized = normalized.replace(/<(USER|BOT|CHAR|CHARIFNOTGROUP|GROUP)>/gi, (_match, body) => {
+                changed = true;
+                return normalizeBody(body.toLowerCase());
+            });
+            if (changed && !reportedStructuralMacros.has(original)) {
+                reportedStructuralMacros.add(original);
+                report.note(`表名宏「${original}」已静态规范化为「${normalized}」；该结构名不再运行时求值，MVU 逻辑路径仍保留原名。`);
+            }
+            return normalized;
+        }
+
         function makeGroupTableName(groupName) {
-            return `${groupName}表`;
+            return `${normalizeStructuralMacroName(groupName)}表`;
+        }
+
+        function claimTopLevelTableName(groupName) {
+            const preferred = makeGroupTableName(groupName);
+            let tableName = preferred;
+            if (seenTables.has(tableName)) {
+                const stem = tableName.endsWith('表') ? tableName.slice(0, -1) : tableName;
+                let n = 2;
+                while (seenTables.has(`${stem}${n}表`)) n++;
+                tableName = `${stem}${n}表`;
+                report.note(`表名「${preferred}」静态规范化后重名（组「${groupName}」），使用「${tableName}」。`);
+            }
+            seenTables.add(tableName);
+            return tableName;
         }
 
         // 从嵌套路径派生的表统一保留完整来源路径。除了避免同名子表碰撞，
@@ -3330,10 +3372,10 @@
                 continue;
             }
             const raw = initvar[groupName];
+            const tableName = claimTopLevelTableName(groupName);
             if (!isPlainObject(raw)) {
                 // 顶层非对象（数组/标量/null）：数组按数组表，其余按单行 JSON 表。
                 // null 是合法状态值，不能当“无数据”跳过。
-                const tableName = makeGroupTableName(groupName);
                 const keyCol = '键名';
                 const isArray = Array.isArray(raw);
                 if (isArray) {
@@ -3356,7 +3398,6 @@
                             childTables: [],
                             source: 'top-level-array',
                         });
-                        seenTables.add(tableName);
                     continue;
                 }
                 // 顶层标量（含 null）：值不能丢。按整组 JSON 表存并原样还原。
@@ -3387,16 +3428,10 @@
                         source: 'top-level-scalar',
                         reminders: ruleReminders[groupName] || [],
                     });
-                seenTables.add(tableName);
                 continue;
             }
 
             const kind = deriveKind(groupName, raw);
-            const tableName = makeGroupTableName(groupName);
-            if (seenTables.has(tableName)) {
-                report.warn(`表名「${tableName}」重复（组「${groupName}」），追加序号`, 'schema');
-            }
-            seenTables.add(tableName);
 
             // 键列名统一为「键名」（键列存的是 stat_data 对象字典里的键，
             // 如 技能1/西园寺爱丽莎；标量/JSON 表存的是组名）。
@@ -3982,16 +4017,13 @@
             }
             for (const ct of g.childTables) {
                 let tableName = makePathTableName(ct.path, ct.key);
-                const parentName = ct.path && ct.path.length ? String(ct.path[0]) : String(g.name || '');
                 if (seenTables.has(tableName)) {
                     // 完整路径仍可能因源数据本身重名，保留稳定编号作为最后兜底。
-                    let alt = tableName;
-                    if (seenTables.has(alt)) {
-                        let n = 2;
-                        while (seenTables.has(alt + n)) n++;
-                        alt = alt + n;
-                    }
-                    report.note(`派生表路径「${(ct.path || [parentName, ct.key]).join('.')}」与其他表重名，使用表名「${alt}」。`);
+                    const stem = tableName.endsWith('表') ? tableName.slice(0, -1) : tableName;
+                    let n = 2;
+                    while (seenTables.has(`${stem}${n}表`)) n++;
+                    const alt = `${stem}${n}表`;
+                    report.note(`派生表路径「${(ct.path || [g.name, ct.key]).join('.')}」与其他表重名，使用表名「${alt}」。`);
                     tableName = alt;
                 }
                 seenTables.add(tableName);
@@ -4772,9 +4804,9 @@
     function buildNote(group) {
         const L = [];
         const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
-        // 用户级只读字段（_ 前缀、排除内部溢出列 _扩展数据）；仅这类字段值得在 note 里说明，
-        // 否则“下划线字段已隐藏”还要再解释一遍只读规则反而占提示词、且与隐藏矛盾。
-        const userReadonlyCols = (group.columns || []).filter(c => String(c.zh).startsWith('_') && c.zh !== '_扩展数据');
+        // 所有下划线前缀列都是只读状态；内部溢出列 _扩展数据虽不进列定义/写入示例，
+        // 但 AI 仍能在真实表头/DDL 里看到，因此同样要触发现有只读提示。
+        const userReadonlyCols = (group.columns || []).filter(c => String(c.zh).startsWith('_'));
         const hasUserReadonly = userReadonlyCols.length > 0;
         const allReadonly = hasUserReadonly && aiCols.length === 0;
         if (group.kind === 'json') {
@@ -4880,22 +4912,29 @@
                 groupedRuleOwner.set(cols[0], { label, cols });
                 for (let i = 1; i < cols.length; i++) groupedRuleOwner.set(cols[i], null);
             }
+            const emitColumnRules = (label, items) => {
+                const rules = items.map(x => String(x == null ? '' : x).trim()).filter(Boolean);
+                if (!rules.length) return;
+                if (rules.length === 1) {
+                    L.push(`- ${label}：${rules[0]}`);
+                    return;
+                }
+                L.push(`- ${label}：`);
+                for (const rule of rules) L.push(`  - ${rule}`);
+            };
             for (const c of aiCols) {
                 const view = ruleViews.get(c);
                 const grouped = groupedRuleOwner.get(c);
-                if (grouped) {
-                    if (view.parts.length) L.push(`- ${grouped.label}：${view.parts.join('；')}`);
-                    for (const rule of view.checks) L.push(`- ${grouped.label}：${rule}`);
-                } else if (grouped !== null) {
-                    if (view.parts.length) L.push(`- ${c.zh}：${view.parts.join('；')}`);
-                    for (const rule of view.checks) L.push(`- ${c.zh}：${rule}`);
-                }
                 // 真实字段说明（如 [值,说明] 的更新条件）；通用描述（唯一标识/键名/JSON 提示）不重复
                 let desc = c.desc ? String(c.desc).replace(/\n/g, ' ').trim() : '';
                 // 关系列的关联含义已经在表级说明中完整表达，不再作为“强制约束”重复一遍。
                 if (group.kind === 'nestedRows' && (c.zh === group.keyCol || (group.ancestorKeyCols || []).some(a => a.col === c.zh) || c.zh === group.parentKeyCol)) desc = '';
                 const generic = desc === '唯一标识' || desc === '对象（JSON 存储，读取时还原）';
-                if (desc && !generic) L.push(`- ${c.zh}：${desc}`);
+                if (grouped) {
+                    emitColumnRules(grouped.label, [...view.parts, ...view.checks, (!generic ? desc : '')]);
+                } else if (grouped !== null) {
+                    emitColumnRules(c.zh, [...view.parts, ...view.checks, (!generic ? desc : '')]);
+                }
             }
             // 子表/动态字典的组级规则（如 世界.动向 的“最多维持2个大事件”）：以表级约束列出
             // 注意：这些行已位于本表自己的 note 内，不再重复表名前缀（避免“道侣表：性别：…”式噪音）
@@ -4917,9 +4956,6 @@
                 if (wr.format) parts.push(`格式：${wr.format}`);
                 parts.push(...(wr.checks || []).map(rule => sanitizeCheckRule(rule, { group })).filter(Boolean));
                 if (parts.length) L.push(`- ${wr.path}（${parts.join('；')}）`);
-            }
-            for (const c of aiCols) {
-                if (c.check && c.check.length > 20) L.push(`- ${c.zh}：…（共 ${c.check.length} 条规则，其余略）`);
             }
             (group.reminders || []).forEach(r => L.push(`- 每次回复必须维护：${r}`));
         }
