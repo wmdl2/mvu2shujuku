@@ -1,6 +1,6 @@
 # MVU 转换与兼容清单
 
-> 适用于 MVU转数据库 v0.3.6。本文用于说明哪些 MVU 内容可以转换、哪些运行时行为由兼容层接管，以及当前无法等价模拟的边界。
+> 适用于 MVU转数据库 v0.3.7。本文用于说明哪些 MVU 内容可以转换、哪些运行时行为由兼容层接管，以及当前无法等价模拟的边界。
 
 这不是对任意 MVU 角色卡“零风险完全兼容”的承诺。转换器会尽可能保留无法静态确认的业务脚本，并在转换报告中列出需要人工核对的项目。依赖 MVU 私有内部状态、未知外部脚本或复杂动态 EJS 的卡，转换后仍应实际测试。
 
@@ -32,6 +32,7 @@
 - 官方数组 `$arrayMeta` 元元素与 `$__META_EXTENSIBLE__$` 魔法标记
 - 根 `$meta` 中的 `strictTemplate`、`strictSet`、`concatTemplateArray` 初始化识别
 - 与官方 `cleanUpMetadata` 等价的元数据清理：保留结构提示，不让保留键进入 `stat_data`
+- 新聊天若仅有一个非用户首楼，且运行时明确存在当前模板之外的外来表、同时当前模板缺表，可安全替换异卡 full checkpoint；已有任何用户楼层时绝不自动重置
 
 ## 2. 数据结构转表
 
@@ -269,7 +270,8 @@ EJS 世界书、`format_message_variable`、状态栏与前端共用实时读取
 - 删除纯 `registerMvuSchema(...)` Schema 注册脚本
 - 不因文件名或 URL 中简单出现 `mvu` 就删除
 - 混合了剧情/EJS 与 `<UpdateVariable>`/`<JSONPatch>` 的世界书条目完整保留，更新块仍由数据桥执行
-- 仅删除可确认属于初始化或纯 MVU 变量输出管线的世界书条目
+- 删除可确认属于初始化、已迁移规则或纯 MVU 变量输出管线的世界书条目；无 `[mvu_update]` 前缀的“变量更新规则”“变量处理指令集”等专名会结合正文结构识别
+- 删除只影响转换副本；不使用 `if (false)` 保存旧 MVU 管线，因为 EJS 仍会编译 false 分支并可能触发语法/重复声明错误
 - `format_message_variable`、`get_message_variable` 与 `getvar(stat_data...)` 属于读取证据，本身不会触发整条删除；即使 comment 带 `[mvu_update]`，业务机制正文仍保留
 - `getvar('stat_data.完整.路径', { defaults: ... })` 迁移为安全路径读取，中间对象缺失时与原函数一样返回 `undefined`/默认值；只读取 `getvar('stat_data')` 根对象的官方教程写法仍返回完整对象
 - 直接保存到 SillyTavern 后，按创建接口返回的头像名和完整卡转换标记复核 `tavern_helper`；兼容 `lazyLoadCharacters` 浅列表，也不会误命中同名旧卡

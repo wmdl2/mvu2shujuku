@@ -1,5 +1,12 @@
 # 更新日志
 
+## v0.3.7（2026-09-04）
+
+- 修复保存转换卡后复核酒馆助手脚本时报 `deepClone is not defined`：UI 独立作用域现在使用自身的 JSON 副本写入 ST 官方 `writeExtensionField`，并通过真实保存流程回归测试覆盖。
+- 兼容没有 `[mvu_update]` 前缀、但以“变量更新规则”“变量处理指令集”等专名存在的纯 MVU 世界书条目。规则约束先迁入数据库表备注，再从转换副本移除；含剧情或业务 EJS 的混合主控条目仍完整保留。
+- 修复新聊天被 SP·数据库初始化竞态挂上其他角色卡 full checkpoint 后，当前卡模板永远不建表、JSONPatch 因跨布局保护而无法写入的问题。仅当聊天恰有一个非用户首楼、运行时明确存在当前模板之外的表且当前模板缺表时，才用当前卡模板重建；出现任何用户楼层后绝不自动覆盖。
+- 异卡 checkpoint 恢复后按“新初始化”继续应用首楼 `<initvar>` / `<UpdateVariable>` / `<JSONPatch>`，不会误登记为旧聊天历史；兼容桥同样发布 fresh checkpoint 标记供扩展接管。
+
 ## v0.3.6（2026-09-04）
 
 - 修复 SillyTavern 开启 `lazyLoadCharacters` 后，新建角色列表不携带 `extensions.mvu2shujuku` 导致保存后误报“未能使用 ST 官方字段接口复核”。现在先用 `/api/characters/create` 返回的唯一头像名定位新卡，再按需取完整卡校验 `converter + convertedAt`，同名旧卡不会被覆盖。
