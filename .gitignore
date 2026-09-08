@@ -13,5 +13,8 @@ node_modules/
 DOCUMENTATION.md
 DOCUMENTATION_HISTORY.md
 
+# 本地审查与临时诊断报告
+docs/audits/
+
 # 本地 Codex 指令，不提交到仓库
 AGENTS.md
