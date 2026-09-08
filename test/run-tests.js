@@ -3686,8 +3686,8 @@ test('开场整表快速路径先追平 prev，再应用部分 next，不回滚�
     assert.ok(!r.bridgeScript.includes("cm0.role==='user'"), '用户楼可能先于最终开场快照建立，不应据此退出初始化阶段');
     assert.ok(r.bridgeScript.includes('openingBulkClosedChats[currentChatKey()]=true'), '卡内桥应在真正处理 AI 更新时关闭初始化阶段');
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
-    assert.ok(source.includes('openingBulkClosedChats.add(autoInitChatId())'), '扩展应在真正处理 AI 更新时关闭初始化阶段');
-    assert.ok(source.includes('}, false, true);') && source.includes('explicitInitialization'), '明确的 <initvar> 分支写入应标记为初始化，不依赖普通 replaceMvuData 猜测');
+    assert.ok(source.includes('openingBulkClosedChats.add(runtimeScopedChatKey(autoInitChatId()))'), '扩展应按角色和聊天关闭初始化阶段');
+    assert.ok(source.includes('}, false, true, chatKey, session);') && source.includes('explicitInitialization'), '明确的 <initvar> 分支写入应携带初始化标记与来源会话');
 });
 
 test('native / sqlite 单模式', () => {
@@ -4476,11 +4476,13 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
     const files = core.assembleExtension({ coreSource });
     const index = files['index.js'];
     // 桥 getAllVariables 行表分支：读回必须是 {键: 标量}（状态栏 typeof==='string' 才能命中）
-    assert.ok(index.includes('if(L.scalarValueCol){'), '桥 getAllVariables 应含 scalarValueCol 读回分支');
-    assert.ok(index.includes('dict[text(kv)]=svcE?convertCell(svcE[1],sv,svcE[2],svcE[5])'), '桥读回应为 {键: 标量}');
-    // 桥 writeDiffToDb：新行值落 scalarValueCol 列、已有行 colZh 指向 scalarValueCol
-    assert.ok(index.includes('if(L.scalarValueCol&&cp.length===1)'), '桥新行插入应把标量值落到 scalarValueCol 列');
-    assert.ok(index.includes('if(L.scalarValueCol&&parts.length===E.prefix.length+1){colZh=L.scalarValueCol;}'), '桥已有行更新应把 colZh 指到 scalarValueCol 列');
+    assert.ok(index.includes('tableCodec.statDataFromTables(SD_LAYOUT,tablesSnap)'), '桥应委派共用表格投影');
+    const scalarProjection = core.statDataFromTables([
+        { kind: 'rows', group: '秘闻', table: '秘闻表', keyCol: '标题', scalarValueCol: '描述', cols: [['描述', 'text', '']], writePaths: [['秘闻']] },
+    ], { sheet_story: { name: '秘闻表', content: [['row_id', '标题', '描述'], [1, '第一条', '秘闻正文']] } });
+    assert.deepStrictEqual(scalarProjection.stat_data.秘闻, { 第一条: '秘闻正文' }, '共用投影读回应为 {键: 标量}');
+    // 桥写入复用已经覆盖 scalarValueCol 插入/更新行为的同一工厂。
+    assert.ok(index.includes('bridgeTableWriter.writeStatDiffToDb(API,SD_LAYOUT,prev,next)'), '桥应委派共用写入实例');
     // 扩展侧应覆盖桥先定义的 getAllVariables（核心 statDataFromTables 才含 scalarValueCol + 持久化兜底）
     assert.ok(!index.includes("if (typeof window.getAllVariables === 'function') return;"), '扩展 installWindowGetAllVariables 不应因桥已定义而跳过安装');
     assert.ok(index.includes('function ensureActiveLayoutLazy()'), 'EJS 同步执行时应能惰性恢复当前卡布局');
@@ -4490,14 +4492,14 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
     assert.ok(index.includes('hostWindow.setTimeout(ensureWindowStatusPlaceholder, 1200)'),
         '状态栏占位符改写应让位于 MESSAGE_RECEIVED 动态正则注册，避免首次 Ticket/<ellia> 渲染竞态');
     assert.ok(index.includes('hadFullCheckpointBeforeInit'), '重进已有 checkpoint 的聊天不应重放开局 initvar');
-    assert.ok(index.includes('await scheduleWindowStatOverlay(nextStat)'), 'Mvu.replaceMvuData 必须等待扩展合并写入真正落定');
+    assert.ok(index.includes('await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, shimSession)'), 'Mvu.replaceMvuData 必须等待来源会话的合并写入真正落定');
     assert.ok(index.includes('await scheduleStatOverlay(nextStat)'), '卡内桥的 Mvu.replaceMvuData 也必须等待写入落定');
     assert.ok(index.includes('function recoverOpeningContinuity(reason)'), '扩展应具备开场 checkpoint 载体丢失恢复');
     assert.ok(index.includes('async function applyPendingMessageUpdateBlocks()'), '扩展作为唯一 runtime owner 时必须接管后续消息 UpdateVariable/JSONPatch');
     assert.ok(index.includes("const updateSource = messageUpdateBlocks(text);"), '首楼初始化应同时读取同一分支的更新块');
     assert.ok(index.includes('finalWrap = await runMvuUpdateCycle(text, finalWrap);'), '首楼应按 MVU 顺序在 initvar 后执行 UpdateVariable/JSONPatch');
     assert.ok(index.includes('preparedTemplate: preparedOpening.template'), '新聊天应把首楼最终快照并入首次 initGameSession');
-    assert.ok(index.includes("}, false, true);"), '首楼 initvar + JSONPatch 最终快照应走一次开局整表初始化');
+    assert.ok(index.includes("}, false, true, chatKey, session);"), '首楼 initvar + JSONPatch 最终快照应携带原会话执行开局整表初始化');
     assert.ok(index.includes("(m ? JSON.stringify(parsed) : 'no-initvar')"), '仅含 JSONPatch 的开场指纹不得依赖执行后会变化的数据库快照');
     assert.ok(!index.includes('stripReadonlyKeys'), '下划线开头的合法业务键不得被当成只读元数据剥除');
     assert.ok(index.includes('mvu2shujukuApplyWorldInfoRegex'), '扩展应注册 WORLD_INFO 正则惰性执行入口');
@@ -6947,17 +6949,18 @@ test('懒加载角色：缓存键用列表对象（带 avatar），开场写入�
     const zj2 = Object.values(tables).find(s => s && s.name === '主角表');
     assert.strictEqual(zj2.content[1][zj2.content[0].indexOf('姓名')], '真实结构注入', '真实 ST 对象形状下开场写入应落库');
 
-    // 头像不一致但卡名相同（列表对象 vs /api/characters/get 完整对象）：布局归属门禁应按卡名兜底，
-    // getAllVariables 不得返回空、前端写入不得被“布局未就绪”丢弃
+    // 两个明确不同的头像不能仅凭同名互认。读取可从当前卡自己的 marker 恢复布局，
+    // 但上一角色的 Mvu 对象不能把旧快照写入当前角色。
     const origAvatar = context.characters[0].avatar;
     context.characters[0].avatar = 'other-avatar.png';
     const gv = win.getAllVariables();
-    assert.strictEqual(gv.stat_data.主角 && gv.stat_data.主角.姓名, '真实结构注入', '头像不一致时读侧仍应按卡名兜底返回数据');
+    assert.strictEqual(gv.stat_data.主角 && gv.stat_data.主角.姓名, '真实结构注入', '读侧可从当前卡自己的 marker 恢复布局');
     context.chat = [{ message_id: 0, mes: '开场白2' }];
-    await win.Mvu.replaceMvuData({ stat_data: { 主角: { 姓名: '头像兜底注入' } } });
+    const staleWrite = await win.Mvu.replaceMvuData({ stat_data: { 主角: { 姓名: '头像兜底注入' } } });
+    assert.strictEqual(staleWrite, false, '旧角色 Mvu 引用必须拒绝在不同头像的当前卡写入');
     await new Promise(res => setTimeout(res, 1000));
     const zj3 = Object.values(tables).find(s => s && s.name === '主角表');
-    assert.strictEqual(zj3.content[1][zj3.content[0].indexOf('姓名')], '头像兜底注入', '头像不一致时写入不应被布局门禁丢弃');
+    assert.strictEqual(zj3.content[1][zj3.content[0].indexOf('姓名')], '真实结构注入', '跨角色写入不得改变数据库');
     context.characters[0].avatar = origAvatar;
 });
 
@@ -9445,7 +9448,8 @@ test('SQLite INTEGER 布尔列读回 stat_data 时恢复 boolean（1.8.1 Zod 开
     const sd = core.statDataFromTables(packed, r.template).stat_data;
     assert.strictEqual(sd.人际网络.故友与同僚.常彪.是否在场, false);
     assert.strictEqual(typeof sd.人际网络.故友与同僚.常彪.是否在场, 'boolean');
-    assert.ok(r.bridgeScript.includes("if(type==='boolean')return boolean(v,fb)"), '卡内桥也必须恢复布尔值');
+    const { win } = bridgeSandbox(r, { extra: { setTimeout() { return 0; }, clearTimeout() {} } });
+    assert.strictEqual(win.getAllVariables().stat_data.人际网络.故友与同僚.常彪.是否在场, false, '卡内桥也必须恢复布尔值');
 });
 
 test('行条目内动态字典用具体实体关联键+键名关系表，嵌套读写不依赖特例', async () => {
@@ -10514,7 +10518,7 @@ test('开局建表：模板数据调用 SillyTavern 原生 substituteParams（�
     assert.ok(!Object.prototype.hasOwnProperty.call(projected.stat_data, '{{user}}'), '不应暴露字面量 {{user}} 逻辑路径');
     assert.strictEqual(people.content[1][people.content[0].indexOf('键名')], '林海');
     assert.deepStrictEqual(Array.from(people.content[0]), ['row_id', '键名', '关系', '_扩展数据'], '表头必须保持固定');
-    assert.deepStrictEqual(Array.from(companions.content.slice(1), row => row[1]), ['林海', '林海'], '数组允许重复元素，不得误当业务键冲突');
+    assert.deepStrictEqual(Array.from(companions.content.slice(1), row => JSON.parse(row[1])), ['林海', '林海'], 'JSON 编码数组允许重复元素，不得误当业务键冲突');
 });
 
 test('Mvu 全局发布协议：initializeGlobal 与初始化事件均执行一次', () => {
@@ -10600,4 +10604,9 @@ test('压缩/复用 Schema 的稳定字段类型：嵌套关系中的 string[] �
     assert.match(sheet.sourceData.ddl, /json_type\([^)]*\) = 'array'/, 'SQLite CHECK 也应约束为 JSON 数组');
 });
 
+require('./audit-regressions');
+require('./refresh-conversion');
+require('./table-codec');
+require('./table-writer');
+require('./bridge-lifecycle');
 runTests(parseArgs());

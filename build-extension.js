@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /*
- * 构建 SillyTavern 原生扩展：读取 src/mvu2shujuku.js，装配出仓库根目录可直接安装的扩展文件。
+ * 构建 SillyTavern 原生扩展：主源码及表格/桥生命周期工厂由 assembleExtension 内联，
+ * 装配出仓库根目录可直接安装的扩展文件，浏览器端无需加载额外模块。
  * 用法：node build-extension.js [输出目录]（默认仓库根目录）
  */
 'use strict';
