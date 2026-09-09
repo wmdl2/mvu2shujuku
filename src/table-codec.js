@@ -104,7 +104,7 @@ function createTableCodec(repairJson) {
                 else if (L.kind === 'pathArray') { setPath(sd, L.path || [L.group], []); }
                 else if (L.kind === 'nestedArray') { /* 同上，不虚构关联键 */ }
                 else if (L.kind === 'array') { sd[L.group] = []; for (const m of L.mirrors || []) setPath(sd, m.path, ''); }
-                else if (L.kind === 'json') { sd[L.group] = {}; }
+                else if (L.kind === 'json') { sd[L.group] = L.scalarType === 'number' ? ((L.cols || [])[0] || [])[2] ?? 0 : {}; }
                 continue;
             }
             // 读方向只认 content（真实数据）：seedRows 是插件"模板基底/待物化"行，
@@ -177,7 +177,10 @@ function createTableCodec(repairJson) {
                 const jrow = sRows[1] || [];
                 const jidx = header.indexOf('内容');
                 const jv = jidx >= 0 ? jrow[jidx] : undefined;
-                const jparsed = parseObject(jv);
+                const numeric = L.scalarType === 'number';
+                const fallback = ((L.cols || [])[0] || [])[2] ?? 0;
+                const n = (typeof jv === 'number' || (typeof jv === 'string' && jv.trim())) ? Number(jv) : NaN;
+                const jparsed = numeric ? (Number.isFinite(n) ? n : fallback) : parseObject(jv);
                 sd[L.group] = jparsed === undefined ? {} : jparsed;
                 for (const m of L.mirrors || []) setPath(sd, m.path, m.mode === 'first' ? (jparsed && typeof jparsed === 'object' && !Array.isArray(jparsed) ? jparsed : '') : jparsed);
             } else if (L.kind === 'nestedRows') {

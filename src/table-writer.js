@@ -146,6 +146,10 @@ function createTableWriter(dependencies) {
                     continue;
                 }
                 if (entry && entry.kind === 'json') {
+                    if (entry.layout.scalarType === 'number' && (typeof nv !== 'number' || !Number.isFinite(nv))) {
+                        markWriteFailure('数值表「' + entry.layout.table + '」只接受有限数字');
+                        continue;
+                    }
                     // JSON 组允许对象、数组和标量；数据形状不能证明调用来自默认值回写。
                     // 统一接收实际变化，后续与数据库当前内容比较以跳过无变化的重复写入。
                     ops.push({ np, entry, value: nv, json: true });
@@ -463,7 +467,11 @@ function createTableWriter(dependencies) {
                     // 插件 SQLite 表带 CHECK json_valid(neirong)，空串/非 JSON 会被拒绝）
                     if (SE0.keyCol && !sObj[SE0.keyCol]) sObj[SE0.keyCol] = SE0.keyValue || 'row1';
                     const jv0 = sObj['内容'];
-                    if (jv0 === undefined || jv0 === null || jv0 === '') sObj['内容'] = '{}';
+                    if (SE0.scalarType === 'number') {
+                        const fallback = ((SE0.cols || [])[0] || [])[2] ?? 0;
+                        sObj['内容'] = jv0 !== '' && jv0 !== null && jv0 !== undefined && Number.isFinite(Number(jv0)) ? Number(jv0) : fallback;
+                    }
+                    else if (jv0 === undefined || jv0 === null || jv0 === '') sObj['内容'] = '{}';
                     else { try { JSON.parse(jv0); } catch (e) { sObj['内容'] = '{}'; } }
                 }
                 try {
@@ -541,7 +549,7 @@ function createTableWriter(dependencies) {
                     dbgWarn(' 整组JSON表「' + L.table + '」缺少「内容」列（旧模板/旧聊天），写入已跳过；请重新转换角色卡并新开聊天。');
                     continue;
                 }
-                const jNew = op.value === undefined || op.value === null ? '{}' : JSON.stringify(op.value);
+                const jNew = L.scalarType === 'number' ? op.value : (op.value === undefined || op.value === null ? '{}' : JSON.stringify(op.value));
                 const jCur = sheet.content[1] ? sheet.content[1][jcIdx] : undefined;
                 if (sameValue(jCur, jNew)) continue;
                 directOps.push({ kind: 'json', key: found.key, sheet, header, layout: L, value: jNew });

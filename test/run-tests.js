@@ -1810,7 +1810,7 @@ test('initvar 注释行不产生变量组，顶层标量原样保留', () => {
     const sheetNames = Object.keys(t).filter(k => k.startsWith('sheet_')).map(k => t[k].name);
     // 1) # 注释行不得成为表
     assert.ok(!sheetNames.some(n => n.startsWith('#')), '注释行不应生成表，实际：' + sheetNames.join('、'));
-    // 2) 顶层标量保留为 JSON 表（内容列）
+    // 2) 顶层数字保留为数值表（内容列；模板单元格统一文本化）
     const cash = t[Object.keys(t).find(k => t[k].name === '现金表')];
     assert.strictEqual(cash.content[1][cash.content[0].indexOf('内容')], '500', '现金初始值应保留');
     const competence = t[Object.keys(t).find(k => t[k].name === '胜任度表')];
@@ -3369,7 +3369,9 @@ test('转换产物齐全', () => {
     assert.ok((c.extensions.regex_scripts || []).some(rx => rx.scriptName === 'XML状态栏'), '非 MVU 显示正则应保留');
     assert.ok(c.extensions.mvu2shujuku, '应有转换标记');
     assert.ok(typeof c.extensions.mvu2shujuku.layout === 'string' && Array.isArray(JSON.parse(c.extensions.mvu2shujuku.layout)), '转换标记应包含布局（供扩展重建 stat_data）');
-    assert.ok(!c.character_book.entries.some(e => /\[initvar\]|\[mvu_update\]|变量列表/i.test(String(e.comment || ''))), 'MVU 世界书条目应被删除');
+    assert.ok(!c.character_book.entries.some(e => /\[initvar\]|变量输出格式强调|变量列表/i.test(String(e.comment || ''))), '初始化和明确的旧输出协议应被删除');
+    assert.ok(c.character_book.entries.some(e => e.comment === '[mvu_update]'), '参考卡的非法 YAML 规则必须保留，不能凭前缀整条删除');
+    assert.ok(r.reportText.includes('无法确认为完整静态规则文档'), '保留不完整规则必须报告人工核对');
     assert.ok(String(c.name).endsWith('_数据库'), '卡名应带 _数据库 后缀');
     if (c.character_book && c.character_book.name) {
         assert.ok(String(c.character_book.name).endsWith('_数据库'), '内嵌世界书名称应加 _数据库 后缀');
@@ -3411,7 +3413,7 @@ test('折叠显示类 MVU 更新块清理正则也保留', () => {
     const rx = out.extensions.regex_scripts || [];
     assert.ok(rx.some(x => x.scriptName === '[折叠]变量更新中'), '折叠显示类清理正则（流式未闭合块）应保留');
     assert.ok(rx.some(x => x.scriptName === '[折叠]完整变量更新'), '折叠显示类清理正则（完整块）应保留');
-    assert.ok(!rx.some(x => x.scriptName === '[美化]变量更新'), '带 MVU API 的美化正则仍应移除');
+    assert.ok(rx.some(x => x.scriptName === '[美化]变量更新'), '匹配更新块并调用兼容 API 不能证明是引擎，业务脚本应保留');
 });
 
 test('INTEGER range 初始值为非数字哨兵时 DDL 放行且默认值保留哨兵', () => {
@@ -3988,7 +3990,7 @@ test('无 MVU 前缀的专用变量规则/处理指令条目被迁移删除，�
     assert.ok(worldSheet && worldSheet.sourceData.note.includes('时间流逝后更新'), '删除世界书规则前必须先把约束迁移进数据库表备注');
 });
 
-test('实际 Zod 卡：转换副本移除无前缀纯 MVU 条目并保留系统主控 EJS', () => {
+test('实际 Zod 卡：保留解析不完整的规则与系统主控 EJS，移除专用输出协议', () => {
     const actualPath = '/mnt/e/Download/MVU_Zod-.png';
     if (!fs.existsSync(actualPath)) {
         console.log('    （跳过：缺少实际 Zod 卡）');
@@ -3997,7 +3999,7 @@ test('实际 Zod 卡：转换副本移除无前缀纯 MVU 条目并保留系统�
     const result = core.convert(fs.readFileSync(actualPath), { mode: 'both' });
     const data = result.card.data || result.card;
     const comments = data.character_book.entries.map(entry => String(entry.comment || ''));
-    assert.ok(!comments.includes('变量更新规则'), '实际卡的规则已迁移，不应重复注入');
+    assert.ok(comments.includes('变量更新规则'), '实际卡规则含非法 YAML，不能因回退提取了部分规则就删除原文');
     assert.ok(!comments.includes('变量处理指令集'), '实际卡的旧 JSONPatch 输出协议应移除');
     assert.ok(comments.includes('系统主控脚本[EJS]'), '实际卡的剧情/校验主控脚本应保留');
     assert.ok(result.meta.tableNames.includes('李慕雪表') && result.meta.tableNames.includes('沈煜表'), '实际卡规则迁移后仍应生成角色表');
@@ -10609,4 +10611,5 @@ require('./refresh-conversion');
 require('./table-codec');
 require('./table-writer');
 require('./bridge-lifecycle');
+require('./card-conversion-fixes');
 runTests(parseArgs());
