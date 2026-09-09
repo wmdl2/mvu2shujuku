@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.3.15';
+    const VERSION = '0.3.17';
 
     let sharedTableCodec = null;
     function getTableCodecFactory() {
@@ -963,8 +963,9 @@
             const v = doc.toJS();
             if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
             let rules = null;
-            if (v['变量更新规则'] && typeof v['变量更新规则'] === 'object' && !Array.isArray(v['变量更新规则'])) {
-                rules = v['变量更新规则'];
+            const wrapper = ['变量更新规则', 'variables_update_rules'].find(k => v[k] && typeof v[k] === 'object' && !Array.isArray(v[k]));
+            if (wrapper) {
+                rules = v[wrapper];
             } else if (Object.keys(v).some(k => /^[\u4e00-\u9fff$]{1,12}$/.test(k) && v[k] && typeof v[k] === 'object' && !Array.isArray(v[k]))) {
                 rules = v; // 没有 变量更新规则 壳，直接是顶层组
             }
@@ -990,7 +991,7 @@
                                 acc.objects[group] = acc.objects[group] || {};
                                 for (const obj of groupObjects) acc.objects[group][obj] = true;
                             }
-                            mergeShapeMetadata(group, gparsed, acc.fieldTypes, acc.objectSchemas);
+                            mergeShapeMetadata(group, gparsed, acc.fieldTypes, acc.objectSchemas, acc.enumPaths, pathArr);
                             if (gparsed.dynamicTop) acc.dynamicGroups.add(group);
                         }
                     }
@@ -1180,7 +1181,7 @@
             acc.objects[tableKey] = acc.objects[tableKey] || {};
             for (const f of parsed.objects) acc.objects[tableKey][f] = true;
         }
-        mergeShapeMetadata(tableKey, parsed, acc.fieldTypes, acc.objectSchemas);
+        mergeShapeMetadata(tableKey, parsed, acc.fieldTypes, acc.objectSchemas, acc.enumPaths, tableParts);
         // ${槽位} 本身就是条目键；dynamicTop 则是显式 [动态键] 字典。
         if (lastIsTemplateKey || parsed.dynamicTop) acc.dynamicPaths.add(fullParts.join('.'));
     }
@@ -1211,7 +1212,7 @@
                         acc.objects[target] = acc.objects[target] || {};
                         for (const obj of targetObjects) acc.objects[target][obj] = true;
                     }
-                    mergeShapeMetadata(target, parsed, acc.fieldTypes, acc.objectSchemas);
+                    mergeShapeMetadata(target, parsed, acc.fieldTypes, acc.objectSchemas, acc.enumPaths, fieldPath);
                     if (parsed.dynamicTop || (parsed.dynamic && parsed.dynamic.length)) {
                         acc.dynamicDicts[group] = acc.dynamicDicts[group] || {};
                         if (parsed.dynamicTop) acc.dynamicDicts[group][field] = true;
@@ -1273,6 +1274,7 @@
         const objectSchemas = {};
         const ranges = {};
         const enums = {};
+        const enumPaths = [];
         const formats = {};
         const checks = {};
         const reminders = {};
@@ -1313,7 +1315,7 @@
             if (collectRulesFromYaml(content, {
                 shapes, objects, fieldTypes, objectSchemas, ranges, enums, formats, checks, reminders, groupChecks, zodDescs,
                 wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups,
-                allCheckItems, checkPaths,
+                allCheckItems, checkPaths, enumPaths,
             })) continue;
             // YAML 失败回退正则：注明原因，便于发现“回退后个别声明丢失”（如大荒组级 type）。
             if (report && (/\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment) || /变量更新规则|变量输出格式/.test(comment))) {
@@ -1469,7 +1471,7 @@
                                 objects[target] = objects[target] || {};
                                 for (const obj of targetObjects) objects[target][obj] = true;
                             }
-                            mergeShapeMetadata(target, parsed, fieldTypes, objectSchemas);
+                            mergeShapeMetadata(target, parsed, fieldTypes, objectSchemas, enumPaths, [group, field]);
                             if (target === group) {
                                 if (!shapes[group].includes(field)) shapes[group].push(field);
                                 objects[group] = objects[group] || {};
@@ -1496,7 +1498,7 @@
                                 objects[target] = objects[target] || {};
                                 for (const obj of targetObjects) objects[target][obj] = true;
                             }
-                            mergeShapeMetadata(target, parsed, fieldTypes, objectSchemas);
+                            mergeShapeMetadata(target, parsed, fieldTypes, objectSchemas, enumPaths, [group, field]);
                             if (parsed.dynamicTop || (parsed.dynamic && parsed.dynamic.length)) {
                                 dynamicDicts[group] = dynamicDicts[group] || {};
                                 if (parsed.dynamicTop) dynamicDicts[group][field] = true;
@@ -1627,7 +1629,7 @@
                     const groupObjects = (parsed.topObjects && parsed.topObjects.length) ? parsed.topObjects : parsed.objects;
                     if (groupObjects.length) objects[group] = objects[group] || {};
                     for (const objField of groupObjects) objects[group][objField] = true;
-                    mergeShapeMetadata(group, parsed, fieldTypes, objectSchemas);
+                    mergeShapeMetadata(group, parsed, fieldTypes, objectSchemas, enumPaths);
                     // 组本身声明为动态键字典（组 type: { [键: type]: {...} }）：
                     // 顶层组按条目行表转换，不能当单例/固定字段表。
                     if (parsed.dynamicTop) dynamicGroups.add(group);
@@ -1765,7 +1767,7 @@
         for (const [field, kinds] of Object.entries(globalFieldKindSets)) {
             if (kinds.size === 1) globalFieldTypes[field] = [...kinds][0];
         }
-        return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, ranges, enums, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, dynamicKeyNames, checkPaths };
+        return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, ranges, enums, enumPaths, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, dynamicKeyNames, checkPaths };
     }
 
     // 手写 MVU Zod 卡把硬 Schema 放在酒馆助手脚本中。这里仅解析可证明安全的
@@ -2352,12 +2354,24 @@
         return /^[\u3400-\u9fffA-Za-z_$][\u3400-\u9fffA-Za-z0-9_$]{0,31}$/.test(String(name || ''));
     }
 
-    function mergeShapeMetadata(target, parsed, fieldTypes, objectSchemas) {
+    function mergeShapeMetadata(target, parsed, fieldTypes, objectSchemas, enumPaths, basePath) {
         if (!target || !parsed) return;
         fieldTypes[target] = fieldTypes[target] || {};
         objectSchemas[target] = objectSchemas[target] || {};
         for (const [field, kind] of Object.entries(parsed.fieldTypes || {})) fieldTypes[target][field] = kind;
         for (const [field, schema] of Object.entries(parsed.objectSchemas || {})) objectSchemas[target][field] = schema;
+        // TS type 块中的字面量联合属于字段约束，按完整逻辑路径保留，避免同名列串表。
+        if (Array.isArray(enumPaths)) {
+            const walk = (node, path) => {
+                if (!node) return;
+                if (node.enum) enumPaths.push({ path, enum: node.enum.slice() });
+                if (node.kind === 'object') {
+                    if (node.dynamic) walk(node.value, path);
+                    for (const [field, child] of Object.entries(node.fields || {})) walk(child, [...path, field]);
+                }
+            };
+            walk(parsed.schema, basePath && basePath.length ? basePath : [target]);
+        }
     }
 
     // 把 TypeScript 风格对象声明解析成保留类型的树。它不是 TS 编译器，只处理 MVU 规则
@@ -2371,6 +2385,10 @@
         const skip = () => { while (i < s.length && /\s/.test(s[i])) i++; };
         const scalarNode = raw => {
             const t = String(raw || '').trim().replace(/[;,]+$/, '').trim();
+            if (/^(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')(?:\s*\|\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'))+$/.test(t)) {
+                const values = t.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g).map(token => getMvuYamlLibs().JSON5.parse(token));
+                return { kind: 'text', raw: t, enum: [...new Set(values)] };
+            }
             if (/^(?:number|integer)\b/i.test(t)) return { kind: 'number', raw: t };
             if (/^boolean\b/i.test(t)) return { kind: 'boolean', raw: t };
             // MVU/Zod 规则既会写具体结构 `{...}` / `T[]`，也常直接写宽类型
@@ -3432,17 +3450,19 @@
                         });
                     continue;
                 }
-                // 顶层标量（含 null）：值不能丢。按整组 JSON 表存并原样还原。
+                // 有限数字使用数值列；其他标量（含 null）保留 JSON 编码。
+                // 仍复用单行整组投影，不把 stat_data.点数 变成 { 内容: 点数 }。
+                const numericScalar = typeof raw === 'number' && Number.isFinite(raw);
                 const usedScalar = new Set(['row_id']);
                 const scalarColumns = [
                         {
                             zh: '内容',
                             path: [groupName, '内容'],
-                            value: '',
-                            desc: '顶层标量（JSON 存储，读取时原样还原；内部数据，AI 不应直接修改）',
-                            type: 'TEXT',
+                            value: numericScalar ? raw : '',
+                            desc: numericScalar ? '顶层数值（直接存储数字，读取时还原原变量）' : '顶层标量（JSON 存储，读取时原样还原；内部数据，AI 不应直接修改）',
+                            type: numericScalar ? 'REAL' : 'TEXT',
                             ident: toIdent('内容', usedScalar, 'column'),
-                            isObject: true,
+                            isObject: !numericScalar,
                         },
                     ];
                 let scalarInit;
@@ -3458,6 +3478,7 @@
                         rows: [[1, scalarInit]],
                         childTables: [],
                         source: 'top-level-scalar',
+                        scalarType: numericScalar ? 'number' : undefined,
                         reminders: ruleReminders[groupName] || [],
                     });
                 continue;
@@ -4396,6 +4417,7 @@
         const ruleZodDescs = (shapeInfo && shapeInfo.zodDescs) || {};
         const ruleWildcardRules = (shapeInfo && shapeInfo.wildcardRules) || {};
         const ruleCheckPaths = (shapeInfo && shapeInfo.checkPaths) || [];
+        const ruleEnumPaths = (shapeInfo && shapeInfo.enumPaths) || [];
         const ruleReminders = (shapeInfo && shapeInfo.reminders) || {};
 
         // 规则中的 <角色名> / ${条目名} 是动态字典键，而关系表的列路径只保存
@@ -4580,6 +4602,8 @@
                 // 按完整书写路径合并所有同字段规则。多个 [mvu_update] 条目或 YAML+Zod
                 // 可以同时补充 check/range/format，不能只取其中“最佳一条”而覆盖其余。
                 const colPath = c.path || [g.name, c.zh];
+                const enumMatches = !c.isObject ? matchingPathRules(colPath, ruleEnumPaths, e => e.enum) : [];
+                if (enumMatches.length) c.enum = enumMatches[0].list.slice();
                 const matches = [
                     ...matchingPathRules(colPath, ruleCheckPaths.filter(e => !e.tableLevel), e => e.list),
                     ...matchingPathRules(colPath, g.wildcardRules || [], e => e.checks),
@@ -4752,7 +4776,7 @@
                     }
                 }
             }
-            if (c.type === 'INTEGER') {
+            if (c.type === 'INTEGER' || c.type === 'REAL') {
                 let defaultExpr = 0;
                 if (typeof dv === 'boolean') {
                     defaultExpr = dv ? 1 : 0;
@@ -4767,6 +4791,7 @@
                     defaultExpr = range[0];
                 }
                 def += ` NOT NULL DEFAULT ${defaultExpr}`;
+                if (includeCheck && group.scalarType === 'number') def += ` CHECK(typeof(${c.ident}) IN ('integer', 'real'))`;
                 if (isKey) def += ' UNIQUE';
                 if (range && includeCheck) {
                     def += ` CHECK(${c.ident} BETWEEN ${range[0]} AND ${range[1]}`;
@@ -4835,6 +4860,15 @@
 
     function buildNote(group) {
         const L = [];
+        if (group.scalarType === 'number') {
+            const rules = [...(group.groupChecks || []), ...(group.wildcardRules || []).flatMap(r => r.checks || [])];
+            L.push('数值表（row_id=1，全表固定一行）：「内容」直接保存一个数字，可含小数；禁止写入对象、数组、布尔值或带引号的 JSON 字符串。禁止新增/删除行。');
+            if (rules.length) {
+                L.push('【更新规则】', ...rules.map(rule => '- ' + sanitizeCheckRule(rule, { group })).filter(s => s !== '- '));
+                L.push('只在本轮发生相应变化时更新数值；未发生变化则保持原值。');
+            } else L.push('本数值由脚本/前端维护，AI 不应直接修改本表。');
+            return L.join('\n');
+        }
         const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
         // 所有下划线前缀列都是只读状态；内部溢出列 _扩展数据虽不进列定义/写入示例，
         // 但 AI 仍能在真实表头/DDL 里看到，因此同样要触发现有只读提示。
@@ -5003,6 +5037,7 @@
     }
 
     function buildInitNode(group) {
+        if (group.scalarType === 'number') return '开局已初始化唯一数值记录（row_id=1）；不得再次初始化或新增/删除行，后续更新遵循 note。';
         if (group.kind === 'json') {
             return ((group.wildcardRules || []).length || (group.groupChecks || []).length)
                 ? `开局模板已初始化整组数据（row_id=1）；自动填表阶段仅按 note 中「可写路径与约束」更新「内容」列，其余由脚本/前端维护。`
@@ -5113,6 +5148,12 @@
     }
 
     function buildNodeProse(group, kind) {
+        if (group.scalarType === 'number') {
+            if (kind !== 'update') return '禁止。';
+            if (!(group.groupChecks || []).length && !(group.wildcardRules || []).length) return '本数值由脚本/前端维护，AI 不应直接修改。';
+            const col = group.columns[0];
+            return `根据 note 中的更新规则修改数值，只允许 UPDATE，禁止 INSERT / DELETE。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = ${col.value} WHERE row_id=1;`;
+        }
         if (group.kind === 'json') {
             if (kind === 'update') {
                 if ((group.wildcardRules || []).length || (group.groupChecks || []).length) {
@@ -5456,7 +5497,7 @@
         // SQLite 用 INTEGER 0/1 存布尔值，但 stat_data 必须恢复为真正的
         // boolean；否则卡内 Zod 结构校验会拒绝数字。
         if (c.logicalType === 'boolean' || typeof c.value === 'boolean') return 'boolean';
-        if (c.type === 'INTEGER') return 'number';
+        if (c.type === 'INTEGER' || c.type === 'REAL') return 'number';
         if (c.isPair) return 'pair';
         return 'text';
     }
@@ -5471,6 +5512,7 @@
             if (g.kind === 'json') {
                 const entry = {
                     kind: 'json',
+                    scalarType: g.scalarType,
                     group: g.name,
                     table: g.tableName,
                     keyCol: g.keyCol,
@@ -5650,6 +5692,7 @@
             path: e.path || [],
             valueCol: e.valueCol || '',
             scalarValueCol: e.scalarValueCol || '',
+            scalarType: e.scalarType,
             emptyValue: Object.prototype.hasOwnProperty.call(e, 'emptyValue') ? e.emptyValue : undefined,
             cols: (e.cols || []).map(c => e.kind === 'singleton'
                 ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
@@ -7394,11 +7437,36 @@
      * ================================================================ */
 
     // 仅当正则明确解析 MVU 专属语法时才移除；显示用正则（data_block/状态栏等）原样保留
+    // 消息前端用 /<%|%>/ 检测模板标签时，EJS 会把它误编译成单个 |。
+    // 仅处理 script 内这类确定的检测字面量；JS 正则和字符串中的字符语义不变。
+    // 同时支持酒馆渲染阶段的 HTML 实体形式，不触碰正常 EJS 表达式。
+    function protectFrontendEjsLiterals(text) {
+        return String(text || '').replace(
+            /(<script\b[^>]*>|&lt;script\b(?:(?!&gt;)[\s\S])*?&gt;)([\s\S]*?)(<\/script\s*>|&lt;\/script\s*&gt;)/gi,
+            (whole, open, body, close) => open + body.replace(/\/(?:<|&lt;)%\|%(?:>|&gt;)\//g, '/\\x3c%|%\\x3e/') + close
+        );
+    }
+
     function isMvuRegex(r) {
-        const content = String(r.replaceString || '') + '\n' + String(r.findRegex || '');
-        // 名称只能帮助报告，不能证明规则属于 MVU。尤其“完整变量显示”常被普通
-        // 角色卡拿来命名任意文本替换；只有匹配/替换内容本身含 MVU 专属协议才可删。
-        return /format_message_variable|status_current_variables|<UpdateVariable\b/i.test(content);
+        // 只删除整个替换体就是旧变量快照输出的规则。匹配目标、名称、
+        // 显示前端中的变量宏/更新块/API 都不能证明整条正则是 MVU 引擎。
+        const replacement = String(r.replaceString || '').trim();
+        return /^(?:\{\{format_message_variable(?:::[^{}]*)?\}\}|<status_current_variables?>\s*\{\{(?:format_message_variable|get_message_variable)::[^{}]+\}\}\s*<\/status_current_variables?>)$/i.test(replacement);
+    }
+
+    function isPureMvuRuleDocument(content) {
+        if (/<%|&lt;%/i.test(content)) return false;
+        try {
+            const clean = String(content).replace(/<!--[\s\S]*?-->/g, '');
+            const doc = getMvuYamlLibs().YAML.parseDocument(protectYamlTemplateScalarValues(clean), { merge: true });
+            if (doc.errors && doc.errors.length) return false;
+            const value = doc.toJS();
+            if (!isPlainObject(value)) return false;
+            const keys = Object.keys(value);
+            const wrapper = keys.find(k => k === '变量更新规则' || k === 'variables_update_rules');
+            if (wrapper) return keys.length === 1 && isPlainObject(value[wrapper]);
+            return keys.length > 0 && keys.every(k => isPlainObject(value[k])) && /(?:^|\n)[ \t]+(?:type|range|check|format)\s*:/m.test(clean);
+        } catch (e) { return false; }
     }
 
     // 这类正则不负责运行 MVU，只在显示/提示词阶段把原始更新块隐藏或折叠起来。
@@ -8150,37 +8218,38 @@
             // [mvu_update] 的剧情/机制文本”。format_message_variable、
             // get_message_variable、getvar(stat_data...) 都只是读取变量，常被业务规则
             // 用作条件或插值；仅凭读取痕迹绝不能整条删除。
-            const mvuPlumbing = /<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]|变量更新规则|变量更新格式|变量列表|变量输出格式/i;
             const explicitUpdateEntry = /\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment);
+            const entryTitle = comment.replace(/\[mvu[ _-]?update\]|\[mvuupdate\]/ig, '').trim();
             // 一部分 Zod 卡没有 [mvu_update] 前缀，只用中文专名区分规则与
             // 输出协议。必须同时校验 comment 和正文结构，避免仅因普通剧情提到
             // “变量更新规则”就删除整个条目。
-            const dedicatedRuleEntry = /^(?:变量(?:更新)?规则|变量规则)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(comment.trim());
-            const dedicatedProtocolEntry = /^变量(?:处理|更新|输出)(?:指令集|指令|协议)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(comment.trim());
-            const dedicatedOutputEntry = /^(?:variables?|output_format)(?:\b|\s|\()/i.test(comment.trim()) ||
-                /变量列表|变量输出格式/i.test(comment) || dedicatedProtocolEntry;
-            const ruleDocumentContent = /(?:^|\n)\s*变量更新规则\s*:|(?:^|\n)[ \t]+(?:type|range|check|format)\s*:/mi.test(content);
-            const outputProtocolContent = /<status_current_variables?|get_message_variable\s*::\s*stat_data|<UpdateVariable|<JSONPatch|json\s*patch|每轮[^\n]{0,40}(?:必须)?输出/i.test(content);
+            const dedicatedRuleEntry = /^(?:变量(?:更新)?规则|变量规则)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(entryTitle);
+            const dedicatedProtocolEntry = /^变量(?:处理|更新|输出)(?:指令集|指令|协议)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(entryTitle);
+            const dedicatedOutputEntry = /^(?:variables?|output_format)(?:\s*\([^)]*\))?$/i.test(entryTitle) ||
+                /^(?:变量列表|变量(?:更新|输出)格式(?:强调)?|变量输出规则)(?:\s*\([^)]*\))?$/i.test(entryTitle) || dedicatedProtocolEntry;
+            const ruleDocumentContent = /(?:^|\n)\s*(?:变量更新规则|variables_update_rules)\s*:|(?:^|\n)[ \t]+(?:type|range|check|format)\s*:/mi.test(content);
+            const outputProtocolContent = /<status_current_variables?|get_message_variable\s*::\s*stat_data|<UpdateVariable|<JSONPatch|json\s*patch|每轮[^\n]{0,40}(?:必须)?输出|^\s*格式:\s*_\.set\s*\(/i.test(content);
             const pureStatusOutput = /^\s*<status_current_variables?>[\s\S]*<\/status_current_variables?>\s*$/i.test(content) &&
                 /get_message_variable|stat_data/i.test(content);
             // 某些卡用单个箭头/图标作为变量管线的起止占位。只识别这种
             // 纯符号 marker；不再用“少于 60 字”猜测，避免删掉 lastUserMessage 等短上下文。
             const purePipelineMarker = explicitUpdateEntry && /变量|更新|输出/i.test(comment) &&
                 /^\s*[🔻🔺▼▲↓↑⬇⬆⏬⏫─━—_=*#.:;\-]+\s*$/u.test(content);
-            const isMvuUpdate =
-                // 显式 [mvu_update] 标记：内容含管道语法或短标记 → 删；内容为剧情文本（如误标条目）→ 保留
-                (explicitUpdateEntry && (mvuPlumbing.test(content) || !String(content).trim() || purePipelineMarker)) ||
-                // 无前缀的专用规则文档：约束已由 parseMvuShapes 迁移到数据库表备注，继续注入只会重复提示。
-                (dedicatedRuleEntry && ruleDocumentContent) ||
-                // 变量输出类条目（comment 含“变量列表/变量输出格式”）→ 删
-                (dedicatedOutputEntry && outputProtocolContent) ||
+            const isMvuUpdate = !isPlot && (
+                (explicitUpdateEntry && (!String(content).trim() || purePipelineMarker)) ||
+                ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent && isPureMvuRuleDocument(content)) ||
+                // 输出文档必须是完整专名；有 EJS 的混合业务不能凭名称删除。
+                (dedicatedOutputEntry && outputProtocolContent && !/<%|&lt;%/i.test(content)) ||
                 // 教程中 comment 可任意命名；整个正文只有变量快照标签时仍是纯输出管线。
-                pureStatusOutput;
+                pureStatusOutput);
             if (isInit || isMvuUpdate) {
                 report.note(`已删除 MVU 世界书条目「${comment}」（${isInit ? '初始变量' : '更新规则'}已迁移为数据库模板/规则）。`);
                 continue;
             }
-            if (!isPlot && !explicitUpdateEntry && !dedicatedOutputEntry && /<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]/i.test(content)) {
+            if ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent) {
+                report.warn(`规则条目「${comment}」无法确认为完整静态规则文档，已保留原条目；已提取的规则可能不完整，请核对后决定是否停用原条目。`, 'schema');
+            }
+            if (!isPlot && /<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]/i.test(content)) {
                 report.note(`世界书条目「${comment}」同时含剧情/EJS 与 MVU 更新块，已完整保留；更新块由数据桥在运行时解析。`);
             }
             // EJS 重写
@@ -8231,6 +8300,8 @@
         const keptRegexes = [];
         const pushFrontendRegex = (rx) => {
             const copy = deepClone(rx);
+            copy.replaceString = rewriteFormatMessageVariableMacros(copy.replaceString || '', report, `正则「${copy.scriptName || copy.name || ''}」`);
+            copy.replaceString = protectFrontendEjsLiterals(copy.replaceString || '');
             const marked = markCardFrontendMode(copy.replaceString || '');
             copy.replaceString = marked.text;
             keptRegexes.push(copy);
@@ -8244,8 +8315,11 @@
                 continue;
             }
             if (isMvuRegex(r)) {
-                report.note(`已移除 MVU 专属正则「${name}」（解析 <UpdateVariable>/format_message_variable 等 MVU 语法）。`);
+                report.note(`已移除纯 MVU 变量快照输出正则「${name}」（整个替换体仅为旧变量快照宏）。`);
                 continue;
+            }
+            if (/format_message_variable|status_current_variables|<UpdateVariable\b/i.test(String(r.replaceString || '') + '\n' + String(r.findRegex || ''))) {
+                report.note(`已保留含 MVU 语法的正则「${name}」：无法证明整个替换体仅为旧变量输出，显示/业务代码交由兼容层运行，请核对实际效果。`);
             }
             // 内联 Vue/React 等消息前端：若只在 mount 时读取一次 message stat_data，
             // 等数据库 getVariables shim 装好后再启动，避免把初始化窗口的空值固化。
@@ -14732,6 +14806,22 @@ ${DB_INIT_SNIPPET}
             dbgWarn(' 扩展侧注册异常:', e);
         }
     }
+    function installFrontendEjsLiteralGuard(prepared) {
+        if (!prepared || prepared.runType !== 'render' || typeof prepared.activateRegex !== 'function') return;
+        const character = currentCharacter();
+        if (!character || !isConvertedMvuCard(character)) return;
+        const core = window.MVU2SHUJUKU_CORE;
+        if (!core || typeof core.protectFrontendEjsLiterals !== 'function') return;
+        const chatKey = autoInitChatId(), cardKey = cardCacheKey(character);
+        // 使用提示词模板公开的临时 HTML 正则阶段，不改楼层原文、全局设置或远端资源。
+        prepared.activateRegex(/[\s\S]+/g, text => {
+            const current = currentCharacter();
+            if (!current || !isConvertedMvuCard(current) || autoInitChatId() !== chatKey || cardCacheKey(current) !== cardKey) return text;
+            return core.protectFrontendEjsLiterals(text);
+        }, { uuid: 'mvu2shujuku-frontend-ejs-literals', basic: false, message: true, generate: false,
+            before: false, after: false, html: true, order: 100000, sticky: 0 });
+    }
+
     function bindDebugHooks(context) {
         const es = context && (context.eventSource || context.event_source);
         if (!es || typeof es.on !== 'function') return;
@@ -14744,6 +14834,7 @@ ${DB_INIT_SNIPPET}
                 // prepare 事件上再直接注入实际执行上下文，避免任意一个 helper
                 // ReferenceError 使 SP 整份提示退回未处理原文。
                 if (prepared && typeof prepared === 'object') Object.assign(prepared, templateDatabaseDefines());
+                installFrontendEjsLiteralGuard(prepared);
                 if (firstPreparedLogged) return;
                 firstPreparedLogged = true;
                 const pageEjs = (typeof window !== 'undefined' && window.EjsTemplate) || null;
@@ -14947,6 +15038,7 @@ ${DB_INIT_SNIPPET}
         writeStatDiffToDb,
         get lastStatWriteFailed() { return getTableWriter().lastStatWriteFailed; },
         rewriteEjsConditions,
+        protectFrontendEjsLiterals,
         translateSimpleEjsConditions,
         toPinyinSlug,
         transformCard,
