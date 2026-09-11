@@ -79,10 +79,8 @@ test('共用编解码：实际生成的旧桥与扩展投影一致，回放空�
 test('共用编解码：生成扩展内联模块，无 Node 模块加载器也能投影', () => {
     const coreSource = fs.readFileSync(path.join(__dirname, '../src/mvu2shujuku.js'), 'utf8');
     const index = core.assembleExtension({ coreSource })['index.js'];
-    const ui = index.lastIndexOf('\n// ============================================================\n// MVU转数据库 · SillyTavern 原生扩展 UI');
-    assert.ok(ui > 0);
     const sandbox = vm.createContext({ console });
-    vm.runInContext(index.slice(0, ui), sandbox);
+    vm.runInContext(index, sandbox);
     assert.strictEqual(typeof sandbox.require, 'undefined');
     assert.deepStrictEqual(plain(sandbox.MVU2SHUJUKU_CORE.statDataFromTables(scalarLayout, scalarTables)), codec.statDataFromTables(scalarLayout, scalarTables));
 });

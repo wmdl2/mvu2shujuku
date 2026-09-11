@@ -15,7 +15,7 @@
 const { test, runTests, parseArgs } = require('./runner');
 const {
     fs, path, os, assert, core, PNG, FIXTURE, HAS_FIXTURE,
-    requireFixture, applyingApi, parseSqlValue, splitSqlValues, applySqlToTables, bridgeSandbox, waitBridgeFlush,
+    requireFixture, legacyBridgeScript, applyingApi, parseSqlValue, splitSqlValues, applySqlToTables, bridgeSandbox, waitBridgeFlush,
 } = require('./helpers');
 
 const SHOW_TEST_SECTIONS = process.argv.includes('--verbose') || process.argv.includes('-v') || /^(?:1|true|yes)$/i.test(String(process.env.TEST_VERBOSE || ''));
@@ -1107,6 +1107,7 @@ test('writeStatDiffToDb：stat_data 差异写回数据库（单例更新/行表�
     };
     const api = {
         exportTableAsJson: () => tables,
+        importTableAsJson: applyingApi(tables).importTableAsJson,
         updateCell: async (tn, ri, col, val) => {
             const s = Object.values(tables).find(x => x.name === tn);
             const ci = s.content[0].indexOf(col);
@@ -1135,7 +1136,7 @@ test('writeStatDiffToDb：stat_data 差异写回数据库（单例更新/行表�
     assert.deepStrictEqual(tables.sheet_3.content.slice(1).map(r => r[1]), ['新1', '新2'], '数组应整体替换');
 });
 
-test('writeStatDiffToDb：多操作走逐条原生 CRUD（不再用 executeSqlBatch），row_id 不冲突', async () => {
+test('writeStatDiffToDb：普通操作走原生 CRUD、数组原子导入，row_id 不冲突', async () => {
     const layout = [
         { kind: 'singleton', group: '系统', table: '系统表', keyCol: '名称', keyValue: '系统', cols: [['名称', 'text', '', '', '', ''], ['当前MC点', 'number', '', '', '', '']], writePaths: [], mirrors: [] },
         { kind: 'rows', group: '角色', table: '角色表', keyCol: '名称', cols: [['名称', 'text', '', '', '', ''], ['好感度', 'number', '', '', '', '']], writePaths: [['角色']], mirrors: [] },
@@ -1149,8 +1150,10 @@ test('writeStatDiffToDb：多操作走逐条原生 CRUD（不再用 executeSqlBa
     };
     let crudCalls = 0;
     let sqlBatchCalls = 0;
+    let importCalls = 0;
     const api = {
         exportTableAsJson: () => tables,
+        importTableAsJson: async data => { importCalls++; return applyingApi(tables).importTableAsJson(data); },
         executeSqlBatch: async () => { sqlBatchCalls++; throw new Error('原生 CRUD 路径不应走 executeSqlBatch'); },
         updateCell: async (tn, ri, col, val) => { crudCalls++; const s = Object.values(tables).find(x => x.name === tn); const ci = s.content[0].indexOf(col); s.content[ri][ci] = val; return true; },
         insertRow: async (tn, data) => {
@@ -1168,7 +1171,8 @@ test('writeStatDiffToDb：多操作走逐条原生 CRUD（不再用 executeSqlBa
     const n = await core.writeStatDiffToDb(api, layout, prev, next);
     assert.ok(n >= 5, '应产生 5 个以上差异操作');
     assert.strictEqual(sqlBatchCalls, 0, '原生 CRUD 路径不应调用 executeSqlBatch');
-    assert.ok(crudCalls >= 5, '多操作应逐条走原生 CRUD');
+    assert.strictEqual(crudCalls, 4, '单例、既有行和两条新行走原生 CRUD');
+    assert.strictEqual(importCalls, 1, '数组多步差量只提交一次');
     assert.strictEqual(tables.sheet_1.content[1][2], 80, '单例更新应生效');
     assert.strictEqual(tables.sheet_2.content[1][2], 5, '行表更新应生效');
     const names = tables.sheet_2.content.slice(1).map(r => r[1]);
@@ -1606,7 +1610,7 @@ test('开局按当前分支注入 <initvar>：切到另一分支后表格更新�
     assert.strictEqual(zj.content[1][ki], '金丹一层', '分支2注入后修为应为金丹一层');
 });
 
-test('单例容器列不覆盖展平字段；空动态字典用其它分支样本推断标量列', async () => {
+test("旧桥回归：单例容器列不覆盖展平字段；空动态字典用其它分支样本推断标量列", async () => {
     const init1 = {
         主角: {
             资产: { 场币: 15000, 仓库: {}, 装备: { 头盔: '(绿)头盔' } },
@@ -1631,7 +1635,7 @@ test('单例容器列不覆盖展平字段；空动态字典用其它分支样�
         },
     };
     const r = core.convert(card, { mode: 'both' });
-    const lm = r.bridgeScript.match(/var SD_LAYOUT=(\[.*?\]);/);
+    const lm = legacyBridgeScript(r).match(/var SD_LAYOUT=(\[.*?\]);/);
     assert.ok(lm, '桥脚本应包含 SD_LAYOUT');
     const layout = JSON.parse(lm[1]);
     const zjLayout = layout.find(e => e.table === '主角表');
@@ -1922,7 +1926,7 @@ test('单例对象列写入：子字段变更整对象写回（jsonCell）', asy
     assert.strictEqual(after.系统._管理考核['上次生成期'], 3, '回读应一致');
 });
 
-test('桥 JSONPatch：标准 <UpdateVariable><JSONPatch> 支持 replace/delta/insert/remove/move', () => {
+test("旧桥回归：桥 JSONPatch：标准 <UpdateVariable><JSONPatch> 支持 replace/delta/insert/remove/move", () => {
     // 从生成的卡内桥提取纯函数（parseUpdateCommands/applyCommandsToStat）做隔离验证
     const card = {
         spec: 'chara_card_v3',
@@ -1934,7 +1938,7 @@ test('桥 JSONPatch：标准 <UpdateVariable><JSONPatch> 支持 replace/delta/in
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const bridge = core.convert(card, { mode: 'both' }).bridgeScript;
+    const bridge = legacyBridgeScript(core.convert(card, { mode: 'both' }));
     const start = bridge.indexOf('function parseCommandValue2');
     const end = bridge.indexOf('function applyPendingUpdateBlocks');
     assert.ok(start >= 0 && end > start, '桥应包含更新块解析函数');
@@ -2176,26 +2180,26 @@ test('官方教程规范写法：getvar("stat_data").组["字段"][0] 与 _.has'
 
 /* ---------------- 数据桥脚本 ---------------- */
 section('generateBridgeScript');
-test('脚本语法与 SD_LAYOUT 结构', () => {
+test("旧桥回归：脚本语法与 SD_LAYOUT 结构", () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
-    new Function(r.bridgeScript);
-    const m = r.bridgeScript.match(/var SD_LAYOUT=(\[.*?\]);/);
+    new Function(legacyBridgeScript(r));
+    const m = legacyBridgeScript(r).match(/var SD_LAYOUT=(\[.*?\]);/);
     assert.ok(m, '应包含 SD_LAYOUT');
     const layout = JSON.parse(m[1]);
     assert.ok(layout.some(e => e.kind === 'singleton' && e.group === '主角'));
     assert.ok(layout.some(e => e.kind === 'rows' && e.group === '储物袋' && e.writePaths[0][0] === '主角'));
     assert.ok(layout.some(e => e.kind === 'array' && e.group === '$器灵台词'));
-    assert.ok(r.bridgeScript.includes('importTemplateFromData'), '应使用 importTemplateFromData 自动建表');
-    assert.ok(r.bridgeScript.includes('initGameSession'), '应使用 initGameSession 做开局初始化（对应 MVU init 时机）');
-    assert.ok(r.bridgeScript.includes('mvu2shujukuMissingTableNames'), '应按模板表名判断缺表，而非仅看是否有任意表');
-    assert.ok(r.bridgeScript.includes('mag_variable_update_ended'), '写库后应广播 MVU 原版的 VARIABLE_UPDATE_ENDED 事件');
+    assert.ok(legacyBridgeScript(r).includes('importTemplateFromData'), '应使用 importTemplateFromData 自动建表');
+    assert.ok(legacyBridgeScript(r).includes('initGameSession'), '应使用 initGameSession 做开局初始化（对应 MVU init 时机）');
+    assert.ok(legacyBridgeScript(r).includes('mvu2shujukuMissingTableNames'), '应按模板表名判断缺表，而非仅看是否有任意表');
+    assert.ok(legacyBridgeScript(r).includes('mag_variable_update_ended'), '写库后应广播 MVU 原版的 VARIABLE_UPDATE_ENDED 事件');
     // EJS 数据函数由扩展注册（桥不在主窗口执行，注册无效）；桥不再包含注册代码
-    assert.ok(!r.bridgeScript.includes('installTemplateDefines'), '桥不应再包含失效的模板注册代码');
-    assert.ok(r.bridgeScript.includes("var embedded=String(BRIDGE_CARD_NAME||'').trim()"), '聊天上下文暂无角色名时应用转换时固化卡名兜底，避免模板名只剩“模板”');
+    assert.ok(!legacyBridgeScript(r).includes('installTemplateDefines'), '桥不应再包含失效的模板注册代码');
+    assert.ok(legacyBridgeScript(r).includes("var embedded=String(BRIDGE_CARD_NAME||'').trim()"), '聊天上下文暂无角色名时应用转换时固化卡名兜底，避免模板名只剩“模板”');
 });
 
-test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
+test("旧桥回归：数据桥 getAllVariables 重建 stat_data（端到端模拟）", () => {
     const vm = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -2229,7 +2233,7 @@ test('数据桥 getAllVariables 重建 stat_data（端到端模拟）', () => {
     win.TextDecoder = TextDecoder;
     win.atob = (s) => Buffer.from(s, 'base64').toString('binary');
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     // 填入一行道侣数据
     const companions = tables[byName('道侣表')];
     const header = companions.content[0];
@@ -2329,7 +2333,7 @@ test('Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessag
         });
 });
 
-test('扩展运行时存在时卡内桥只注册 payload，不启动第二套运行时', () => {
+test("旧桥回归：扩展运行时存在时卡内桥只注册 payload，不启动第二套运行时", () => {
     const vm = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -2343,7 +2347,7 @@ test('扩展运行时存在时卡内桥只注册 payload，不启动第二套运
     };
     win.top = win; win.parent = win; win.window = win;
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     assert.strictEqual(received.length, 1, '桥应只向扩展注册一次卡级 payload');
     assert.ok(Array.isArray(received[0].layout) && received[0].layout.length > 0, 'payload 应携带 layout');
     assert.ok(typeof received[0].templateBase64 === 'string' && received[0].templateBase64.length > 0, 'payload 应携带模板');
@@ -2364,7 +2368,7 @@ test('AI 命令中 _ 前缀字段被跳过，普通字段正常更新', async ()
     assert.strictEqual(parsed.stat_data.主角._隐藏, 1, '_ 前缀字段不应被 AI 命令修改');
 });
 
-test('剧情/EJS 中内嵌 UpdateVariable 应整条保留，MessageVar(stat_data) 改由数据库函数接管', () => {
+test("旧桥回归：剧情/EJS 中内嵌 UpdateVariable 应整条保留，MessageVar(stat_data) 改由数据库函数接管", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -2391,8 +2395,8 @@ test('剧情/EJS 中内嵌 UpdateVariable 应整条保留，MessageVar(stat_data
     assert.ok(plot.content.includes("getMessageVar(ROOM_STATE_KEY"), '动态非 stat_data MessageVar 必须保持原语义');
     assert.strictEqual(r.report.manualReview.length, 0, '同块的普通 getvar/动态 MessageVar 不应被误报为 stat_data 漏接管');
     assert.ok(!entries.some(e => e.comment === 'variables'), '明确的纯变量输出管道仍应删除');
-    assert.ok(r.bridgeScript.includes('mvu2shujukuGetMessageVar') && r.bridgeScript.includes('mvu2shujukuSetMessageVar'), '卡内桥应注册 MessageVar 数据库函数');
-    assert.ok(r.bridgeScript.includes("hasOwnProperty.call(opts,'defaults')"), '卡内桥 MessageVar getter 应兼容酒馆助手 defaults 选项');
+    assert.ok(legacyBridgeScript(r).includes('mvu2shujukuGetMessageVar') && legacyBridgeScript(r).includes('mvu2shujukuSetMessageVar'), '卡内桥应注册 MessageVar 数据库函数');
+    assert.ok(legacyBridgeScript(r).includes("hasOwnProperty.call(opts,'defaults')"), '卡内桥 MessageVar getter 应兼容酒馆助手 defaults 选项');
 });
 
 test('Mvu 兼容层：解析事件按官方顺序触发，COMMAND_PARSED 修改命令后真正生效', async () => {
@@ -2534,7 +2538,7 @@ test('扩展产物：index.js 应包含完整 Mvu 兼容层（事件名/接管/�
 /* ---------------- 空字典组 / 未声明动态字段（通用 JSON 兜底） ---------------- */
 section('JSON 兜底（空字典组 / 未声明字段）');
 
-test('空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删除均可还原', () => {
+test("旧桥回归：空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删除均可还原", () => {
     const vm = require('vm');
     const card = {
         spec: 'chara_card_v3',
@@ -2595,7 +2599,7 @@ test('空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     return (async () => {
         // 对象条目写入
         let mvu = win.Mvu.getMvuData();
@@ -2618,7 +2622,7 @@ test('空字典组（无字段线索）→ 整组 JSON：对象条目/标量/删
     })().catch(e => { throw e; });
 });
 
-test('已声明单例/行表：未声明的动态字段写入 _扩展数据 并读回', () => {
+test("旧桥回归：已声明单例/行表：未声明的动态字段写入 _扩展数据 并读回", () => {
     const vm = require('vm');
     const card = {
         spec: 'chara_card_v3',
@@ -2681,7 +2685,7 @@ test('已声明单例/行表：未声明的动态字段写入 _扩展数据 并�
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     return (async () => {
         // 单例组未声明字段（对应 系统._hypnoos 场景）
         let mvu = win.Mvu.getMvuData();
@@ -2702,7 +2706,7 @@ test('已声明单例/行表：未声明的动态字段写入 _扩展数据 并�
     })().catch(e => { throw e; });
 });
 
-test('表结构校验：旧模板（同名表缺列）会被识别并重新导入，不再静默跳过', () => {
+test("旧桥回归：表结构校验：旧模板（同名表缺列）会被识别并重新导入，不再静默跳过", () => {
     const vm = require('vm');
     const card = {
         spec: 'chara_card_v3',
@@ -2759,7 +2763,7 @@ test('表结构校验：旧模板（同名表缺列）会被识别并重新导�
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     return new Promise((resolve, reject) => {
         setTimeout(() => {
             try {
@@ -2771,7 +2775,7 @@ test('表结构校验：旧模板（同名表缺列）会被识别并重新导�
     });
 });
 
-test('性能回归：桥的 重建/写入 按批次只导出一次全表快照（不再每表/每操作导出）', () => {
+test("旧桥回归：性能回归：桥的 重建/写入 按批次只导出一次全表快照（不再每表/每操作导出）", () => {
     const vm = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both', installMvuShim: true });
@@ -2814,7 +2818,7 @@ test('性能回归：桥的 重建/写入 按批次只导出一次全表快照�
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     return (async () => {
         const before = exportCount;
         const mvu = win.Mvu.getMvuData();
@@ -2834,7 +2838,7 @@ test('性能回归：桥的 重建/写入 按批次只导出一次全表快照�
     })().catch(e => { throw e; });
 });
 
-test('单例/整组JSON表仅表头时自动补初始行（updateCell 不再 Row index out of bounds）', () => {
+test("旧桥回归：单例/整组JSON表仅表头时自动补初始行（updateCell 不再 Row index out of bounds）", () => {
     const vm = require('vm');
     const card = {
         spec: 'chara_card_v3',
@@ -2905,7 +2909,7 @@ test('单例/整组JSON表仅表头时自动补初始行（updateCell 不再 Row
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     return (async () => {
         // 写任务（JSON 表，仅表头）→ 应先补初始行再写内容
         let mvu = win.Mvu.getMvuData();
@@ -3128,7 +3132,7 @@ test('读方向只认 content：seedRows 不作为已存在数据展示（删除
     assert.strictEqual(out2.stat_data.主角.储物袋['铁剑'].数量, 1, 'content 有行时行表正常读取');
 });
 
-test('桥复刻 MVU 占位符维护：AI 回复自动追加 <StatusPlaceHolderImpl/>（前端每楼可注入）', () => {
+test("旧桥回归：桥复刻 MVU 占位符维护：AI 回复自动追加 <StatusPlaceHolderImpl/>（前端每楼可注入）", () => {
     const vm = require('vm');
     const card = {
         spec: 'chara_card_v3',
@@ -3196,7 +3200,7 @@ test('桥复刻 MVU 占位符维护：AI 回复自动追加 <StatusPlaceHolderIm
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     return new Promise((resolve, reject) => {
         setTimeout(() => {
             try {
@@ -3214,7 +3218,7 @@ test('桥复刻 MVU 占位符维护：AI 回复自动追加 <StatusPlaceHolderIm
     });
 });
 
-test('插件 initGameSession 挂起时不阻塞建表（超时后继续，不再永久卡住自动初始化）', () => {
+test("旧桥回归：插件 initGameSession 挂起时不阻塞建表（超时后继续，不再永久卡住自动初始化）", () => {
     const vm = require('vm');
     const card = {
         spec: 'chara_card_v3',
@@ -3235,7 +3239,7 @@ test('插件 initGameSession 挂起时不阻塞建表（超时后继续，不再
     };
     const r = core.convert(card, { mode: 'both' });
     // 缩短桥内建表超时，便于测试（默认 15s/20s）
-    let bridge = r.bridgeScript.replace(/\+'模板'\);/, "+'模板',{importMs:80,initMs:80});");
+    let bridge = legacyBridgeScript(r).replace(/\+'模板'\);/, "+'模板',{importMs:80,initMs:80});");
     let tables = {};
     let initGameSessionCalled = 0;
     const fakeApi = {
@@ -3275,7 +3279,7 @@ test('插件 initGameSession 挂起时不阻塞建表（超时后继续，不再
     });
 });
 
-test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）', () => new Promise((resolve, reject) => {
+test("旧桥回归：问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add（端到端模拟）", () => new Promise((resolve, reject) => {
     const vm = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -3323,7 +3327,7 @@ test('问候语 <UpdateVariable> 覆盖初始值 + display 镜像 + 日期 add�
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     setTimeout(() => {
         try {
             const all = win.getAllVariables();
@@ -3658,7 +3662,7 @@ test('动态行表 ${角色}.静态字段 保守展开为列，数组/对象保�
     assert.ok(!/\b(?:add|replace|remove)\b/i.test(t.sourceData.note), '表格 note 不应残留 MVU/JSON Patch 操作词：' + t.sourceData.note);
 });
 
-test('开场整表快速路径先追平 prev，再应用部分 next，不回滚未提交字段', async () => {
+test("旧桥回归：开场整表快速路径先追平 prev，再应用部分 next，不回滚未提交字段", async () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3683,11 +3687,11 @@ test('开场整表快速路径先追平 prev，再应用部分 next，不回滚�
     assert.strictEqual(back.主角.A, '新A', '本次提交字段应更新');
     assert.strictEqual(back.主角.B, '旧B', 'next 未携带的字段必须保留 prev，不得回滚模板默认值');
     assert.strictEqual(back.系统.C, '新C', '另一顶层组字段应更新');
-    assert.ok(r.bridgeScript.includes('baseStat,prev,tables') && r.bridgeScript.includes('prev,next,tables'), '卡内桥应使用同一两阶段快速路径');
-    assert.ok(!r.bridgeScript.includes('OPENING_BULK_PHASE_MS'), '初始化阶段不应再依赖任意墙钟超时');
-    assert.ok(!r.bridgeScript.includes("cm0.role==='user'"), '用户楼可能先于最终开场快照建立，不应据此退出初始化阶段');
-    assert.ok(r.bridgeScript.includes('openingBulkClosedChats[currentChatKey()]=true'), '卡内桥应在真正处理 AI 更新时关闭初始化阶段');
-    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'mvu2shujuku.js'), 'utf8');
+    assert.ok(legacyBridgeScript(r).includes('baseStat,prev,tables') && legacyBridgeScript(r).includes('prev,next,tables'), '卡内桥应使用同一两阶段快速路径');
+    assert.ok(!legacyBridgeScript(r).includes('OPENING_BULK_PHASE_MS'), '初始化阶段不应再依赖任意墙钟超时');
+    assert.ok(!legacyBridgeScript(r).includes("cm0.role==='user'"), '用户楼可能先于最终开场快照建立，不应据此退出初始化阶段');
+    assert.ok(legacyBridgeScript(r).includes('openingBulkClosedChats[currentChatKey()]=true'), '卡内桥应在真正处理 AI 更新时关闭初始化阶段');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'extension-runtime.js'), 'utf8');
     assert.ok(source.includes('openingBulkClosedChats.add(runtimeScopedChatKey(autoInitChatId()))'), '扩展应按角色和聊天关闭初始化阶段');
     assert.ok(source.includes('}, false, true, chatKey, session);') && source.includes('explicitInitialization'), '明确的 <initvar> 分支写入应携带初始化标记与来源会话');
 });
@@ -4020,6 +4024,9 @@ test('浏览器环境（无 Buffer）PNG 回写正常', () => {
     sandbox.globalThis = sandbox;
     sandbox.window = sandbox;
     vm.createContext(sandbox);
+    sandbox.__MVU2SHUJUKU_INPUT_PARSER_FACTORY__ = vm.runInContext(
+        '(' + require('../src/input-parser').toString() + ')', sandbox,
+    );
     vm.runInContext(src, sandbox);
     const core = sandbox.MVU2SHUJUKU_CORE;
     const buf = fs.readFileSync(PNG);
@@ -4066,7 +4073,7 @@ function dbInitSnippetHarness(chat, runtimeTables) {
         },
     };
     const converted = core.convert(sourceCard, { mode: 'both' });
-    const bridge = converted.bridgeScript;
+    const bridge = legacyBridgeScript(converted);
     const start = bridge.indexOf('function mvu2shujukuDecodeB64');
     const end = bridge.indexOf('var SD_LAYOUT=', start);
     assert.ok(start >= 0 && end > start, '应能提取扩展与桥共用的真实初始化代码');
@@ -4149,7 +4156,7 @@ test('聊天已有用户楼层时，即使 full checkpoint 与当前卡不匹配
     assert.strictEqual(runtimeTables.sheet_dao_lv_biao.content[1][1], '用户已有数据', '已有数据必须原样保留');
 });
 
-test('兼容桥修复新聊天异卡 checkpoint 后发布 fresh 标记供扩展接管开场状态', async () => {
+test("旧桥回归：兼容桥修复新聊天异卡 checkpoint 后发布 fresh 标记供扩展接管开场状态", async () => {
     const vm = require('vm');
     const sourceCard = {
         spec: 'chara_card_v3', spec_version: '3.0',
@@ -4194,7 +4201,7 @@ test('兼容桥修复新聊天异卡 checkpoint 后发布 fresh 标记供扩展�
     win.top = win;
     win.parent = win;
     vm.createContext(win);
-    vm.runInContext(converted.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(converted), win);
     await new Promise(resolve => setTimeout(resolve, 50));
 
     assert.strictEqual(initCalls, 1, '兼容桥应执行一次当前卡模板恢复');
@@ -4478,13 +4485,13 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
     const files = core.assembleExtension({ coreSource });
     const index = files['index.js'];
     // 桥 getAllVariables 行表分支：读回必须是 {键: 标量}（状态栏 typeof==='string' 才能命中）
-    assert.ok(index.includes('tableCodec.statDataFromTables(SD_LAYOUT,tablesSnap)'), '桥应委派共用表格投影');
+    assert.ok(index.includes('core.statDataFromTables(layout, tables)'), '扩展应委派共用表格投影');
     const scalarProjection = core.statDataFromTables([
         { kind: 'rows', group: '秘闻', table: '秘闻表', keyCol: '标题', scalarValueCol: '描述', cols: [['描述', 'text', '']], writePaths: [['秘闻']] },
     ], { sheet_story: { name: '秘闻表', content: [['row_id', '标题', '描述'], [1, '第一条', '秘闻正文']] } });
     assert.deepStrictEqual(scalarProjection.stat_data.秘闻, { 第一条: '秘闻正文' }, '共用投影读回应为 {键: 标量}');
     // 桥写入复用已经覆盖 scalarValueCol 插入/更新行为的同一工厂。
-    assert.ok(index.includes('bridgeTableWriter.writeStatDiffToDb(API,SD_LAYOUT,prev,next)'), '桥应委派共用写入实例');
+    assert.ok(index.includes('window.MVU2SHUJUKU_CORE.writeStatDiffToDb(diffApi, activeLayout'), '扩展应委派共用写入实例');
     // 扩展侧应覆盖桥先定义的 getAllVariables（核心 statDataFromTables 才含 scalarValueCol + 持久化兜底）
     assert.ok(!index.includes("if (typeof window.getAllVariables === 'function') return;"), '扩展 installWindowGetAllVariables 不应因桥已定义而跳过安装');
     assert.ok(index.includes('function ensureActiveLayoutLazy()'), 'EJS 同步执行时应能惰性恢复当前卡布局');
@@ -4495,7 +4502,6 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
         '状态栏占位符改写应让位于 MESSAGE_RECEIVED 动态正则注册，避免首次 Ticket/<ellia> 渲染竞态');
     assert.ok(index.includes('hadFullCheckpointBeforeInit'), '重进已有 checkpoint 的聊天不应重放开局 initvar');
     assert.ok(index.includes('await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, shimSession)'), 'Mvu.replaceMvuData 必须等待来源会话的合并写入真正落定');
-    assert.ok(index.includes('await scheduleStatOverlay(nextStat)'), '卡内桥的 Mvu.replaceMvuData 也必须等待写入落定');
     assert.ok(index.includes('function recoverOpeningContinuity(reason)'), '扩展应具备开场 checkpoint 载体丢失恢复');
     assert.ok(index.includes('async function applyPendingMessageUpdateBlocks()'), '扩展作为唯一 runtime owner 时必须接管后续消息 UpdateVariable/JSONPatch');
     assert.ok(index.includes("const updateSource = messageUpdateBlocks(text);"), '首楼初始化应同时读取同一分支的更新块');
@@ -4729,7 +4735,7 @@ test('扩展 owner 端到端：仅含 JSONPatch 的首楼合并初始化、保�
 
 /* ---------------- 对照金标准 ---------------- */
 section('通用性验证');
-test('合成卡：与参考卡无关的组名也能转换（含 [value,desc] 叶子 / EJS / UpdateVariable）', () => {
+test("旧桥回归：合成卡：与参考卡无关的组名也能转换（含 [value,desc] 叶子 / EJS / UpdateVariable）", () => {
     const synthetic = {
         spec: 'chara_card_v3',
         data: {
@@ -4798,7 +4804,7 @@ test('合成卡：与参考卡无关的组名也能转换（含 [value,desc] 叶
     // UpdateVariable 开场白保留（由数据桥运行时应用）
     assert.ok(r.card.data.alternate_greetings[0].includes('<UpdateVariable>'));
     // 数据桥脚本包含更新块解析
-    assert.ok(r.bridgeScript.includes('parseUpdateCommands'));
+    assert.ok(legacyBridgeScript(r).includes('parseUpdateCommands'));
 });
 
 test('EJS 数据入口改写：fallback/getAllVariables/allVariables/TavernHelper 全覆盖，动态读取进入人工报告', () => {
@@ -5004,7 +5010,7 @@ test('世界书无 [InitVar] 但问候语含 <initvar> 块：按 MVU 规范兜�
     assert.ok(byName('人物表'), '应从问候语 <initvar> 推导出 人物表');
 });
 
-test('仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部 import 与 Mvu API 业务脚本必须保留', () => {
+test("旧桥回归：仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部 import 与 Mvu API 业务脚本必须保留", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -5072,8 +5078,8 @@ test('仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部 import 与 Mvu
     assert.ok(String(front.replaceString || '').includes('__mvu2shujukuReloadFrontend'), '整页前端应保存可复用的加载函数');
     assert.ok(String(front.replaceString || '').includes('data-mvu2shujuku-frontend="direct"'), '已识别的 body.load 整页前端应标记为 direct，避免再点击内部刷新控件');
     assert.ok(!String(front.replaceString || '').includes('mvu2shujuku_external_table_update'), '表格写入不应自动重载整页前端');
-    assert.ok(r.bridgeScript.includes("initializeGlobal") && r.bridgeScript.includes("'Mvu',mvuFake"), '卡内桥应按 TavernHelper 协议共享 Mvu');
-    assert.ok(r.bridgeScript.includes("String(name)==='Mvu'") && r.bridgeScript.includes('original.apply(owner,arguments)'), '卡内桥应仅精确接管 Mvu 的全局初始化等待');
+    assert.ok(legacyBridgeScript(r).includes("initializeGlobal") && legacyBridgeScript(r).includes("'Mvu',mvuFake"), '卡内桥应按 TavernHelper 协议共享 Mvu');
+    assert.ok(legacyBridgeScript(r).includes("String(name)==='Mvu'") && legacyBridgeScript(r).includes('original.apply(owner,arguments)'), '卡内桥应仅精确接管 Mvu 的全局初始化等待');
     const sb = (d.extensions && d.extensions.regex_scripts || []).find(rx => String(rx.scriptName || '') === 'MVU状态栏');
     assert.ok(sb && String(sb.replaceString || '').includes('window.eventOn(window.Mvu.events.VARIABLE_UPDATE_ENDED'), '状态栏事件监听应原样保留（靠数据桥广播 mag_variable_update_ended 驱动）');
     assert.ok(sb && String(sb.replaceString || '').includes('__mvu2shujukuFrontendMode="event"'), 'v5.3 事件型状态栏应标记为 event 模式');
@@ -5229,7 +5235,7 @@ test('扩展侧写路径：单例/JSON 表仅表头时按模板补初始行（�
     assert.strictEqual(zj.content[1][hdr.indexOf('姓名')], '测试主角', '姓名应写入成功（不再 out of bounds）');
 });
 
-test('开局自动建表：单例/JSON 表仅表头且无 seedRows 时自动补初始行（开场白切换重建场景）', async () => {
+test("旧桥回归：开局自动建表：单例/JSON 表仅表头且无 seedRows 时自动补初始行（开场白切换重建场景）", async () => {
     const vm = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -5263,7 +5269,7 @@ test('开局自动建表：单例/JSON 表仅表头且无 seedRows 时自动补�
         deleteRow: async () => true,
     };
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     await waitBridgeFlush(500);
     const zj = Object.values(tables).find(s => s && s.name === '主角表');
     assert.ok(zj && zj.content.length > 1, '开局自动建表应为仅表头的单例表补初始行');
@@ -5271,7 +5277,7 @@ test('开局自动建表：单例/JSON 表仅表头且无 seedRows 时自动补�
     assert.strictEqual(sd.主角.姓名, '未知', '补行后应能读到初始值');
 });
 
-test('卡内桥最小运行时：已有表格的聊天不重初始化、不重建锚点、不重置', async () => {
+test("旧桥回归：卡内桥最小运行时：已有表格的聊天不重初始化、不重建锚点、不重置", async () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
 
@@ -5302,7 +5308,7 @@ test('卡内桥最小运行时：已有表格的聊天不重初始化、不重�
             deleteRow: async () => true,
         };
         vm2.createContext(win);
-        vm2.runInContext(r.bridgeScript, win);
+        vm2.runInContext(legacyBridgeScript(r), win);
         return { win, initCalls: () => initCalls };
     };
 
@@ -5312,7 +5318,7 @@ test('卡内桥最小运行时：已有表格的聊天不重初始化、不重�
     assert.strictEqual(s2.initCalls(), 0, '已有表格的聊天不应重初始化/重建锚点（对齐参考卡：只缺表才初始化）');
 });
 
-test('桥启动即提供 eventOn 兜底，且 VARIABLE_UPDATE_ENDED 按 (after, before) 传参', async () => {
+test("旧桥回归：桥启动即提供 eventOn 兜底，且 VARIABLE_UPDATE_ENDED 按 (after, before) 传参", async () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const vm2 = require('vm');
@@ -5341,7 +5347,7 @@ test('桥启动即提供 eventOn 兜底，且 VARIABLE_UPDATE_ENDED 按 (after, 
         deleteRow: async () => true,
     };
     vm2.createContext(win);
-    vm2.runInContext(r.bridgeScript, win);
+    vm2.runInContext(legacyBridgeScript(r), win);
     assert.strictEqual(typeof win.eventOn, 'function', '桥启动后 window.eventOn 应可用');
     const got = [];
     const handle = win.eventOn('mag_variable_update_ended', (a, b) => { got.push([a, b]); });
@@ -5369,7 +5375,7 @@ test('getVariables 返回 { stat_data }，updateVariablesWith 接收含 stat_dat
     assert.strictEqual(after.主角.生命, 55, 'updateVariablesWith 应通过 wrapper.stat_data 写库');
 });
 
-test('写库直接 diff 落表（移除锚点前置/重置门控）', async () => {
+test("旧桥回归：写库直接 diff 落表（移除锚点前置/重置门控）", async () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
 
@@ -5419,7 +5425,7 @@ test('写库直接 diff 落表（移除锚点前置/重置门控）', async () =
             deleteRow: async () => true,
         };
         vm2.createContext(win);
-        vm2.runInContext(r.bridgeScript, win);
+        vm2.runInContext(legacyBridgeScript(r), win);
         return { win, tables, counters };
     };
 
@@ -5452,7 +5458,7 @@ test('写库直接 diff 落表（移除锚点前置/重置门控）', async () =
     assert.strictEqual(zj2.content[1][nameIdx], '测试主角3', '写入应直接落表（不再因锚点门控放弃）');
 });
 
-test('写库不受锚点形态门控（移除运行时锚点重建机制）', async () => {
+test("旧桥回归：写库不受锚点形态门控（移除运行时锚点重建机制）", async () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const vm2 = require('vm');
@@ -5485,7 +5491,7 @@ test('写库不受锚点形态门控（移除运行时锚点重建机制）', as
             deleteRow: async () => true,
         };
         vm2.createContext(win);
-        vm2.runInContext(r.bridgeScript, win);
+        vm2.runInContext(legacyBridgeScript(r), win);
         const mvu = win.Mvu.getMvuData();
         if (!mvu.stat_data.主角) mvu.stat_data.主角 = {};
         mvu.stat_data.主角.姓名 = '测试' + ci;
@@ -5516,14 +5522,14 @@ test('外部 import 脚本默认安装 MVU 兼容层（自动检测兜底）', (
     // 卡内只有一行外部 import、没有任何可见的 Mvu. 调用：静态扫描看不到，必须默认装兼容层
     const external = core.convert(mkCard("import 'https://example.com/game.js';"), { mode: 'both' });
     assert.ok(
-        external.files.find(f => f.kind === 'bridge').data.includes('installMvuShim();'),
-        '外部 import 卡应默认安装桥内 MVU 兼容层'
+        external.files.find(f => f.kind === 'bridge').data.includes('"installMvuShim":true'),
+        '外部 import 卡应登记安装 MVU 兼容层的需求'
     );
     assert.ok(external.report.toMarkdown().includes('外部 import'), '报告应注明外部 import 兜底');
     // 卡内既无 Mvu. 调用也无外部 import：自动检测应保持不安装
     const internal = core.convert(mkCard('function tick(){ return 1; }'), { mode: 'both' });
     assert.ok(
-        !internal.files.find(f => f.kind === 'bridge').data.includes('installMvuShim();'),
+        internal.files.find(f => f.kind === 'bridge').data.includes('"installMvuShim":false'),
         '无 MVU/外部 import 的卡不应安装兼容层'
     );
 });
@@ -6172,7 +6178,7 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
     assert.ok(oursMvu(win.Mvu), '切回转换卡后 Mvu 应重新接管');
 });
 
-test('桥缺省接管：全局函数原本不存在时，切到普通卡必须清除我方接管（不残留、不还原成桥版）', async () => {
+test('旧桥回归：全局函数原本不存在时，切到普通卡必须清除我方接管（不残留、不还原成桥版）', async () => {
     const vm2 = require('vm');
     const card = {
         spec: 'chara_card_v3',
@@ -6185,12 +6191,12 @@ test('桥缺省接管：全局函数原本不存在时，切到普通卡必须�
         extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
     };
     const r = core.convert(card, { mode: 'both' });
-    const bridge = r.files.find(f => f.kind === 'bridge').data;
+    const bridge = legacyBridgeScript(r);
     const handlers = {};
     const context = {
         chatId: 'c1',
-        name: '缺省卡',
-        characters: [{ name: '缺省卡', avatar: '' }],
+        name: r.card.data.name,
+        characters: [{ name: r.card.data.name, avatar: '' }],
         characterId: 0,
         chat: [],
         eventSource: { on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }, emit: () => {} },
@@ -8146,7 +8152,7 @@ test('无 full checkpoint 但有 data_replace：扩展不手工恢复，运行�
 });
 
 
-test('开局建表：运行时全表仅表头且带 seedRows（插件 native 初始化签名）时走 initGameSession 完整模板建锚', async () => {
+test("旧桥回归：开局建表：运行时全表仅表头且带 seedRows（插件 native 初始化签名）时走 initGameSession 完整模板建锚", async () => {
     const vm = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
@@ -8178,7 +8184,7 @@ test('开局建表：运行时全表仅表头且带 seedRows（插件 native 初
         deleteRow: async () => true,
     };
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     await waitBridgeFlush(500);
     assert.ok(initCalls > 0, '全表头+seedRows+无 checkpoint 时应走 initGameSession 完整模板建锚（否则 checkpoint 无行，刷新后 v2-replay 无法恢复）');
 });
@@ -10058,7 +10064,7 @@ test('MVU 规则 YAML 中未引用的 {{getvar}} 标量保留语义，并改为�
     assert.ok(!sheet.sourceData.note.includes('{{format_message_variable::'), '表格提示词不应残留 MVU 格式化宏');
 });
 
-test('WORLD_INFO promptOnly 正则迁移到表格提示词，replacement 中 random 宏保持运行时求值且原正则保留', () => {
+test("旧桥回归：WORLD_INFO promptOnly 正则迁移到表格提示词，replacement 中 random 宏保持运行时求值且原正则保留", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -10082,8 +10088,8 @@ test('WORLD_INFO promptOnly 正则迁移到表格提示词，replacement 中 ran
     assert.ok(!sheet.sourceData.note.includes('[RANDOM_JUESE]'), '静态 WORLD_INFO 标记应已替换');
     assert.ok(!sheet.sourceData.note.includes('{{random:'), '不得把原始 random 宏留给 SP 表格占位符链');
     assert.ok(r.card.data.extensions.regex_scripts.some(x => x.scriptName === '绝色候选'), '原正则仍应保留供其他世界书内容使用');
-    assert.ok(r.bridgeScript.includes('mvu2shujukuResolveMacro'), '卡内桥应注册提示词宏解析入口');
-    assert.ok(r.bridgeScript.includes('mvu2shujukuFormatMessageVariable'), '卡内桥应注册 MVU YAML 格式化入口');
+    assert.ok(legacyBridgeScript(r).includes('mvu2shujukuResolveMacro'), '卡内桥应注册提示词宏解析入口');
+    assert.ok(legacyBridgeScript(r).includes('mvu2shujukuFormatMessageVariable'), '卡内桥应注册 MVU YAML 格式化入口');
 });
 
 test('非法 YAML（format 带裸 | 联合）时回退正则，功法式动态字典仍正确拆表（大荒回归）', () => {
@@ -10464,7 +10470,7 @@ test('切换开场分支：动态字典行表整组替换（旧行删除、新�
     assert.deepStrictEqual(sd.世界系统.修仙秘闻, { 海图司账本: '分支B秘闻一', 龙绡渡潮阵: '分支B秘闻二', 贝壳风铃: '分支B秘闻三' }, '读回应为分支B的 {键: 值}');
 });
 
-test('开局建表：模板数据调用 SillyTavern 原生 substituteParams（单元格+动态行键）', async () => {
+test("旧桥回归：开局建表：模板数据调用 SillyTavern 原生 substituteParams（单元格+动态行键）", async () => {
     const vm = require('vm');
     const card = {
         spec: 'chara_card_v3',
@@ -10504,7 +10510,7 @@ test('开局建表：模板数据调用 SillyTavern 原生 substituteParams（�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm.createContext(win);
-    vm.runInContext(converted.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(converted), win);
     await new Promise(resolve => setTimeout(resolve, 250));
     assert.ok(imported, '应把已解析模板交给 initGameSession');
     const system = Object.values(imported).find(s => s && s.name === '系统表');
@@ -10610,6 +10616,10 @@ require('./audit-regressions');
 require('./refresh-conversion');
 require('./table-codec');
 require('./table-writer');
+require('./array-writer');
+require('./runtime-native');
 require('./bridge-lifecycle');
+require('./input-parser');
+require('./card-bridge');
 require('./card-conversion-fixes');
 runTests(parseArgs());

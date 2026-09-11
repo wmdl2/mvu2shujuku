@@ -79,9 +79,12 @@ v0.3.17 将顶层数字（如 `命运点数: 0`）直接存为 REAL 数值列，
 - `${露出|扩张}经验` 类模板键会展开绑定到每个真实列；同表列的约束完全相同时，提示词保留合并写法以避免重复，SQL 约束仍逐列生效。
 
 ### 数据桥（写入卡内 tavern_helper 脚本）
+
+新生成的卡内桥仅向 MVU转数据库扩展登记模板、布局和接口需求。请保持扩展启用；尚未加载时会自动等待并提示，加载后自动连接。旧卡的退出接管协议继续兼容。
+
 - **开局自动建表（对应 MVU 的 init 时机 → SP·数据库 的初始化）**：转换时把模板以 base64
   写入世界书条目 `__ACU_TEMPLATE_DATA__`，不改动开场白（纯文字开场白也能用）。
-  扩展本体与卡内数据桥在进入聊天/首条消息时，若按模板表名检测到缺表，就调用
+  扩展在进入聊天/首条消息时，若按模板表名检测到缺表，就调用
   `initGameSession({ injectTemplate:true, loadPreset:false, templateData })` 建表并写入初始行；
   已有表格的聊天不会被重置。唯一的自动恢复例外是：聊天只有一个非用户首楼、运行时明确出现其他卡的表且当前卡缺表；此时尚无游玩数据，会用当前卡模板替换异卡 checkpoint。只要已有用户楼层就绝不自动覆盖。
   若卡的开场白脚本会切换/重写首楼（如“重塑仙缘”类开局流程）
@@ -97,13 +100,13 @@ v0.3.17 将顶层数字（如 `命运点数: 0`）直接存为 REAL 数值列，
 - 运行时解析 `<UpdateVariable>` / `<json_patch>` 块（`_.set/add/remove/assign`、JSON Patch）写库；开场同楼的 initvar 与更新块按 MVU 顺序合并为最终初始化快照。
 - 兼容 MVU/VWD 在开局事件中保留的 `[当前值, 描述]` 变量叶子：建表时按转换布局精确取出当前值，不会把整个数组写入 TEXT/枚举列；普通数组字段不受影响。
 - **问候语 `<UpdateVariable>` 覆盖初始值**：MVU 允许额外问候语里的更新语句覆盖 `[InitVar]`；
-  转换后桥脚本在开局建表完成后再应用开场白里的更新块，等效于 MVU 的覆盖行为。
+  转换后由扩展按 MVU 顺序合并 initvar 与开场白更新块，再提交最终开局快照。
 - **命令与显示兼容**：`_.set`（双参/三参 `old,new` 两种格式）、`_.assign`（对象合并/按键赋值）、
   `_.remove/unset/delete`、`_.add`（数值加法带精度处理、日期字符串按毫秒推进转 ISO）；
   `display_data` 在会话内保存 `旧->新(原因)` 镜像（与 MVU 的 display 字符串同格式）。
 - 公开 MVU 更新事件链由兼容层接管；`COMMAND_PARSED` 监听器可改写或追加命令，`VARIABLE_UPDATE_ENDED` 携带更新前后的完整 `MvuData`。具体参数语义和边界见兼容清单。
 - 普通表格 CRUD、自动填表以及删除楼层、切换 swipe、增改消息造成的历史变化，都会在数据库快照稳定后同步转换卡前端；兼容 MVU 更新事件、数据库更新事件、安全内联重读入口和明确刷新控件。
-- 数据桥同时提供 `TavernHelper.getVariables()` shim，兼容教程中「纯文本状态栏」的读取写法。
+- 扩展同时提供 `TavernHelper.getVariables()` shim，兼容教程中「纯文本状态栏」的读取写法。
 - 对只在首次挂载时调用一次 `getVariables({type:'message'})` 的内联开场前端，转换器会等待数据库变量 shim 就绪后再启动，避免选项列表在异步建表窗口读空。
 
 ### 卡片清理
@@ -128,7 +131,7 @@ v0.3.16 支持 `variables_update_rules` 英文规则外壳，并将 TypeScript �
 改写为 `mvu2shujukuGetAllVariables().stat_data.路径`。转换器同时识别常见的
 `getAllVariables().stat_data`、`allVariables().stat_data`、`all_variables.stat_data`、
 `window.stat_data` / `globalThis.stat_data` 与
-`TavernHelper.getVariables().stat_data`。扩展和卡内数据桥都会把该函数注册进
+`TavernHelper.getVariables().stat_data`。扩展会把该函数注册进
 st-prompt-template 的模板上下文（`EjsTemplate.defines`），因此只导入转换卡时也可读取，并用卡内布局 +
 插件表格**惰性重建** stat_data（每次调用实时读表，数据只存一份、无冗余同步、不依赖卡内桥）。
 唯一名字避免撞名；状态栏用的 `window.getAllVariables` 也由扩展提供。
@@ -154,8 +157,8 @@ SillyTavern 原生 `substituteParams` 解析。表名中的宏不会运行时求
 | --- | --- |
 | `manifest.json` / `index.js` / `style.css` | 扩展本体（仓库根目录即扩展，可直接安装） |
 | `src/mvu2shujuku.js` | 转换核心源码 |
-| `src/table-codec.js` | 扩展与旧桥共用的表格投影、类型转换和 JSON 容错模块（构建时内联） |
-| `src/table-writer.js` | 扩展与独立旧桥共用的差异写入模块，将 MVU 数据变化映射到插件原生 CRUD |
+| `src/table-codec.js` | 扩展使用的表格投影、类型转换和 JSON 容错模块（构建时内联） |
+| `src/table-writer.js` | 扩展差异写入模块，将 MVU 数据变化映射到 CRUD 或原子导入 |
 | `src/bridge-lifecycle.js` | 扩展晚加载时停止兼容桥的任务、监听与定时器，等待在途调用结束 |
 | `src/pinyin-data.js` | 拼音字典（由 pinyin-pro 生成，MIT） |
 | `build-extension.js` | 重新构建扩展文件 |
@@ -165,6 +168,8 @@ SillyTavern 原生 `substituteParams` 解析。表名中的宏不会运行时求
 
 ## 开发
 
+维护资料、源码定位和验证入口见[文档索引](docs/README.md)。
+
 ```bash
 node test/run-tests.js                    # 全量测试：默认只输出数量和汇总
 node test/run-tests.js --grep "桥|扩展"  # 只跑相关用例
@@ -173,10 +178,12 @@ node build-extension.js  # 重新构建扩展文件
 ```
 
 默认模式会抑制通过用例的 VM/数据桥日志；用例失败时自动回放最后 20 条截断日志。也可使用 `TEST_VERBOSE=1` 开启详细模式。
-修改 `src/table-codec.js`、`src/table-writer.js` 或 `src/bridge-lifecycle.js` 后同样需要重新构建；浏览器安装入口仍为根目录 `index.js`。
+修改 `src/` 中的任意模块后都需要重新构建；浏览器安装入口为根目录 `index.js`。
+
+真实酒馆验收单独运行 `node test/real-host.js`（Node 22 与本地上游依赖），使用公开合成卡及隔离数据目录。环境、场景和已知边界见[实机验收记录](docs/validation/2026-09-11-host.md)。
 
 v0.3.15 新生成的卡内桥支持扩展晚加载接管。此前转换的卡需要重新转换，才能获得停止旧桥任务的能力；已发出的数据库调用不会回滚，接管会等它结束再启动扩展运行时。
 
 ## 许可
 
-MIT（见 `LICENSE`）。`src/pinyin-data.js` 派生自 [pinyin-pro](https://github.com/zh-lx/pinyin-pro)（MIT）。本仓库不包含 SP·数据库 插件源码与任何角色卡内容。
+MIT（见 `LICENSE`）。`src/pinyin-data.js` 派生自 [pinyin-pro](https://github.com/zh-lx/pinyin-pro)（MIT）。本仓库不包含 SP·数据库插件源码或第三方角色卡内容；公开测试使用项目自建的合成卡。

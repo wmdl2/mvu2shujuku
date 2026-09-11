@@ -2,7 +2,7 @@
 const vm = require('vm');
 const { test } = require('./runner');
 const { core, assert, fs, path, applyingApi } = require('./helpers');
-const source = fs.readFileSync(path.join(__dirname, '../src/mvu2shujuku.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/extension-runtime.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 function card(data = { 状态: { 生命: 100 } }, scripts = []) {
     return { name: '审查合成卡', first_mes: '你好', character_book: { entries: [
@@ -19,7 +19,9 @@ function runtime(extra = {}) {
     const context = { getContextSafe: () => ({ chatId: chat }), currentCharacter: () => ({ avatar }),
         autoInitChatId: () => chat, characterDisplayName: () => '同名', cardCacheKey: ch => ch.avatar, ...extra };
     vm.createContext(context);
-    vm.runInContext(extract("    let runtimeSessionKey = '';", '    // 首楼替换修复'), context);
+    const sessions = require('../src/runtime-session')(() => ({ characterKey: 'avatar:' + avatar, groupKey: '', chatKey: chat, cardKey: avatar }));
+    Object.assign(context, { captureRuntimeSession: sessions.capture, isRuntimeSessionCurrent: sessions.isCurrent,
+        assertRuntimeSession: sessions.assertCurrent, runtimeApiForSession: sessions.apiForSession, runtimeScopedChatKey: sessions.scopedChatKey });
     return { context, switchChat: value => { chat = value; }, switchCard: value => { avatar = value; } };
 }
 
@@ -124,14 +126,13 @@ for (const mode of ['false', 'throw', 'insert-minus-one']) test('审查：数组
     const layout = JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout), tables = clone(result.template);
     const before = core.statDataFromTables(layout, tables).stat_data;
     const api = applyingApi(tables), calls = [];
-    const originalDelete = api.deleteRow;
-    api.deleteRow = async (...args) => {
-        calls.push('delete');
-        if (mode === 'throw') throw new Error('模拟删除失败');
-        return mode === 'false' ? false : originalDelete(...args);
+    api.updateCell = async () => {
+        calls.push('update');
+        if (mode === 'throw') throw new Error('模拟更新失败');
+        return false;
     };
     api.insertRow = async () => { calls.push('insert'); return -1; };
-    await core.writeStatDiffToDb(api, layout, before, { 列表: [4, 5, 6] });
+    await core.writeStatDiffToDb(api, layout, before, { 列表: mode === 'insert-minus-one' ? [1, 2, 3, 4] : [4, 2, 3] });
     assert.strictEqual(core.lastStatWriteFailed, true);
     assert.strictEqual(calls.filter(x => x === 'insert').length, mode === 'insert-minus-one' ? 1 : 0);
     if (mode !== 'insert-minus-one') assert.strictEqual(calls.length, 1);
@@ -177,6 +178,76 @@ test('审查：CRUD await 期间切聊天后拒绝返回及下一次调用', asy
     await assert.rejects(pending, e => e.code === 'MVU_SESSION_CHANGED');
     assert.throws(() => api.updateCell(), e => e.code === 'MVU_SESSION_CHANGED');
     assert.strictEqual(calls, 1);
+});
+
+test('消息来源：更新周期 await 期间删楼、编辑或换 swipe，不得排入旧快照', async () => {
+    for (const mutation of ['delete', 'edit', 'swipe']) {
+        let release;
+        const message = { mes: '更新块', swipe_id: 0 };
+        const chat = [{ mes: '首楼' }, message], writes = [];
+        const state = { baselined: true, running: false, processed: new Set(), pending: new Set() };
+        const r = runtime({ getContextSafe: () => ({ chat }), greetingInitState: () => ({ ready: true }),
+            messageUpdateState: () => state, messageUpdateFingerprint: m => m.mes + '|' + m.swipe_id,
+            window: { getAllVariables: () => ({ stat_data: { 金币: 10 } }) },
+            runMvuUpdateCycle: () => new Promise(resolve => { release = resolve; }),
+            emitMvuEvent: async () => {}, scheduleWindowStatOverlay: (...args) => writes.push(args), dbgWarn() {} });
+        vm.runInContext(extract('    async function applyPendingMessageUpdateBlocks()', '    // 前端开场白用 setChatMessages'), r.context);
+        const pending = r.context.applyPendingMessageUpdateBlocks();
+        if (mutation === 'delete') chat.pop();
+        else if (mutation === 'edit') message.mes = '编辑后的更新块';
+        else message.swipe_id += 1;
+        release({ stat_data: { 金币: 29 } });
+        await pending;
+        assert.strictEqual(writes.length, 0, mutation + ' 后旧消息不得写库');
+        assert.strictEqual(state.pending.size, 0);
+        assert.strictEqual(state.processed.size, 0);
+    }
+});
+
+test('消息来源：删除发生于合并窗口时旧写入结算 false，清除待写投影', async () => {
+    const r = writeQueue();
+    let exists = true, reads = 0;
+    r.context.getAcuApi = () => { reads += 1; return {}; };
+    const session = r.context.captureRuntimeSession(() => exists);
+    const pending = r.context.scheduleWindowStatOverlay({ 金币: 29 }, null, false, false, 'A', session);
+    exists = false;
+    await Array.from(r.timers.values())[0]();
+    assert.strictEqual(await pending, false);
+    assert.strictEqual(reads, 0, '来源失效应在访问数据库之前拦截');
+    assert.strictEqual(r.win.__mvu2shujukuPendingStat, null);
+});
+
+test('消息来源：数据库 await 期间来源失效后拒绝返回和后续 CRUD', async () => {
+    const r = runtime();
+    let valid = true, release, calls = 0;
+    const api = r.context.runtimeApiForSession({ updateCell() {
+        calls += 1; return new Promise(resolve => { release = resolve; });
+    } }, r.context.captureRuntimeSession(() => valid));
+    const pending = api.updateCell();
+    valid = false; release(true);
+    await assert.rejects(pending, e => e.code === 'MVU_SESSION_CHANGED');
+    assert.throws(() => api.updateCell(), e => e.code === 'MVU_SESSION_CHANGED');
+    assert.strictEqual(calls, 1);
+});
+
+test('消息去重：同内容重生成仍执行，原消息移动楼层不重复执行', async () => {
+    const message = { mes: '<UpdateVariable>金币加五</UpdateVariable>', swipe_id: 0 };
+    const chat = [{ mes: '首楼' }, message], writes = [];
+    const state = { baselined: true, running: false, processed: new Set(), pending: new Set() };
+    const r = runtime({ getContextSafe: () => ({ chat }), greetingInitState: () => ({ ready: true }),
+        messageUpdateState: () => state, messageUpdateBlocks: text => text.match(/<UpdateVariable>(.*?)<\/UpdateVariable>/)?.[1] || '',
+        window: { MVU2SHUJUKU_CORE: core, getAllVariables: () => ({ stat_data: { 金币: 10 } }) },
+        runMvuUpdateCycle: async () => ({ stat_data: { 金币: 15 } }), emitMvuEvent: async () => {},
+        scheduleWindowStatOverlay: (next, settled) => { writes.push(clone(next)); settled(true); }, dbgWarn() {} });
+    vm.runInContext(extract('    const messageUpdateFpCache =', '    function baselineMessageUpdateBlocks('), r.context);
+    vm.runInContext(extract('    async function applyPendingMessageUpdateBlocks()', '    // 前端开场白用 setChatMessages'), r.context);
+    await r.context.applyPendingMessageUpdateBlocks();
+    await r.context.applyPendingMessageUpdateBlocks();
+    assert.strictEqual(writes.length, 1, '重复通知不重复执行');
+    assert.strictEqual(r.context.messageUpdateFingerprint(message, 1), r.context.messageUpdateFingerprint(message, 3), '移动楼层不改变已执行标记');
+    chat[1] = { ...message }; // 重生成得到内容相同的新消息对象，数据库已回放到 10。
+    await r.context.applyPendingMessageUpdateBlocks();
+    assert.deepStrictEqual(writes, [{ 金币: 15 }, { 金币: 15 }]);
 });
 
 test('审查：开场异步准备期间切聊天不排入新聊天写队列', async () => {

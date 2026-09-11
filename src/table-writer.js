@@ -88,37 +88,47 @@ function createTableWriter(dependencies) {
             }
             return null;
         };
-        const findRowByColumn = (sheet, colName, value) => {
-            if (!sheet || !Array.isArray(sheet.content)) return -1;
-            const ci = sheet.content[0] ? sheet.content[0].indexOf(colName) : -1;
-            if (ci === -1) return -1;
-            for (let i = 1; i < sheet.content.length; i++) {
-                if (sheet.content[i] && String(sheet.content[i][ci]) === String(value)) return i;
-            }
-            return -1;
-        };
-        const findRelationRow = (sheet, parentCol, parentValue, keyCol, keyValue) => {
+        // 只在无写入的规划阶段复用行索引；执行阶段必须读取最新行位置。
+        const rowIndexes = new WeakMap();
+        let planningRows = true;
+        const indexedRow = (sheet, columns, values) => {
             if (!sheet || !Array.isArray(sheet.content) || !sheet.content[0]) return -1;
-            const pi = sheet.content[0].indexOf(parentCol);
-            const ki = sheet.content[0].indexOf(keyCol);
-            if (pi === -1 || ki === -1) return -1;
-            for (let i = 1; i < sheet.content.length; i++) {
-                const row = sheet.content[i];
-                if (row && String(row[pi]) === String(parentValue) && String(row[ki]) === String(keyValue)) return i;
+            const indexes = columns.map(col => sheet.content[0].indexOf(col));
+            if (indexes.some(index => index < 0)) return -1;
+            const key = JSON.stringify(values.map(String));
+            if (!planningRows) {
+                for (let i = 1; i < sheet.content.length; i++) {
+                    const row = sheet.content[i];
+                    if (row && indexes.every((index, j) => String(row[index]) === String(values[j]))) return i;
+                }
+                return -1;
             }
-            return -1;
+            let cache = rowIndexes.get(sheet);
+            if (!cache || cache.length !== sheet.content.length || cache.header !== sheet.content[0]) {
+                cache = { length: sheet.content.length, header: sheet.content[0], columns: new Map() };
+                rowIndexes.set(sheet, cache);
+            }
+            const signature = JSON.stringify(indexes);
+            let rows = cache.columns.get(signature);
+            if (!rows) {
+                rows = new Map();
+                for (let i = 1; i < sheet.content.length; i++) {
+                    const row = sheet.content[i];
+                    if (!row) continue;
+                    const rowKey = JSON.stringify(indexes.map(index => String(row[index])));
+                    if (!rows.has(rowKey)) rows.set(rowKey, i); // 重复键维持首次命中契约
+                }
+                cache.columns.set(signature, rows);
+            }
+            return rows.has(key) ? rows.get(key) : -1;
+        };
+        const findRowByColumn = (sheet, colName, value) => indexedRow(sheet, [colName], [value]);
+        const findRelationRow = (sheet, parentCol, parentValue, keyCol, keyValue) => {
+            return indexedRow(sheet, [parentCol, keyCol], [parentValue, keyValue]);
         };
         const findRelationRowByAncestors = (sheet, layout, ancestorValues, keyValue) => {
-            if (!sheet || !Array.isArray(sheet.content) || !sheet.content[0]) return -1;
             const cols = Array.isArray(layout.ancestorKeyCols) && layout.ancestorKeyCols.length ? layout.ancestorKeyCols : [layout.parentKeyCol];
-            const idxs = cols.map(col => sheet.content[0].indexOf(col));
-            const ki = sheet.content[0].indexOf(layout.keyCol);
-            if (ki === -1 || idxs.some(i => i === -1)) return -1;
-            for (let i = 1; i < sheet.content.length; i++) {
-                const row = sheet.content[i];
-                if (row && idxs.every((idx, ai) => String(row[idx]) === String((ancestorValues || [])[ai])) && String(row[ki]) === String(keyValue)) return i;
-            }
-            return -1;
+            return indexedRow(sheet, [...cols, layout.keyCol], [...cols.map((_, i) => (ancestorValues || [])[i]), keyValue]);
         };
         const sameValue = (a, b) => {
             const na = a === undefined || a === null ? '' : a;
@@ -776,6 +786,128 @@ function createTableWriter(dependencies) {
             return 0;
         });
 
+        // 数组不能沿用过去的“删光再插入”路径：其中任一个 CRUD 失败都会留下半份数组。
+        // 先把所有数组替换转成针对当前行的最小计划；计划多于一步时由一次整表 import
+        // 提交，插件会把该 import 当作一笔原子持久化事务。
+        planningRows = false;
+        const arrayResolved = resolved.filter(r => r.kind === 'array' || r.kind === 'nested-array');
+        const arrayPlans = [];
+        const expectedArraySheets = new Map();
+        const nextArrayRowIds = new Map();
+        const encodeArrayItem = (r, value) => {
+            if (r.isJsonScalarArray) {
+                try { const encoded = JSON.stringify(value); return encoded === undefined ? 'null' : encoded; } catch (e) { return 'null'; }
+            }
+            if (value && typeof value === 'object') {
+                try { return JSON.stringify(value); } catch (e) { return 'null'; }
+            }
+            return String(value);
+        };
+        for (const r of arrayResolved) {
+            if (r.valueIdx < 0 || (r.kind === 'nested-array' && r.parentIdx < 0)) {
+                markWriteFailure('数组缺少值列或父键列');
+                break;
+            }
+            const targetRows = [];
+            for (let ri = 1; ri < r.sheet.content.length; ri++) {
+                const row = r.sheet.content[ri];
+                if (r.kind !== 'nested-array' || (row && r.parentIdx >= 0 && String(row[r.parentIdx]) === String(r.parentVal))) {
+                    targetRows.push({ rowIndex: ri, row });
+                }
+            }
+            const updates = [], deletes = [], appends = [];
+            const common = Math.min(targetRows.length, r.arr.length);
+            for (let i = 0; i < common; i++) {
+                const value = encodeArrayItem(r, r.arr[i]);
+                if (!sameValue(targetRows[i].row && targetRows[i].row[r.valueIdx], value)) {
+                    updates.push({ rowIndex: targetRows[i].rowIndex, col: r.layout.valueCol || r.header[1] || '内容', value });
+                }
+            }
+            let maxRowId = nextArrayRowIds.get(r.key) || 0;
+            const rowIdIdx = r.header.indexOf('row_id');
+            for (let ri = 1; ri < r.sheet.content.length; ri++) {
+                const n = Number(r.sheet.content[ri] && r.sheet.content[ri][rowIdIdx >= 0 ? rowIdIdx : 0]);
+                if (Number.isFinite(n) && n > maxRowId) maxRowId = n;
+            }
+            for (let i = common; i < r.arr.length; i++) {
+                const row = new Array(r.header.length).fill('');
+                if (rowIdIdx >= 0) row[rowIdIdx] = String(++maxRowId);
+                if (r.kind === 'nested-array' && r.parentIdx >= 0) row[r.parentIdx] = String(r.parentVal);
+                if (r.valueIdx >= 0) row[r.valueIdx] = encodeArrayItem(r, r.arr[i]);
+                appends.push({ row });
+            }
+            nextArrayRowIds.set(r.key, maxRowId);
+            for (let i = targetRows.length - 1; i >= r.arr.length; i--) deletes.push({ rowIndex: targetRows[i].rowIndex });
+            arrayPlans.push({ r, updates, deletes, appends });
+            if (!expectedArraySheets.has(r.key)) expectedArraySheets.set(r.key, JSON.stringify(r.sheet.content));
+        }
+        const arrayOperationCount = arrayPlans.reduce((n, p) => n + p.updates.length + p.deletes.length + p.appends.length, 0);
+        const arrayResultFailed = (value) => value === false || value === -1 || value === null || value === undefined;
+        const readUnchangedArrayTables = () => {
+            let latest;
+            try { latest = api.exportTableAsJson() || {}; } catch (e) { markWriteFailure('数组 exportTableAsJson', e); return null; }
+            for (const [key, expected] of expectedArraySheets) {
+                const current = latest[key];
+                if (!current || JSON.stringify(current.content) !== expected) {
+                    markWriteFailure('数组表在规划后已变化，等待重试');
+                    return null;
+                }
+            }
+            return latest;
+        };
+        if (arrayOperationCount > 0 && !abortWrites) {
+            if (arrayOperationCount > 1 && typeof api.importTableAsJson !== 'function') {
+                markWriteFailure('数组写入需要 importTableAsJson');
+            } else {
+                const latest = readUnchangedArrayTables();
+                if (latest) {
+                    if (arrayOperationCount === 1) {
+                        const p = arrayPlans.find(x => x.updates.length || x.deletes.length || x.appends.length);
+                        const L = p.r.layout;
+                        try {
+                            let result;
+                            if (p.updates.length) {
+                                const op = p.updates[0];
+                                result = await Promise.resolve(api.updateCell(L.table, op.rowIndex, op.col, op.value));
+                            } else if (p.deletes.length) {
+                                result = await Promise.resolve(api.deleteRow(L.table, p.deletes[0].rowIndex));
+                            } else {
+                                const obj = {};
+                                p.r.header.forEach((h, i) => { if (p.appends[0].row[i] !== '') obj[h] = p.appends[0].row[i]; });
+                                result = await Promise.resolve(api.insertRow(L.table, obj));
+                            }
+                            if (arrayResultFailed(result)) markWriteFailure('数组单步 CRUD(' + L.table + ')');
+                        } catch (e) { markWriteFailure('数组单步 CRUD(' + L.table + ')', e); }
+                    } else {
+                        // JSON 克隆既避免改动 export 的宿主引用，也保留无关 sheet、列和 nested
+                        // array 的其他 parent 行。删除统一倒序，保证计划时的行号仍然有效。
+                        let candidate;
+                        try { candidate = JSON.parse(JSON.stringify(latest)); } catch (e) { markWriteFailure('数组快照克隆', e); }
+                        if (candidate) {
+                            try {
+                                const allUpdates = [], allDeletes = [], allAppends = [];
+                                for (const p of arrayPlans) {
+                                    for (const op of p.updates) allUpdates.push({ key: p.r.key, op });
+                                    for (const op of p.deletes) allDeletes.push({ key: p.r.key, op });
+                                    for (const op of p.appends) allAppends.push({ key: p.r.key, op });
+                                }
+                                for (const item of allUpdates) {
+                                    const sheet = candidate[item.key]; const ci = sheet && sheet.content[0].indexOf(item.op.col);
+                                    if (!sheet || ci < 0 || !sheet.content[item.op.rowIndex]) throw new Error('数组更新目标已不存在');
+                                    sheet.content[item.op.rowIndex][ci] = item.op.value;
+                                }
+                                allDeletes.sort((a, b) => a.key === b.key ? b.op.rowIndex - a.op.rowIndex : a.key.localeCompare(b.key));
+                                for (const item of allDeletes) candidate[item.key].content.splice(item.op.rowIndex, 1);
+                                for (const item of allAppends) candidate[item.key].content.push(item.op.row);
+                                const imported = await Promise.resolve(api.importTableAsJson(JSON.stringify(candidate)));
+                                if (!(imported === true || (imported && imported.success === true))) markWriteFailure('数组 importTableAsJson');
+                            } catch (e) { markWriteFailure('数组 importTableAsJson', e); }
+                        }
+                    }
+                }
+            }
+        }
+
         // 原生 CRUD 写入：同一既有行的多个单元格优先合并为一次 updateRow，避免插件为
         // 每个 updateCell 都执行一次完整 V2 持久化；旧版插件或行更新失败时逐格回退。
         // insertRow/deleteRow 仍逐条执行，保持行结构变更与回放语义不变。
@@ -804,50 +936,7 @@ function createTableWriter(dependencies) {
                     } catch (e) { markWriteFailure('deleteRow(' + L.table + ')', e); }
                     continue;
                 }
-                if (r.kind === 'array') {
-                    for (let rr = r.sheet.content.length - 1; rr >= 1; rr--) {
-                        // deleteRow 的 rowIndex 是 content 数组索引（0=表头，1=第一数据行），
-                        // rr 正是数组索引，直接传 rr；传 rr-1 会误删表头/前一数据行。
-                        try {
-                            const ok = await Promise.resolve(api.deleteRow(L.table, rr));
-                            if (!ok) { markWriteFailure('数组 deleteRow(' + L.table + ')'); break; }
-                        } catch (e) { markWriteFailure('数组 deleteRow(' + L.table + ')', e); break; }
-                    }
-                    if (abortWrites) continue;
-                    for (let ai = 0; ai < r.arr.length; ai++) {
-                        const o = {}; const av = r.arr[ai];
-                        let encoded = r.isJsonScalarArray ? JSON.stringify(av) : (av && typeof av === 'object' ? JSON.stringify(av) : String(av));
-                        if (encoded === undefined) encoded = 'null';
-                        o[L.valueCol || r.header[1] || '内容'] = encoded;
-                        try {
-                            const ir = await Promise.resolve(api.insertRow(L.table, o));
-                            if (ir === -1 || ir === false || ir === undefined || ir === null) { markWriteFailure('数组 insertRow(' + L.table + ')'); break; }
-                        } catch (e) { markWriteFailure('数组 insertRow(' + L.table + ')', e); break; }
-                    }
-                    continue;
-                }
-                if (r.kind === 'nested-array') {
-                    for (let rr = r.sheet.content.length - 1; rr >= 1; rr--) {
-                        const row = r.sheet.content[rr];
-                        if (row && r.parentIdx >= 0 && String(row[r.parentIdx]) === String(r.parentVal)) {
-                            try {
-                                const ok = await Promise.resolve(api.deleteRow(L.table, rr));
-                                if (!ok) { markWriteFailure('嵌套数组 deleteRow(' + L.table + ')'); break; }
-                            } catch (e) { markWriteFailure('嵌套数组 deleteRow(' + L.table + ')', e); break; }
-                        }
-                    }
-                    if (abortWrites) continue;
-                    for (const item of r.arr) {
-                        const o = {};
-                        o[L.parentKeyCol] = String(r.parentVal);
-                        o[L.valueCol || '内容'] = item && typeof item === 'object' ? JSON.stringify(item) : String(item);
-                        try {
-                            const ir = await Promise.resolve(api.insertRow(L.table, o));
-                            if (ir === -1 || ir === false || ir === undefined || ir === null) { markWriteFailure('嵌套数组 insertRow(' + L.table + ')'); break; }
-                        } catch (e) { markWriteFailure('嵌套数组 insertRow(' + L.table + ')', e); break; }
-                    }
-                    continue;
-                }
+                if (r.kind === 'array' || r.kind === 'nested-array') continue;
                 if (r.newRowObj) {
                     // 行表 INSERT 前检查：若持久化帧里该表已有同键行，说明运行时仅表头只是
                     // 插件回放未完成（切聊天/刷新窗口）。此刻 insertRow 会造出重复行，
