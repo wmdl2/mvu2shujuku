@@ -133,9 +133,8 @@ test('写入适配模块：失败状态在实例间隔离，计划数量不等�
 test('写入适配模块：浏览器构建使用内联工厂且保留核心写入接口', async () => {
     const coreSource = fs.readFileSync(path.join(__dirname, '../src/mvu2shujuku.js'), 'utf8');
     const index = core.assembleExtension({ coreSource })['index.js'];
-    const ui = index.lastIndexOf('\n// ============================================================\n// MVU转数据库 · SillyTavern 原生扩展 UI');
     const sandbox = vm.createContext({ console });
-    vm.runInContext(index.slice(0, ui), sandbox);
+    vm.runInContext(index, sandbox);
     const data = tables(), browserCore = sandbox.MVU2SHUJUKU_CORE;
     await browserCore.writeStatDiffToDb(applyingApi(data), layout, { 状态: { 生命: 100 } }, { 状态: { 生命: 80 } });
     assert.strictEqual(data.sheet_status.content[1][1], '80');

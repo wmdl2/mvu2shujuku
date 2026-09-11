@@ -11,6 +11,18 @@ const os = require('os');
 const assert = require('assert');
 
 const core = require('../src/mvu2shujuku.js');
+const legacyGenerator = require('./legacy/bridge-v0.3.17')(core);
+// 旧卡迁移回归显式使用冻结的旧桥；新产物断言必须直接读取 result.bridgeScript。
+function legacyBridgeScript(result) {
+    const data = result.card.data || result.card;
+    const meta = data.extensions.mvu2shujuku;
+    return legacyGenerator(result.schema, result.template, {
+        bridgeCardName: data.name || '', bridgeCardAvatar: data.avatar || result.card.avatar || '',
+        bridgeConvertedAt: meta.convertedAt, version: '0.3.17', appendPlaceholder: true,
+        jsonrepairInline: fs.readFileSync(path.join(__dirname, '../src/vendor/jsonrepair-lite.js'), 'utf8'),
+        statusPlaceholderNeeded: (data.extensions.regex_scripts || []).some(r => String(r.findRegex).includes('StatusPlaceHolderImpl')),
+    });
+}
 
 const FIXTURE = path.join(__dirname, 'fixtures', '道渊-MVU.json');
 const PNG = path.join(__dirname, '..', '..', '参考资料', '参考角色卡', 'v5.2_1-MVU版.png');
@@ -181,7 +193,7 @@ function bridgeSandbox(r, opts = {}) {
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     win.AutoCardUpdaterAPI = fakeApi;
     vm.createContext(win);
-    vm.runInContext(r.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r), win);
     return { win, tables, fakeApi };
 }
 
@@ -191,6 +203,7 @@ async function waitBridgeFlush(ms = 300) {
 }
 
 module.exports = {
+    legacyBridgeScript,
     fs,
     path,
     os,

@@ -7,7 +7,7 @@
 - [MagVarUpdate](https://github.com/MagicalAstrogy/MagVarUpdate)：MVU 初始化、变量结构、更新命令、事件顺序与 `Mvu.*` 接口的主要依据。项目采用 MIT 许可证。
 - [酒馆助手（JS-Slash-Runner）](https://github.com/N0VI028/JS-Slash-Runner)：角色脚本、变量、事件、消息 iframe 与 EJS 运行环境的接口依据。
 - [SillyTavern](https://github.com/SillyTavern/SillyTavern)：角色卡、世界书、宏、聊天消息和扩展宿主行为的上游项目。
-- SP·数据库：本轮核对 9.2.4（`3bac799640cf2cda9f0c23fcf27ee66f48254662`）相关 CRUD 与初始化源码契约；这不代表已完成全部真实宿主场景验收。此前 v8.9.2 为历史参考。本项目与该插件相互独立，不包含其源码。
+- SP·数据库：本轮核对 9.2.5（`5c53f795832b194ec4baa74135e8ebd950122438`）的 CRUD、初始化与整表导入契约，并以该提交的纯净产物完成 native／SQLite 隔离酒馆验收。native 模式不暴露 SQL API，不能把 SQL getter 为 undefined 判作 CRUD 未就绪；多步数组差量通过一次 `importTableAsJson` 提交，导入失败后不反向覆盖可能已持久化的数据。手动 CRUD 选择最近已有表帧的 AI 楼，消息更新改用整表导入落在最新 AI 楼，保证删除／重生成的回退边界。具体场景与限制见[验收记录](docs/validation/2026-09-11-host.md)。此前 v8.9.2、9.2.4 为历史参考。本项目与该插件相互独立，不包含其源码。
 - MVU：本轮核对官方 beta 源码 `61010dab47bc3a08a1b626320bf7fc8c9573eca4`。工作区 `MagVarUpdate/` 没有 Git 元数据，仍属于本地快照，不能据其目录名推断为最新分支。
 
 ## 教程与社区资料

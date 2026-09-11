@@ -1,9 +1,9 @@
 'use strict';
 const vm = require('vm');
 const { test } = require('./runner');
-const { core, assert, fs, path, bridgeSandbox } = require('./helpers');
+const { core, assert, fs, path, bridgeSandbox, legacyBridgeScript } = require('./helpers');
 const createLifecycle = require('../src/bridge-lifecycle');
-const source = fs.readFileSync(path.join(__dirname, '../src/mvu2shujuku.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/extension-runtime.js'), 'utf8');
 const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 function extract(start, end) {
     const a = source.indexOf(start), b = source.indexOf(end, a + start.length);
@@ -41,7 +41,7 @@ function startExtension(win) {
         syncRuntimeForCurrentCard() { win.Mvu = extensionMvu; },
         acceptBridgeRegistration(payload) { received.push(payload); return true; },
     });
-    vm.runInContext(extract('    const runtimeRegistry = (() => {', '\n    function getContextSafe()') +
+    vm.runInContext(extract('    const runtimeRegistry = (() => {', '\n    function getContextSafe(') +
         extract('    function activateRuntimeRegistry()', '    // 重读通知去重') +
         extract('    function main() {', '\n    try {\n        main();') + '\nmain();', win);
     return { started, received, extensionMvu, registry: win.__mvu2shujukuRuntime };
@@ -70,7 +70,7 @@ test('桥接管：工厂停止后取消睡眠、定时器和监听，API 失败�
 
 test('桥接管：扩展晚加载取消待提交快照，旧定时器不会抢回 Mvu', async () => {
     const r = setup(); await tick();
-    const callbackKey = '__mvu2shujukuTableUpdateCallback_' + core.VERSION;
+    const callbackKey = '__mvu2shujukuTableUpdateCallback_0.3.17';
     const oldCallback = r.win[callbackKey];
     let removed = 0;
     r.fakeApi.unregisterTableUpdateCallback = callback => { assert.strictEqual(callback, oldCallback); removed++; };
@@ -101,7 +101,7 @@ test('桥接管：API 缺失时重试不累积控制器，晚加载扩展取消�
         clearTimeout(key) { timers.delete(key); } };
     win.window = win; win.top = win; win.parent = win;
     vm.createContext(win);
-    vm.runInContext(r.converted.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r.converted), win);
     assert.strictEqual(win.__mvu2shujukuLegacyBridges.length, 1);
     const first = Array.from(timers.values())[0]; timers.clear(); first.fn();
     assert.strictEqual(win.__mvu2shujukuLegacyBridges.length, 1);
@@ -120,7 +120,7 @@ test('桥接管：扩展登记抛错也不启动第二套兼容运行时', () =>
     const win = { console, __mvu2shujukuRuntime: { owner: 'extension', registerCard() { throw new Error('登记失败'); } } };
     win.window = win; win.top = win;
     vm.createContext(win);
-    vm.runInContext(r.converted.bridgeScript, win);
+    vm.runInContext(legacyBridgeScript(r.converted), win);
     assert.strictEqual(win.__mvu2shujukuLegacyBridges, undefined);
     assert.strictEqual(win.Mvu, undefined);
 });
