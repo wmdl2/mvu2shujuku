@@ -13,7 +13,17 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.3.18';
+    const VERSION = '0.4.0';
+
+    /* VWD 动态说明实验开关（内部）。
+     * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
+     * 说明拒绝策略，结构、DDL、note 与旧布局行为保持交接前的样子。
+     * 只有显式打开（测试或本地实验）才登记该能力；这不是面向用户的设置，也不承诺
+     * “接上宿主接口即可启用”——完整的说明同步协议尚未接入，见 2026-09-15 返工结果。
+     */
+    let vwdExperimental = false;
+    function setVwdExperimental(on) { vwdExperimental = !!on; }
+    function isVwdExperimental() { return vwdExperimental; }
 
     let sharedTableCodec = null;
     function getTableCodecFactory() {
@@ -37,6 +47,11 @@
         if (typeof require === 'function') return require('./runtime-session.js');
         throw new Error('运行会话模块未加载，请使用构建后的 index.js');
     }
+    function getRuntimeWindowsFactory() {
+        if (typeof root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__ === 'function') return root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__;
+        if (typeof require === 'function') return require('./runtime-windows.js');
+        throw new Error('运行窗口模块未加载，请使用构建后的 index.js');
+    }
     function getStAdapterFactory() {
         if (typeof root.__MVU2SHUJUKU_ST_ADAPTER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_ST_ADAPTER_FACTORY__;
         if (typeof require === 'function') return require('./st-adapter.js');
@@ -47,14 +62,26 @@
         if (typeof require === 'function') return require('./settings-view.js');
         throw new Error('设置视图模块未加载，请使用构建后的 index.js');
     }
+    function getResultViewFactory() {
+        if (typeof root.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__ === 'function') return root.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__;
+        if (typeof require === 'function') return require('./result-view.js');
+        throw new Error('转换结果视图未加载，请使用构建后的 index.js');
+    }
     function getSchemaLayoutFactory() {
         if (typeof root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ === 'function') return root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__;
         if (typeof require === 'function') return require('./schema-layout.js');
         throw new Error('结构推导模块未加载，请使用构建后的 index.js');
     }
+    function getStatusUsageFactory() {
+        if (typeof root.__MVU2SHUJUKU_STATUS_USAGE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_STATUS_USAGE_FACTORY__;
+        if (typeof require === 'function') return require('./status-usage.js');
+        throw new Error('前端字段扫描模块未加载，请使用构建后的 index.js');
+    }
     function getSchemaLayout() {
         if (!sharedSchemaLayout) sharedSchemaLayout = getSchemaLayoutFactory()({
             getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf,
+            maskJsStringsAndComments, createStatusUsage: getStatusUsageFactory(), isPromptVisibleColumn,
+            vwdExperimental: isVwdExperimental,
         });
         return sharedSchemaLayout;
     }
@@ -102,6 +129,7 @@
     function getTableWriter() {
         if (!sharedTableWriter) sharedTableWriter = getTableWriterFactory()({
             parseJson: safeParseJson, debugOn: mvu2shujukuDebugOn, debug: dbg, warn: dbgWarn,
+            vwdNoteSyncSupported: canWriteVwdDescriptions,
             readCachedTemplate: () => {
                 const holder = typeof window !== 'undefined' ? window : root;
                 return holder && holder.__mvu2shujukuTemplateCache;
@@ -601,6 +629,7 @@
     function yamlExpandTemplateKeys(...args) { return getSchemaLayout().yamlExpandTemplateKeys(...args); }
     function expandYamlTemplateFieldKey(...args) { return getSchemaLayout().expandYamlTemplateFieldKey(...args); }
     function protectYamlTemplateScalarValues(...args) { return getSchemaLayout().protectYamlTemplateScalarValues(...args); }
+    function prepareMvuRuleYaml(...args) { return getSchemaLayout().prepareMvuRuleYaml(...args); }
     function yamlCollectCheckRanges(...args) { return getSchemaLayout().yamlCollectCheckRanges(...args); }
     function collectRulesFromYaml(...args) { return getSchemaLayout().collectRulesFromYaml(...args); }
     function yamlParseRange(...args) { return getSchemaLayout().yamlParseRange(...args); }
@@ -698,6 +727,40 @@
         return String(v == null ? '' : v).replace(/'/g, "''");
     }
 
+    function jsonPathChecksSql(column) {
+        if (!Array.isArray(column.jsonPathChecks) || !column.jsonPathChecks.length) return '';
+        let initial;
+        try { initial = JSON.parse(column.value); } catch (_) {}
+        const initialValues = Array.isArray(column.initialJsonValues) ? column.initialJsonValues : [initial];
+        const literal = v => typeof v === 'number' ? String(v) : typeof v === 'boolean' ? (v ? '1' : '0') : `'${sqlQuote(v)}'`;
+        const checks = [];
+        for (const check of column.jsonPathChecks || []) {
+            const path = '$' + check.path.map(key => typeof key === 'number' && Number.isInteger(key) && key >= 0
+                ? '[' + key + ']' : '.' + JSON.stringify(String(key))).join('');
+            const value = `json_extract(${column.ident}, '${sqlQuote(path)}')`;
+            const type = `json_type(${column.ident}, '${sqlQuote(path)}')`;
+            const fallbacks = [...new Set(initialValues.map(initial => {
+                let value = initial;
+                for (const key of check.path) value = value == null ? undefined : value[key];
+                return value;
+            }).filter(value => value !== undefined && value !== null && ['string', 'number', 'boolean'].includes(typeof value)))];
+            const wrap = expr => ` CHECK(CASE WHEN ${column.ident} = '' OR NOT json_valid(${column.ident}) THEN 1 WHEN ${type} IS NULL OR ${type} = 'null' THEN 1 ELSE (${expr}) END)`;
+            if (check.range && check.range.length === 2 && check.range.every(Number.isFinite)) {
+                let expr = `${value} BETWEEN ${check.range[0]} AND ${check.range[1]}`;
+                // JSON 提取结果没有数值列亲和性，初值 "5" 仍是字符串；沿用原初值放行契约。
+                const rangeFallbacks = Array.isArray(column.initialJsonValues)
+                    ? fallbacks.filter(v => typeof v !== 'number' || v < check.range[0] || v > check.range[1]) : fallbacks;
+                for (const fallback of rangeFallbacks) expr += ` OR ${value} = ${literal(fallback)}`;
+                checks.push(wrap(expr));
+            }
+            if (Array.isArray(check.enum) && check.enum.length && check.enum.length <= 8) {
+                const values = [...new Set([...check.enum, ...fallbacks])];
+                checks.push(wrap(`${value} IN (${values.map(literal).join(', ')})`));
+            }
+        }
+        return checks.join('');
+    }
+
     function buildDdl(group, opts = {}) {
         // 用户可关掉 DDL 里的 CHECK（数值范围/枚举/json_valid），只保留列类型与默认值。
         const includeCheck = opts.includeCheck !== false;
@@ -727,7 +790,31 @@
                     }
                 }
             }
-            if (c.type === 'INTEGER' || c.type === 'REAL') {
+            if ((c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional')) {
+                const encodedDefault = dv === undefined ? '' : JSON.stringify(dv);
+                def += ` NOT NULL DEFAULT '${sqlQuote(encodedDefault)}'`;
+                if (includeCheck) {
+                    def += ` CHECK(${c.ident} = '' OR (json_valid(${c.ident}) AND json_type(${c.ident}) IN ('null', 'text', 'integer', 'real', 'true', 'false')))`;
+                    const valueExpr = `json_extract(${c.ident}, '$')`;
+                    const emptyExpr = `${c.ident} = '' OR json_type(${c.ident}) = 'null'`;
+                    if (range) {
+                        const allowed = extras.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`);
+                        def += ` CHECK(${emptyExpr} OR ${valueExpr} BETWEEN ${range[0]} AND ${range[1]}${allowed.length ? ` OR ${valueExpr} IN (${allowed.join(', ')})` : ''})`;
+                    }
+                    if (c.enum && c.enum.length <= 8) {
+                        const allowed = [...new Set([...c.enum, ...(dv === undefined || dv === null ? [] : [dv]), ...extras])];
+                        if (allowed.length) def += ` CHECK(${emptyExpr} OR ${valueExpr} IN (${allowed.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`).join(', ')}))`;
+                    }
+                }
+            } else if (c.logicalType === 'jsonObjectOptional') {
+                const encodedDefault = c.jsonDefaultMissing === true || dv === undefined ? '' : (typeof dv === 'string' ? dv : JSON.stringify(dv));
+                def += ` NOT NULL DEFAULT '${sqlQuote(encodedDefault)}'`;
+                if (includeCheck) {
+                    const kinds = c.jsonKind === 'array' ? "'array'" : "'object'";
+                    def += ` CHECK(${c.ident} = '' OR (json_valid(${c.ident}) AND json_type(${c.ident}) IN ('null', ${kinds})))`;
+                    def += jsonPathChecksSql(c);
+                }
+            } else if (c.type === 'INTEGER' || c.type === 'REAL') {
                 let defaultExpr = 0;
                 if (typeof dv === 'boolean') {
                     defaultExpr = dv ? 1 : 0;
@@ -796,34 +883,86 @@
             return '数组表：每行一个数组元素，行号即数组顺序；按行新增、移除或更新元素。';
         }
         if (group.kind === 'nestedRows') {
-            const ancestors = (group.ancestorKeyCols && group.ancestorKeyCols.length)
-                ? group.ancestorKeyCols : [{ col: group.parentKeyCol, parentTable: group.parentTable, parentKeyCol: group.keyCol }];
-            if (ancestors.length === 1) {
-                const a = ancestors[0];
-                const entity = a.entity || group.relationEntity || String(a.col || '').replace(/_键名$/, '') || '关联记录';
-                return `关系表：每行记录「${a.parentTable || group.parentTable}」中某条${entity}记录的一项${group.childKey || group.name}数据；「${a.col}」取自「${a.parentTable || group.parentTable}.${a.parentKeyCol || group.keyCol}」，并与「${group.keyCol}」共同定位该记录。`;
-            }
-            const keys = [...ancestors.map(a => `「${a.col}」`), `「${group.keyCol}」`].join('、');
-            return `关系表：每行记录一项${group.childKey || group.name}数据；${keys}组成完整关系键，共同定位所属记录。`;
+            return `每行记录一项${group.childKey || group.name}数据。`;
         }
         return `行表，以「${group.keyCol}」为唯一标识；同名记录只存在一行，已有记录按需更新，新记录按需新增。`;
     }
 
-    function buildNote(group) {
+    function isRelationshipKeyColumn(group, column) {
+        return column && (column.zh === group.keyCol || column.zh === group.parentKeyCol
+            || (group.ancestorKeyCols || []).some(a => a && a.col === column.zh));
+    }
+    function isDollarPrivateColumn(group, column) {
+        if (!column || isRelationshipKeyColumn(group, column)) return false;
+        return String(group.name || '').startsWith('$')
+            || String(column.zh || '').startsWith('$')
+            || (Array.isArray(column.path) && column.path.some(part => String(part).startsWith('$')));
+    }
+    function isUnderscoreReadonlyColumn(group, column) {
+        return column && (String(column.zh || '').startsWith('_')
+            || (!isRelationshipKeyColumn(group, column) && Array.isArray(column.path)
+                && column.path.some(part => String(part).startsWith('_'))));
+    }
+    function isAiPromptColumn(group, column) {
+        return column && column.zh !== '_扩展数据'
+            && !isUnderscoreReadonlyColumn(group, column)
+            && !isDollarPrivateColumn(group, column);
+    }
+
+    // 模型确实能看到该列说明（= 会进 buildNote 的【字段说明与规则】）。VWD 只登记
+    // 这些列：私有/只读列不进提示词，也就不该为它保存“当前说明”。
+    // 与 buildNote 里 aiCols 的过滤条件保持同一套判定。
+    function isPromptVisibleColumn(group, column) {
+        if (!isAiPromptColumn(group, column)) return false;
+        if (group && group.scalarType === 'number') return false;
+        if (group && group.kind === 'json') return false;
+        return true;
+    }
+
+    function aiJsonColumns(group) {
+        if (group.scalarType === 'number') return [];
+        if (group.kind === 'json') {
+            return (group.wildcardRules || []).length || (group.groupChecks || []).length
+                ? (group.columns || []).filter(c => c.zh === '内容') : [];
+        }
+        return (group.columns || []).filter(c => isAiPromptColumn(group, c)
+            && !isRelationshipKeyColumn(group, c) && (c.isObject || c.logicalType === 'jsonObjectOptional'));
+    }
+
+    function jsonUpdateGuide(group, mode) {
+        const cols = aiJsonColumns(group);
+        if (!cols.length) return '';
+        const label = group.kind === 'json' ? '内容列' : cols.map(c => `「${c.zh}」`).join('、');
+        if (mode === 'native') return `${label}以 JSON 存储；更新单元格时提供完整的新 JSON，保留未改动的字段和元素。`;
+        return `${label}以 JSON 存储。SQL 模式优先用 json_set(列, '$."键"', 新值)、json_replace 或 json_remove 局部更新，仅操作规则允许的路径；对象/数组/布尔/null 新值用 json('...')，字符串用 SQL 字符串。数组从 0 索引，末尾追加用 [#]，中间插入/移动需重建受影响数组。空单元格或 JSON null 容器先按规则初始化，保留未改字段；json_patch 的 null 会删键，不作路径更新替代。`
+            + (mode === 'both' ? ' native 模式仍提供完整的新单元格 JSON，保留未改内容。' : '');
+    }
+
+    function buildNote(group, opts = {}) {
+        const mode = opts.mode || 'both';
         const L = [];
         if (group.scalarType === 'number') {
+            const scriptReadonly = /^[_$]/.test(String(group.name || ''));
             const rules = [...(group.groupChecks || []), ...(group.wildcardRules || []).flatMap(r => r.checks || [])];
             L.push('数值表（row_id=1，全表固定一行）：「内容」直接保存一个数字，可含小数；禁止写入对象、数组、布尔值或带引号的 JSON 字符串。禁止新增/删除行。');
             if (rules.length) {
                 L.push('【更新规则】', ...rules.map(rule => '- ' + sanitizeCheckRule(rule, { group })).filter(s => s !== '- '));
-                L.push('只在本轮发生相应变化时更新数值；未发生变化则保持原值。');
-            } else L.push('本数值由脚本/前端维护，AI 不应直接修改本表。');
+                if (!scriptReadonly) L.push('只在本轮发生相应变化时更新数值；未发生变化则保持原值。');
+            } else if (scriptReadonly) L.push('本数值由脚本/前端维护，AI 不应直接修改本表。');
+            else L.push('根据正文、设定与本表规则，数值发生明确变化时按需更新；未发生变化则保持原值。');
+            if (scriptReadonly && rules.length) L.push('本数值由脚本/前端维护，AI 不应直接修改本表。');
             return L.join('\n');
         }
-        const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+        const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => isAiPromptColumn(group, c));
+        if (group.kind === 'singleton' && group.valueCol && aiCols.length) {
+            L.push(`「${group.valueCol}」直接保存整个「${group.name}」变量；空单元格表示该变量不存在，JSON null 表示空值，{} / [] 表示相应空容器。状态切换也只更新此单元格，不能删除身份行。JSON 路径从内容内部开始，不再重复外层组名；内部以 _ 开头的字段由脚本维护，不主动修改。`);
+        }
+        if (group.scalarValueCol && group.containerSchema && aiCols.length) {
+            L.push(`「${group.scalarValueCol}」保存当前键名对应的完整记录；JSON null 表示该记录为空值，{} / [] 表示空容器，删除行表示该键不存在（空单元格读回也视为缺失）。JSON 路径从记录内部开始，不重复键名或关联列。修改内部字段须保留其他字段；内部以 _ 开头的字段由脚本维护。`);
+        }
         // 所有下划线前缀列都是只读状态；内部溢出列 _扩展数据虽不进列定义/写入示例，
         // 但 AI 仍能在真实表头/DDL 里看到，因此同样要触发现有只读提示。
-        const userReadonlyCols = (group.columns || []).filter(c => String(c.zh).startsWith('_'));
+        const userReadonlyCols = (group.columns || []).filter(c => isUnderscoreReadonlyColumn(group, c));
         const hasUserReadonly = userReadonlyCols.length > 0;
         const allReadonly = hasUserReadonly && aiCols.length === 0;
         if (group.kind === 'json') {
@@ -831,8 +970,8 @@
             const gc = group.groupChecks || [];
             if (wr.length || gc.length) {
                 // 规则声明了 AI 可写路径（如 户.<门牌>.妻.好感值）：JSON 表不再一刀切只读，
-                // 而是列出可写路径与约束，AI 读取现有 JSON 仅改对应路径后整体写回「内容」列。
-                L.push('整组 JSON 存储表（row_id=1，全表固定一行）：本表以 JSON 保存动态结构。AI 可更新「内容」列——读取当前 JSON，只改变【可写路径与约束】中列出的路径，其余字段保持原样，再把整个 JSON 写回；禁止新增/删除行。');
+                // 而是列出可写路径与约束；SQL 可在单元格内按路径更新。
+                L.push('整组 JSON 存储表（row_id=1，全表固定一行）：本表以 JSON 保存动态结构。AI 可更新「内容」列，只改变【可写路径与约束】中列出的路径，其余字段保持原样；禁止新增/删除行。');
                 L.push('【可写路径与约束】');
                 for (const r of wr) {
                     const parts = [];
@@ -848,7 +987,7 @@
                 // 的路径（否则空 JSON 表永远无法初始化，如大荒 宗门表）。不做关键词检测。
                 L.push('- 只更新【可写路径与约束】中列出的路径；未列出的字段一律只读（它们仍存在于同一 JSON 中，由脚本/系统维护，AI 不得改动）。规则要求 insert/初始化/新增 的路径允许创建对应字段、对象或记录；严禁新增未声明的字段、对象或记录');
                 L.push('- 只更新本轮剧情中明确出现并被影响到的对象；其余对象的数据保持原样');
-                L.push('- 写回时必须完整保留 JSON 中其余全部字段；数值字段保持数字类型、字符串字段保持字符串类型');
+                L.push('- 更新后必须保留 JSON 中其余全部字段及其原有类型');
             } else {
                 L.push(`整组 JSON 存储表（row_id=1，全表固定一行）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除行。`);
             }
@@ -862,12 +1001,42 @@
                 // 避免“AI 无需填表”让人以为整组数据都不存在。
                 const childNames = (group.childTables || []).map(ct => ct.tableName || (ct.key + '表'));
                 L.push(childNames.length
-                    ? `本表为容器（row_id=1 占位），数据在子表「${childNames.join('、')}」中；本表自身无 AI 可填字段，全部字段由脚本/系统维护，AI 无需填表。`
+                    ? `本表为容器（row_id=1 占位），数据保存在「${childNames.join('、')}」中；本表自身无 AI 可填字段，全部字段由脚本/系统维护，AI 无需填表。`
                     : `本表唯一记录已由开局模板初始化（row_id=1）；全部字段由脚本/系统维护，AI 无需填表。`);
             }
         } else {
             // 与插件默认模板一致：note 不重复表名（插件会在表头显示表名），直接给表类型说明
             L.push(describeGroup(group));
+        }
+        if (group.kind === 'nestedRows' || group.kind === 'nestedArray') {
+            const ancestors = (group.ancestorKeyCols && group.ancestorKeyCols.length)
+                ? group.ancestorKeyCols : [{ col: group.parentKeyCol, parentTable: group.parentTable }];
+            const fields = ancestors.filter(a => a && a.col);
+            if (fields.length) {
+                const origins = fields.map(a => a.parentTable && a.parentKeyCol
+                    ? `「${a.col}」对应「${a.parentTable}.${a.parentKeyCol}」` : `「${a.col}」用于确定所属记录`);
+                L.push(`关联字段：${origins.join('；')}。`);
+                const locator = [...new Set([...fields.map(a => a.col), ...(group.kind === 'nestedRows' ? [group.keyCol] : [])])].filter(Boolean);
+                if (group.kind === 'nestedRows') {
+                    L.push(`定位记录须同时匹配${locator.map(k => `「${k}」`).join('、')}；不得只匹配其中一个字段。`);
+                    const example = locator.map((key, i) => `「${key}」=“示例值${i + 1}”`).join('、');
+                    L.push(`定位示例（值仅为占位，须换成当前表格的实际值）：${example}。只更新或删除完整组合匹配的记录，其他来源下的同名条目保持不变。`);
+                } else {
+                    L.push(`先核对${locator.map(k => `「${k}」`).join('、')}确认所属记录，再定位要操作的数组元素。`);
+                    L.push('定位示例：不同来源各有第 2 个元素时，先确认来源，再取目标元素在本表中的行标识；不能把来源内的序号 1 直接当成本表行号。');
+                }
+            }
+            const knownParent = ancestors.some(a => a && a.parentTable);
+            if (knownParent) L.push('关联来源记录删除时，一并删除本表对应记录；来源标识值变更时，同步修改本表对应的关联字段。请在本次填表中完成这些操作。');
+        }
+        if (['array', 'pathArray', 'nestedArray'].includes(group.kind)) {
+            const nativeLocator = 'native 使用本表提示中方括号里的行号（从 0 开始），不填 SQL row_id';
+            const sqlLocator = 'SQL 使用当前数据中的 row_id，不按显示顺序推算';
+            L.push(mode === 'native' ? nativeLocator + '。' : mode === 'sqlite' ? sqlLocator + '。' : nativeLocator + '；' + sqlLocator + '。');
+        }
+        if (Array.isArray(group.childTables) && group.childTables.length) {
+            const childNames = group.childTables.map(ct => ct.tableName || (ct.key + '表')).filter(Boolean);
+            if (childNames.length) L.push(`相关数据保存在「${childNames.join('、')}」；删除本表记录时，一并删除其中对应记录；本表标识值变更时，同步修改其中对应的关联字段。请在本次填表中完成这些操作。`);
         }
         // JSON 表整组由脚本/前端管理：完全不展示列定义与约束；其余表隐藏内部列（_扩展数据）
         // 下划线开头字段 = 脚本维护的只读状态：不进填表规则（AI 仍能在数据表里看到值，
@@ -877,12 +1046,24 @@
             // 注意：只声明“不列入填表字段/严禁更新”，不要声称“更新会被回滚”——
             // 转换器没有回滚机制（下划线字段只是不进填表规则，AI 若硬写 SQL 不会被回滚）。
             L.push('下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。');
+            // 展平后表头可能丢失开头的下划线，必须用实际列名说明只读范围。
+            const flattenedReadonly = userReadonlyCols.filter(c => !String(c.zh || '').startsWith('_') && !isDollarPrivateColumn(group, c));
+            if (flattenedReadonly.length) L.push(`只读列：${flattenedReadonly.map(c => `「${c.zh}」`).join('、')}；AI 只能读取、严禁更新。`);
+            for (const c of userReadonlyCols) {
+                if (c.zh !== '_扩展数据' && !isDollarPrivateColumn(group, c) && c.desc) {
+                    L.push(`只读字段「${c.zh}」说明：${String(c.desc).trim().replace(/\n/g, '\n  ')}`);
+                }
+            }
         }
         if (aiCols.length) {
-            L.push('【列定义】');
-            // 对齐默认模板：列定义只列中文名 + 标识符；字段说明与约束放【强制约束】
-            aiCols.forEach((c, i) => L.push(`- 列${i + 1}: ${c.zh} ${c.ident}`));
-            L.push('【强制约束】');
+            const rulesStart = L.length;
+            L.push('【字段说明与规则】');
+            const nullableCols = aiCols.filter(c => (c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional'));
+            if (nullableCols.length) L.push(`- ${nullableCols.map(c => c.zh).join('、')}：按 JSON 标量填值；null 表示空值，字符串保留 JSON 双引号（空字符串为 ""），空单元格表示缺失字段。`);
+            const encodedCols = aiCols.filter(c => c.logicalType === 'jsonScalar');
+            if (encodedCols.length) L.push(`- ${encodedCols.map(c => `「${c.zh}」`).join('、')}：单元格保存完整 JSON 值，遵守原字段/数组元素的类型；字符串保留 JSON 双引号（如 \"文字\"），数字、布尔、null 不加 JSON 引号，对象/数组保存完整 JSON。SQL 字符串外围的单引号只是 SQL 写法，不属于单元格内容。`);
+            const nullableContainers = aiCols.filter(c => c.logicalType === 'jsonObjectOptional');
+            if (nullableContainers.length) L.push(`- ${nullableContainers.map(c => c.zh).join('、')}：保存 JSON 对象/数组；JSON null 表示空值，空单元格表示缺失字段。`);
             if (group.kind === 'nestedRows') {
                 const entity = group.relationEntity || String(group.parentKeyCol || '').replace(/_键名$/, '') || '关联记录';
                 L.push(`- 维护本表时，同时遵循对应${entity}记录中与「${group.childKey || group.name}」相关的整体规则`);
@@ -896,62 +1077,46 @@
                 const checks = (c.check || []).map(rule => sanitizeCheckRule(rule, { group, column: c })).filter(Boolean);
                 return { parts, checks };
             };
-            const compactTemplateLabel = (cols) => {
-                const names = cols.map(c => String(c.zh || ''));
-                if (names.length < 2 || names.some(x => !x)) return '';
-                const chars = names.map(x => Array.from(x));
-                let prefix = 0;
-                while (chars.every(x => prefix < x.length && x[prefix] === chars[0][prefix])) prefix++;
-                let suffix = 0;
-                while (chars.every(x => suffix < x.length - prefix && x[x.length - 1 - suffix] === chars[0][chars[0].length - 1 - suffix])) suffix++;
-                const choices = chars.map(x => x.slice(prefix, x.length - suffix).join(''));
-                // 至少共享前缀或后缀，才能证明这是一组可读的模板列；
-                // 不把仅仅恰好有相同枚举/check 的无关列硬拼成 ${A|B}。
-                if ((!prefix && !suffix) || choices.some(x => !x) || new Set(choices).size !== choices.length) return '';
-                return chars[0].slice(0, prefix).join('') + '${' + choices.join('|') + '}' + (suffix ? chars[0].slice(-suffix).join('') : '');
-            };
-            // 模板键会展开为真实列以便绑定 DDL，但提示词不必复制同一套
-            // 规则。仅在同表多列的范围/枚举/格式/check 完全一致时折叠；
-            // 各列自己的 [值,描述] 仍分别展示。
-            const ruleViews = new Map(aiCols.map(c => [c, columnRuleView(c)]));
-            const sameRuleSets = new Map();
-            for (const c of aiCols) {
-                const view = ruleViews.get(c);
-                if (!view.parts.length && !view.checks.length) continue;
-                const sig = JSON.stringify([view.parts, view.checks]);
-                if (!sameRuleSets.has(sig)) sameRuleSets.set(sig, []);
-                sameRuleSets.get(sig).push(c);
-            }
-            const groupedRuleOwner = new Map();
-            for (const cols of sameRuleSets.values()) {
-                const label = compactTemplateLabel(cols);
-                if (!label) continue;
-                groupedRuleOwner.set(cols[0], { label, cols });
-                for (let i = 1; i < cols.length; i++) groupedRuleOwner.set(cols[i], null);
-            }
             const emitColumnRules = (label, items) => {
-                const rules = items.map(x => String(x == null ? '' : x).trim()).filter(Boolean);
+                const rules = [...new Set(items.map(x => String(x == null ? '' : x).trim()).filter(Boolean))];
                 if (!rules.length) return;
                 if (rules.length === 1) {
-                    L.push(`- ${label}：${rules[0]}`);
+                    L.push(`- ${label}：${rules[0].replace(/\n/g, '\n  ')}`);
                     return;
                 }
                 L.push(`- ${label}：`);
-                for (const rule of rules) L.push(`  - ${rule}`);
+                for (const rule of rules) L.push(`  - ${rule.replace(/\n/g, '\n    ')}`);
+            };
+            // 字段含义比篇幅更重要：逐列展示实际名称，不把不同字段的说明
+            // 或业务条件折叠成模板标签。只在同一字段内部去掉逐字相同的项目。
+            // VWD 字段的静态说明在这里换成唯一插槽：运行期只替换“该字段”的当前说明，
+            // 不靠 replace(旧说明, 新说明) 猜位置（两个字段说明相同也能正确归属）。
+            const vwdPlan = opts.vwdSlotPlan && typeof opts.vwdSlotPlan === 'object' ? opts.vwdSlotPlan : null;
+            const vwdByCol = new Map();
+            if (vwdPlan && Array.isArray(vwdPlan.fields)) {
+                for (const field of vwdPlan.fields) {
+                    if (field && field.col && !vwdByCol.has(String(field.col))) vwdByCol.set(String(field.col), field);
+                }
+            }
+            const slotDesc = (c, desc) => {
+                const field = vwdByCol.get(String(c.zh));
+                if (!field || !vwdPlan) return desc;
+                if (!field.noteSlot) {
+                    field.noteSlot = vwdToken(vwdPlan.tokens.length);
+                    vwdPlan.tokens.push(field.id);
+                }
+                return field.noteSlot;
             };
             for (const c of aiCols) {
-                const view = ruleViews.get(c);
-                const grouped = groupedRuleOwner.get(c);
-                // 真实字段说明（如 [值,说明] 的更新条件）；通用描述（唯一标识/键名/JSON 提示）不重复
-                let desc = c.desc ? String(c.desc).replace(/\n/g, ' ').trim() : '';
-                // 关系列的关联含义已经在表级说明中完整表达，不再作为“强制约束”重复一遍。
-                if (group.kind === 'nestedRows' && (c.zh === group.keyCol || (group.ancestorKeyCols || []).some(a => a.col === c.zh) || c.zh === group.parentKeyCol)) desc = '';
+                const view = columnRuleView(c);
+                const desc = c.desc ? String(c.desc).trim() : '';
                 const generic = desc === '唯一标识' || desc === '对象（JSON 存储，读取时还原）';
-                if (grouped) {
-                    emitColumnRules(grouped.label, [...view.parts, ...view.checks, (!generic ? desc : '')]);
-                } else if (grouped !== null) {
-                    emitColumnRules(c.zh, [...view.parts, ...view.checks, (!generic ? desc : '')]);
-                }
+                const generatedRelation = (group.ancestorKeyCols || []).some(a => c.zh === a.col
+                    && desc === `关联「${a.parentTable}.${a.parentKeyCol}」`);
+                const dynamicDescription = vwdPlan && vwdPlan.promptVersion === 1 && vwdByCol.has(String(c.zh));
+                const items = [...(dynamicDescription ? [slotDesc(c, desc)] : (!generic && !generatedRelation ? [desc] : [])), ...view.parts, ...view.checks]
+                    .map(x => (!dynamicDescription && x && vwdByCol.has(String(c.zh)) && String(x) === desc ? slotDesc(c, desc) : x));
+                emitColumnRules(c.zh, items);
             }
             // 子表/动态字典的组级规则（如 世界.动向 的“最多维持2个大事件”）：以表级约束列出
             // 注意：这些行已位于本表自己的 note 内，不再重复表名前缀（避免“道侣表：性别：…”式噪音）
@@ -975,6 +1140,7 @@
                 if (parts.length) L.push(`- ${wr.path}（${parts.join('；')}）`);
             }
             (group.reminders || []).forEach(r => L.push(`- 每次回复必须维护：${r}`));
+            if (L.length === rulesStart + 1) L.pop();
         }
         if (allReadonly && group.kind !== 'json') {
             L.push('本表全部字段均为脚本/系统维护的只读状态：AI 无需填表，仅供读取。');
@@ -984,18 +1150,23 @@
             // “每次回复必须更新/replace 整个对象”这类每轮强制规则冲突。
             L.push('更新以正文和规则为依据，不得为凑表而虚构数据。');
         }
+        const jsonGuide = jsonUpdateGuide(group, mode);
+        if (jsonGuide) L.push(jsonGuide);
         return L.join('\n');
     }
 
     function buildInitNode(group) {
-        if (group.scalarType === 'number') return '开局已初始化唯一数值记录（row_id=1）；不得再次初始化或新增/删除行，后续更新遵循 note。';
+        if (group.scalarType === 'number') {
+            if (/^[_$]/.test(String(group.name || ''))) return '开局已初始化唯一数值记录（row_id=1）；不得再次初始化或新增/删除行，后续由脚本/前端维护，自动填表阶段不修改本表。';
+            return '开局已初始化唯一数值记录（row_id=1）；不得再次初始化或新增/删除行，后续根据正文、设定与 note 按需更新。';
+        }
         if (group.kind === 'json') {
             return ((group.wildcardRules || []).length || (group.groupChecks || []).length)
                 ? `开局模板已初始化整组数据（row_id=1）；自动填表阶段仅按 note 中「可写路径与约束」更新「内容」列，其余由脚本/前端维护。`
                 : `开局模板已初始化整组数据（row_id=1）；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
         }
         if (group.kind === 'singleton') {
-            const aiCols = (group.columns || []).filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+            const aiCols = (group.columns || []).filter(c => isAiPromptColumn(group, c));
             return aiCols.length
                 ? `开局模板已初始化唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`
                 : `开局模板已初始化唯一记录（row_id=1）；全部字段由脚本/系统维护，自动填表阶段不修改本表。`;
@@ -1013,61 +1184,130 @@
         return '开局为空表；出现符合本表定义的新记录时，新增一行完整记录。';
     }
 
-    // SQL 示例取值：优先真实初始行值 → 其次 DDL 默认值（INTEGER 未给默认按 0，对象列按 '{}'）
-    // → 最后“列中文名示例”兜底（主要覆盖无默认值的 TEXT 列）。
+    // INSERT 延续初始行值 → 默认值的策略；没有值时按列约束选择有效的
+    // 类型示例，不把字段名占位符写进枚举/数值/JSON。标识和业务值均需按本轮替换。
     function exampleCellValue(col, rowValue) {
-        if (rowValue !== undefined && rowValue !== null && String(rowValue) !== '') {
-            const isNum = col && col.type === 'INTEGER' && typeof rowValue === 'number';
-            return isNum ? String(rowValue) : `'${sqlQuote(String(rowValue))}'`;
+        const value = rowValue === undefined ? col.value : rowValue;
+        const quote = v => `'${sqlQuote(v)}'`;
+        if (['jsonScalarOptional', 'jsonPairOptional'].includes(col.logicalType)) {
+            return quote(value === undefined ? '' : JSON.stringify(value));
         }
-        if (col) {
-            const dv = col.value === undefined || col.value === null ? '' : col.value;
-            if (col.type === 'INTEGER') {
-                const num = dv === '' ? 0 : Number(dv);
-                return String(Number.isFinite(num) ? num : 0);
-            }
-            if (String(dv) !== '') return `'${sqlQuote(String(dv))}'`;
-            if (col.isObject) {
-                const example = col.objectSchema ? JSON.stringify(schemaExample(col.objectSchema)) : (col.jsonKind === 'array' ? '[]' : '{}');
-                return `'${sqlQuote(example)}'`;
-            }
+        if (col.logicalType === 'jsonObjectOptional') {
+            return quote(value === undefined ? '' : typeof value === 'string' ? value : JSON.stringify(value));
         }
-        return col && col.zh ? `'${sqlQuote(col.zh)}示例'` : '';
+        if (col.logicalType === 'jsonScalar') {
+            try { JSON.parse(value); return quote(value); } catch (_) { return quote('null'); }
+        }
+        if (col.isObject) {
+            if (value !== undefined && value !== null && value !== '') return quote(typeof value === 'string' ? value : JSON.stringify(value));
+            return quote(JSON.stringify(col.objectSchema ? schemaExample(col.objectSchema) : col.jsonKind === 'array' ? [] : {}));
+        }
+        if (col.logicalType === 'boolean' || typeof value === 'boolean') return value === true || value === 1 || value === 'true' || value === '1' ? '1' : '0';
+        if (value !== undefined && value !== null && value !== '') {
+            return typeof value === 'number' ? String(value) : quote(value);
+        }
+        if (col.enum && col.enum.length) {
+            const selected = col.enum[0];
+            return typeof selected === 'number' ? String(selected) : quote(selected);
+        }
+        if (col.type === 'INTEGER' || col.type === 'REAL') return String(col.range ? col.range[0] : 0);
+        return quote(`${col.zh || '字段'}示例`);
     }
 
-    // UPDATE 示例取值：不能拿当前值/默认值当示例值，否则会读成“把它更新成原值”的指令
-    // （如 SET 当前时间 = '未知'，而当前时间本来就是 '未知'）。TEXT 一律用 '新值' 占位；
-    // INTEGER 给 DDL 默认数字（0 或初始值）。示例统一不带“示例值仅为格式演示”后缀，
-    // 与插件内置模板风格一致；占位语义由“SQL示例”标签与 note 的“不得虚构数据”约束兜底。
-    function exampleUpdateValue(col) {
-        if (col && col.type === 'INTEGER') {
-            const dv = col.value === undefined || col.value === null ? '' : col.value;
-            const num = dv === '' ? 0 : Number(dv);
-            return String(Number.isFinite(num) ? num : 0);
+    // 示例只演示语法，不定义业务变化。选择符合已知类型/范围/枚举的值，
+    // 不把通用“新值”写进数字、布尔或 JSON 编码列。
+    function exampleScalarValue(col, current) {
+        const allowed = value => (!col.range || (typeof value === 'number' && value >= col.range[0] && value <= col.range[1]));
+        if (Array.isArray(col.enum) && col.enum.length) {
+            const values = col.enum.filter(v => (v === null || ['string', 'number', 'boolean'].includes(typeof v)) && allowed(v));
+            const different = values.find(v => v !== current);
+            return different !== undefined ? different : values.length ? values[0] : current;
         }
-        return "'新值'";
+        if (col.logicalType === 'boolean' || typeof current === 'boolean') return !current;
+        if (col.range || col.logicalType === 'number' || col.type === 'INTEGER' || col.type === 'REAL' || typeof current === 'number') {
+            const number = Number(current);
+            const candidates = [number + 1, number - 1, ...(col.range || []), 1, 0];
+            return candidates.find(v => Number.isFinite(v) && allowed(v) && v !== current)
+                ?? candidates.find(v => Number.isFinite(v) && allowed(v)) ?? current;
+        }
+        if (current === null || current === undefined) {
+            // 可空列没有非空类型证据时，不猜测原作者希望数字还是文本。
+            if (['jsonScalarOptional', 'jsonPairOptional', 'jsonScalar'].includes(col.logicalType)) return null;
+        }
+        return '新值';
     }
 
-    // 卡内 check 规则是写给 MVU JSON Patch 机制看的，转换后需要洗掉机制性残留，
-    // 只保留业务规则，避免与数据库填表通道（DSL/SQL）打架：
-    //  1. 括号机制注释（op: delta/replace、勿用delta）整段删除
-    //  2. 纯机制句（【防崩警告】…严禁 replace/delta、严禁对整个对象使用 replace/delta）整句删除
-    //  3. “必须分N条指令更新：一条replaceA，另一条replaceB” → “A；B”（保留业务语义）
-    //  4. “如 /组/字段/子字段” 这类路径写法 → 点分路径（机制句删掉后罕见，兜底处理）
+    function exampleUpdateValue(col, group) {
+        const index = group ? group.columns.indexOf(col) + 1 : 0;
+        const raw = [...(group && group.rows || []).map(row => row[index]), col.value];
+        const candidates = col.logicalType === 'jsonScalar'
+            ? raw.map(value => { try { return JSON.parse(value); } catch (_) { return undefined; } }) : raw;
+        let current = candidates.find(value => value !== null && value !== undefined && value !== '');
+        if (current === undefined) current = candidates.find(value => value !== undefined);
+        if (current === undefined) current = col.value;
+        // jsonScalar 也能承载数组/对象元素，不用字符串示例替换它们。
+        if (col.logicalType === 'jsonScalar' && current && typeof current === 'object') return null;
+        const value = exampleScalarValue(col, current);
+        if (['jsonScalar', 'jsonScalarOptional', 'jsonPairOptional'].includes(col.logicalType)) return `'${sqlQuote(JSON.stringify(value))}'`;
+        if (typeof value === 'boolean') return value ? '1' : '0';
+        return typeof value === 'number' && Number.isFinite(value) ? String(value) : `'${sqlQuote(value)}'`;
+    }
+
+    // SQL 专用模板的示例从实际 JSON 单元格选一条已有公开路径，避免教模型
+    // 用残缺对象覆盖整格。整组 JSON 的可写范围另由规则决定，不猜示例路径。
+    function exampleUpdateAssignment(group, col) {
+        if (!aiJsonColumns(group).includes(col) || group.kind === 'json') {
+            const value = exampleUpdateValue(col, group);
+            return value === null ? null : `${col.ident} = ${value}`;
+        }
+        const index = group.columns.indexOf(col) + 1;
+        const values = [...(group.rows || []).map(row => row[index]), col.value];
+        const findLeaf = (value, path, depth = 0) => {
+            if (depth > 12) return null;
+            if (value === null || typeof value !== 'object') return path === '$' ? null : { path, value };
+            for (const key of Object.keys(value)) {
+                // 引号/反斜线等键的 SQLite 路径兼容性因引擎版本而异，示例不猜转义。
+                if (/^[_$]|["\\\x00-\x1f]/.test(key)) continue;
+                const next = Array.isArray(value) ? `${path}[${key}]` : `${path}."${key}"`;
+                const leaf = findLeaf(value[key], next, depth + 1);
+                if (leaf) return leaf;
+            }
+            return null;
+        };
+        for (const cell of values) {
+            let value;
+            try { value = typeof cell === 'string' ? JSON.parse(cell) : cell; } catch (_) { continue; }
+            if (!value || typeof value !== 'object') continue;
+            const leaf = findLeaf(value, '$');
+            if (!leaf) continue;
+            const newValue = typeof leaf.value === 'string' ? "'新值'"
+                : typeof leaf.value === 'number' && Number.isFinite(leaf.value) ? String(leaf.value)
+                    : `json('${leaf.value === null ? 'null' : JSON.stringify(leaf.value)}')`;
+            return `${col.ident} = json_replace(${col.ident}, '${sqlQuote(leaf.path)}', ${newValue})`;
+        }
+        // 缺失、null、空对象或仅含私有字段时没有可证明的局部路径，不编造键。
+        return null;
+    }
+
+    // 仅改写能完整识别的 MVU 机制语句。业务中的“指令”、英文名称、路径或
+    // 括号条件不能作为删除依据；无法确定时保留原文，不以清洁/精简牺牲含义。
     function sanitizeCheckRule(line, context) {
         let s = String(line || '').trim();
         if (!s) return s;
         const ctx = context || {};
         const col = ctx.column || null;
         const jsonArray = !!(ctx.jsonContainer || (col && col.isObject && col.jsonKind === 'array'));
+        const containerOnly = /^(?:【[^】]*(?:警告|防崩|注意)[^】]*】\s*)?(?:更新时必须精确到子字段(?:（如[^（）]*）|\(如[^()]*\))?\s*[，,]\s*)?(?:严禁|不要|避免|请勿|勿)(?:直接)?对整个(?:对象|数组)使用\s*["'“”]?(?:replace|delta)["'“”]?(?:\s*(?:或|和|\/)\s*["'“”]?(?:replace|delta)["'“”]?)?\s*[。！!]?$/i;
+        if (containerOnly.test(s)) return '更新时只修改发生变化的字段或元素，保留其他内容。';
+
         // 先把 JSON Patch 的“怎么发指令”还原为业务/存储语义。不能机械地把
         // add/remove 替换成 INSERT/DELETE：JSON 数组列在两种数据库模式下都仍是
-        // 一个单元格，增删元素实际需要更新并完整写回该列，而不是增删表格行。
+        // 一个单元格，增删元素应修改列内内容，而不是增删表格行。
         if (jsonArray) {
             s = s.replace(/更改(.+?)内容时[，,]?\s*(?:必须)?(?:使用|用|采用)\s*["'“”]?replace["'“”]?\s*(?:操作|指令)?将整个数组重新输出更新/gi,
-                '更改$1内容时，必须完整写回更新后的数组，并保留未改动的元素');
-            s = s.replace(/清除(.+?)时[，,]?\s*(?:必须)?(?:使用|用|采用)\s*["'“”]?remove["'“”]?\s*(?:操作|指令)?并指定精确索引(?:（[^）]*）|\([^)]*\))?[。；;]?\s*需先读取数组内容确认索引[，,]?避免误删[。]?/gi,
-                '移除$1中的记录前，必须先读取现有数组并确认目标元素；更新后完整写回数组并保留其他记录，避免误删');
+                '更改$1内容时，更新目标元素并保留未改动的元素');
+            s = s.replace(/清除(.+?)时[，,]?\s*(?:必须)?(?:使用|用|采用)\s*["'“”]?remove["'“”]?\s*(?:操作|指令)?并指定精确索引((?:（[^）]*）|\([^)]*\))?)[。；;]?\s*需先读取数组内容确认索引[，,]?避免误删[。]?/gi,
+                (_, target, condition) => `移除${target}中的记录前${condition || ''}，必须先读取现有数组并确认目标元素；移除后保留其他记录，避免误删`);
         }
         // 动态对象在 MVU 中修改一个 value 时，部分规则会要求
         // remove 旧键 + insert 新键；拆成数据库行后可直接更新该记录的值。
@@ -1078,38 +1318,49 @@
         s = s.replace(/(?:使用|用|采用)\s*["'“”]?(add|replace|remove)["'“”]?\s*(?:操作|指令)/gi,
             (m, op) => opVerb[String(op).toLowerCase()] || '执行对应变更');
         s = s.replace(/(?:并)?指定精确索引/gi, '并准确定位目标元素');
-        s = s.replace(/(?:（|\()[^）)]*\/[\u3400-\u9fffA-Za-z0-9_$-]+(?:\/[\u3400-\u9fffA-Za-z0-9_$-]+)+[^）)]*(?:）|\))/g, '');
-        // 1) 括号机制注释（中文括号与英文括号都处理）
-        s = s.replace(/（[^）]*?(?:op\s*[:：]|delta|replace|指令)[^）]*?）/gi, '')
-             .replace(/\([^)]*?(?:op\s*[:：]|delta|replace)[^)]*?\)/gi, '');
-        // 2) 纯机制句：整句删除
-        if (/^【[^】]*(?:警告|防崩|注意)[^】]*】/.test(s) && /(?:replace|delta|指令|op\s*[:：]|json\s*patch|patch)/i.test(s)) return '';
-        if (/^(?:严禁|不要|避免|请勿|勿)/.test(s) && /(?:replace|delta|指令|op\s*[:：]|json\s*patch|patch)/i.test(s)) return '';
+        // 只转换整个括号都是 op/value 标量参数的情形；参数里的数值也是
+        // 更新规则的一部分，不能因为去掉旧语法而丢掉增量、重置值或例外条件。
+        s = s.replace(/（([^（）]*)）|\(([^()]*)\)/g, (whole, chinese, english) => {
+            const body = chinese === undefined ? english : chinese;
+            const op = body.trim().match(/^op\s*[:：]\s*(delta|replace)\s*[,，]\s*value\s*[:：]\s*(.+)$/i);
+            if (op) {
+                try {
+                    const value = JSON.parse(op[2]);
+                    const numeric = typeof value === 'number' && Number.isFinite(value);
+                    const representable = op[1].toLowerCase() === 'delta' ? numeric : numeric || value === null || ['boolean', 'string'].includes(typeof value);
+                    if (representable) {
+                        const meaning = op[1].toLowerCase() === 'delta' ? '增量' : '新值';
+                        return `（${meaning}：${JSON.stringify(value)}）`;
+                    }
+                } catch (_) { /* 混合业务、表达式或不完整参数均保留，不猜测。 */ }
+            }
+            if (/^(?:勿用|不要使用)\s*delta\s*导致超限[。！!]?$/i.test(body.trim())) return '（增量更新不得导致超限）';
+            return whole;
+        });
         // 3) “必须分N条指令更新：一条replaceA，另一条replaceB” → 保留前半句 + “A；B”
-        const dm = s.match(/([\s\S]*?)分\s*(?:\d+|[一二三四五六七八九十两])\s*条指令更新[：:]\s*一条(?:replace\s*)?([^，,。]+?)，另一条(?:replace\s*)?([^，,。]+?)(?:（[^）]*）)?\s*$/);
+        const dm = s.match(/([\s\S]*?)分\s*(?:\d+|[一二三四五六七八九十两])\s*条指令更新[：:]\s*一条(?:replace\s*)?([^，,。]+?)，另一条(?:replace\s*)?([^，,。]+?)(（[^）]*）|\([^)]*\))?\s*$/);
         if (dm) {
             const prefix = String(dm[1] || '').trim().replace(/[，,。;；\s]+$/, '').replace(/必须$/, '');
             const a = String(dm[2]).trim();
             const b = String(dm[3]).trim();
-            s = (prefix ? prefix : '') + a + '；' + b;
+            s = (prefix ? prefix + '，' : '') + '必须同时完成：' + a + '；' + b + (dm[4] || '');
         }
-        // 4) “如 /组/字段/子字段” 路径写法 → 点分路径
-        s = s.replace(/(?:如|为|到|写)\s*\/[\u4e00-\u9fff$]+(?:\/[\u4e00-\u9fff$]+)+/g, (m) => m.replace(/\//g, '.'));
         return s.trim();
     }
 
     function buildNodeProse(group, kind) {
         if (group.scalarType === 'number') {
             if (kind !== 'update') return '禁止。';
-            if (!(group.groupChecks || []).length && !(group.wildcardRules || []).length) return '本数值由脚本/前端维护，AI 不应直接修改。';
+            if (/^[_$]/.test(String(group.name || ''))) return '本数值由脚本/前端维护，AI 不应直接修改。';
             const col = group.columns[0];
-            return `根据 note 中的更新规则修改数值，只允许 UPDATE，禁止 INSERT / DELETE。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = ${col.value} WHERE row_id=1;`;
+            const hasRules = (group.groupChecks || []).length || (group.wildcardRules || []).length;
+            const basis = hasRules ? '根据 note 中的更新规则' : '根据正文、设定与本表规则';
+            return `${basis}修改数值，只允许 UPDATE，禁止 INSERT / DELETE。\nSQL示例: UPDATE ${group.ident} SET ${exampleUpdateAssignment(group, col)} WHERE row_id=1;`;
         }
         if (group.kind === 'json') {
             if (kind === 'update') {
                 if ((group.wildcardRules || []).length || (group.groupChecks || []).length) {
-                    const col = (group.columns || []).find(c => c.zh === '内容') || { ident: 'neirong', zh: '内容' };
-                    return `只允许 UPDATE（整组 JSON 固定 row_id=1，禁止 INSERT / DELETE）；正文明确造成字段变化时，按 note 中【可写路径与约束】只改实际存在的可写字段（未列出字段一律只读）、其余字段原样保留后整体写回。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = '{"可写键名":"新值"}' WHERE row_id=1;`;
+                    return '只允许 UPDATE（整组 JSON 固定 row_id=1，禁止 INSERT / DELETE）；正文明确造成字段变化时，按 note 中【可写路径与约束】维护允许的路径（未列出字段一律只读），保留其余字段。';
                 }
                 return '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
             }
@@ -1119,28 +1370,40 @@
             if (kind === 'update') {
                 // 用首个可写业务列给出具体示例（有初始值用真实值，否则“列名示例”）；
                 // 全只读单例（全部为 _ 字段）不生成可执行的 UPDATE 示例，避免教 AI 写只读字段
-                const col = (group.columns || []).find(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+                const col = (group.columns || []).find(c => isAiPromptColumn(group, c));
                 if (!col) return '本表全部字段均为脚本/系统维护的只读状态，AI 不应修改本表。';
-                const ident = col.ident;
-                const val = exampleUpdateValue(col);
-                return `只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；根据正文、设定与本表规则，已有字段的值发生变化时更新。\nSQL示例: UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1;`;
+                const assignment = exampleUpdateAssignment(group, col);
+                return '只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；根据正文、设定与本表规则，已有字段的值发生变化时更新。'
+                    + (assignment ? `\nSQL示例: UPDATE ${group.ident} SET ${assignment} WHERE row_id=1;` : ' JSON 操作遵循 note，仅在规则要求时初始化容器。');
             }
             return '禁止。';
         }
         if (group.kind === 'array' || group.kind === 'pathArray' || group.kind === 'nestedArray') {
-            // 数组表与插件按行 DSL 对齐：每行一个数组元素，支持按行增删改；
-            // 不再写“整体替换”（插件没有整表替换指令，且与禁止增删自相矛盾）
-            const col = (group.columns || []).find(c => c.zh === '内容') || (group.columns && group.columns[0]) || { ident: 'neirong', zh: '内容' };
-            const parent = group.kind === 'nestedArray' ? (group.columns || []).find(c => c.zh === group.parentKeyCol) : null;
+            const col = (group.columns || []).find(c => c.zh === '内容') || group.columns[0];
+            const ancestors = group.kind === 'nestedArray'
+                ? (group.ancestorKeyCols && group.ancestorKeyCols.length ? group.ancestorKeyCols
+                    : [{ col: group.parentKeyCol, parentTable: group.parentTable }]) : [];
+            const parents = ancestors.map(a => group.columns.find(c => c.zh === a.col)).filter(Boolean);
+            const parentValues = parents.map(c => {
+                const index = group.columns.indexOf(c) + 1;
+                const value = group.rows && group.rows[0] && group.rows[0][index];
+                return `'${sqlQuote(value === undefined ? '所属记录标识' : value)}'`;
+            });
+            const where = [...parents.map((c, i) => `${c.ident} = ${parentValues[i]}`), 'row_id = 1'].join(' AND ');
+            const value = exampleUpdateValue(col, group);
             if (kind === 'update') {
-                return `根据正文、设定与本表规则，已有数组元素的内容发生变化时更新该行。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = '新内容' WHERE row_id = 1;`;
+                return '根据正文、设定与本表规则，已有数组元素的内容发生变化时更新该行。'
+                    + (value === null ? ' 按 note 的编码规则提供完整的新元素，保留其他行。'
+                        : `\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = ${value} WHERE ${where};`);
             }
             if (kind === 'insert') {
-                return parent
-                    ? `根据正文、设定与本表规则，对应${group.relationEntity || '关联'}记录的数组出现本表尚未记录的新元素时添加；「${group.parentKeyCol}」必须取自「${group.parentTable}.${group.keyCol || '键名'}」。\nSQL示例: INSERT INTO ${group.ident} (${parent.ident}, ${col.ident}) VALUES ('${group.relationEntity || '关联'}键名', '新元素');`
-                    : `根据正文、设定与本表规则，数组出现本表尚未记录的新元素时添加（行号自动分配，行序即数组顺序）。\nSQL示例: INSERT INTO ${group.ident} (${col.ident}) VALUES ('新元素');`;
+                const association = parents.length
+                    ? ` 必须填写所有关联字段${parents.map(c => `「${c.zh}」`).join('、')}，取值对应 note 列出的来源记录。` : '';
+                return '根据正文、设定与本表规则，数组出现本表尚未记录的新元素时添加（行号自动分配，行序即数组顺序）。' + association
+                    + (value === null ? ' 按 note 的编码规则填写完整的新元素。'
+                        : `\nSQL示例: INSERT INTO ${group.ident} (${[...parents, col].map(c => c.ident).join(', ')}) VALUES (${[...parentValues, value].join(', ')});`);
             }
-            return `根据正文、设定与本表规则，已有数组元素不再属于当前数组时删除对应行。\nSQL示例: DELETE FROM ${group.ident} WHERE row_id = 1;`;
+            return `根据正文、设定与本表规则，已有数组元素不再属于当前数组时删除对应行。\nSQL示例: DELETE FROM ${group.ident} WHERE ${where};`;
         }
         if (group.kind === 'nestedRows') {
             const ancestorDefs = (group.ancestorKeyCols && group.ancestorKeyCols.length)
@@ -1148,7 +1411,7 @@
             const parents = ancestorDefs.map(a => group.columns.find(c => c.zh === a.col)).filter(Boolean);
             const key = group.columns.find(c => c.zh === group.keyCol) || group.columns[1];
             const ancestorNames = new Set(ancestorDefs.map(a => a.col));
-            const valueCols = group.columns.filter(c => !ancestorNames.has(c.zh) && c.zh !== group.keyCol && c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+            const valueCols = group.columns.filter(c => !ancestorNames.has(c.zh) && c.zh !== group.keyCol && isAiPromptColumn(group, c));
             const value = valueCols[0];
             const entity = group.relationEntity || String(group.parentKeyCol || '').replace(/_键名$/, '') || '关联';
             const whereParts = parents.map((p, i) => `${p.ident} = '${ancestorDefs[i].entity || String(ancestorDefs[i].col).replace(/_键名$/, '')}键名'`);
@@ -1156,9 +1419,10 @@
             const where = whereParts.join(' AND ');
             const keyNames = [...ancestorDefs.map(a => `「${a.col}」`), `「${group.keyCol}」`].join('、');
             if (kind === 'update') {
-                return value
-                    ? `根据正文、设定与本表规则，对应${entity}记录中已有${group.childKey || group.name}数据的字段值发生变化时更新；WHERE 必须同时带${keyNames}。\nSQL示例: UPDATE ${group.ident} SET ${value.ident} = ${exampleUpdateValue(value)} WHERE ${where};`
-                    : '本表无 AI 可更新的业务列。';
+                if (!value) return '本表无 AI 可更新的业务列。';
+                const assignment = exampleUpdateAssignment(group, value);
+                return `根据正文、设定与本表规则，对应${entity}记录中已有${group.childKey || group.name}数据的字段值发生变化时更新；WHERE 必须同时带${keyNames}。`
+                    + (assignment ? `\nSQL示例: UPDATE ${group.ident} SET ${assignment} WHERE ${where};` : ' JSON 操作遵循 note，仅在规则要求时初始化容器。');
             }
             if (kind === 'insert') {
                 const cols = [...parents, key, ...valueCols];
@@ -1166,7 +1430,7 @@
                     ...parents.map((p, i) => `'${ancestorDefs[i].entity || String(ancestorDefs[i].col).replace(/_键名$/, '')}键名'`),
                     "'键名'", ...valueCols.map(c => exampleCellValue(c, c.value) || "'值'"),
                 ];
-                return `根据正文、设定与本表规则，对应${entity}记录中出现本表尚未记录的新${group.childKey || group.name}时添加；必须填写完整关系键 ${keyNames}。\nSQL示例: INSERT INTO ${group.ident} (${cols.map(c => c.ident).join(', ')}) VALUES (${vals.join(', ')});`;
+                return `根据正文、设定与本表规则，对应${entity}记录中出现本表尚未记录的新${group.childKey || group.name}时添加；必须填写所有定位字段 ${keyNames}。\nSQL示例: INSERT INTO ${group.ident} (${cols.map(c => c.ident).join(', ')}) VALUES (${vals.join(', ')});`;
             }
             return `根据正文、设定与本表规则，对应${entity}记录中已有${group.childKey || group.name}不再属于其「${group.childKey || group.name}」数据时删除；WHERE 必须同时带${keyNames}。\nSQL示例: DELETE FROM ${group.ident} WHERE ${where};`;
         }
@@ -1183,13 +1447,14 @@
             ? `'${sqlQuote(sampleRow[1])}'`
             : "'键名'";
         // 示例列排除内部溢出列（_扩展数据）与下划线只读字段：AI 不应直接修改
-        const exampleCols = group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+        const exampleCols = group.columns.filter(c => isAiPromptColumn(group, c));
         const allIdents = exampleCols.map(c => c.ident);
-        const firstNonKey = allIdents[1] || '字段';
         if (kind === 'update') {
-            const updCol = exampleCols[1] || exampleCols[0];
-            const updVal = updCol ? exampleUpdateValue(updCol) : "'新值'";
-            return `根据正文、设定与本表规则，已有记录的字段值发生变化时更新。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${updVal} WHERE ${keyIdent} = ${keyValue};`;
+            const updCol = exampleCols.find(c => !isRelationshipKeyColumn(group, c));
+            if (!updCol) return '本表无 AI 可更新的业务列。';
+            const assignment = exampleUpdateAssignment(group, updCol);
+            return '根据正文、设定与本表规则，已有记录的字段值发生变化时更新。'
+                + (assignment ? `\nSQL示例: UPDATE ${group.ident} SET ${assignment} WHERE ${keyIdent} = ${keyValue};` : ' JSON 操作遵循 note，仅在规则要求时初始化容器。');
         }
         if (kind === 'insert') {
             // 完整列示例：全部列都列出，列数与 VALUES 一一对应；
@@ -1205,14 +1470,165 @@
         return `根据正文、设定与本表规则，已有记录所对应的对象不再属于本表记录范围时删除。\nSQL示例: DELETE FROM ${group.ident} WHERE ${keyIdent} = ${keyValue};`;
     }
 
+    // buildSchema 先收集顶层表、再追加派生表，所以同一逻辑组的表在原数组中可能被拆开。
+    // 这里仅为新模板排版建立一个副本：绝不改写 schema 或 layout 的既有顺序。
+    function orderSchemaTables(schema) {
+        const groups = Array.isArray(schema) ? schema.slice() : [];
+        const tableOwners = new Map();
+        const addOwner = (tableName, index) => {
+            if (!tableName) return;
+            const list = tableOwners.get(tableName) || [];
+            list.push(index);
+            tableOwners.set(tableName, list);
+        };
+        groups.forEach((group, index) => addOwner(group && group.tableName, index));
+
+        const parentOf = new Array(groups.length).fill(-1);
+        const uniqueOwner = tableName => {
+            const owners = tableOwners.get(tableName) || [];
+            return owners.length === 1 ? owners[0] : -1;
+        };
+
+        // 关系表会带精确的 parentTable；这是最可靠的父子依据。
+        groups.forEach((group, index) => {
+            if (!group || !group.parentTable) return;
+            const parent = uniqueOwner(group.parentTable);
+            if (parent >= 0 && parent !== index) parentOf[index] = parent;
+        });
+
+        // 非关系派生表在父组 childTables 中保留最终 tableName（含去重后的名称）。
+        groups.forEach((group, index) => {
+            if (!group || parentOf[index] >= 0) return;
+            const candidates = [];
+            groups.forEach((parent, parentIndex) => {
+                if (parentIndex === index || !Array.isArray(parent && parent.childTables)) return;
+                if (parent.childTables.some(child => child && child.tableName === group.tableName)) candidates.push(parentIndex);
+            });
+            if (candidates.length === 1) parentOf[index] = candidates[0];
+        });
+
+        // 旧/手工 schema 可能没有上面的关联元数据。只以完整逻辑路径作最后兜底，
+        // 不根据物理表名前缀或可能重名的 parentGroup 猜测。
+        const logicalPaths = group => {
+            const out = [];
+            const add = path => {
+                if (!Array.isArray(path) || !path.length || path.some(part => typeof part !== 'string' || !part)) return;
+                const signature = JSON.stringify(path);
+                if (!out.some(existing => JSON.stringify(existing) === signature)) out.push(path);
+            };
+            add(group && group.arrayPath);
+            if (group && Array.isArray(group.writePaths)) group.writePaths.forEach(add);
+            add(group && group.path);
+            // 顶层 InitVar 组的完整逻辑路径就是它自身；这不是按 parentGroup 猜测。
+            if (group && (group.source === 'initvar' || group.source === 'top-level-array' || group.source === 'top-level-scalar')) add([group.name]);
+            return out;
+        };
+        const paths = groups.map(logicalPaths);
+        const isPathPrefix = (parent, child) => parent.length < child.length && parent.every((part, index) => part === '*' || part === child[index]);
+        groups.forEach((group, index) => {
+            if (!group || parentOf[index] >= 0 || !paths[index].length) return;
+            let bestLength = -1;
+            let candidates = [];
+            paths.forEach((parentPaths, parentIndex) => {
+                if (parentIndex === index) return;
+                for (const parentPath of parentPaths) {
+                    if (!paths[index].some(childPath => isPathPrefix(parentPath, childPath))) continue;
+                    if (parentPath.length > bestLength) { bestLength = parentPath.length; candidates = [parentIndex]; }
+                    else if (parentPath.length === bestLength) candidates.push(parentIndex);
+                }
+            });
+            candidates = [...new Set(candidates)];
+            if (candidates.length === 1) parentOf[index] = candidates[0];
+        });
+
+        const children = groups.map(() => []);
+        parentOf.forEach((parent, index) => { if (parent >= 0) children[parent].push(index); });
+        const ordered = [];
+        const visited = new Set();
+        const visit = index => {
+            if (visited.has(index)) return;
+            visited.add(index);
+            ordered.push(groups[index]);
+            children[index].forEach(visit);
+        };
+        // 根组仍按原有顺序；DFS 让所有可证明的后代紧随其祖先。
+        groups.forEach((group, index) => { if (group && parentOf[index] < 0) visit(index); });
+        // 循环或不完整元数据不能阻断生成，保留其原顺序。
+        groups.forEach((group, index) => { if (group) visit(index); });
+        return ordered;
+    }
+
     /**
      * schema → 完整模板对象
      * mode: 'both' | 'native' | 'sqlite'
      */
+    // 该表的说明插槽计划（只有含 VWD 字段的单例表才有）。直接复用 buildSchema 阶段
+    // 建好、并由 buildLayout 原样带进布局的同一对象，保证 layout 里保存的
+    // tokens/noteTemplate 与 note 完全一致。
+    function vwdSlotPlanForGroup(group) {
+        if (!group || group.kind !== 'singleton' || !group.vwdMetaZh) return null;
+        return group.vwd && typeof group.vwd === 'object' && Array.isArray(group.vwd.fields) ? group.vwd : null;
+    }
+
+    // 用当前 note 重建一份干净的插槽计划（幂等：重复调用只保留最后一次结果）。
+    // note 省略时按同一规则现算；给定 note 时直接以它为准，不重置已登记的插槽。
+    function applyVwdSlotPlan(group, note, plan) {
+        const target = plan || vwdSlotPlanForGroup(group);
+        if (!target) return null;
+        if (note === undefined || note === null) {
+            target.tokens = [];
+            for (const field of target.fields || []) field.noteSlot = '';
+            target.plan = buildNote(group, { mode: 'both', vwdSlotPlan: target });
+        } else {
+            target.plan = String(note);
+        }
+        target.noteTemplate = target.plan;
+        return target;
+    }
+
+    // 转换复用调用方已有模板时不会有新的 note：用同一规则现算一份插槽计划，
+    // 填进 group（buildLayout 随后把它带进布局），否则运行期无法按字段替换说明。
+    // 目标 SP 不支持隐藏内部物理列时不登记：与 generateTemplate 同一门槛。
+    function ensureVwdSlotPlans(schema, opts = {}) {
+        if (!vwdHostSupportsHiddenColumns(opts.targetSpVersion)) return;
+        for (const group of Array.isArray(schema) ? schema : []) {
+            const plan = vwdSlotPlanForGroup(group);
+            if (!plan) continue;
+            const sheet = opts.template ? Object.values(opts.template).find(s => s && s.name === group.tableName) : null;
+            const note = sheet && sheet.sourceData ? sheet.sourceData.note : null;
+            if (plan.promptVersion === 1) {
+                plan.tokens = [];
+                for (const field of plan.fields) field.noteSlot = '';
+                applyVwdSlotPlan(group, buildNote(group, { mode: opts.mode || 'both', vwdSlotPlan: plan }), plan);
+                getTableCodec().bindVwdPromptNote(plan, group.tableName, note);
+            } else applyVwdSlotPlan(group, note, plan);
+        }
+    }
+
+    // VWD 依赖隐藏内部物理列的能力（SP 9.2.5+）。与 generateTemplate 内的门槛同源。
+    function vwdHostSupportsHiddenColumns(targetSpVersion) {
+        const parts = String(targetSpVersion === undefined ? '9.2.5' : targetSpVersion).trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:\.\d+)?$/);
+        if (!parts) return false;
+        return Number(parts[1]) > 9
+            || (Number(parts[1]) === 9 && (Number(parts[2]) > 2 || (Number(parts[2]) === 2 && Number(parts[3]) >= 5)));
+    }
+
     function generateTemplate(schema, opts = {}) {
         const mode = opts.mode || 'both';
         const includeCheck = opts.ddlIncludeCheck !== false;
         const report = opts.report || createReport();
+        const targetVersion = opts.targetSpVersion === undefined ? '9.2.5' : opts.targetSpVersion;
+        const canHidePhysicalColumns = vwdHostSupportsHiddenColumns(targetVersion);
+        let warnedHiddenColumnGate = false;
+        let warnedVwdGate = false;
+        const hasPrivateJsonKey = value => {
+            if (!value || typeof value !== 'object') return false;
+            if (Array.isArray(value)) return value.some(hasPrivateJsonKey);
+            return Object.entries(value).some(([key, child]) => {
+                if (key === '_vendor') return false;
+                return key.startsWith('$') || hasPrivateJsonKey(child);
+            });
+        };
         const template = {
             mate: {
                 type: 'chatSheets',
@@ -1229,7 +1645,7 @@
             },
         };
         const order = {};
-        schema.forEach((g, idx) => {
+        orderSchemaTables(schema).forEach((g, idx) => {
             // 统计每列“超出规则但必须放行”的初始值（不改动初始值，只放宽 CHECK）
             const extraAllowed = {};
             for (const c of g.columns) extraAllowed[c.ident] = [];
@@ -1254,12 +1670,42 @@
                 }
             }
             g.extraAllowed = extraAllowed;
+            const hiddenColumns = g.columns.filter(c => c.zh === '_扩展数据' || isDollarPrivateColumn(g, c));
+            if (hiddenColumns.length && !canHidePhysicalColumns && !warnedHiddenColumnGate) {
+                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）不支持可靠隐藏内部物理列，内部列仍可能对 AI 可见，请升级至 9.2.5 或更高版本。`, 'template');
+                warnedHiddenColumnGate = true;
+            }
+            // VWD 动态说明依赖一个内部元数据列。没有可靠隐藏能力时不登记该能力：
+            // 宁可明确降级（静态说明 + 重新转换提示），也不新增可能对 AI 可见的内部列。
+            const vwdAllowed = canHidePhysicalColumns && g.kind === 'singleton' && !!g.vwdMetaZh;
+            if (g.vwdMetaZh && !canHidePhysicalColumns && !warnedVwdGate) {
+                warnedVwdGate = true;
+                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）无法可靠隐藏内部物理列，动态说明（VWD）实验路径本次不登记；说明仍按静态文本写入提示词。该能力处于实验阶段，即使版本满足也默认关闭。`, 'template');
+            }
+            // 目标 SP 无法隐藏内部物理列时，VWD 元数据列整列不进模板：宁可不提供动态
+            // 说明，也不能让内部覆盖集合出现在模型可见的表头、DDL 与更新示例里。
+            // 在这里就整列摘掉，后续 content/rows/DDL/extraAllowed 才共用同一套列。
+            if (!vwdAllowed && g.vwdMetaZh) {
+                g.columns = g.columns.filter(c => c.zh !== g.vwdMetaZh);
+                for (const row of g.rows || []) row.length = g.columns.length + 1;
+            }
+            for (let ci = 0; ci < g.columns.length; ci++) {
+                const column = g.columns[ci];
+                if (hiddenColumns.includes(column) || !(column.isObject || g.kind === 'json')) continue;
+                const hasPrivate = (g.rows || []).some(row => {
+                    try { const value = row[ci + 1]; return hasPrivateJsonKey(typeof value === 'string' ? JSON.parse(value) : value); }
+                    catch (_) { return false; }
+                });
+                if (hasPrivate) report.warn(`表「${g.tableName}」的 JSON 列「${column.zh}」含深层 $ 私有键；物理列隐藏无法单独隐藏 JSON 内部键，此列仍会整体进入提示词，请核对展示规则。`, 'template');
+            }
             // 归一化行号 1..N（初始值原样保留）
             const content = [['row_id', ...g.columns.map(c => c.zh)]];
             // 插件 SyncBridge 的 escapeValue 只放行 null/数字，其余值必须能 .replace()：
             // 布尔（false）会直接 TypeError（实测 val.replace is not a function），
             // 因此内容单元格统一归一化——布尔 → 1/0，null/undefined → ''，其余转字符串。
             const normalizeCell = (v, c) => {
+                if (c && (c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional')) return v === undefined ? '' : JSON.stringify(v);
+                if (c && c.logicalType === 'jsonObjectOptional') return v === undefined ? '' : (typeof v === 'string' ? v : JSON.stringify(v));
                 if (c && c.isObject && (v === null || v === undefined || v === '')) return c.jsonKind === 'array' ? '[]' : '{}';
                 if (v === null || v === undefined) return '';
                 if (typeof v === 'boolean') return v ? 1 : 0;
@@ -1281,15 +1727,29 @@
                 }
             }
             const uid = 'sheet_' + g.ident;
+            const trigger = kind => {
+                const prose = buildNodeProse(g, kind);
+                // 双模式模板也可能交给 native 填表；共享触发说明不混入 SQL 协议。
+                // 只截去本生成器附在末尾的示例，不处理作者规则正文。
+                return mode === 'sqlite' ? prose.replace('\nSQL示例:', '\n以下仅演示 SQL 写法；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。\nSQL示例:') : prose.split('\nSQL示例:')[0];
+            };
+            const vwdSlotPlan = vwdAllowed ? vwdSlotPlanForGroup(g) : null;
+            const noteText = buildNote(g, { mode, vwdSlotPlan });
+            // 落进 sourceData/卡的是静态说明版：没有运行期覆盖时与旧版逐字节相同，
+            // 插槽只存在于内部布局，模型请求不会看到 \u0000VWD·n\u0000。
+            if (vwdSlotPlan) applyVwdSlotPlan(g, noteText, vwdSlotPlan);
+            const displayNote = vwdSlotPlan && vwdSlotPlan.promptVersion === 1
+                ? buildVwdPromptNote(vwdSlotPlan, g.tableName)
+                : vwdSlotPlan ? stripVwdNoteTokens(noteText, vwdSlotPlan.fields) : noteText;
             template[uid] = {
                 uid,
                 name: g.tableName,
                 sourceData: {
-                    note: buildNote(g),
+                    note: displayNote,
                     initNode: buildInitNode(g),
-                    deleteNode: buildNodeProse(g, 'delete'),
-                    updateNode: buildNodeProse(g, 'update'),
-                    insertNode: buildNodeProse(g, 'insert'),
+                    deleteNode: trigger('delete'),
+                    updateNode: trigger('update'),
+                    insertNode: trigger('insert'),
                     ddl: buildDdl(g, { includeCheck }),
                 },
                 content,
@@ -1297,6 +1757,12 @@
                 exportConfig: { enabled: false, splitByRow: false },
                 orderNo: idx,
             };
+            // 说明插槽计划随布局保存：note 模板 + 插槽↔字段登记。没有 VWD 字段的表
+            // 不产生计划，note 与旧版逐字节相同。插槽计划本身不进入模型请求。
+            if (vwdSlotPlan && vwdSlotPlan.promptVersion === 1) getTableCodec().bindVwdPromptNote(vwdSlotPlan, g.tableName, displayNote);
+            if (canHidePhysicalColumns && hiddenColumns.length) {
+                template[uid].sourceData.hiddenPhysicalColumns = hiddenColumns.map(c => c.ident);
+            }
             order[uid] = idx;
         });
         return template;
@@ -1447,6 +1913,34 @@
     function statDataFromTables(layoutEntries, tables) {
         return getTableCodec().statDataFromTables(layoutEntries, tables);
     }
+    function vwdFieldId(...args) { return getTableCodec().vwdFieldId(...args); }
+    function vwdOverridesFromRow(...args) { return getTableCodec().vwdOverridesFromRow(...args); }
+    function vwdNoteFromSlots(...args) { return getTableCodec().vwdNoteFromSlots(...args); }
+    function vwdCurrentDescriptions(...args) { return getTableCodec().vwdCurrentDescriptions(...args); }
+    function resolveVwdNote(...args) { return getTableCodec().resolveVwdNote(...args); }
+    function formatVwdPromptDescription(...args) { return getTableCodec().formatVwdPromptDescription(...args); }
+    function buildVwdPromptNote(...args) { return getTableCodec().buildVwdPromptNote(...args); }
+    function vwdPromptDescriptions(...args) { return getTableCodec().vwdPromptDescriptions(...args); }
+    function canWriteVwdDescriptions(entry, tables) {
+        if (!entry || !entry.vwd || entry.vwd.promptVersion !== 1) return false;
+        const holder = typeof window !== 'undefined' ? window : root;
+        if (!holder || !holder.EjsTemplate || typeof holder.EjsTemplate.evalTemplate !== 'function'
+            || !holder.EjsTemplate.evalTemplate.__mvu2shujukuContextBridge) return false;
+        const sheet = Object.values(tables || {}).find(s => s && s.name === (entry && entry.table));
+        return !!getTableCodec().vwdPromptMatches(entry, sheet);
+    }
+    function warnVwdPromptTemplates(layout, tables, report) {
+        for (const entry of layout || []) {
+            if (!entry || !entry.vwd || entry.vwd.promptVersion !== 1) continue;
+            const sheet = Object.values(tables || {}).find(s => s && s.name === entry.table);
+            if (!getTableCodec().vwdPromptMatches(entry, sheet)) {
+                report.warn(`「${entry.table}」使用的自定义模板不含匹配的动态说明入口；本表说明变化将被拒绝，请保留生成的说明模板或重新转换。`, 'template');
+            }
+        }
+    }
+    function stripVwdNoteTokens(...args) { return getTableCodec().stripVwdNoteTokens(...args); }
+    function vwdDescriptionDelta(...args) { return getTableCodec().vwdDescriptionDelta(...args); }
+    function vwdToken(index) { return getTableCodec().vwdNoteTokens().token(index); }
 
     /**
      * 把 stat_data 的差异写回数据库表格（Mvu.replaceMvuData 等价物）。
@@ -1508,7 +2002,7 @@
         if (/<%|&lt;%/i.test(content)) return false;
         try {
             const clean = String(content).replace(/<!--[\s\S]*?-->/g, '');
-            const doc = getMvuYamlLibs().YAML.parseDocument(protectYamlTemplateScalarValues(clean), { merge: true });
+            const doc = getMvuYamlLibs().YAML.parseDocument(prepareMvuRuleYaml(clean), { merge: true });
             if (doc.errors && doc.errors.length) return false;
             const value = doc.toJS();
             if (!isPlainObject(value)) return false;
@@ -2201,13 +2695,29 @@
                 'schema'
             );
         }
-        const schema = buildSchema(initvar, usage, report, shapeInfo);
-        const layout = buildLayout(schema);
-        const template = opts.template || generateTemplate(schema, { mode, report, ddlIncludeCheck: opts.ddlIncludeCheck });
+        const schema = buildSchema(initvar, usage, report, shapeInfo, { vwdDescriptions: opts.vwdDescriptions, jsonContainers: opts.jsonContainers });
+        if ([data.first_mes, ...(data.alternate_greetings || [])].some(text => /<initvar\b/i.test(String(text || '')))) {
+            report.warn('开场消息含 <initvar>：SP 独立填表会读取原始聊天正文，可能重复发送初始变量（包括已从表格隐藏的字段）。请在 SP 填表设置的标签排除规则中配置起始 <initvar、结束 </initvar>，并检查最终请求；酒馆显示正则不替代此设置。', 'template');
+        }
+        // 说明插槽计划（VWD）需要先生成模板才能确定 note 文本与插槽位置；buildLayout
+        // 复用 group 上已经填好插槽的同一计划对象，因此顺序必须是先 generateTemplate
+        // 再 buildLayout。布局本身不依赖模板内容，两者仍从同一 schema 派生。
+        const template = opts.template || generateTemplate(schema, { mode, report, ddlIncludeCheck: opts.ddlIncludeCheck, targetSpVersion: opts.targetSpVersion });
+        // 复用调用方已有模板时不会有新的 note，用同一规则现算一份插槽计划，避免布局里
+        // 存下空计划而运行期无法按字段替换说明。
+        if (opts.template) ensureVwdSlotPlans(schema, { template, mode, report, targetSpVersion: opts.targetSpVersion });
         const sourceRegexScripts = (data.extensions && Array.isArray(data.extensions.regex_scripts))
             ? data.extensions.regex_scripts
             : [];
         migrateTemplatePromptRuntime(template, sourceRegexScripts, report);
+        // 固定原规则/宏迁移后的完整模板，运行期只替换说明数据，不再修改 note。
+        for (const group of schema) {
+            if (!group.vwd || group.vwd.promptVersion !== 1) continue;
+            const sheet = Object.values(template).find(s => s && s.name === group.tableName);
+            getTableCodec().bindVwdPromptNote(group.vwd, group.tableName, sheet && sheet.sourceData && sheet.sourceData.note);
+        }
+        const layout = buildLayout(schema);
+        warnVwdPromptTemplates(layout.entries, template, report);
 
         // 2. 检测卡内是否依赖 MVU API
         // 静态扫描只能看到卡内文本；tavern_helper 里 `import 'https://…'` 的外部脚本
@@ -2591,7 +3101,7 @@
     }
     function conversionOptionKey(opts) {
         const normalized = { mode: 'both', nameSuffix: '_数据库', appendPlaceholder: true,
-            ddlIncludeCheck: true, translateSimpleEjs: false, ...opts };
+            ddlIncludeCheck: true, translateSimpleEjs: false, jsonContainers: false, ...opts };
         return JSON.stringify(Object.keys(normalized).sort().filter(k =>
             !['template', 'asPng', 'report'].includes(k) && normalized[k] !== undefined
         ).map(k => [k, normalized[k]]));
@@ -2670,6 +3180,11 @@
         if (!session) throw new Error('转换会话不存在，请重新转换原卡');
         const options = { ...session.options, ...opts, template: opts.template || previous.template };
         if (conversionOptionKey(options) !== session.key) {
+            // 容器存储方式改变会改变列和表，不能把旧模板隐式套在新布局上。
+            // 调用方显式提供的新模板仍按既有模板覆盖契约处理。
+            if (!opts.template && JSON.stringify(options.jsonContainers || false) !== JSON.stringify(session.options.jsonContainers || false)) {
+                delete options.template;
+            }
             const result = convert(session.input, options);
             result.meta.sourceCharacter = previous.meta.sourceCharacter || null;
             if (previous.meta.avatarBytes) {
@@ -2708,15 +3223,28 @@
                 }
             }
         }
+        const refreshedLayout = JSON.parse(data.extensions.mvu2shujuku.layout || '[]');
+        const refreshedSchema = previous.schema.some(group => group.vwd && group.vwd.promptVersion === 1) ? previous.schema.map(group => {
+            if (!group.vwd || group.vwd.promptVersion !== 1) return group;
+            const next = { ...group, vwd: { ...group.vwd } };
+            const sheet = Object.values(template).find(s => s && s.name === group.tableName);
+            if (getTableCodec().bindVwdPromptNote(next.vwd, group.tableName, sheet && sheet.sourceData && sheet.sourceData.note)) {
+                const entry = refreshedLayout.find(item => item.table === group.tableName && item.vwd);
+                if (entry) entry.vwd.noteTemplate = next.vwd.noteTemplate;
+            }
+            return next;
+        }) : previous.schema;
+        data.extensions.mvu2shujuku.layout = JSON.stringify(refreshedLayout);
+        warnVwdPromptTemplates(refreshedLayout, template, report);
         const entry = data.character_book.entries.find(e => Array.isArray(e.keys) && e.keys.includes('__ACU_TEMPLATE_DATA__'));
         const scripts = data.extensions.tavern_helper.scripts;
         const bridge = scripts.find(s => s.content === previous.bridgeScript);
         if (!entry || !bridge) throw new Error('转换产物的模板或数据桥缺失，请重新转换原卡');
         entry.content = toBase64(JSON.stringify(template));
-        const bridgeScript = generateBridgeScript(previous.schema, template, session.bridgeOptions);
+        const bridgeScript = generateBridgeScript(refreshedSchema, template, session.bridgeOptions);
         bridge.content = bridgeScript;
         data.extensions.mvu2shujuku.templateUid = Object.keys(template).filter(k => k.startsWith('sheet_')).map(k => template[k].uid);
-        const result = packageConversion(session.input, options, { card, template, schema: previous.schema, bridgeScript, report }, previous.meta.isPngInput, previous.meta);
+        const result = packageConversion(session.input, options, { card, template, schema: refreshedSchema, bridgeScript, report }, previous.meta.isPngInput, previous.meta);
         // UI 配置应用摘要属于本次转换说明，刷新产物时保留，不叠加重复摘要。
         const oldReport = previous.report.toMarkdown();
         if (previous.reportText.startsWith(oldReport)) result.reportText += previous.reportText.slice(oldReport.length);
@@ -2803,7 +3331,7 @@
             '#mvu2shujuku-settings #mvu2shujuku-downloads { flex: 1 1 100%; flex-wrap: wrap; }',
             '#mvu2shujuku-settings .mvu2shujuku-hint { font-size: 12px; opacity: 0.75; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-editor { margin: 10px 0; padding: 8px 10px; border: 1px dashed var(--SmartThemeBorderColor, #666); border-radius: 6px; }',
-            '#mvu2shujuku-settings .mvu2shujuku-param-grid { display: grid; grid-template-columns: minmax(90px, 1.2fr) minmax(110px, 1fr) 76px; gap: 6px 8px; align-items: center; margin: 6px 0; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-grid { display: grid; gap: 8px; margin: 10px 0; max-height: 540px; overflow-y: auto; padding-right: 4px; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-head { font-weight: 600; font-size: 12px; opacity: 0.8; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-name { word-break: break-all; font-size: 13px; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-cell { min-width: 0; }',
@@ -2811,11 +3339,49 @@
             // 批量行在 flex 行里不能用 100% 宽（会被撑出界面），给固定窄宽
             '#mvu2shujuku-settings .mvu2shujuku-param-bulk .mvu2shujuku-param-select { width: 150px; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-bulk .mvu2shujuku-param-value { width: 76px; }',
-            '#mvu2shujuku-settings .mvu2shujuku-param-select { color: var(--SmartThemeBodyColor, #ddd); }',
-            '#mvu2shujuku-settings .mvu2shujuku-param-value { color: #222; text-align: right; }',
             '#mvu2shujuku-settings .mvu2shujuku-check-label { flex: 1 1 auto; min-width: 0; word-break: break-word; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-bulk { padding-top: 6px; border-top: 1px solid var(--SmartThemeBorderColor, #666); }',
             '#mvu2shujuku-settings .mvu2shujuku-merge-section { margin: 10px 0; padding: 8px 10px; border: 1px dashed var(--SmartThemeBorderColor, #666); border-radius: 6px; }',
+            "#mvu2shujuku-settings [hidden] { display: none !important; }",
+            "#mvu2shujuku-settings { --mvu2shujuku-accent: var(--SmartThemeQuoteColor, #79bbd1); }",
+            "#mvu2shujuku-settings input[type=\"number\"], #mvu2shujuku-settings input[type=\"search\"], #mvu2shujuku-settings input[type=\"text\"], #mvu2shujuku-settings select, #mvu2shujuku-settings textarea { box-sizing: border-box; min-height: 34px; padding: 6px 9px; border: 1px solid var(--SmartThemeBorderColor, #626262); border-radius: 6px; background: var(--SmartThemeBlurTintColor, #252525); color: var(--SmartThemeBodyColor, #ddd); font: inherit; line-height: 1.35; box-shadow: none; }",
+            "#mvu2shujuku-settings input[type=\"number\"] { text-align: right; font-variant-numeric: tabular-nums; }",
+            "#mvu2shujuku-settings select option { background: var(--SmartThemeBlurTintColor, #252525); color: var(--SmartThemeBodyColor, #ddd); }",
+            "#mvu2shujuku-settings input::placeholder { color: inherit; opacity: .55; }",
+            "#mvu2shujuku-settings input:focus-visible, #mvu2shujuku-settings select:focus-visible, #mvu2shujuku-settings textarea:focus-visible, #mvu2shujuku-settings button:focus-visible, #mvu2shujuku-settings summary:focus-visible { outline: 2px solid var(--mvu2shujuku-accent); outline-offset: 2px; }",
+            "#mvu2shujuku-settings .menu_button { min-height: 34px; font: inherit; }",
+            "#mvu2shujuku-settings .mvu2shujuku-param-editor { padding: 12px; border-radius: 8px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-param-bulk { padding: 10px 0; margin-bottom: 0; gap: 8px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-apply-selected:not(:disabled) { border-color: var(--mvu2shujuku-accent); }",
+            "#mvu2shujuku-settings .mvu2shujuku-table-row { border-radius: 8px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-table-row:focus-within { border-color: var(--mvu2shujuku-accent); }",
+
+            "#mvu2shujuku-settings .mvu2shujuku-section-title, #mvu2shujuku-settings h4 { margin: 6px 0 10px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-detail { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--SmartThemeBorderColor, #555); border-radius: 6px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-detail > summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }",
+            "#mvu2shujuku-settings .mvu2shujuku-detail[open] > summary { margin-bottom: 8px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-attention { border-left: 4px solid #d9a441; }",
+            "#mvu2shujuku-settings .mvu2shujuku-report-summary { margin: 16px 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-result-heading { display: flex; flex-direction: column; gap: 5px; padding: 8px 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-report-list { margin: 0; padding-left: 22px; max-height: 280px; overflow-y: auto; }",
+            "#mvu2shujuku-settings .mvu2shujuku-report-list li { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }",
+            "#mvu2shujuku-settings .mvu2shujuku-param-editor { container-type: inline-size; border-style: solid; }",
+            "#mvu2shujuku-settings .mvu2shujuku-table-row { display: grid; grid-template-columns: minmax(0, 1fr) 68px; align-items: center; gap: 8px; padding: 10px; border: 1px solid var(--SmartThemeBorderColor, #555); border-radius: 6px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-param-name { grid-column: 1 / -1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }",
+            "#mvu2shujuku-settings .mvu2shujuku-check-inline { display: flex; align-items: center; gap: 7px; cursor: pointer; margin: 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-check-inline input { flex: 0 0 auto; margin: 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-injection-label { grid-column: 1 / -1; font-size: 12px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-table-columns, #mvu2shujuku-settings .mvu2shujuku-row-note { grid-column: 1 / -1; min-width: 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-table-search { flex: 1 1 180px; min-width: 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-bulk-value { width: 76px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-bulk-param { max-width: 100%; }",
+            "#mvu2shujuku-settings .mvu2shujuku-row > #mvu2shujuku-char-select, #mvu2shujuku-settings .mvu2shujuku-row > #mvu2shujuku-profile-select { flex: 1 1 180px; min-width: 0; max-width: 100%; }",
+            "#mvu2shujuku-settings .mvu2shujuku-advanced .mvu2shujuku-help { margin-left: 0; }",
+            "#mvu2shujuku-settings #mvu2shujuku-actions { padding-top: 10px; border-top: 1px solid var(--SmartThemeBorderColor, #555); }",
+            "@container (min-width: 420px) { #mvu2shujuku-settings .mvu2shujuku-table-row { grid-template-columns: minmax(100px, 1fr) 68px 115px; } #mvu2shujuku-settings .mvu2shujuku-injection-label { grid-column: auto; } }",
+            "@container (min-width: 620px) { #mvu2shujuku-settings .mvu2shujuku-table-row { grid-template-columns: minmax(140px, 1fr) 150px 76px 115px; } #mvu2shujuku-settings .mvu2shujuku-param-name { grid-column: auto; } }",
+            "@media (max-width: 420px) { #mvu2shujuku-settings .mvu2shujuku-table-row { grid-template-columns: minmax(100px, 1fr) 68px; } #mvu2shujuku-settings .mvu2shujuku-injection-label { grid-column: 1 / -1; } #mvu2shujuku-settings .mvu2shujuku-card { padding: 8px; } }",
+
         ].join('\n');
     }
 
@@ -2823,6 +3389,15 @@
         if (typeof root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ === 'function') return root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__;
         if (typeof require === 'function') return require('./extension-runtime.js');
         throw new Error('扩展运行时模块未加载，请使用构建后的 index.js');
+    }
+    // 候选快照构造与运行时同源：浏览器端从内联工厂取，Node 端从同一模块取。
+    function getCandidateBuilderFactory() {
+        if (typeof root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__;
+        if (typeof require === 'function') {
+            const installer = require('./extension-runtime.js');
+            if (installer && typeof installer.createCandidateBuilder === 'function') return installer.createCandidateBuilder;
+        }
+        throw new Error('候选快照构造模块未加载，请使用构建后的 index.js');
     }
     function extensionIndexUi() {
         return 'if (typeof window !== "undefined") window.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__(window);';
@@ -2846,11 +3421,15 @@
             'root.__MVU2SHUJUKU_INPUT_PARSER_FACTORY__ = ' + getInputParserFactory().toString() + ';',
             'root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = ' + getEjsTransformFactory().toString() + ';',
             'root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = ' + getSchemaLayoutFactory().toString() + ';',
+            'root.__MVU2SHUJUKU_STATUS_USAGE_FACTORY__ = ' + getStatusUsageFactory().toString() + ';',
             'root.__MVU2SHUJUKU_RUNTIME_SESSION_FACTORY__ = ' + getRuntimeSessionFactory().toString() + ';',
+            'root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__ = ' + getRuntimeWindowsFactory().toString() + ';',
             'root.__MVU2SHUJUKU_SP_ADAPTER_FACTORY__ = ' + getSpAdapterFactory().toString() + ';',
             'root.__MVU2SHUJUKU_ST_ADAPTER_FACTORY__ = ' + getStAdapterFactory().toString() + ';',
             'root.__MVU2SHUJUKU_SETTINGS_VIEW__ = ' + getSettingsView().toString() + ';',
+            'root.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__ = ' + getResultViewFactory().toString() + ';',
             'root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = ' + getExtensionRuntimeInstaller().toString() + ';',
+            'root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__ = ' + getCandidateBuilderFactory().toString() + ';',
             'root.__MVU2SHUJUKU_CARD_BRIDGE_INSTALLER__ = ' + getCardBridgeInstaller().toString() + ';',
             'root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = ' + getTableWriterFactory().toString() + ';',
             'root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = ' + getBridgeLifecycleFactory().toString() + ';',
@@ -2920,6 +3499,19 @@
         generateBridgeScript,
         resolveLayoutMacros,
         statDataFromTables,
+        vwdFieldId,
+        vwdOverridesFromRow,
+        vwdNoteFromSlots,
+        vwdCurrentDescriptions,
+        resolveVwdNote,
+        formatVwdPromptDescription,
+        buildVwdPromptNote,
+        vwdPromptDescriptions,
+        canWriteVwdDescriptions,
+        vwdDescriptionDelta,
+        getCandidateBuilderFactory,
+        setVwdExperimental,
+        isVwdExperimental,
         writeStatDiffToDb,
         get lastStatWriteFailed() { return getTableWriter().lastStatWriteFailed; },
         rewriteEjsConditions,

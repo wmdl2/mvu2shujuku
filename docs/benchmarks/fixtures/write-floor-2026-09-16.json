@@ -1,0 +1,38 @@
+{
+  "node": "v22.23.2",
+  "platform": "linux",
+  "floor": [
+    {
+      "messages": 100,
+      "medianMs": 0.01466100000001802
+    },
+    {
+      "messages": 1000,
+      "medianMs": 0.01169500000000312
+    },
+    {
+      "messages": 10000,
+      "medianMs": 0.11566300000001206
+    }
+  ],
+  "write": [
+    {
+      "rows": 100,
+      "snapshotBytes": 6224,
+      "diffMedianMs": 2.5138149999999655,
+      "candidateMedianMs": 3.450029000000029
+    },
+    {
+      "rows": 1000,
+      "snapshotBytes": 39526,
+      "diffMedianMs": 9.841519999999946,
+      "candidateMedianMs": 18.257551000000035
+    },
+    {
+      "rows": 10000,
+      "snapshotBytes": 399528,
+      "diffMedianMs": 63.88445499999989,
+      "candidateMedianMs": 148.305065
+    }
+  ]
+}

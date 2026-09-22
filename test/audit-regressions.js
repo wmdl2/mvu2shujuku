@@ -21,6 +21,7 @@ function runtime(extra = {}) {
     vm.createContext(context);
     const sessions = require('../src/runtime-session')(() => ({ characterKey: 'avatar:' + avatar, groupKey: '', chatKey: chat, cardKey: avatar }));
     Object.assign(context, { captureRuntimeSession: sessions.capture, isRuntimeSessionCurrent: sessions.isCurrent,
+        bindWriteTarget: session => sessions.bindWriteTarget(session, () => context.getContextSafe().chat),
         assertRuntimeSession: sessions.assertCurrent, runtimeApiForSession: sessions.apiForSession, runtimeScopedChatKey: sessions.scopedChatKey });
     return { context, switchChat: value => { chat = value; }, switchCard: value => { avatar = value; } };
 }
@@ -33,7 +34,8 @@ function writeQueue() {
         clearTimeout(id) { timers.delete(id); },
     }, invalidateStatProjectionCache() {}, getAcuApi: () => null, activeLayout: null,
         dbg() {}, dbgWarn() {} });
-    vm.runInContext(extract('    let pendingStatWrite = null;', '    function normalizeCellForSync('), r.context);
+    // 候选快照构造已提取为可独立调用的模块（与运行时同源），因此这里只取写队列本身。
+    vm.runInContext(extract('    let pendingStatWrite = null;', '    function canonicalJsonForSync('), r.context);
     vm.runInContext(extract('    function scheduleWindowStatOverlay(', '    // 扩展侧提供 window.getAllVariables'), r.context);
     return { ...r, timers, win };
 }
@@ -280,7 +282,7 @@ test('审查：点击数据桥下载按钮得到可执行 JS 而非报告', asyn
     const box = node(), downloadBox = { appendChild(button) { buttons.push(button); } };
     const panel = { querySelector: selector => selector === '.mvu2shujuku-result' ? box : selector === '#mvu2shujuku-downloads' ? downloadBox : node() };
     const context = { hostDocument: { getElementById: () => panel, createElement: node }, PANEL_ID: 'test',
-        renderUpdateConfigEditor() {}, renderMergeSection() {}, toast() {}, lastResult: result,
+        renderUpdateConfigEditor() {}, renderMergeSection() {}, resultView: { renderReport() {} }, toast() {}, lastResult: result,
         download: (...args) => downloads.push(args) };
     vm.createContext(context);
     vm.runInContext(extract('    function renderResult(', '    function findSettingsMount('), context);
@@ -354,7 +356,7 @@ test('审查：JSON 文件刷新保留自动格式与源角色', () => {
     original.meta.sourceCharacter = { avatar: 'source.png' };
     const context = { lastInput: input, lastResult: original, getSettings: () => ({ asPng: 'auto', installMvuShim: 'auto' }), window: { MVU2SHUJUKU_CORE: core } };
     vm.createContext(context);
-    vm.runInContext(extract('    function refreshConvertedResult()', '    function updateConfigOf('), context);
+    vm.runInContext(extract('    function refreshConvertedResult()', '    function updateParamSheetRows('), context);
     const result = context.refreshConvertedResult();
     assert.ok(result.files.find(f => f.kind === 'card').name.endsWith('.json'));
     assert.strictEqual(result.meta.avatarBytes, undefined);

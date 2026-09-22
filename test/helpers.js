@@ -63,6 +63,17 @@ function applyingApi(tables, opts = {}) {
             s.content[rowIndex][ci] = String(value);
             return true;
         },
+        // 真实 SP 公开 updateRow（多列一次写）；测试助手此前只提供 updateCell。
+        updateRow: async (tableName, rowIndex, payload) => {
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s || !s.content[rowIndex] || !payload || typeof payload !== 'object') return false;
+            for (const col of Object.keys(payload)) {
+                const ci = s.content[0].indexOf(col);
+                if (ci === -1) return false;
+                s.content[rowIndex][ci] = String(payload[col]);
+            }
+            return true;
+        },
         insertRow: async (tableName, obj) => {
             const s = Object.values(tables).find(x => x && x.name === tableName);
             if (!s) return 0;

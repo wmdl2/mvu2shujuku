@@ -392,11 +392,15 @@ test('YAML 带前后缀的 ${A|B}模板键展开 check/range，非数值 range �
 
     const r = core.convert(card, { mode: 'both', ddlIncludeCheck: true });
     const table = Object.values(r.template).find(s => s && s.name === '任务经验表');
-    assert.ok(table.sourceData.note.includes('- ${露出|扩张}经验：\n  - 数值范围 0~100'), '完全相同的展开列约束应在提示词中恢复为紧凑模板键');
-    assert.ok(table.sourceData.note.includes('  - 根据对应经验值更新分区'), 'check 应进入合并模板键的字段分组');
-    assert.ok(table.sourceData.note.includes('  - 经验为0至20时'), '合并展示不得丢失详细 check');
-    assert.ok(!table.sourceData.note.includes('露出分区：根据对应经验值'), '同一规则不应再按实际列重复输出');
-    assert.ok(table.sourceData.note.includes('可选值：初级区 / 中级区 / 高级区'), '枚举 range 应进入强制约束');
+    for (const field of ['露出经验', '扩张经验']) {
+        const section = table.sourceData.note.split(`- ${field}：`)[1].split('\n- ')[0];
+        assert.ok(section.includes('数值范围 0~100') && section.includes('完成对应任务时增加1'), '每个实际列名下应有完整范围和业务条件');
+    }
+    for (const field of ['露出分区', '扩张分区']) {
+        const section = table.sourceData.note.split(`- ${field}：`)[1].split('\n- ')[0];
+        assert.ok(section.includes('根据对应经验值更新分区') && section.includes('经验为0至20时'), '逐列说明不得丢失联动规则');
+        assert.ok(section.includes('可选值：初级区 / 中级区 / 高级区'), '枚举应在每个对应列下可见');
+    }
     assert.ok(table.sourceData.ddl.includes('CHECK'), '开启 DDL check 时应生成数值/枚举硬约束');
 });
 
@@ -623,7 +627,7 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     assert.ok(si.wildcardFields.has('户.<门牌>.夫.当前情绪'), '多个通配路径字段都应被识别');
     assert.ok(![...si.wildcardFields].some(k => k.includes('0.8mm')), '描述文本中的小数点不得误判为 MVU 路径');
     assert.ok(Array.isArray(si.wildcardRules['人物']) && si.wildcardRules['人物'][0].range[0] === 0, '通配规则应按路径首段归组并提取范围');
-    const r = core.convert(card, { mode: 'both' });
+    const r = core.convert(card, { mode: 'sqlite' });
     assert.ok(r.report.toMarkdown().includes('通配路径规则'), '转换报告应显式警告通配路径规则');
     const hub = Object.values(r.template).find(s => s && s.name === '户表');
     assert.ok(hub.sourceData.note.includes('【可写路径与约束】'), 'JSON 表有可写规则时不应一刀切只读');
@@ -637,11 +641,12 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     assert.ok(hub.sourceData.note.includes('规则要求 insert/初始化/新增 的路径允许创建对应字段、对象或记录'), 'JSON 表守卫应允许规则声明可新增的路径（初始化 insert 不被堵死）');
     assert.ok(hub.sourceData.note.includes('禁止新增/删除行'), 'JSON 表顶部应说“行”而非“记录”');
     assert.ok(hub.sourceData.updateNode.includes('未列出字段一律只读'), 'JSON 表 updateNode 应包含只读守卫');
-    assert.ok(hub.sourceData.updateNode.includes('SQL示例: UPDATE'), 'JSON 表有可写规则时 updateNode 应含 SQL 示例');
-    assert.ok(hub.sourceData.updateNode.includes('WHERE row_id=1'), 'JSON 表更新示例应定位 row_id=1');
+    assert.ok(hub.sourceData.note.includes('json_set'), 'JSON 表有可写规则时应提供 SQL 路径更新说明');
+    assert.ok(!hub.sourceData.updateNode.includes('可写键名'), '不能用虚构键名的残缺 JSON 覆盖整组');
+    assert.ok(hub.sourceData.updateNode.includes('row_id=1'), 'JSON 表更新守卫应明确固定 row_id=1');
     assert.ok(hub.sourceData.ddl.includes('CHECK(json_valid(neirong))'), 'JSON 表内容列应有 json_valid CHECK（SQLite 模式生效）');
     const cash = Object.values(r.template).find(s => s && s.name === '现金表');
-    assert.ok(cash.sourceData.note.includes('AI 不应直接修改本表'), '无规则的 JSON 表仍应保持只读');
+    assert.ok(cash.sourceData.note.includes('数值发生明确变化时按需更新'), '公开顶层数值缺少专用规则时仍可按剧情更新');
     const rw = Object.values(r.template).find(s => s && s.name === '人物表');
     assert.ok(
         rw.sourceData.note.includes('人物.角色名.亲密（数值范围 0~100；与NPC互动时更新，单次 ±(2~5)）'),
@@ -888,16 +893,16 @@ test('SQL 示例优先用默认值，TEXT 无默认才用“列名示例”', ()
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = core.convert(card, { mode: 'sqlite' });
     const dl = Object.values(r.template).find(s => s && s.name === '道侣表');
     assert.ok(dl.sourceData.insertNode.includes("VALUES ('林若悠', 50, 0, '性格示例')"), 'INSERT 应含真实值/默认值/列名示例');
-    assert.ok(dl.sourceData.updateNode.includes('SET qinmi = 0'), 'UPDATE 示例应使用占位值而非当前值');
-    assert.ok(!dl.sourceData.updateNode.includes('示例值仅为格式演示'), 'UPDATE 示例不再带“示例值仅为格式演示”后缀（与插件内置模板一致）');
+    assert.ok(dl.sourceData.updateNode.includes('SET qinmi = 51'), 'UPDATE 示例保持数值类型，演示不同于初始值的合法数值');
+    assert.ok(dl.sourceData.updateNode.includes('不得直接照抄示例值'), '示例必须与本轮真实操作区分');
 });
 
 test('单例 UPDATE 示例：与行表一致的“规则 + SQL示例:”格式，TEXT 用“新值”占位', () => {
     const card = requireFixture();
-    const r = core.convert(card, { mode: 'both' });
+    const r = core.convert(card, { mode: 'sqlite' });
     const world = Object.values(r.template).find(s => s && s.name === '世界表');
     const node = world.sourceData.updateNode;
     assert.ok(node.includes('SQL示例: UPDATE shijiebiao SET dangqianshijian ='), '单例 updateNode 应有 SQL示例: 前缀');
@@ -953,7 +958,7 @@ test('相邻顶层组不被跳过 + check 机制词清洗（op/delta/replace/分
     assert.ok(worldNote.includes('更新以正文和规则为依据，不得为凑表而虚构数据。'), '通用约束应改为“以正文和规则为依据”，不与每轮强制规则冲突');
     const heroNote = byName('主角表').sourceData.note;
     assert.ok(!heroNote.includes('防崩') && !heroNote.includes('replace') && !heroNote.includes('delta') && !heroNote.includes('指令'), '纯机制句与机制词应被清洗');
-    assert.ok(heroNote.includes('满100时阶级提升；熟练度为0'), '“分两条指令”应改写为业务语义');
+    assert.ok(heroNote.includes('满100时，必须同时完成：阶级提升；熟练度为0（增量更新不得导致超限）'), '“分两条指令”应改写为业务语义');
 });
 
 /* ---------------- scanStatusUsage ---------------- */
@@ -2950,7 +2955,7 @@ test('SQL 示例不应包含内部溢出列 _扩展数据', () => {
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = core.convert(card, { mode: 'sqlite' });
     const sheet = Object.values(r.template).find(s => s && s.name === '持有物品表');
     assert.ok(sheet.content[0].includes('_扩展数据'), '表头应有 _扩展数据 列');
     assert.ok(!sheet.sourceData.insertNode.includes('_扩展数据'), 'INSERT 示例不应包含 _扩展数据');
@@ -2971,7 +2976,7 @@ test('数组表提示词按行增删改，不再“整体替换/禁止增删”'
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = core.convert(card, { mode: 'sqlite' });
     const sheet = Object.values(r.template).find(s => s && s.name === '背包表');
     assert.ok(sheet, '应生成背包表');
     assert.ok(sheet.sourceData.note.startsWith('数组表：'), 'note 不应以表名开头（对齐默认模板）');
@@ -3081,7 +3086,7 @@ test('行表 SQL 示例排除下划线只读字段', () => {
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = core.convert(card, { mode: 'sqlite' });
     const sheet = Object.values(r.template).find(s => s && s.name === '主角_气运表');
     assert.ok(sheet, '应生成气运表');
     assert.ok(sheet.content[0].includes('_剩余次数'), '表头应有 _剩余次数 列');
@@ -3374,8 +3379,11 @@ test('转换产物齐全', () => {
     assert.ok(c.extensions.mvu2shujuku, '应有转换标记');
     assert.ok(typeof c.extensions.mvu2shujuku.layout === 'string' && Array.isArray(JSON.parse(c.extensions.mvu2shujuku.layout)), '转换标记应包含布局（供扩展重建 stat_data）');
     assert.ok(!c.character_book.entries.some(e => /\[initvar\]|变量输出格式强调|变量列表/i.test(String(e.comment || ''))), '初始化和明确的旧输出协议应被删除');
-    assert.ok(c.character_book.entries.some(e => e.comment === '[mvu_update]'), '参考卡的非法 YAML 规则必须保留，不能凭前缀整条删除');
-    assert.ok(r.reportText.includes('无法确认为完整静态规则文档'), '保留不完整规则必须报告人工核对');
+    assert.ok(!c.character_book.entries.some(e => e.comment === '[mvu_update]'), '完整规则经行内操作说明容错解析并迁移后，应移除旧条目');
+    assert.doesNotMatch(r.reportText, /YAML 解析失败|无法确认为完整静态规则文档/);
+    const worldNote = Object.values(r.template).find(t => t.name === '世界表').sourceData.note;
+    assert.match(worldNote, /遭遇冷却/);
+    assert.match(worldNote, /每推进一次剧情\/回合就减1/);
     assert.ok(String(c.name).endsWith('_数据库'), '卡名应带 _数据库 后缀');
     if (c.character_book && c.character_book.name) {
         assert.ok(String(c.character_book.name).endsWith('_数据库'), '内嵌世界书名称应加 _数据库 后缀');
@@ -3657,8 +3665,8 @@ test('动态行表 ${角色}.静态字段 保守展开为列，数组/对象保�
     assert.ok(t.content[0].includes('经验档案'), '${角色}.经验档案 应展开为列');
     assert.ok(t.sourceData.ddl.includes("weiguijilu TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(weiguijilu) AND json_type(weiguijilu) = 'array')"), '违规记录应为数组 JSON 列');
     assert.ok(t.sourceData.ddl.includes("jingyandangan TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(jingyandangan) AND json_type(jingyandangan) = 'object')"), '经验档案应为对象 JSON 列');
-    assert.ok(t.sourceData.note.includes('必须完整写回更新后的数组，并保留未改动的元素'), 'JSON 数组 replace 规则应改写为跨模式的完整写回语义');
-    assert.ok(t.sourceData.note.includes('必须先读取现有数组并确认目标元素；更新后完整写回数组并保留其他记录'), 'JSON 数组 remove 规则应改写为跨模式的元素移除语义');
+    assert.ok(t.sourceData.note.includes('更新目标元素并保留未改动的元素'), 'JSON 数组规则应允许 SQL 局部更新并保留其他元素');
+    assert.ok(t.sourceData.note.includes('必须先读取现有数组并确认目标元素；移除后保留其他记录'), 'JSON 数组 remove 规则应改写为跨模式的元素移除语义');
     assert.ok(!/\b(?:add|replace|remove)\b/i.test(t.sourceData.note), '表格 note 不应残留 MVU/JSON Patch 操作词：' + t.sourceData.note);
 });
 
@@ -3705,13 +3713,13 @@ test('native / sqlite 单模式', () => {
     assert.ok(!rn.template[hero].sourceData.note.includes('原生 DSL'), 'note 不应区分 native 模式');
     assert.ok(!rn.template[hero].sourceData.note.includes('SQLite SQL'), 'note 不应区分 sqlite 模式');
     assert.strictEqual(rn.template[hero].sourceData.note, rs.template[hero].sourceData.note, '两种模式应生成相同 note');
-    assert.ok(rn.template[hero].sourceData.note.includes('【列定义】'), 'note 应含默认模板风格的列定义');
-    assert.ok(rn.template[hero].sourceData.note.includes('【强制约束】'), 'note 应含强制约束');
+    assert.ok(!rn.template[hero].sourceData.note.includes('【列定义】'), '字段映射由宿主权威表头/DDL提供，不在 note 重复');
+    assert.ok(rn.template[hero].sourceData.note.includes('【字段说明与规则】'), 'note 应含强制约束');
 });
 
 test('SQL 示例 VALUES 数量与列数一致', () => {
     const card = requireFixture();
-    const r = core.convert(card, { mode: 'both' });
+    const r = core.convert(card, { mode: 'sqlite' });
     let checked = 0;
     for (const k of Object.keys(r.template).filter(k => k.startsWith('sheet_'))) {
         const ins = r.template[k].sourceData.insertNode || '';
@@ -3745,7 +3753,7 @@ test('INSERT 示例优先用卡内真实初始值，空表退回列名占位', (
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = core.convert(card, { mode: 'sqlite' });
     const ins = Object.values(r.template).find(s => s && s.name === '道侣表').sourceData.insertNode;
     assert.ok(ins.includes("VALUES ('林若悠', 88"), ins);
     // 空表（无初始条目）的示例应使用“列中文名示例”占位，而不是凭空的值
@@ -3764,7 +3772,7 @@ test('INSERT 示例优先用卡内真实初始值，空表退回列名占位', (
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r2 = core.convert(card2, { mode: 'both' });
+    const r2 = core.convert(card2, { mode: 'sqlite' });
     const ins2 = Object.values(r2.template).find(s => s && s.name === '仓库表').sourceData.insertNode;
     assert.ok(ins2.includes("VALUES ('键名')") || !ins2.includes('值1'), ins2);
 });
@@ -4326,7 +4334,7 @@ test('扩展文件齐全且 index.js 语法正确', () => {
     assert.strictEqual(manifest.js, 'index.js');
     assert.ok(files['index.js'].includes('下载数据桥源码（仅供调试）'), '数据桥下载按钮应明确标注为调试源码');
     assert.ok(files['index.js'].includes('不是酒馆助手 .json 导入包'), '应明确说明 .js 无需导入酒馆助手');
-    assert.ok(files['index.js'].includes('const tableUpdateHookCallback = (latestTableData) =>'), 'SP 表更新桥应使用稳定回调引用，并接收提交后快照');
+    assert.ok(files['index.js'].includes('const tableUpdateHookCallback = (latestTableData, meta) =>'), 'SP 表更新桥应使用稳定回调引用，并接收提交后快照及持久化标记');
     assert.ok(files['index.js'].includes('core.statDataFromTables(activeLayout, data)'), 'SP 表更新应直接用回调快照生成 MVU 事件载荷，不依赖 replay 窗口内的同步导出');
     assert.ok(files['index.js'].includes('function tableSnapshotCoversLayout(data, layout)'), '读侧应按完整 layout 判定 replay 物化快照是否就绪');
     assert.ok(files['index.js'].includes('[前端迟到挂载]'), '重生成时新状态栏 iframe 晚于数据事件挂载时应补发最近载荷');
@@ -4501,7 +4509,7 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
     assert.ok(index.includes('hostWindow.setTimeout(ensureWindowStatusPlaceholder, 1200)'),
         '状态栏占位符改写应让位于 MESSAGE_RECEIVED 动态正则注册，避免首次 Ticket/<ellia> 渲染竞态');
     assert.ok(index.includes('hadFullCheckpointBeforeInit'), '重进已有 checkpoint 的聊天不应重放开局 initvar');
-    assert.ok(index.includes('await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, shimSession)'), 'Mvu.replaceMvuData 必须等待来源会话的合并写入真正落定');
+    assert.ok(index.includes('await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, writeSession)'), 'Mvu.replaceMvuData 必须等待来源会话的合并写入真正落定');
     assert.ok(index.includes('function recoverOpeningContinuity(reason)'), '扩展应具备开场 checkpoint 载体丢失恢复');
     assert.ok(index.includes('async function applyPendingMessageUpdateBlocks()'), '扩展作为唯一 runtime owner 时必须接管后续消息 UpdateVariable/JSONPatch');
     assert.ok(index.includes("const updateSource = messageUpdateBlocks(text);"), '首楼初始化应同时读取同一分支的更新块');
@@ -8729,6 +8737,27 @@ test('道渊开场：replaceMvuData 等待真正落定，/cut 删除 checkpoint 
             });
             return { success: true, runtimeReady: true };
         },
+        updateRow: async (tableName, rowIndex, payload) => {
+            // 第一次写入单元格（无论走 updateRow 还是 updateCell）时模拟“首楼替换”
+            // 清空运行时：主角表行被清掉，稍后由回放恢复。
+            if (tableName === '主角表' && !cleared) {
+                cleared = true;
+                const zj = Object.values(tables).find(x => x && x.name === '主角表');
+                const replayRow = JSON.parse(JSON.stringify(zj.content[1]));
+                zj.content = [zj.content[0]];
+                log.push('clear');
+                setTimeout(() => { if (zj.content.length === 1) zj.content.push(replayRow); }, 400);
+                return false;
+            }
+            const s = Object.values(tables).find(x => x && x.name === tableName);
+            if (!s || !s.content[rowIndex] || !payload) return false;
+            for (const col of Object.keys(payload)) {
+                const ci = s.content[0].indexOf(col);
+                if (ci === -1) return false;
+                s.content[rowIndex][ci] = String(payload[col]);
+            }
+            return true;
+        },
         updateCell: async (tableName, rowIndex, col, value) => {
             const s = Object.values(tables).find(x => x && x.name === tableName);
             // 第一次单元格写入时模拟“首楼替换”清空运行时：主角表行被清掉
@@ -10618,6 +10647,31 @@ require('./table-codec');
 require('./table-writer');
 require('./array-writer');
 require('./runtime-native');
+require('./mvu-public-api');
+require('./early-event-fallback');
+require('./mvu-update-views');
+require('./table-order');
+require('./table-prompts');
+require('./json-update-prompts');
+require('./sql-example-safety');
+require('./business-rule-preservation');
+require('./fixed-child-tables');
+require('./scoped-status-usage');
+require('./nullable-columns');
+require('./nullable-json-columns');
+require('./container-presence');
+require('./nullable-records');
+require('./full-json-containers');
+require('./result-view');
+require('./nested-wildcard-rules');
+require('./vwd-descriptions');
+require('./vwd-prompt');
+require('./relationship-lifecycle');
+require('./numeric-write-policy');
+require('./hidden-columns');
+require('./compact-table-prompts');
+require('./sp-business-events');
+require('./runtime-windows');
 require('./bridge-lifecycle');
 require('./input-parser');
 require('./card-bridge');

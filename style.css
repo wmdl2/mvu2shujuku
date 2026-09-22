@@ -51,15 +51,51 @@
 #mvu2shujuku-settings #mvu2shujuku-downloads { flex: 1 1 100%; flex-wrap: wrap; }
 #mvu2shujuku-settings .mvu2shujuku-hint { font-size: 12px; opacity: 0.75; }
 #mvu2shujuku-settings .mvu2shujuku-param-editor { margin: 10px 0; padding: 8px 10px; border: 1px dashed var(--SmartThemeBorderColor, #666); border-radius: 6px; }
-#mvu2shujuku-settings .mvu2shujuku-param-grid { display: grid; grid-template-columns: minmax(90px, 1.2fr) minmax(110px, 1fr) 76px; gap: 6px 8px; align-items: center; margin: 6px 0; }
+#mvu2shujuku-settings .mvu2shujuku-param-grid { display: grid; gap: 8px; margin: 10px 0; max-height: 540px; overflow-y: auto; padding-right: 4px; }
 #mvu2shujuku-settings .mvu2shujuku-param-head { font-weight: 600; font-size: 12px; opacity: 0.8; }
 #mvu2shujuku-settings .mvu2shujuku-param-name { word-break: break-all; font-size: 13px; }
 #mvu2shujuku-settings .mvu2shujuku-param-cell { min-width: 0; }
 #mvu2shujuku-settings .mvu2shujuku-param-grid .mvu2shujuku-param-select, #mvu2shujuku-settings .mvu2shujuku-param-grid .mvu2shujuku-param-value { width: 100%; box-sizing: border-box; min-width: 0; }
 #mvu2shujuku-settings .mvu2shujuku-param-bulk .mvu2shujuku-param-select { width: 150px; }
 #mvu2shujuku-settings .mvu2shujuku-param-bulk .mvu2shujuku-param-value { width: 76px; }
-#mvu2shujuku-settings .mvu2shujuku-param-select { color: var(--SmartThemeBodyColor, #ddd); }
-#mvu2shujuku-settings .mvu2shujuku-param-value { color: #222; text-align: right; }
 #mvu2shujuku-settings .mvu2shujuku-check-label { flex: 1 1 auto; min-width: 0; word-break: break-word; }
 #mvu2shujuku-settings .mvu2shujuku-param-bulk { padding-top: 6px; border-top: 1px solid var(--SmartThemeBorderColor, #666); }
 #mvu2shujuku-settings .mvu2shujuku-merge-section { margin: 10px 0; padding: 8px 10px; border: 1px dashed var(--SmartThemeBorderColor, #666); border-radius: 6px; }
+#mvu2shujuku-settings [hidden] { display: none !important; }
+#mvu2shujuku-settings { --mvu2shujuku-accent: var(--SmartThemeQuoteColor, #79bbd1); }
+#mvu2shujuku-settings input[type="number"], #mvu2shujuku-settings input[type="search"], #mvu2shujuku-settings input[type="text"], #mvu2shujuku-settings select, #mvu2shujuku-settings textarea { box-sizing: border-box; min-height: 34px; padding: 6px 9px; border: 1px solid var(--SmartThemeBorderColor, #626262); border-radius: 6px; background: var(--SmartThemeBlurTintColor, #252525); color: var(--SmartThemeBodyColor, #ddd); font: inherit; line-height: 1.35; box-shadow: none; }
+#mvu2shujuku-settings input[type="number"] { text-align: right; font-variant-numeric: tabular-nums; }
+#mvu2shujuku-settings select option { background: var(--SmartThemeBlurTintColor, #252525); color: var(--SmartThemeBodyColor, #ddd); }
+#mvu2shujuku-settings input::placeholder { color: inherit; opacity: .55; }
+#mvu2shujuku-settings input:focus-visible, #mvu2shujuku-settings select:focus-visible, #mvu2shujuku-settings textarea:focus-visible, #mvu2shujuku-settings button:focus-visible, #mvu2shujuku-settings summary:focus-visible { outline: 2px solid var(--mvu2shujuku-accent); outline-offset: 2px; }
+#mvu2shujuku-settings .menu_button { min-height: 34px; font: inherit; }
+#mvu2shujuku-settings .mvu2shujuku-param-editor { padding: 12px; border-radius: 8px; }
+#mvu2shujuku-settings .mvu2shujuku-param-bulk { padding: 10px 0; margin-bottom: 0; gap: 8px; }
+#mvu2shujuku-settings .mvu2shujuku-apply-selected:not(:disabled) { border-color: var(--mvu2shujuku-accent); }
+#mvu2shujuku-settings .mvu2shujuku-table-row { border-radius: 8px; }
+#mvu2shujuku-settings .mvu2shujuku-table-row:focus-within { border-color: var(--mvu2shujuku-accent); }
+#mvu2shujuku-settings .mvu2shujuku-section-title, #mvu2shujuku-settings h4 { margin: 6px 0 10px; }
+#mvu2shujuku-settings .mvu2shujuku-detail { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--SmartThemeBorderColor, #555); border-radius: 6px; }
+#mvu2shujuku-settings .mvu2shujuku-detail > summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+#mvu2shujuku-settings .mvu2shujuku-detail[open] > summary { margin-bottom: 8px; }
+#mvu2shujuku-settings .mvu2shujuku-attention { border-left: 4px solid #d9a441; }
+#mvu2shujuku-settings .mvu2shujuku-report-summary { margin: 16px 0; }
+#mvu2shujuku-settings .mvu2shujuku-result-heading { display: flex; flex-direction: column; gap: 5px; padding: 8px 0; }
+#mvu2shujuku-settings .mvu2shujuku-report-list { margin: 0; padding-left: 22px; max-height: 280px; overflow-y: auto; }
+#mvu2shujuku-settings .mvu2shujuku-report-list li { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+#mvu2shujuku-settings .mvu2shujuku-param-editor { container-type: inline-size; border-style: solid; }
+#mvu2shujuku-settings .mvu2shujuku-table-row { display: grid; grid-template-columns: minmax(0, 1fr) 68px; align-items: center; gap: 8px; padding: 10px; border: 1px solid var(--SmartThemeBorderColor, #555); border-radius: 6px; }
+#mvu2shujuku-settings .mvu2shujuku-param-name { grid-column: 1 / -1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+#mvu2shujuku-settings .mvu2shujuku-check-inline { display: flex; align-items: center; gap: 7px; cursor: pointer; margin: 0; }
+#mvu2shujuku-settings .mvu2shujuku-check-inline input { flex: 0 0 auto; margin: 0; }
+#mvu2shujuku-settings .mvu2shujuku-injection-label { grid-column: 1 / -1; font-size: 12px; }
+#mvu2shujuku-settings .mvu2shujuku-table-columns, #mvu2shujuku-settings .mvu2shujuku-row-note { grid-column: 1 / -1; min-width: 0; }
+#mvu2shujuku-settings .mvu2shujuku-table-search { flex: 1 1 180px; min-width: 0; }
+#mvu2shujuku-settings .mvu2shujuku-bulk-value { width: 76px; }
+#mvu2shujuku-settings .mvu2shujuku-bulk-param { max-width: 100%; }
+#mvu2shujuku-settings .mvu2shujuku-row > #mvu2shujuku-char-select, #mvu2shujuku-settings .mvu2shujuku-row > #mvu2shujuku-profile-select { flex: 1 1 180px; min-width: 0; max-width: 100%; }
+#mvu2shujuku-settings .mvu2shujuku-advanced .mvu2shujuku-help { margin-left: 0; }
+#mvu2shujuku-settings #mvu2shujuku-actions { padding-top: 10px; border-top: 1px solid var(--SmartThemeBorderColor, #555); }
+@container (min-width: 420px) { #mvu2shujuku-settings .mvu2shujuku-table-row { grid-template-columns: minmax(100px, 1fr) 68px 115px; } #mvu2shujuku-settings .mvu2shujuku-injection-label { grid-column: auto; } }
+@container (min-width: 620px) { #mvu2shujuku-settings .mvu2shujuku-table-row { grid-template-columns: minmax(140px, 1fr) 150px 76px 115px; } #mvu2shujuku-settings .mvu2shujuku-param-name { grid-column: auto; } }
+@media (max-width: 420px) { #mvu2shujuku-settings .mvu2shujuku-table-row { grid-template-columns: minmax(100px, 1fr) 68px; } #mvu2shujuku-settings .mvu2shujuku-injection-label { grid-column: 1 / -1; } #mvu2shujuku-settings .mvu2shujuku-card { padding: 8px; } }
