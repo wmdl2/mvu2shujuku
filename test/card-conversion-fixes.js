@@ -36,6 +36,34 @@ test('规则迁移：TS 枚举按路径归属，不污染别组同名字段', ()
     assert.ok(!/CHECK\(guanzhudu IN/.test(table.sourceData.ddl));
 });
 
+test('规则迁移：check 行内操作说明按文本解析，完整迁移后移除旧规则条目', () => {
+    const checks = ['本轮推进时减1（op: delta, value: -1）', '触发事件时重置为15(op: replace, value: 15)'];
+    const card = input(`变量更新规则:\n  状态:\n    冷却:\n      type: number\n      check:\n${checks.map(s => '        - ' + s).join('\n')}\n`, { 状态: { 冷却: 20 } });
+    const shapes = core.parseMvuShapes(card);
+    assert.deepStrictEqual(shapes.checks.状态.冷却, checks, '解析阶段保留业务原文，不吞掉冒号后的内容');
+    const result = core.convert(card);
+    const data = result.card.data || result.card;
+    assert.ok(!data.character_book.entries.some(e => e.comment === '[mvu_update]变量更新规则'));
+    assert.ok(!result.report.warnings.some(w => /YAML 解析失败|完整静态规则/.test(w.message)));
+    const note = Object.values(result.template).find(t => t.name === '状态表').sourceData.note;
+    assert.match(note, /本轮推进时减1/);
+    assert.match(note, /触发事件时重置为15/);
+    assert.doesNotMatch(note, /op:|value:/, '操作协议由数据库说明负责，业务条件仍保留');
+});
+
+test('规则迁移：行内操作容错不改块文本、不掩盖其他 YAML 错误或混合 EJS', () => {
+    const text = '本轮推进时减1（op: delta, value: -1）';
+    for (const value of ['\n        - ' + JSON.stringify(text), '\n        - |-\n          ' + text + '\n          第二行必须保留']) {
+        const shapes = core.parseMvuShapes(input('变量更新规则:\n  状态:\n    冷却:\n      check:' + value, { 状态: { 冷却: 20 } }));
+        assert.ok(shapes.checks.状态.冷却[0].includes(text));
+        if (value.includes('第二行')) assert.ok(shapes.checks.状态.冷却[0].includes('第二行必须保留'));
+    }
+    for (const extra of ['\n    其他:\n      type: [缺少闭合', '\n<% if (condition) { %>额外业务<% } %>']) {
+        const result = core.convert(input('变量更新规则:\n  状态:\n    冷却:\n      check:\n        - ' + text + extra, { 状态: { 冷却: 20 } }));
+        assert.ok((result.card.data || result.card).character_book.entries.some(e => e.comment === '[mvu_update]变量更新规则'));
+    }
+});
+
 test('规则迁移：宽字符串联合不误建枚举，纯字符串选项保留内部竖线', () => {
     const result = core.convert(input(`变量更新规则:
   任务:
@@ -103,11 +131,12 @@ test('前端 EJS：生成的扩展在当前转换卡渲染阶段保护，切聊�
 });
 
 test('顶层数字：数值 DDL、默认值和示例保留数字，小数往返不变', async () => {
-    const result = core.convert(input('变量更新规则:\n  点数:\n    type: number\n    check:\n      - 消耗后更新，不可为负数', { 点数: 0, 比例: 0.5, 空组: {} }));
+    const result = core.convert(input('变量更新规则:\n  点数:\n    type: number\n    check:\n      - 消耗后更新，不可为负数', { 点数: 0, 比例: 0.5, 空组: {} }), {mode: 'sqlite'});
     const t = Object.values(result.template).find(t => t.name === '点数表');
     assert.match(t.sourceData.ddl, /neirong REAL NOT NULL DEFAULT 0 CHECK\(typeof\(neirong\) IN \('integer', 'real'\)\)/);
     assert.ok(!t.sourceData.ddl.includes('json_valid'));
-    assert.match(t.sourceData.updateNode, /SET neirong = 0 WHERE/);
+    assert.match(t.sourceData.updateNode, /SET neirong = 1 WHERE/);
+    assert.match(t.sourceData.updateNode, /不得直接照抄示例值/);
     assert.ok(!t.sourceData.note.includes('可写路径'));
     assert.ok(t.sourceData.note.includes('不可为负数'));
     const layout = JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout);

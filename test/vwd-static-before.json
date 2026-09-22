@@ -1,0 +1,369 @@
+{
+  "_about": "VWD 默认关闭对照。来自本次实施前的公开合成样本输出；用于检测 VWD 是否改变旧行为，不把既有 pair 写入缺陷定义为正确语义。",
+  "_sourceSha256": "0fd4497573e962ba9c54ce8a89ea0aafcacb6b0f1be8764c1de5750355cb0771",
+  "conversion": {
+    "template": {
+      "mate": {
+        "type": "chatSheets",
+        "version": 2,
+        "updateConfigUiSentinel": -1,
+        "globalInjectionConfig": {
+          "readableEntryPlacement": {
+            "position": "before_character_definition",
+            "depth": 2,
+            "order": 99981
+          },
+          "wrapperPlacement": {
+            "position": "before_character_definition",
+            "depth": 2,
+            "order": 99980
+          }
+        }
+      },
+      "sheet_abiao": {
+        "uid": "sheet_abiao",
+        "name": "A表",
+        "sourceData": {
+          "note": "本表唯一记录已由开局模板初始化（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。\n下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。\n【字段说明与规则】\n- num：按 JSON 标量填值；null 表示空值，字符串保留 JSON 双引号（空字符串为 \"\"），空单元格表示缺失字段。\n- str：静态说明\n- other：另一说明\n更新以正文和规则为依据，不得为凑表而虚构数据。",
+          "initNode": "开局模板已初始化唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。",
+          "deleteNode": "禁止。",
+          "updateNode": "只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；根据正文、设定与本表规则，已有字段的值发生变化时更新。",
+          "insertNode": "禁止。",
+          "ddl": "CREATE TABLE abiao ( -- A表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  str TEXT NOT NULL DEFAULT '初始', -- str\n  other TEXT NOT NULL DEFAULT 'x', -- other\n  num TEXT NOT NULL DEFAULT '3' CHECK(num = '' OR (json_valid(num) AND json_type(num) IN ('null', 'text', 'integer', 'real', 'true', 'false'))), -- num\n  kuozhanshuju TEXT NOT NULL DEFAULT '{}' -- _扩展数据\n);",
+          "hiddenPhysicalColumns": [
+            "kuozhanshuju"
+          ]
+        },
+        "content": [
+          [
+            "row_id",
+            "str",
+            "other",
+            "num",
+            "_扩展数据"
+          ],
+          [
+            1,
+            "初始",
+            "x",
+            "3",
+            "{}"
+          ]
+        ],
+        "updateConfig": {
+          "skipFloors": -1
+        },
+        "exportConfig": {
+          "enabled": false,
+          "splitByRow": false
+        },
+        "orderNo": 0
+      },
+      "sheet_rowsbiao": {
+        "uid": "sheet_rowsbiao",
+        "name": "Rows表",
+        "sourceData": {
+          "note": "行表，以「键名」为唯一标识；同名记录只存在一行，已有记录按需更新，新记录按需新增。\n下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。\n【字段说明与规则】\n- s：记录说明\n更新以正文和规则为依据，不得为凑表而虚构数据。",
+          "initNode": "开局模板已初始化 1 条记录；出现符合本表定义且尚不存在的新记录时，新增一行完整记录。",
+          "deleteNode": "根据正文、设定与本表规则，已有记录所对应的对象不再属于本表记录范围时删除。",
+          "updateNode": "根据正文、设定与本表规则，已有记录的字段值发生变化时更新。",
+          "insertNode": "根据正文、设定与本表规则，出现本表尚未记录的新键名时添加完整记录。",
+          "ddl": "CREATE TABLE rowsbiao ( -- Rows表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  jianming TEXT NOT NULL DEFAULT '' UNIQUE, -- 键名\n  s TEXT NOT NULL DEFAULT '', -- s\n  kuozhanshuju TEXT NOT NULL DEFAULT '{}' -- _扩展数据\n);",
+          "hiddenPhysicalColumns": [
+            "kuozhanshuju"
+          ]
+        },
+        "content": [
+          [
+            "row_id",
+            "键名",
+            "s",
+            "_扩展数据"
+          ],
+          [
+            1,
+            "one",
+            "v",
+            "{}"
+          ]
+        ],
+        "updateConfig": {
+          "skipFloors": -1
+        },
+        "exportConfig": {
+          "enabled": false,
+          "splitByRow": false
+        },
+        "orderNo": 1
+      },
+      "sheet_arrbiao": {
+        "uid": "sheet_arrbiao",
+        "name": "Arr表",
+        "sourceData": {
+          "note": "数组表：每行一个数组元素，行号即数组顺序；按行新增、移除或更新元素。\nnative 使用本表提示中方括号里的行号（从 0 开始），不填 SQL row_id；SQL 使用当前数据中的 row_id，不按显示顺序推算。\n【字段说明与规则】\n- 「内容」：单元格保存完整 JSON 值，遵守原字段/数组元素的类型；字符串保留 JSON 双引号（如 \"文字\"），数字、布尔、null 不加 JSON 引号，对象/数组保存完整 JSON。SQL 字符串外围的单引号只是 SQL 写法，不属于单元格内容。\n- 内容：数组元素（JSON 标量编码，读取时保留原始类型）\n更新以正文和规则为依据，不得为凑表而虚构数据。",
+          "initNode": "开局模板已初始化 2 个元素；此后按剧情和规则新增、移除或更新对应元素。",
+          "deleteNode": "根据正文、设定与本表规则，已有数组元素不再属于当前数组时删除对应行。",
+          "updateNode": "根据正文、设定与本表规则，已有数组元素的内容发生变化时更新该行。",
+          "insertNode": "根据正文、设定与本表规则，数组出现本表尚未记录的新元素时添加（行号自动分配，行序即数组顺序）。",
+          "ddl": "CREATE TABLE arrbiao ( -- Arr表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  neirong TEXT NOT NULL DEFAULT '' -- 内容\n);"
+        },
+        "content": [
+          [
+            "row_id",
+            "内容"
+          ],
+          [
+            1,
+            "\"a\""
+          ],
+          [
+            2,
+            "\"b\""
+          ]
+        ],
+        "updateConfig": {
+          "skipFloors": -1
+        },
+        "exportConfig": {
+          "enabled": false,
+          "splitByRow": false
+        },
+        "orderNo": 2
+      }
+    },
+    "layout": [
+      {
+        "kind": "singleton",
+        "group": "A",
+        "table": "A表",
+        "keyCol": "键名",
+        "keyValue": "A",
+        "childKey": "",
+        "parentKeyCol": "",
+        "ancestorKeyCols": [],
+        "parentTable": "",
+        "parentPath": [],
+        "path": [],
+        "valueCol": "",
+        "scalarValueCol": "",
+        "cols": [
+          [
+            "str",
+            "pair",
+            "初始",
+            [
+              "A",
+              "str"
+            ],
+            true,
+            "静态说明"
+          ],
+          [
+            "other",
+            "pair",
+            "x",
+            [
+              "A",
+              "other"
+            ],
+            true,
+            "另一说明"
+          ],
+          [
+            "num",
+            "jsonScalarOptional",
+            3,
+            [
+              "A",
+              "num"
+            ],
+            false,
+            ""
+          ],
+          [
+            "_扩展数据",
+            "object",
+            "",
+            [
+              "A",
+              "_扩展数据"
+            ],
+            false,
+            "本表未在模板声明的动态字段（JSON 存储，读取时自动还原；内部数据，AI 不应直接修改）"
+          ]
+        ],
+        "writePaths": [],
+        "mirrors": []
+      },
+      {
+        "kind": "rows",
+        "group": "Rows",
+        "table": "Rows表",
+        "keyCol": "键名",
+        "keyValue": "",
+        "childKey": "",
+        "parentKeyCol": "",
+        "ancestorKeyCols": [],
+        "parentTable": "",
+        "parentPath": [],
+        "path": [],
+        "valueCol": "",
+        "scalarValueCol": "",
+        "cols": [
+          [
+            "键名",
+            "textExact",
+            "",
+            [],
+            false,
+            ""
+          ],
+          [
+            "s",
+            "pair",
+            "",
+            [
+              "s"
+            ],
+            true,
+            "记录说明"
+          ],
+          [
+            "_扩展数据",
+            "object",
+            "{}",
+            [
+              "_扩展数据"
+            ],
+            false,
+            "本表未在模板声明的动态字段（JSON 存储，读取时自动还原；内部数据，AI 不应直接修改）"
+          ]
+        ],
+        "writePaths": [
+          [
+            "Rows"
+          ]
+        ],
+        "mirrors": []
+      },
+      {
+        "kind": "array",
+        "group": "Arr",
+        "table": "Arr表",
+        "keyCol": "键名",
+        "keyValue": "",
+        "childKey": "",
+        "parentKeyCol": "",
+        "ancestorKeyCols": [],
+        "parentTable": "",
+        "parentPath": [],
+        "path": [],
+        "valueCol": "内容",
+        "scalarValueCol": "",
+        "cols": [
+          [
+            "内容",
+            "jsonScalar",
+            "",
+            [
+              "Arr",
+              "内容"
+            ],
+            false,
+            "数组元素（JSON 标量编码，读取时保留原始类型）"
+          ]
+        ],
+        "writePaths": [],
+        "mirrors": []
+      }
+    ]
+  },
+  "rowWrite": {
+    "n": 2,
+    "failed": false,
+    "calls": [
+      [
+        "updateRow",
+        "{\"好感\":[2,\"好感说明\"],\"名称\":[\"乙\",\"名\"]}"
+      ]
+    ],
+    "row": [
+      1,
+      "甲",
+      "2,好感说明",
+      "乙,名",
+      "{}"
+    ]
+  },
+  "pairSequence": {
+    "afterDesc": {
+      "str": [
+        "初始,已完成委托",
+        "旧说明"
+      ],
+      "other": [
+        "x,其他说明",
+        "其他说明"
+      ]
+    },
+    "afterValue": {
+      "str": [
+        "小乙二,当前称呼",
+        "旧说明"
+      ],
+      "other": [
+        "x,其他说明",
+        "其他说明"
+      ]
+    },
+    "row": [
+      1,
+      "小乙二,当前称呼",
+      "x,其他说明",
+      "{}"
+    ]
+  },
+  "defaultWrite": {
+    "n": 3,
+    "failed": false,
+    "sheet": {
+      "uid": "sheet_abiao",
+      "name": "A表",
+      "sourceData": {
+        "note": "本表唯一记录已由开局模板初始化（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。\n下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。\n【字段说明与规则】\n- num：按 JSON 标量填值；null 表示空值，字符串保留 JSON 双引号（空字符串为 \"\"），空单元格表示缺失字段。\n- str：静态说明\n- other：另一说明\n更新以正文和规则为依据，不得为凑表而虚构数据。",
+        "initNode": "开局模板已初始化唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。",
+        "deleteNode": "禁止。",
+        "updateNode": "只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；根据正文、设定与本表规则，已有字段的值发生变化时更新。",
+        "insertNode": "禁止。",
+        "ddl": "CREATE TABLE abiao ( -- A表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  str TEXT NOT NULL DEFAULT '初始', -- str\n  other TEXT NOT NULL DEFAULT 'x', -- other\n  num TEXT NOT NULL DEFAULT '3' CHECK(num = '' OR (json_valid(num) AND json_type(num) IN ('null', 'text', 'integer', 'real', 'true', 'false'))), -- num\n  kuozhanshuju TEXT NOT NULL DEFAULT '{}' -- _扩展数据\n);",
+        "hiddenPhysicalColumns": [
+          "kuozhanshuju"
+        ]
+      },
+      "content": [
+        [
+          "row_id",
+          "str",
+          "other",
+          "num",
+          "_扩展数据"
+        ],
+        [
+          1,
+          "新值,新说明",
+          "x,另一说明",
+          "3",
+          "{}"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 0
+    }
+  }
+}

@@ -53,7 +53,7 @@ for (const [name, content] of Object.entries(files)) {
     if (name === 'README.md') continue;
     const target = path.join(OUT_DIR, name);
     fs.writeFileSync(target, content, 'utf8');
-    console.log('已生成', path.relative(ROOT, target), `(${content.length} 字节)`);
+    console.log('已生成', path.relative(ROOT, target), `(${Buffer.byteLength(content, 'utf8')} 字节)`);
 }
 
 // 语法校验生成的 index.js

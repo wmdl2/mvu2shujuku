@@ -1,5 +1,5 @@
 // MVU转数据库 · SillyTavern 原生扩展
-// 生成自 src/mvu2shujuku.js 与表格共用模块（0.3.18），源码内联如下
+// 生成自 src/mvu2shujuku.js 与表格共用模块（0.4.0），源码内联如下
 // @ts-nocheck
 (function (root) {
 root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson) {
@@ -28,8 +28,26 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
         const n = Number(s);
         return Number.isFinite(n) ? n !== 0 : (typeof fb === 'boolean' ? fb : false);
     };
-    const convertCell = (type, v, fb, desc) => {
+    const convertCell = (type, v, fb, desc, jsonKind) => {
+        if ((type === 'jsonScalarOptional' || type === 'jsonPairOptional')) {
+            if (v === undefined || v === null || v === '') return undefined;
+            // 新编码不猜测裸文本，也不把坏单元格伪造成 {}。旧 jsonScalar 解码不变。
+            try {
+                const parsed = JSON.parse(String(v));
+                return parsed === null || typeof parsed !== 'object' ? (type === 'jsonPairOptional' ? [parsed, desc || ''] : parsed) : undefined;
+            } catch (e) { return undefined; }
+        }
+        if (type === 'jsonObjectOptional') {
+            if (v === undefined || v === null || v === '') return undefined;
+            try {
+                const parsed = JSON.parse(String(v));
+                if (parsed === null) return parsed;
+                if (jsonKind === 'array') return Array.isArray(parsed) ? parsed : undefined;
+                return !Array.isArray(parsed) && parsed && typeof parsed === 'object' ? parsed : undefined;
+            } catch (e) { return undefined; }
+        }
         if (type === 'number') return number(v, fb);
+        if (type === 'textExact') return v === undefined || v === null ? (fb === undefined ? '' : fb) : String(v);
         if (type === 'boolean') return boolean(v, fb);
         if (type === 'jsonScalar') {
             if (v === undefined || v === null || v === '') return fb === undefined ? '' : fb;
@@ -45,8 +63,86 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
             if (!cur[path[i]] || typeof cur[path[i]] !== 'object' || Array.isArray(cur[path[i]])) cur[path[i]] = {};
             cur = cur[path[i]];
         }
-        cur[path[path.length - 1]] = value;
+        if (value !== undefined) cur[path[path.length - 1]] = value;
     };
+
+    /* ---------------- VWD 动态说明（第一版：单例表 pair / jsonPairOptional） ----------------
+     * 字段身份 = layout.vwd.fields[].id（登记路径数组的 JSON 串）。
+     * 覆盖集合只保存与静态默认不同的说明；显式 "" 是有效覆盖；未登记键一律忽略，
+     * 因此内部元数据永远不会被反投影成业务变量。任何非法元数据都降级为“无覆盖”。
+     */
+    const VWD_META_ID_MAX = 512;
+
+    function vwdFieldId(path) {
+        try { return JSON.stringify((Array.isArray(path) ? path : []).map(String)); } catch (e) { return ''; }
+    }
+
+    function vwdFieldsOf(entry) {
+        const vwd = entry && entry.vwd;
+        if (!vwd || typeof vwd !== 'object' || Number(vwd.v) !== 1) return null;
+        return Array.isArray(vwd.fields) ? vwd.fields : null;
+    }
+
+    // 运行时表里元数据列是 JSON 单元格；模板里可能是 JSON 文本。两种都接受，
+    // 不是合法对象形状时返回 null（降级为无覆盖），不抛错、不部分套用。
+    function parseVwdMetaObject(raw) {
+        if (raw === undefined || raw === null || raw === '') return null;
+        if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+        if (typeof raw !== 'string') return null;
+        try {
+            const parsed = JSON.parse(raw);
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+        } catch (e) { return null; }
+    }
+
+    function vwdOverridesFromRow(entry, header, row) {
+        const fields = vwdFieldsOf(entry);
+        if (!fields) return {};
+        const vwd = entry.vwd;
+        const metaCol = typeof vwd.metaCol === 'string' && vwd.metaCol ? vwd.metaCol : '';
+        if (!metaCol || !Array.isArray(row)) return {};
+        let idx = Array.isArray(header) && header.length ? header.indexOf(metaCol) : -1;
+        if (idx < 0) {
+            // 无表头时按列定义顺序退化定位，仍以 layout 登记的物理名为准。
+            const pos = (entry.cols || []).findIndex(c => c && c[0] === metaCol);
+            idx = pos < 0 ? -1 : pos + 1;
+        }
+        if (idx < 0 || idx >= row.length) return new Map();
+        const blob = parseVwdMetaObject(row[idx]);
+        if (!blob) return new Map();
+        const known = new Set(fields.map(f => f && f.id).filter(Boolean));
+        const out = new Map();
+        const take = source => {
+            for (const key of Object.keys(source)) {
+                if (!known.has(key) || key.length > VWD_META_ID_MAX) continue;
+                if (typeof source[key] === 'string') out.set(key, source[key]);
+            }
+        };
+        if (blob.v === 1 && blob.o && typeof blob.o === 'object' && !Array.isArray(blob.o)) take(blob.o);
+        // 兼容早期无版本号的裸覆盖集合；未知键依旧忽略。
+        else if (blob.v === undefined) take(blob);
+        return out;
+    }
+
+    // 当前说明 = 覆盖文本（存在时，含显式 ""）→ 否则静态默认。字段不在本次布局登记
+    // 范围时不改写单元格，继续保持既有静态读回契约。
+    // overrides: Map<fieldId, string>；运行时表项没有登记字段时视作无 VWD 布局。
+    function applyVwdDescriptions(entry, overrides, sd) {
+        const fields = vwdFieldsOf(entry);
+        if (!fields) return;
+        for (const field of fields) {
+            if (!field || typeof field !== 'object' || !field.id) continue;
+            const path = Array.isArray(field.path) && field.path.length ? field.path : null;
+            if (!path) continue;
+            const current = getPath(sd, path);
+            const overridden = overrides && overrides.has(field.id);
+            if ((field.type === 'number' || field.type === 'boolean') && current !== undefined && !Array.isArray(current)) {
+                setPath(sd, path, [current, overridden ? String(overrides.get(field.id)) : String(field.desc || '')]);
+            } else if (overridden && Array.isArray(current) && current.length === 2) {
+                current[1] = String(overrides.get(field.id));
+            }
+        }
+    }
     const getPath = (obj, path) => {
         let cur = obj;
         for (const p of path || []) { if (cur === null || cur === undefined || typeof cur !== 'object') return undefined; cur = cur[p]; }
@@ -82,8 +178,25 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
             if (!tablesByName.has(name)) tablesByName.set(name, sheet);
         }
         const sheetOf = name => tablesByName.get(name) || null;
+        const vwdPending = [];
         for (const L of entries) {
             const s = sheetOf(L.table);
+            // 内部说明元数据列：既不落进 stat_data，也不参与缺表补默认值。
+            const vwdMetaCol = L.vwd && typeof L.vwd.metaCol === 'string' ? L.vwd.metaCol : '';
+            const isMetaCol = c => !!vwdMetaCol && c[0] === vwdMetaCol;
+            // 新单例完整容器投影：内容列本身就是顶层值，而不是 { 内容: 值 }。
+            // 仅缺表窗口使用登记初值；有表而单元格为空/无数据行时保留缺失。
+            if (L.kind === 'singleton' && L.valueCol) {
+                const c = (L.cols || []).find(c => c[0] === L.valueCol);
+                if (!c || c[1] !== 'jsonObjectOptional') continue;
+                const rows = s && Array.isArray(s.content) && s.content.length ? s.content : null;
+                const ci = rows ? (rows[0] || []).indexOf(L.valueCol) : -1;
+                const row = rows && rows.slice(1).find(r => r && String(r[0]) === '1');
+                const raw = rows ? (row && ci >= 0 ? row[ci] : undefined) : (c[6] === true ? undefined : c[2]);
+                const value = convertCell(c[1], raw, c[2], c[5], c[7]);
+                if (value !== undefined) sd[L.group] = value;
+                continue;
+            }
             if (!s || !Array.isArray(s.content) || !s.content.length) {
                 if (L.kind === 'singleton') {
                     // EJS/前端可能在插件回放与布局建立之间同步读取。即使整张表
@@ -91,9 +204,9 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                     // stat_data.世界运转.场景 在加载窗口因中间组 undefined 直接抛错。
                     sd[L.group] = {};
                     for (const c of L.cols || []) {
-                        if (c[0] === '_扩展数据') continue;
+                        if (c[0] === '_扩展数据' || isMetaCol(c)) continue;
                         const cp = Array.isArray(c[3]) && c[3].length ? c[3] : [L.group, c[0]];
-                        setPath(sd, cp, convertCell(c[1], undefined, c[2], c[5]));
+                        setPath(sd, cp, ((c[1] === 'jsonScalarOptional' || c[1] === 'jsonPairOptional') || c[1] === 'jsonObjectOptional') ? (c[6] === true ? undefined : convertCell(c[1], c[1] === 'jsonObjectOptional' ? c[2] : JSON.stringify(c[2]), c[2], c[5], c[7])) : convertCell(c[1], undefined, c[2], c[5], c[7]));
                     }
                 }
                 else if (L.kind === 'rows') { for (const wp of L.writePaths || []) setPath(sd, wp, L.emptyValue === null ? null : {}); }
@@ -102,6 +215,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                 else if (L.kind === 'nestedArray') { /* 同上，不虚构关联键 */ }
                 else if (L.kind === 'array') { sd[L.group] = []; for (const m of L.mirrors || []) setPath(sd, m.path, ''); }
                 else if (L.kind === 'json') { sd[L.group] = L.scalarType === 'number' ? ((L.cols || [])[0] || [])[2] ?? 0 : {}; }
+                if (L.kind === 'singleton' && vwdMetaCol) vwdPending.push({ entry: L, header: [], row: [] });
                 continue;
             }
             // 读方向只认 content（真实数据）：seedRows 是插件"模板基底/待物化"行，
@@ -115,7 +229,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                 sd[L.group] = {};
                 for (let j = 0; j < (L.cols || []).length; j++) {
                     const c = L.cols[j];
-                    if (c[0] === '_扩展数据') continue;
+                    if (c[0] === '_扩展数据' || isMetaCol(c)) continue;
                     const vj = idxs[j] >= 0 ? row[idxs[j]] : undefined;
                     const cp = c.length > 3 && c[3] && c[3].length ? c[3] : [L.group, c[0]];
                     // 兼容旧布局里值为空的容器列（如 主角.资产）：它只是“该对象已拆
@@ -123,8 +237,9 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                     // 资产.场币/状态.生命值百分比 等标量字段会全部丢失。
                     const existingAt = getPath(sd, cp);
                     if (existingAt && typeof existingAt === 'object' && !Array.isArray(existingAt) && (vj === undefined || vj === null || vj === '')) continue;
-                    setPath(sd, cp, convertCell(c[1], vj, c[2], c[5]));
+                    setPath(sd, cp, convertCell(c[1], vj, c[2], c[5], c[7]));
                 }
+                if (vwdMetaCol) vwdPending.push({ entry: L, header, row });
                 const sovIdx = header.indexOf('_扩展数据');
                 if (sovIdx >= 0 && row[sovIdx]) {
                     const sov = parseObject(row[sovIdx]);
@@ -140,7 +255,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                 for (let r = 1; r < sRows.length; r++) {
                     const rw = sRows[r];
                     if (rw && valueIdx >= 0 && rw[valueIdx] !== undefined) {
-                        arr.push(valueDef ? convertCell(valueDef[1], rw[valueIdx], valueDef[2], valueDef[5]) : text(rw[valueIdx]));
+                        arr.push(valueDef ? convertCell(valueDef[1], rw[valueIdx], valueDef[2], valueDef[5], valueDef[7]) : text(rw[valueIdx]));
                     }
                 }
                 sd[L.group] = arr;
@@ -151,7 +266,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                 const vi = header.indexOf(L.valueCol);
                 for (let r = 1; r < sRows.length; r++) {
                     const rw = sRows[r];
-                    if (rw && vi >= 0) arr.push(convertCell(vc ? vc[1] : 'text', rw[vi], vc ? vc[2] : '', vc ? vc[5] : ''));
+                    if (rw && vi >= 0) arr.push(convertCell(vc ? vc[1] : 'text', rw[vi], vc ? vc[2] : '', vc ? vc[5] : '', vc ? vc[7] : undefined));
                 }
                 setPath(sd, L.path, arr);
             } else if (L.kind === 'nestedArray') {
@@ -167,7 +282,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                         if (!rw || pi < 0 || vi < 0) continue;
                         const pk = text(rw[pi]);
                         if (!pk || !parents[pk] || typeof parents[pk] !== 'object') continue;
-                        parents[pk][childKey].push(convertCell(vc ? vc[1] : 'text', rw[vi], vc ? vc[2] : '', vc ? vc[5] : ''));
+                        parents[pk][childKey].push(convertCell(vc ? vc[1] : 'text', rw[vi], vc ? vc[2] : '', vc ? vc[5] : '', vc ? vc[7] : undefined));
                     }
                 }
             } else if (L.kind === 'json') {
@@ -225,7 +340,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                         const svc = (L.cols || []).find(c => c[0] === L.scalarValueCol);
                         const svIdx = svc ? header.indexOf(svc[0]) : -1;
                         const sv = svIdx >= 0 ? rw2[svIdx] : undefined;
-                        childDict[text(kv)] = svc ? convertCell(svc[1], sv, svc[2], svc[5]) : text(sv);
+                        setPath(childDict, [text(kv)], svc ? convertCell(svc[1], sv, svc[2], svc[5], svc[7]) : text(sv));
                         continue;
                     }
                     const item = {};
@@ -234,7 +349,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                         if (ancestorCols.includes(c2[0]) || c2[0] === L.keyCol || c2[0] === '_扩展数据') continue;
                         const vj2 = idxs[j2] >= 0 ? rw2[idxs[j2]] : undefined;
                         const cp2 = c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : [c2[0]];
-                        setPath(item, cp2, convertCell(c2[1], vj2, c2[2], c2[5]));
+                        setPath(item, cp2, convertCell(c2[1], vj2, c2[2], c2[5], c2[7]));
                     }
                     const ovIdx = header.indexOf('_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) mergeMissing(item, parseObject(rw2[ovIdx]) || {});
@@ -254,7 +369,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                         const svc = (L.cols || []).find(c => c[0] === L.scalarValueCol);
                         const svIdx = svc ? header.indexOf(svc[0]) : -1;
                         const sv = svIdx >= 0 ? rw2[svIdx] : undefined;
-                        dict[text(kv)] = svc ? convertCell(svc[1], sv, svc[2], svc[5]) : (sv === undefined || sv === null ? '' : String(sv));
+                        setPath(dict, [text(kv)], svc ? convertCell(svc[1], sv, svc[2], svc[5], svc[7]) : (sv === undefined || sv === null ? '' : String(sv)));
                         continue;
                     }
                     const item = {};
@@ -266,7 +381,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                         // 消歧改名（山西→山西2）时，读回仍还原 stat_data.<组>.<山西>，
                         // 不破坏 MVU 原 shape（普通行表列 path 末尾即字段名，行为不变）。
                         const cp2 = c2 && c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : null;
-                        setPath(item, cp2 || [c2[0]], convertCell(c2[1], vj2, c2[2], c2[5]));
+                        setPath(item, cp2 || [c2[0]], convertCell(c2[1], vj2, c2[2], c2[5], c2[7]));
                     }
                     const ovIdx = header.indexOf('_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) {
@@ -279,11 +394,186 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                 for (const wp2 of L.writePaths || []) setPath(sd, wp2, rowValue);
             }
         }
+        // 说明覆盖在所有业务列重建完成后再套用：只改 pair 叶子的当前说明，
+        // 不改值、不建键、不触碰未登记字段。
+        for (const item of vwdPending) {
+            const overrides = vwdOverridesFromRow(item.entry, item.header, item.row);
+            applyVwdDescriptions(item.entry, overrides, sd);
+        }
         try { data.display_data = JSON.parse(JSON.stringify(sd)); } catch (e) {}
         return data;
     }
 
-    return { statDataFromTables, text, number, boolean, parseObject, convertCell, setPath, getPath, mergeMissing };
+    /* ---------------- VWD 说明插槽：note 重建的确定性纯函数 ----------------
+     * 转换期为每个 VWD 字段在 note 的【字段说明与规则】中该字段条目的说明位置留下
+     * 唯一插槽，并把整份 note 存进 layout.vwd.plan。运行期只做一次按字段的 token
+     * 替换，不猜位置、不做 replace(旧说明, 新说明)，因此两个字段说明相同、多行说明、
+     * 空说明都能正确归属。插槽计划属于内部渲染数据，不进入模型请求。
+     */
+    const VWD_TOKEN_PREFIX = '\u0000VWD·';
+    const VWD_TOKEN_SUFFIX = '\u0000';
+    const VWD_TOKEN_RE = /\u0000VWD·(\d+)\u0000/g;
+
+    function vwdToken(index) {
+        return VWD_TOKEN_PREFIX + String(index) + VWD_TOKEN_SUFFIX;
+    }
+
+    function vwdNoteTokens() {
+        return { token: vwdToken, prefix: VWD_TOKEN_PREFIX, suffix: VWD_TOKEN_SUFFIX, regex: VWD_TOKEN_RE };
+    }
+
+    // 用 token→说明 的回调替换插槽。缺失/非法插槽按空说明处理，并整行丢弃：
+    // 说明缺失的字段不应在提示词里留下“字段名：”这类空壳。
+    function vwdNoteFromSlots(plan, resolver) {
+        const source = String(plan == null ? '' : plan);
+        if (!source) return '';
+        const lines = source.split('\n');
+        const out = [];
+        for (const line of lines) {
+            VWD_TOKEN_RE.lastIndex = 0;
+            if (!VWD_TOKEN_RE.test(line)) { out.push(line); continue; }
+            VWD_TOKEN_RE.lastIndex = 0;
+            const replaced = line.replace(VWD_TOKEN_RE, (whole, digits) => {
+                const value = typeof resolver === 'function' ? resolver(Number(digits)) : undefined;
+                return value === undefined || value === null ? '' : String(value);
+            });
+            if (!replaced.replace(/[\s\u3000]/g, '')) continue;
+            out.push(replaced);
+        }
+        return out.join('\n');
+    }
+
+    /* ---------------- VWD 说明差量预检（原始数据，未折叠） ----------------
+     * 供候选快照构造在折叠 pair 之前调用：折叠会丢掉第二项，只看折叠后的数据会漏掉
+     * 说明变化。这里按 layout.vwd.fields 登记范围逐字段比较原始说明，返回拒绝原因字符串
+     * （空串表示放行）。登记范围内的字段一律检查，与它有没有 note 插槽无关。
+     */
+    function vwdDescriptionDelta(layoutEntries, prevStat, nextStat) {
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            if (!L || L.kind !== 'singleton') continue;
+            const fields = vwdFieldsOf(L);
+            if (!fields) continue;
+            const changed = [];
+            for (const field of fields) {
+                if (!field || !field.id || !Array.isArray(field.path) || !field.path.length) continue;
+                const nd = vwdDescriptionAt_(nextStat, field.path);
+                const pd = vwdDescriptionAt_(prevStat, field.path);
+                // 只有“确实提供了字符串说明、且与原说明不同”才算说明变化：
+                // 字段被删除、值不是 [值, 说明] 形状时都不算。
+                if (nd !== undefined && nd !== pd) changed.push(field.col || field.id);
+            }
+            if (changed.length) {
+                return '表「' + L.table + '」字段 ' + changed.join('、') + ' 的说明变化无法同步进提示词';
+            }
+        }
+        return '';
+    }
+
+    function vwdDescriptionAt_(node, path) {
+        let cur = node;
+        for (const part of path) {
+            if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+            cur = cur[part];
+        }
+        return Array.isArray(cur) && cur.length === 2 && typeof cur[1] === 'string' ? cur[1] : undefined;
+    }
+
+    // 转换期落进卡与 sourceData 的 note：插槽全部换成字段静态说明。这样没有运行期
+    // 覆盖时，写进 sourceData 的文本与旧版逐字节相同；插槽计划只留在内部布局里。
+    function stripVwdNoteTokens(plan, fields) {
+        const list = Array.isArray(fields) ? fields : [];
+        return vwdNoteFromSlots(plan, index => {
+            const field = list[index];
+            return field ? String(field.desc == null ? '' : field.desc) : '';
+        });
+    }
+
+    // 当前有效说明表（fieldId → 说明文本）：覆盖优先，未覆盖回退该字段静态默认。
+    // 契约是**逐键回退**：覆盖集合里合法的字符串项照常生效，非法项（数值、未登记键、
+    // 版本不符、无效 JSON）单独忽略，不影响同表其它字段；不报成功也不部分套用非法项。
+    function vwdCurrentDescriptions(entry, row, header) {
+        const fields = vwdFieldsOf(entry);
+        const out = new Map();
+        if (!fields) return out;
+        const overrides = row === undefined && header === undefined ? null : vwdOverridesFromRow(entry, header, row);
+        for (const field of fields) {
+            if (!field || typeof field !== 'object' || !field.id) continue;
+            out.set(field.id, overrides && overrides.has(field.id) ? overrides.get(field.id) : String(field.desc == null ? '' : field.desc));
+        }
+        return out;
+    }
+
+    // 说明是数据，不是待执行模板。普通文字保持可读；可能触发下游 EJS、酒馆宏、
+    // SP 查询/条件/随机模板的字符使用可逆的 JSON 字符串表示，不能靠代码块保护。
+    function formatVwdPromptDescription(value) {
+        const text = String(value == null ? '' : value);
+        if (!/[<>{}$&\u0000-\u001f\u2028\u2029]/.test(text)) return text;
+        return '（说明以 JSON 字符串表示）' + JSON.stringify(text).replace(/[<>{}$&\u2028\u2029]/g,
+            ch => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'));
+    }
+
+    function vwdPromptParts(plan, table) {
+        const fields = plan && Array.isArray(plan.fields) ? plan.fields : [];
+        const js = value => JSON.stringify(value).replace(/[<>{}$&\u2028\u2029]/g,
+            ch => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'));
+        const variable = '__mvu2shujukuVwd_' + Array.from(String(table)).map(ch => ch.codePointAt(0).toString(16)).join('_');
+        return { fields, variable, prelude: '<% var ' + variable + ' = mvu2shujukuVwdDescriptions('
+            + js(String(table)) + ', ' + js(fields.map(f => f.id)) + '); %>' };
+    }
+
+    // 原规则/宏继续在原位置执行；只将字段说明插槽换为动态数据读取。
+    function buildVwdPromptNote(plan, table) {
+        if (!plan || plan.promptVersion !== 1 || typeof plan.plan !== 'string') return null;
+        const { fields, variable, prelude } = vwdPromptParts(plan, table);
+        return prelude + '\n' + vwdNoteFromSlots(plan.plan, index => {
+            const fieldIndex = fields.findIndex(field => field.id === plan.tokens[index]);
+            return fieldIndex < 0 ? '' : '<%- ' + variable + '[' + fieldIndex + '] %>';
+        });
+    }
+
+    function vwdPromptMatches(entry, sheet) {
+        if (!entry || !entry.vwd || entry.vwd.promptVersion !== 1 || !sheet || sheet.name !== entry.table) return false;
+        if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0]) || !sheet.content[0].includes(entry.vwd.metaCol)) return false;
+        if (!entry.vwd.fields.every(field => field.noteSlot && entry.vwd.plan.includes(field.noteSlot))) return false;
+        return sheet.sourceData && sheet.sourceData.note === entry.vwd.noteTemplate
+            && vwdPromptShapeMatches(entry.vwd, entry.table, sheet.sourceData.note);
+    }
+
+    function vwdPromptShapeMatches(plan, table, note) {
+        if (!plan || plan.promptVersion !== 1 || typeof note !== 'string') return false;
+        const { fields, variable, prelude } = vwdPromptParts(plan, table);
+        return note.startsWith(prelude) && fields.every((field, index) =>
+            field.noteSlot && plan.plan.includes(field.noteSlot) && note.includes('<%- ' + variable + '[' + index + '] %>'));
+    }
+
+    function bindVwdPromptNote(plan, table, note) {
+        if (!vwdPromptShapeMatches(plan, table, note)) return false;
+        plan.noteTemplate = note;
+        return true;
+    }
+
+    function vwdPromptDescriptions(entry, sheet) {
+        if (!vwdPromptMatches(entry, sheet) || !Array.isArray(sheet.content) || !Array.isArray(sheet.content[1])) {
+            throw new Error('动态说明的布局、模板或已提交数据不完整');
+        }
+        const current = vwdCurrentDescriptions(entry, sheet.content[1], sheet.content[0]);
+        return entry.vwd.fields.map(field => formatVwdPromptDescription(current.get(field.id)));
+    }
+
+    // 按插槽计划为整表重建 note。没有插槽计划（旧布局/无 VWD 字段）返回 null，
+    // 调用方继续使用原 sourceData.note，旧行为不变。
+    function resolveVwdNote(entry, row, header) {
+        const plan = entry && entry.vwd && typeof entry.vwd.plan === 'string' ? entry.vwd.plan : '';
+        if (!plan) return null;
+        const current = vwdCurrentDescriptions(entry, row, header);
+        const slots = entry.vwd.tokens || [];
+        return vwdNoteFromSlots(plan, index => {
+            const token = slots[index];
+            return token && current.has(token) ? current.get(token) : '';
+        });
+    }
+
+    return { statDataFromTables, text, number, boolean, parseObject, convertCell, setPath, getPath, mergeMissing, vwdFieldId, applyVwdDescriptions, vwdOverridesFromRow, vwdNoteFromSlots, stripVwdNoteTokens, vwdCurrentDescriptions, resolveVwdNote, vwdNoteTokens, vwdDescriptionDelta, formatVwdPromptDescription, buildVwdPromptNote, vwdPromptMatches, vwdPromptDescriptions, bindVwdPromptNote };
 };
 root.__MVU2SHUJUKU_INPUT_PARSER_FACTORY__ = function createInputParser({ clone } = {}) {
     const deepClone = typeof clone === 'function' ? clone : (v => JSON.parse(JSON.stringify(v)));
@@ -857,7 +1147,7 @@ root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = function createEjsTransform() {
         };
     };
 root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(dependencies) {
-    const { getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf } = dependencies;
+    const { getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, maskJsStringsAndComments, createStatusUsage, isPromptVisibleColumn, vwdExperimental = () => false } = dependencies;
     function leafInfo(v) {
             if (Array.isArray(v)) {
                 return { value: v.length > 0 ? v[0] : '', desc: v.length > 1 ? String(v[1]) : '' };
@@ -966,6 +1256,32 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 (_m, prefix, macro) => prefix + JSON.stringify(macro)
             );
         }
+
+    function prepareMvuRuleYaml(content) {
+            const lines = protectYamlTemplateScalarValues(content).split('\n');
+            const visible = maskYamlBlockScalarBodies(lines.join('\n')).split('\n');
+            let checkIndent = -1;
+            for (let i = 0; i < lines.length; i++) {
+                const line = visible[i];
+                if (!line.trim() || /^\s*#/.test(line)) continue;
+                const indent = line.match(/^[ \t]*/)[0].length;
+                if (indent <= checkIndent) checkIndent = -1;
+                if (/^[ \t]*check[ \t]*:[ \t]*(?:#.*)?$/.test(line)) {
+                    checkIndent = indent;
+                    continue;
+                }
+                if (checkIndent < 0) continue;
+                const item = lines[i].match(/^([ \t]*-[ \t]+)([\p{L}\p{N}_][^\n]*)$/u);
+                // MVU check 的行内操作说明是自然语言；其中两个“冒号+空格”会让
+                // YAML 错当紧凑映射。只保护完整的单行说明，不修补任意损坏的 YAML。
+                if (!item || !/[（(][ \t]*op[ \t]*:[^()（）\n]*\bvalue[ \t]*:[^()（）\n]*[)）][ \t]*$/.test(item[2])) continue;
+                let next = i + 1;
+                while (next < lines.length && (!lines[next].trim() || /^\s*#/.test(lines[next]))) next++;
+                if (next < lines.length && lines[next].match(/^[ \t]*/)[0].length > indent) continue;
+                lines[i] = item[1] + JSON.stringify(item[2]);
+            }
+            return lines.join('\n');
+        }
     
     function yamlCollectCheckRanges(allCheckItems, ranges, numericFields) {
             for (const line of allCheckItems) {
@@ -980,7 +1296,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
     function collectRulesFromYaml(content, acc) {
             try {
                 const libs = getMvuYamlLibs();
-                const doc = libs.YAML.parseDocument(protectYamlTemplateScalarValues(content), { merge: true });
+                const doc = libs.YAML.parseDocument(prepareMvuRuleYaml(content), { merge: true });
                 // 作者自由发挥常产生非法 YAML（如 format: '稀薄'|'普通'|'浓郁'|'极浓' 的裸 |），
                 // parseDocument 不抛错但会在 errors 里记录，toJS() 返回残缺树——用残缺树会
                 // 丢整组规则。只要有 error 就回退正则（正则对这类怪癖更宽容）。
@@ -1070,6 +1386,10 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                             }
                             continue;
                         }
+                        if (/^\$\{[^{}.\n]+\}$|^<[^<>.\s]+>$|^\*$/.test(key)) {
+                            registerYamlWildcard([...(pathArr || [group]), key].join('.'), val, acc, group);
+                            continue;
+                        }
                         if (!/^[\u4e00-\u9fff$]{1,12}$/.test(key)) continue; // rule/format 等 ASCII 键跳过
                         if (typeof val === 'string') {
                             // 叶子字段的行内值：枚举 a/b/c。块标量/长文本（如 [mvu_plot]
@@ -1141,7 +1461,8 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             });
         }
     
-    function registerYamlWildcard(key, val, acc, enclosingGroup) {
+    function registerYamlWildcard(key, val, acc, enclosingGroup, ancestors = new Set()) {
+            if (val && typeof val === 'object' && ancestors.has(val)) return;
             acc.wildcardFields.add(key);
             const group0 = String(key).split('.')[0].trim();
             const rec = { path: key };
@@ -1154,7 +1475,13 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     const r = yamlParseRange(val.range);
                     if (r) rec.range = r;
                 }
-                if (val.check !== undefined) rec.checks = yamlCheckItems(val.check);
+                if (val.check !== undefined || val.note !== undefined) {
+                    rec.checks = [...new Set([...yamlCheckItems(val.check), ...yamlCheckItems(val.note)])];
+                }
+                if (val.enum !== undefined) {
+                    const values = Array.isArray(val.enum) ? val.enum : parseInlineEnumValues(String(val.enum));
+                    if (values && values.length) acc.enumPaths.push({ path: key.split('.'), enum: values.slice() });
+                }
                 if (val.format !== undefined) {
                     const fv = String(val.format);
                     rec.format = fv.indexOf('\n') !== -1 ? fv.replace(/\s+/g, ' ').trim() : fv.trim();
@@ -1172,6 +1499,21 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             if (enclosingGroup && enclosingGroup !== group0) {
                 acc.wildcardRules[enclosingGroup] = acc.wildcardRules[enclosingGroup] || [];
                 acc.wildcardRules[enclosingGroup].push(rec);
+            }
+            // 占位路径下仍可嵌套字段或附带集合规则；统一登记完整来源路径。
+            // 不遍历 type/check 的内容，也不把 YAML 引用环当作无限层级。
+            if (val && typeof val === 'object' && !Array.isArray(val)) {
+                ancestors.add(val);
+                for (const [child, value] of Object.entries(val)) {
+                    if (['type', 'check', 'note', 'format', 'range', 'enum'].includes(child)) continue;
+                    const alternatives = expandYamlTemplateFieldKey(child);
+                    const names = alternatives || [child];
+                    for (const name of names) {
+                        const path = key + '.' + name;
+                        if (isMvuRulePathKey(path)) registerYamlWildcard(path, value, acc, enclosingGroup, ancestors);
+                    }
+                }
+                ancestors.delete(val);
             }
         }
     
@@ -1953,6 +2295,14 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     const op = mm[1], opRaw = tail.slice(opOpen + 1, opClose), opArgs = splitJsTopLevelArgs(opRaw);
                     if (op === 'min') node.min = Number(literal(opArgs[0]));
                     else if (op === 'max') node.max = Number(literal(opArgs[0]));
+                    else if (op === 'nullable' || op === 'optional' || op === 'nullish') {
+                        if (op !== 'optional') node.nullable = true;
+                        if (op !== 'nullable') node.optional = true;
+                        if ((node.kind === 'object' || node.kind === 'array')
+                            && path.length === 0) {
+                            unsupported.push({ path: path.join('.') || '<根>', kind: '整组/整行可空容器存储', expression: op });
+                        }
+                    }
                     else if (op === 'describe') node.desc = String(literal(opArgs[0]) ?? '');
                     else if (op === 'default' || op === 'prefault') {
                         const v = literal(opArgs[0]);
@@ -2007,7 +2357,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 if (incoming.value) out.value = mergeZodSchemaNodes(out.value, incoming.value) || incoming.value;
                 if (incoming.keySchema) out.keySchema = mergeZodSchemaNodes(out.keySchema, incoming.keySchema) || incoming.keySchema;
             }
-            for (const key of ['min', 'max', 'enum', 'desc', 'hasDefault', 'defaultValue', 'defaultKind', 'coerce', 'clampTransform']) {
+            for (const key of ['min', 'max', 'enum', 'desc', 'hasDefault', 'defaultValue', 'defaultKind', 'coerce', 'clampTransform', 'nullable', 'optional']) {
                 if (incoming[key] !== undefined) out[key] = incoming[key];
             }
             return out;
@@ -2658,224 +3008,8 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             return blobs;
         }
     
-    function scanStatusUsage(card, groupNames) {
-            const usage = {};
-            const usageTypes = {};
-            Object.defineProperty(usage, '__types', { value: usageTypes, enumerable: false });
-            const addField = (group, field, kind) => {
-                if (!field || !isSchemaFieldName(field)) return;
-                if (!usage[group]) usage[group] = [];
-                if (!usage[group].includes(field)) usage[group].push(field);
-                if (kind) {
-                    usageTypes[group] = usageTypes[group] || {};
-                    usageTypes[group][field] = kind;
-                }
-            };
-    
-            // 已知组名来自 initvar 顶层键（扫描只针对这些组做归属）
-            const knownGroups = new Set(Array.isArray(groupNames) ? groupNames : []);
-    
-            const blobs = cardTextBlobs(card);
-            const varToGroup = {};
-            // 嵌套对象变量：var → { group, field }，表示 var 是 group[field] 的对象值
-            const nestedVar = {};
-            // entries 数组变量：var = Object.entries(组变量)
-            const entriesArrayVars = new Set();
-    
-            // 阶段1：直接 stat 映射（只跑一轮即可稳定）
-            for (const { text } of blobs) {
-                // EJS 条件里的 getvar('stat_data.组.条目.字段') / getvar('stat_data.组.字段')
-                const reGetvar = /getvar\s*\(\s*['"]stat_data\.([\u4e00-\u9fff]+)(?:\.([\u4e00-\u9fff]+)(?:\.([\u4e00-\u9fff]+))?)?['"]/g;
-                let gm;
-                while ((gm = reGetvar.exec(text))) {
-                    const group = gm[1];
-                    if (!knownGroups.has(group)) continue;
-                    // 三段式 组.条目.字段 → 条目行表的列；两段式 组.字段 → 单例列（若 initvar 已含则跳过重复）
-                    const field = gm[3] || gm[2];
-                    if (field) addField(group, field);
-                }
-                // const X = ...stat_data.组[键].字段...  → 嵌套对象；只到组 → 组变量
-                const re1 = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:all_variables|getAllVariables\(\))?[^;\n]*?\bstat_data\s*\.\s*([\u4e00-\u9fff]+)((?:\[[^\]]*\])*)((?:\s*\.\s*[\u4e00-\u9fff]+)*)/g;
-                let m;
-                while ((m = re1.exec(text))) {
-                    const v = m[1], g = m[2];
-                    if (!knownGroups.has(g)) continue;
-                    const tail = (m[4] || '').trim();
-                    if (tail === '') varToGroup[v] = g;
-                    else nestedVar[v] = { group: g, field: tail.replace(/^\s*\.\s*/, '') };
-                }
-                // const X = stat.组 / const X = (stat.组 || {})[键] / const X = stat.组[键]
-                const re1b = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\(?\s*stat\s*\.\s*([\u4e00-\u9fff]+)\s*\)?|stat\s*\.\s*([\u4e00-\u9fff]+))\s*(?:\|\|\s*\{\}\s*)?(\[[^\]]*\])?((?:\s*\.\s*[\u4e00-\u9fff]+)*)/g;
-                while ((m = re1b.exec(text))) {
-                    const g = m[2] || m[3];
-                    if (!knownGroups.has(g)) continue;
-                    const tail = (m[5] || '').trim();
-                    if (tail === '') varToGroup[m[1]] = g;
-                    else nestedVar[m[1]] = { group: g, field: tail.replace(/^\s*\.\s*/, '') };
-                }
-                // const X = <已映射>.子表名
-                const re1c = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\.\s*([\u4e00-\u9fff]+)/g;
-                while ((m = re1c.exec(text))) {
-                    const parentGroup = varToGroup[m[2]];
-                    if (parentGroup) varToGroup[m[1]] = m[3];
-                }
-                // const X = Object.entries(Y)（如 sortedBeauties）
-                const re1d = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*Object\s*\.\s*entries\(\s*([A-Za-z_$][\w$]*)\s*\)/g;
-                while ((m = re1d.exec(text))) {
-                    const srcGroup = varToGroup[m[2]];
-                    if (srcGroup && knownGroups.has(srcGroup)) {
-                        varToGroup[m[1]] = srcGroup;
-                        entriesArrayVars.add(m[1]);
-                    }
-                }
-            }
-    
-            // Tavern Helper/EJS 前端常用 get/list/val 封装而不直接读 stat_data：
-            //   rootSect=get(d,'宗门'); s=rootSect[key]; val(s,'师尊')
-            // 旧扫描只认 stat.组.字段，因而漏掉这些真正被前端消费的列。
-            // 按每个前端 render 方法建立局部别名图，避免同一大段 HTML 里
-            // sect/social/inventory 都用 item/s/n 时串组。
-            for (const { text } of blobs) {
-                const scopes = String(text).split(/(?=\b[A-Za-z_$][\w$]*\s*:\s*function\s*\(\s*d\s*\))/);
-                for (const scopeText of scopes) {
-                  const aliases = {};
-                  let m;
-                  const rootRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:get|list)\s*\(\s*d\s*,\s*['"]([^'"]+)['"]/g;
-                  while ((m = rootRe.exec(scopeText))) {
-                    const path = m[2].split(/[.]/).filter(Boolean);
-                    const group = path[path.length - 1];
-                    if (knownGroups.has(group)) aliases[m[1]] = { group, level: 0 };
-                  }
-                  let changed = true;
-                  let rounds = 0;
-                  while (changed && rounds++ < 6) {
-                    changed = false;
-                    const aliasRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)/g;
-                    while ((m = aliasRe.exec(scopeText))) {
-                        if (aliases[m[1]]) continue;
-                        const rhs = m[2];
-                        for (const [src, info] of Object.entries(aliases)) {
-                            const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                            const indexed = new RegExp('\\b' + escaped + '\\b\\s*\\[[^\\]]+\\]').test(rhs);
-                            const copied = new RegExp('\\b' + escaped + '\\b\\s*\\.(?:slice|filter|map)\\s*\\(').test(rhs);
-                            if (indexed || copied) {
-                                aliases[m[1]] = { group: info.group, level: indexed ? info.level + 1 : info.level };
-                                changed = true;
-                                break;
-                            }
-                        }
-                    }
-                    for (const [src, info] of Object.entries({ ...aliases })) {
-                        const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                        const callbackRe = new RegExp('\\b' + escaped + '\\s*\\.(?:forEach|map|filter|find|some|every)\\s*\\(\\s*(?:function\\s*\\(\\s*|\\(?\\s*)([A-Za-z_$][\\w$]*)', 'g');
-                        let cm;
-                        while ((cm = callbackRe.exec(scopeText))) {
-                            if (!aliases[cm[1]]) { aliases[cm[1]] = { group: info.group, level: info.level + 1 }; changed = true; }
-                        }
-                    }
-                  }
-                  for (const [alias, info] of Object.entries(aliases)) {
-                    if (info.level > 1) continue; // 如 s['人口'] 的 pop：其键属于 JSON 对象内部，不是宗门表列
-                    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const valRe = new RegExp('val\\s*\\(\\s*' + escaped + '\\s*,\\s*[\'"]([^\'"]+)[\'"]', 'g');
-                    let vm;
-                    while ((vm = valRe.exec(scopeText))) {
-                        const before = scopeText.slice(Math.max(0, vm.index - 24), vm.index);
-                        const after = scopeText.slice(vm.index + vm[0].length, vm.index + vm[0].length + 32);
-                        const numeric = /parseInt\s*\(\s*$|Number\s*\(\s*$/.test(before) || /^\s*,\s*-?\d+(?:\.\d+)?\s*\)/.test(after);
-                        addField(info.group, vm[1], numeric ? 'number' : '');
-                    }
-                  }
-                }
-            }
-    
-            // 阶段2：多轮解析 forEach 条目（用于推导 itemVar 字段与嵌套变量）
-            const forEachBlocks = [];
-            for (const { text } of blobs) {
-                const re4 = /Object\.entries\(\s*([A-Za-z_$][\w$]*)\s*\)(?:\s*\.\s*[A-Za-z_$][\w$]*\s*\((?:[^()]|\([^()]*\))*\))*\s*\.(?:forEach|map)\(\s*\(\s*\[[^,\]]+,\s*([A-Za-z_$][\w$]*)\]\)\s*=>\s*\{?([\s\S]{0,4000}?)\n\s*\}\);/g;
-                let m;
-                while ((m = re4.exec(text))) {
-                    forEachBlocks.push({ srcVar: m[1], itemVar: m[2], body: m[3] });
-                }
-                // 已映射的 entries 数组变量直接 .forEach（如 sortedBeauties.forEach）
-                const re4b = /([A-Za-z_$][\w$]*)\.(?:forEach|map)\(\s*\(\s*\[[^,\]]+,\s*([A-Za-z_$][\w$]*)\]\)\s*=>\s*\{?([\s\S]{0,4000}?)\n\s*\}\);/g;
-                while ((m = re4b.exec(text))) {
-                    if (entriesArrayVars.has(m[1])) {
-                        forEachBlocks.push({ srcVar: m[1], itemVar: m[2], body: m[3] });
-                    }
-                }
-            }
-            let changed = true;
-            let round = 0;
-            while (changed && round++ < 5) {
-                changed = false;
-                for (const block of forEachBlocks) {
-                    const group = varToGroup[block.srcVar];
-                    if (nestedVar[block.srcVar]) continue; // 嵌套对象不归组
-                    if (!group) continue;
-                    // 推导嵌套变量：const Y = itemVar.字段（如 const history = data.历史记录）
-                    const nestedRe = new RegExp('(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:' + block.itemVar + '|data)\\.([\\u4e00-\\u9fff]{1,12})', 'g');
-                    let nm;
-                    while ((nm = nestedRe.exec(block.body))) {
-                        if (!nestedVar[nm[1]]) {
-                            nestedVar[nm[1]] = { group, field: nm[2] };
-                            changed = true;
-                        }
-                    }
-                }
-            }
-    
-            // 阶段3：成员访问收集（跳过嵌套对象变量）
-            for (const { text } of blobs) {
-                const re2 = /([A-Za-z_$][\w$]*)\.([\u4e00-\u9fff]{1,12})/g;
-                let m;
-                while ((m = re2.exec(text))) {
-                    const v = m[1], field = m[2];
-                    if (nestedVar[v]) continue; // 嵌套对象内部字段（如 record.发送者）不作为顶层列
-                    const group = varToGroup[v];
-                    if (group) addField(group, field);
-                    else if (knownGroups.has(v)) addField(v, field);
-                }
-            }
-    
-            // 阶段4：forEach 条目字段（data.数量 之类），嵌套对象变量跳过
-            for (const block of forEachBlocks) {
-                const group = varToGroup[block.srcVar];
-                if (!group || nestedVar[block.srcVar]) continue;
-                const reItem = new RegExp('(?:' + block.itemVar + '|data)\\.([\\u4e00-\\u9fff]{1,12})', 'g');
-                let im;
-                while ((im = reItem.exec(block.body))) {
-                    if (nestedVar[im[0].split('.')[0]]) continue;
-                    addField(group, im[1]);
-                }
-            }
-    
-            // 阶段4：直接赋值给组/组变量的对象字面量键
-            // 形如：stat.组[键] = { 字段: ... }
-            for (const { text } of blobs) {
-                const assignRe = /stat_data\s*\.\s*([\u4e00-\u9fff]+)(?:\s*\[[^\]]*\])*(?:\s*\.\s*[\u4e00-\u9fff]+)?\s*=\s*\{([^{}]*)\}/g;
-                let m;
-                while ((m = assignRe.exec(text))) {
-                    const g = m[1];
-                    if (!knownGroups.has(g)) continue;
-                    const literal = m[2];
-                    const keyRe = /["']?([\u4e00-\u9fff]{1,12})["']?\s*:/g;
-                    let km;
-                    while ((km = keyRe.exec(literal))) {
-                        if (!knownGroups.has(km[1])) addField(g, km[1]);
-                    }
-                }
-            }
-    
-            // 清理：去掉明显不是字段的词
-            const stop = new Set(['length', 'forEach', 'map', 'filter', 'reduce', 'keys', 'values', 'entries', 'push', 'indexOf', 'includes', 'slice', 'join', 'split', 'trim', 'replace', 'toLowerCase', 'toUpperCase', 'some', 'every', 'find', 'string', 'number', 'boolean']);
-            for (const g of Object.keys(usage)) {
-                usage[g] = usage[g].filter(f => !stop.has(f) && !usage[g].includes(f) ? true : !stop.has(f));
-                usage[g] = [...new Set(usage[g])];
-            }
-            return usage;
-        }
-    
+    const scanStatusUsage = createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSchemaFieldName, cardTextBlobs });
+
     function isPairLeaf(v) {
             return Array.isArray(v) && v.length === 2 && typeof v[1] === 'string';
         }
@@ -2891,6 +3025,18 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 const v = obj[key];
                 const li = leafInfo(v);
                 const path = [...prefixPath, key];
+                const fixedSchema = opts.objectSchemaAt && opts.objectSchemaAt(path);
+                if (fixedSchema && (fixedSchema.kind === 'object' || fixedSchema.kind === 'array') && (fixedSchema.nullable || fixedSchema.optional)) {
+                    cols.push(optionalJsonContainerColumn(key, v, path, fixedSchema, usedIdents));
+                    continue;
+                }
+                if (fixedObjectSchema(fixedSchema) && isPlainObject(v) && Object.keys(v).length === 0) {
+                    for (const c of flattenFixedObjectColumns(key, v, fixedSchema, { rootPath: prefixPath, relativeRoot: [key] })) {
+                        c.ident = toIdent(c.zh, usedIdents, 'column');
+                        cols.push(c);
+                    }
+                    continue;
+                }
                 // 普通数组是明确的值形状（日志/勋章列表等），优先按 JSON 单元格保留；
                 // 不能被宽泛的动态字典规则改造成行对象。二元 [value, desc] 仍走叶子分支。
                 if (Array.isArray(v) && (!isPairLeaf(v) || (opts.isArrayPath && opts.isArrayPath(path)))) {
@@ -2948,13 +3094,16 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 // 真正的子表。例如 主角.装备 只是容器，实际子表是
                 // 主角.装备.固定部位 与 主角.装备.饰品。
                 const hasDynamicDescendant = opts.hasDynamicDescendant ? opts.hasDynamicDescendant(path) : false;
-                if (hasDynamicDescendant) {
+                // 明确的固定对象声明优先于“子值字段相似”的条目字典猜测。
+                // 把固定附属字段并回父表，数组/动态后代仍由递归各自提取子表。
+                if (hasDynamicDescendant || (fixedObjectSchema(fixedSchema) && !/^[_$]/.test(key))) {
                     const nested = collectColumns(v, path, report, opts);
                     // 容器内若还混有静态叶子，仍展平成父表列并保留完整 path；动态子表本身
                     // 已经由共享 childTables 收集，不会出现在 nested 中。
                     for (const c of nested) {
                         c.zh = `${key}_${c.zh}`;
                         c.ident = toIdent(c.zh, usedIdents, 'column');
+                        if (fixedObjectSchema(fixedSchema)) c._mergedFixedSchema = opts.objectSchemaAt && opts.objectSchemaAt(c.path);
                         cols.push(c);
                     }
                     continue;
@@ -3055,7 +3204,8 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 desc = li.desc || '';
                 if (typeof value === 'object' && value !== null) {
                     try { value = JSON.stringify(value); } catch (e) { value = String(value); }
-                }
+    }
+
                 return {
                     zh: key,
                     path,
@@ -3085,6 +3235,16 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 jsonKind: Array.isArray(obj) ? 'array' : 'object',
             };
         }
+
+    function optionalJsonContainerColumn(key, value, path, node, usedIdents) {
+        let encoded;
+        if (value !== undefined) {
+            try { encoded = JSON.stringify(value); } catch (e) { encoded = undefined; }
+        }
+        return { zh: key, path, value: encoded, desc: describeObjectSchema(node) || '可空对象/数组（JSON 整体存储）',
+            type: 'TEXT', range: null, ident: toIdent(key, usedIdents, 'column'), isObject: true,
+            logicalType: 'jsonObjectOptional', jsonKind: node && node.kind === 'array' ? 'array' : 'object', objectSchema: node || null };
+    }
     
     function schemaTypeLabel(node) {
             if (!node) return '文本';
@@ -3139,6 +3299,12 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 for (const key of keys) {
                     const childSchema = schemaFields ? schemaFields[key] : null;
                     const childValue = valueFields && Object.prototype.hasOwnProperty.call(valueFields, key) ? valueFields[key] : undefined;
+                    if (childSchema && (childSchema.kind === 'object' || childSchema.kind === 'array') && (childSchema.nullable || childSchema.optional)) {
+                        const col = optionalJsonContainerColumn([...displayParts, key].join('_'), childValue, [...pathParts, key], childSchema, new Set());
+                        col.itemPath = [...relativeParts, key];
+                        out.push(col);
+                        continue;
+                    }
                     const childFixed = fixedObjectSchema(childSchema) || (!childSchema && fixedObjectFromValue(childValue));
                     if (childFixed) {
                         walk([...displayParts, key], [...pathParts, key], [...relativeParts, key], childValue, childSchema);
@@ -3173,7 +3339,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             return out;
         }
     
-    function buildSchema(initvar, usage, report, shapeInfo) {
+    function buildSchema(initvar, usage, report, shapeInfo, options = {}) {
             const groups = [];
             const seenTables = new Set();
             const reportedStructuralMacros = new Set();
@@ -3198,6 +3364,14 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             const dynamicKeyNames = (shapeInfo && shapeInfo.dynamicKeyNames) || {};
             const dynamicPathSamples = (shapeInfo && shapeInfo.dynamicPathSamples) || new Map();
             const zodSchemaRoot = shapeInfo && shapeInfo.zodSchemaRoot;
+            const nullableNodeAt = path => {
+                let node = zodSchemaRoot;
+                for (const part of path || []) {
+                    if (node && node.dynamic) node = node.value;
+                    node = node && node.fields && node.fields[part];
+                }
+                return node;
+            };
             const isDynamicPath = (pathArr) => {
                 if (!Array.isArray(pathArr) || !pathArr.length) return false;
                 if (dynamicPaths.has(pathArr.join('.'))) return true;
@@ -3219,6 +3393,10 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 return ((shapeFieldTypes[pathArr[0]] || {})[pathArr[1]] === 'array');
             };
             const groupNameSet = new Set(Object.keys(initvar));
+            // 可选顶层容器即使初始缺失，也必须有可写的物理位置；不把缺失补成 {}。
+            for (const [name, node] of Object.entries(zodSchemaRoot && zodSchemaRoot.fields || {})) {
+                if (node && ['object', 'array'].includes(node.kind) && (node.nullable || node.optional)) groupNameSet.add(name);
+            }
     
             // 通用表种类推导：
             //  - 组自身有直接标量字段 → 单例（嵌套对象是子对象字段，如 主角.炼丹.阶级）
@@ -3315,6 +3493,10 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     column.objectSchema = schema || null;
                     const schemaDesc = describeObjectSchema(schema);
                     if (schemaDesc) column.desc = schemaDesc;
+                    if (zodField && (zodField.nullable || zodField.optional)) {
+                        column.logicalType = 'jsonObjectOptional';
+                        if (column.value !== undefined && typeof column.value !== 'string') column.value = JSON.stringify(column.value);
+                    }
                 }
                 return column;
             }
@@ -3373,13 +3555,47 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 return makeGroupTableName(parts.length ? parts.join('_') : fallback);
             }
     
-            for (const groupName of Object.keys(initvar)) {
+            const nullableRecordValue = node => node && node.dynamic && node.value
+                && ['object', 'array'].includes(node.value.kind) && (node.value.nullable || node.value.optional)
+                ? node.value : null;
+            // 完整记录复用 scalarValueCol 的读写协议，身份列仍用于定位与关联。
+            function addNullableRecordGroup(meta, node, entries) {
+                const used = new Set(['row_id']);
+                const identities = [...(meta.ancestorKeyCols || []).map(a => a.col), meta.keyCol];
+                const columns = identities.map(zh => ({ zh, path: [], itemPath: [], value: '', desc: '',
+                    type: 'TEXT', ident: toIdent(zh, used, 'column') }));
+                let name = '内容';
+                while (identities.includes(name)) name += '_内容';
+                const column = optionalJsonContainerColumn(name, undefined, [...meta.writePaths[0], name], node, used);
+                column.itemPath = [name];
+                // 行表的初值可能有多个不同哨兵，SQL CHECK 都必须兼容。
+                column.initialJsonValues = entries.map(e => e.value);
+                columns.push(column);
+                const rows = entries.map((e, i) => [i + 1, ...(e.parents || []), e.key,
+                    e.value === undefined ? '' : JSON.stringify(e.value)]);
+                groups.push({ ...meta, ident: toIdent(meta.tableName, usedTableIdents, 'table'),
+                    columns, rows, childTables: [], scalarValueCol: name, containerSchema: node,
+                    containerPath: [...meta.writePaths[0], '<动态键>'], reminders: ruleReminders[meta.name] || [] });
+                report.note(`可空动态记录「${meta.writePaths[0].join('.')}」逐条保存在「${name}」JSON 列；身份列不变，JSON null、空容器与删除记录分别保留。`);
+            }
+
+            for (const groupName of groupNameSet) {
                 if (groupName === '$meta') {
                     report.note(`已跳过 MVU 保留元数据组「$meta」（strictTemplate 等），不生成表格。`);
                     continue;
                 }
                 const raw = initvar[groupName];
                 const tableName = claimTopLevelTableName(groupName);
+                const containerNode = nullableNodeAt([groupName]);
+                if (containerNode && ['object', 'array'].includes(containerNode.kind) && (containerNode.nullable || containerNode.optional)) {
+                    const column = optionalJsonContainerColumn('内容', raw, [groupName], containerNode, new Set(['row_id']));
+                    groups.push({ name: groupName, tableName, ident: toIdent(tableName, usedTableIdents, 'table'),
+                        kind: 'singleton', keyCol: '', keyValue: groupName, valueCol: column.zh,
+                        columns: [column], rows: [[1, column.value === undefined ? '' : column.value]], childTables: [],
+                        source: 'optional-container', containerSchema: containerNode, reminders: ruleReminders[groupName] || [] });
+                    report.note(`整组可空容器「${groupName}」保留为「内容」JSON 列；空单元格、JSON null 与空容器分别表示缺失、空值和空对象/数组。`);
+                    continue;
+                }
                 if (!isPlainObject(raw)) {
                     // 顶层非对象（数组/标量/null）：数组按数组表，其余按单行 JSON 表。
                     // null 是合法状态值，不能当“无数据”跳过。
@@ -3458,6 +3674,13 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 if (Object.values(raw).some(v => isPlainObject(v) && Object.prototype.hasOwnProperty.call(v, rowsKeyCol))) {
                     rowsKeyCol += '_键名';
                 }
+                const recordValue = nullableRecordValue(containerNode);
+                if (recordValue) {
+                    addNullableRecordGroup({ name: groupName, tableName, kind: 'rows', keyCol: rowsKeyCol,
+                        keyValue: '', source: 'optional-record', writePaths: [[groupName]] }, recordValue,
+                        Object.entries(raw).map(([key, value]) => ({ key, value })));
+                    continue;
+                }
                 const childTables = [];
                 const prefixPath = [groupName];
                 if (kind === 'json') {
@@ -3496,7 +3719,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 // 不从顶层收集子表，避免“每角色一张字段相同的重复表”。
                 const columns = kind === 'rows'
                     ? []
-                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, isArrayPath });
+                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, isArrayPath, objectSchemaAt: nullableNodeAt });
                 if (kind !== 'rows') {
                     const expanded = [];
                     for (const c of columns) {
@@ -3505,7 +3728,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         if (c.isObject && typeof c.value === 'string') {
                             try { actual = JSON.parse(c.value); } catch (e) { actual = undefined; }
                         }
-                        if (c.isObject && (fixedObjectSchema(declaredSchema) || ((!declaredSchema || !declaredSchema.dynamic) && fixedObjectFromValue(actual)))) {
+                        if (c.isObject && c.logicalType !== 'jsonObjectOptional' && (fixedObjectSchema(declaredSchema) || ((!declaredSchema || !declaredSchema.dynamic) && fixedObjectFromValue(actual)))) {
                             const flatCols = flattenFixedObjectColumns(c.zh, actual, declaredSchema, {
                                 rootPath: [groupName],
                                 relativeRoot: [c.zh],
@@ -3582,7 +3805,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                                 continue;
                             }
                             const declaredObjectSchema = (shapeObjectSchemas[groupName] || {})[subKey];
-                            if (fixedObjectSchema(declaredObjectSchema) || ((!declaredObjectSchema || !declaredObjectSchema.dynamic) && fixedObjectFromValue(sv))) {
+                            if (!(declaredObjectSchema && (declaredObjectSchema.nullable || declaredObjectSchema.optional)) && (fixedObjectSchema(declaredObjectSchema) || ((!declaredObjectSchema || !declaredObjectSchema.dynamic) && fixedObjectFromValue(sv)))) {
                                 const flatCols = flattenFixedObjectColumns(subKey, sv, declaredObjectSchema, {
                                     rootPath: [groupName],
                                     relativeRoot: [subKey],
@@ -3633,7 +3856,8 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     }
                     for (const rootField of objectRootCandidates) {
                         const declared = (shapeObjectSchemas[groupName] || {})[rootField];
-                        if (declared && declared.dynamic) continue;
+                        const declaredZod = declaredZodField(groupName, rootField);
+                        if ((declared && (declared.dynamic || declared.nullable || declared.optional)) || (declaredZod && (declaredZod.nullable || declaredZod.optional))) continue;
                         const samples = [];
                         for (const r of entryRows) {
                             let v = r[rootField];
@@ -3687,7 +3911,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     // 空动态行表（大荒宗门/寻缘蝶）没有 InitVar 样本行，
                     // 固定嵌套结构必须直接从 type schema 生成展平列。
                     for (const [rootField, rootSchema] of Object.entries(shapeObjectSchemas[groupName] || {})) {
-                        if (!fixedObjectSchema(rootSchema) || flattenedRoots.has(rootField)) continue;
+                        if (!fixedObjectSchema(rootSchema) || rootSchema.nullable || rootSchema.optional || flattenedRoots.has(rootField)) continue;
                         const flatCols = flattenFixedObjectColumns(rootField, undefined, rootSchema, {
                             rootPath: [groupName],
                             relativeRoot: [rootField],
@@ -3881,8 +4105,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         const rowArr = [r.__rowId || (columns.length + 1), r[rowsKeyCol]];
                         for (const c of columns.slice(1)) {
                             let v = r[c.zh];
-                            if (v === undefined || v === null) v = '';
-                            if (c.isObject && typeof v === 'object') {
+                            if (c.isObject && v && typeof v === 'object') {
                                 try { v = JSON.stringify(v); } catch (e) { v = String(v); }
                             }
                             rowArr.push(v);
@@ -3966,7 +4189,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     for (const c of columns) {
                         const rootField = c.path && c.path.length >= 2 ? c.path[1] : c.zh;
                         const declaredSchema = (shapeObjectSchemas[groupName] || {})[rootField];
-                        if (c.isObject && fixedObjectSchema(declaredSchema)) {
+                        if (c.isObject && c.logicalType !== 'jsonObjectOptional' && fixedObjectSchema(declaredSchema)) {
                             const flat = flattenFixedObjectColumns(rootField, undefined, declaredSchema, {
                                 rootPath: [groupName], relativeRoot: [rootField],
                             });
@@ -4021,6 +4244,8 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 // 规则声明了动态键字典但 initvar 无数据（如 路遇道友录）：不给表的话
                 // AI 写入无处落、整组 check 规则孤儿。补一个空子表，列由 type 声明字段
                 // （shapes[字段]）构造；已有子表/列的不重复添加。
+                if (['array', 'json'].includes(g.kind)) continue; // 完整编码的组不从同名关系字段推导子表。
+                if (g.containerSchema && (g.valueCol || g.scalarValueCol)) continue; // 完整容器的内部字典不再派生重复子表。
                 const declaredDyn = (shapeInfo && shapeInfo.dynamicDicts && shapeInfo.dynamicDicts[g.name]) || {};
                 for (const f of Object.keys(declaredDyn)) {
                     if (!declaredDyn[f]) continue;
@@ -4102,6 +4327,28 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                             ? ct.ancestorKeyCols.map(x => ({ ...x }))
                             : [{ col: parentKeyCol, entity: relationEntity, parentTable: g.tableName, parentKeyCol: g.keyCol }])
                         : [];
+                    const recordValue = nullableRecordValue(nullableNodeAt(ct.path));
+                    if (recordValue) {
+                        const parentBasePath = Array.isArray(g.writePaths) && g.writePaths.length
+                            ? g.writePaths[0].slice() : [g.name];
+                        const entries = [];
+                        const add = (dict, parents = []) => {
+                            if (isPlainObject(dict)) for (const [key, value] of Object.entries(dict)) entries.push({ key, value, parents });
+                        };
+                        if (ct.parentRows && Array.isArray(ct.ancestorEntries)) {
+                            for (const ae of ct.ancestorEntries) add(ae.value, ae.parents || []);
+                        } else if (ct.parentRows) {
+                            for (const [key, dict] of Object.entries(ct.value || {})) add(dict, [key]);
+                        } else add(ct.value);
+                        ct.tableName = tableName;
+                        addNullableRecordGroup({ name: ct.key, tableName, kind: ct.parentRows ? 'nestedRows' : 'rows',
+                            keyCol: rowsKeyCol, keyValue: '', parentKeyCol, ancestorKeyCols, relationEntity,
+                            parentTable: ct.parentRows ? g.tableName : '', parentPath: ct.parentRows ? parentBasePath : [],
+                            childKey: ct.parentRows ? ct.key : '', parentGroup: g.name, source: 'optional-record',
+                            writePaths: ct.parentRows ? [[...parentBasePath, '*', ct.key]] : [[...ct.path]],
+                            emptyValue: ct.emptyValue }, recordValue, entries);
+                        continue;
+                    }
                     const usageFields = (usage[ct.key] || []).filter(f => f !== rowsKeyCol);
                     const relationSchema = ct.parentRows ? ((shapeObjectSchemas[g.name] || {})[ct.key] || null) : null;
                     const relationValueSchema = relationSchema && relationSchema.dynamic ? relationSchema.value : null;
@@ -4272,10 +4519,16 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                             ) : undefined,
                         };
                         const applied = applyDeclaredShape(column, ct.key, f);
+                        if (relationFieldSchema && (relationFieldSchema.kind === 'object' || relationFieldSchema.kind === 'array') &&
+                            (relationFieldSchema.nullable || relationFieldSchema.optional)) {
+                            applied.logicalType = 'jsonObjectOptional';
+                            applied.jsonKind = relationFieldSchema.kind;
+                            applied.objectSchema = relationFieldSchema;
+                        }
                         if (declaredKind === 'number' || declaredKind === 'boolean') applied.type = 'INTEGER';
                         columns.push(applied);
                     }
-                    if (!sawScalarEntries && columns.length === (ct.parentRows ? 2 : 1)) columns.push({
+                    if (!sawScalarEntries && !relationChildByKey.size && columns.length === ancestorKeyCols.length + 1) columns.push({
                         zh: '描述', path: [...ct.path, '描述'], itemPath: ['描述'], value: '', desc: '条目描述', type: 'TEXT',
                         ident: toIdent('描述', used, 'column'),
                     });
@@ -4321,8 +4574,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         const rowArr = [r.__rowId || (columns.length + 1)];
                         for (const c of columns) {
                             let v = r[c.zh];
-                            if (v === undefined || v === null) v = '';
-                            if (c.isObject && typeof v === 'object') {
+                            if (c.isObject && v && typeof v === 'object') {
                                 try { v = JSON.stringify(v); } catch (e) { v = String(v); }
                             }
                             rowArr.push(v);
@@ -4359,9 +4611,222 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             }
             const attached = attachFieldRules(groups, shapeInfo, report);
             disambiguateColumnSlugs(attached, report);
-            return attached;
+            // 只提升已有 null 样本的普通叶子列；空字符串、缺列和 null 不互相猜测。
+            // SP 部分 native 写入路径会把 null 归一化为空单元格，故用 JSON 标量
+            // 存值、空单元格表示缺失。旧布局和未观察到 null 的列保留原契约。
+            for (const g of attached) {
+                if (!['singleton', 'rows', 'nestedRows'].includes(g.kind)) continue;
+                g.columns.forEach((c, i) => {
+                    // 固定附属对象并回父表后，按完整路径保留各叶子的声明。
+                    // 同名叶子可有不同范围/枚举，不能依赖按末段字段名汇总的规则。
+                    const mergedSchema = c._mergedFixedSchema;
+                    delete c._mergedFixedSchema;
+                    if (mergedSchema && !c.isObject) {
+                        if (Number.isFinite(mergedSchema.min) && Number.isFinite(mergedSchema.max)) c.range = [mergedSchema.min, mergedSchema.max];
+                        if (Array.isArray(mergedSchema.enum) && mergedSchema.enum.length) c.enum = mergedSchema.enum.slice();
+                        if (mergedSchema.desc && !c.desc) c.desc = mergedSchema.desc;
+                        if (mergedSchema.kind === 'number' || mergedSchema.kind === 'boolean') c.type = 'INTEGER';
+                        if (!c.isPair && ['number', 'boolean', 'string'].includes(mergedSchema.kind)) c.logicalType = mergedSchema.kind;
+                    }
+                    if (c.isObject || c.zh === g.keyCol || c.zh === g.parentKeyCol
+                        || (g.ancestorKeyCols || []).some(a => a.col === c.zh)
+                        || c.logicalType === 'jsonScalar') return;
+                    const declared = nullableNodeAt(c.path);
+                    const presenceDeclared = declared && (declared.nullable || declared.optional);
+                    if (!presenceDeclared && c.value !== null && !(g.rows || []).some(r => r[i + 1] === null)) return;
+                    c.type = 'TEXT';
+                    c.logicalType = c.isPair ? 'jsonPairOptional' : 'jsonScalarOptional';
+                    if (g.kind !== 'singleton' && c.value === '') c.value = undefined;
+                    if (g.kind === 'singleton' && declared && declared.optional && !declared.hasDefault) {
+                        let original = initvar;
+                        for (const part of c.path || []) original = original == null ? undefined : original[part];
+                        if (original === undefined) {
+                            c.value = undefined;
+                            for (const row of g.rows || []) row[i + 1] = undefined;
+                        }
+                    }
+                });
+            }
+            // VWD 动态说明（实验能力，默认关闭）：单例表中已识别为 pair / jsonPairOptional
+            // 的字段，其第二项（说明）可被卡内脚本改写。说明覆盖值单独存一列隐藏 JSON 元数据，
+            // 不挤进业务 _扩展数据，也不改动值列类型与缺失语义。
+            // 新动态提示布局也登记有 pair 标记的数字/布尔列；SQL 物理类型保持不变，
+            // 读回按原始 pair 恢复说明。默认静态与旧实验路径仍保持既有形状。
+            // 默认关闭时不追加任何列、不设置 g.vwd，普通转换与旧布局行为完全不变。
+            for (const g of (vwdExperimental() || options.vwdDescriptions === true ? attached : [])) {
+                if (g.kind !== 'singleton') continue;
+                const vwdColumns = (g.columns || []).filter(c => {
+                    if (!c || isVwdMetaColumn(c)) return false;
+                    // 只登记模型确实能看到说明的字段：私有/只读列不进入填表提示，
+                    // 也就不该为它保存“当前说明”，避免内部元数据承载不可见契约。
+                    if (typeof isPromptVisibleColumn === 'function' && !isPromptVisibleColumn(g, c)) return false;
+                    const t = columnLayoutType(c);
+                    return t === 'pair' || t === 'jsonPairOptional'
+                        || options.vwdDescriptions === true && c.isPair && (t === 'number' || t === 'boolean');
+                });
+                if (!vwdColumns.length) continue;
+                g.vwdPromptRendering = options.vwdDescriptions === true;
+                // 物理名先经与业务列相同的统一消歧，避免与作者字段撞名。
+                const used = new Set(['row_id', ...(g.columns || []).map(c => String(c.ident || '').toLowerCase()).filter(Boolean)]);
+                const metaZh = uniqueVwdMetaColumnZh(g.columns || []);
+                g.vwdMetaZh = metaZh;
+                g.vwdColumnIdents = vwdColumns.map(c => c.ident).filter(Boolean);
+                g.columns.push({
+                    zh: metaZh,
+                    path: [g.name, metaZh],
+                    value: '',
+                    // 内部列：不进填表规则、不进更新示例，仅描述用途。
+                    desc: 'VWD 动态说明覆盖值（内部 JSON 元数据，读取时按字段还原当前说明；AI 不应直接修改）',
+                    type: 'TEXT',
+                    range: null,
+                    ident: toIdent(metaZh, used, 'column'),
+                    isObject: true,
+                    jsonKind: 'object',
+                    vwdMeta: true,
+                });
+                // 计划挂在 group 上：同一对象在 buildLayout 与 generateTemplate
+                // （note 插槽）之间共享，避免两处各算一份而 tokens/noteTemplate 脱节。
+                g.vwd = buildVwdLayoutPlan(g);
+            }
+            return options.jsonContainers ? preserveJsonContainers(attached, initvar, options.jsonContainers, report) : attached;
         }
+
+    // 在已有规则/列推导完成后合并，复用其完整路径与规则归属，不另猜一套结构。
+    // true 选择全部顶层容器；路径列表用于只选择指定顶层组。既有完整 JSON 组直接复用。
+    function preserveJsonContainers(schema, initvar, selection, report) {
+        const selected = new Set(Object.keys(initvar || {}).filter(key => key !== '$meta'
+            && (isPlainObject(initvar[key]) || Array.isArray(initvar[key]))
+            && (selection === true || Array.isArray(selection) && selection.includes(key))));
+        if (!selected.size) return schema;
+        const layout = buildLayout(schema), byTable = new Map(layout.entries.map(e => [e.table, e]));
+        const prefixOf = entry => ['singleton', 'array', 'json'].includes(entry.kind) ? [entry.group]
+            : entry.path || (entry.writePaths || [])[0] || [entry.group];
+        const owners = new Map(schema.map(g => [g, prefixOf(byTable.get(g.tableName))[0]]));
+        const replacements = new Map();
+        for (const root of selected) {
+            const members = schema.filter(g => owners.get(g) === root);
+            if (!members.length) continue;
+            if (members.length === 1 && members[0].valueCol) {
+                const group = members[0];
+                replacements.set(root, { ...group, columns: group.columns.map(c => c.zh === group.valueCol
+                    ? { ...c, jsonDefaultMissing: true } : c) });
+                continue;
+            }
+            const first = members.find(g => prefixOf(byTable.get(g.tableName)).length === 1) || members[0];
+            const raw = initvar[root], node = { kind: Array.isArray(raw) ? 'array' : 'object' };
+            const column = optionalJsonContainerColumn('内容', raw, [root], node, new Set(['row_id']));
+            // 初始数据由 content/seedRows 保存。DDL 不再复制完整 JSON 初值；
+            // 新增空身份行的 SQL 默认值表示缺失，和已有完整容器协议一致。
+            column.jsonDefaultMissing = true;
+            const descriptions = [], checks = [], jsonChecks = [], reminders = [];
+            let dynamicConstraints = false;
+            for (const group of members) {
+                const entry = byTable.get(group.tableName), prefix = prefixOf(entry);
+                checks.push(...(group.groupChecks || []));
+                reminders.push(...(group.reminders || []));
+                for (const rule of group.wildcardRules || []) {
+                    for (const check of rule.checks || []) checks.push(rule.path + '：' + check);
+                }
+                for (const col of group.columns || []) {
+                    if (col.zh === '_扩展数据' || isVwdMetaColumn(col) || col.zh === group.keyCol
+                        || col.zh === group.parentKeyCol || (entry.ancestorKeyCols || []).includes(col.zh)) continue;
+                    const registered = entry.cols.find(c => c.zh === col.zh);
+                    let path;
+                    if (entry.kind === 'singleton') path = registered.path;
+                    else if (entry.kind === 'rows' || entry.kind === 'nestedRows')
+                        path = [...prefix, '*', ...(entry.scalarValueCol === col.zh ? [] : registered.path || [col.zh])];
+                    else path = [...prefix, '*'];
+                    const pair = col.isPair === true;
+                    const hints = [];
+                    if (pair) hints.push('[当前值, 说明]，当前说明直接保存在 JSON 第二项');
+                    else if (col.desc) hints.push(col.desc);
+                    if (col.format) hints.push('格式 ' + col.format);
+                    if (Array.isArray(col.range)) hints.push('范围 ' + col.range.join('～'));
+                    if (Array.isArray(col.enum) && col.enum.length) hints.push('取值 ' + JSON.stringify(col.enum));
+                    hints.push(...(Array.isArray(col.check) ? col.check : col.check ? [col.check] : []));
+                    if (hints.length) descriptions.push(path.join('.') + '：' + hints.join('；'));
+                    const valuePath = [...path.slice(1), ...(pair ? [0] : [])];
+                    const constraints = [];
+                    if (col.range || Array.isArray(col.enum) && col.enum.length <= 8)
+                        constraints.push({ path: valuePath, range: col.range, enum: col.enum });
+                    for (const check of col.jsonPathChecks || [])
+                        constraints.push({ ...check, path: [...valuePath, ...check.path] });
+                    for (const check of constraints) {
+                        if (check.path.includes('*')) dynamicConstraints = true;
+                        else jsonChecks.push(check);
+                    }
+                }
+            }
+            column.desc = '完整保存 ' + root + ' 的 JSON 数据；字段名和嵌套结构保持原样。'
+                + '\n缺失用空单元格，null 用 JSON null，空容器用 {} 或 []。'
+                + (descriptions.length ? '\n字段说明与规则：\n' + [...new Set(descriptions)].join('\n') : '');
+            if (jsonChecks.length) column.jsonPathChecks = jsonChecks;
+            replacements.set(root, { name: root, tableName: first.tableName, ident: first.ident,
+                kind: 'singleton', keyCol: '', keyValue: root, valueCol: column.zh,
+                columns: [column], rows: [[1, column.value]], childTables: [], source: 'full-json-container',
+                containerSchema: node, groupChecks: [...new Set(checks)], reminders: [...new Set(reminders)], wildcardRules: [] });
+            report.note(`完整 JSON 容器「${root}」合并 ${members.length} 张来源表；空状态和嵌套数据原样保存，SQLite 可用 JSON 路径局部更新。`);
+            if (dynamicConstraints) report.note(`完整 JSON 容器「${root}」的动态记录/数组元素约束保留在说明中；SQLite CHECK 不遍历任意元素。`);
+        }
+        const emitted = new Set(), out = [];
+        for (const group of schema) {
+            const root = owners.get(group), replacement = replacements.get(root);
+            if (!replacement) out.push(group);
+            else if (!emitted.has(root)) { emitted.add(root); out.push(replacement); }
+        }
+        return out;
+    }
     
+    // VWD 动态说明的内部元数据列：$ 前缀走现有私有列隐藏路径（生成器不再把它写进
+    // 提示词、DDL 之外也由 hiddenPhysicalColumns 隐藏），业务投影不还原该列。
+    function isVwdMetaColumn(c) {
+        return !!(c && (c.vwdMeta === true || c.zh === '$说明覆盖'));
+    }
+
+    function uniqueVwdMetaColumnZh(columns) {
+        const taken = new Set((columns || []).map(c => String(c && c.zh == null ? '' : c.zh)));
+        if (!taken.has('$说明覆盖')) return '$说明覆盖';
+        let n = 2;
+        while (taken.has('$说明覆盖' + n)) n += 1;
+        return '$说明覆盖' + n;
+    }
+
+    // 字段身份 = 已登记路径数组。路径段本身可能含点号或与说明 token 相同的字符，
+    // 因此覆盖集合统一用 JSON.stringify(path) 作键，不做点分拼接、不做转义猜测。
+    function vwdFieldId(path) {
+        return JSON.stringify((Array.isArray(path) ? path : []).map(String));
+    }
+
+    // layout 可选槽位：只有存在合格 VWD 字段的单例表才有。字段身份、静态默认说明和
+    // note 中的说明插槽都在这里登记；运行期只做一次纯函数替换，不猜位置。
+    function buildVwdLayoutPlan(g) {
+        if (!g || g.kind !== 'singleton' || !g.vwdMetaZh) return null;
+        // 复用 group 上已建立的计划对象（note 插槽写入的就是它）。
+        if (g.vwd && typeof g.vwd === 'object' && Array.isArray(g.vwd.fields)) return g.vwd;
+        const fields = [];
+        for (const c of g.columns || []) {
+            if (!c || isVwdMetaColumn(c)) continue;
+            // 与登记元数据列时同一套可见性判定：私有/只读列不进入 VWD 说明范围。
+            if (typeof isPromptVisibleColumn === 'function' && !isPromptVisibleColumn(g, c)) continue;
+            const t = columnLayoutType(c);
+            if (t !== 'pair' && t !== 'jsonPairOptional'
+                && !(g.vwdPromptRendering && c.isPair && (t === 'number' || t === 'boolean'))) continue;
+            const path = Array.isArray(c.path) && c.path.length ? c.path.map(String) : [g.name, c.zh];
+            fields.push({
+                id: vwdFieldId(path),
+                col: c.zh,
+                path,
+                type: t,
+                // 静态默认说明：读回时唯一允许的回退来源（不是 note 文本里的副本）。
+                desc: String(c.desc == null ? '' : c.desc).trim(),
+                noteSlot: '',
+            });
+        }
+        if (!fields.length) return null;
+        return { v: 1, metaCol: g.vwdMetaZh, fields, tokens: [], plan: '', noteTemplate: '',
+            ...(g.vwdPromptRendering ? { promptVersion: 1 } : {}) };
+    }
+
     function rowFirstValue(entryRows, field) {
             for (const r of entryRows) {
                 if (r[field] !== undefined && r[field] !== '') return r[field];
@@ -4527,6 +4992,56 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 } else {
                     g.groupChecks = [...new Set([...parentList, ...(ruleGroupChecks[g.name] || []), ...ancestorTableChecks])];
                 }
+                if (g.containerSchema && (g.valueCol || g.scalarValueCol)) {
+                    // 容器没有拆列，字段的说明和约束仍需出现在 note 中。
+                    // 直接保留来源路径，不能把内部字段规则误挂成对「内容」整列的数值约束。
+                    const descriptions = [], jsonPathChecks = [];
+                    const containerPath = g.containerPath || [g.name];
+                    const column = g.columns.find(c => c.zh === (g.valueCol || g.scalarValueCol));
+                    let dynamicConstraints = false;
+                    const visit = (node, path, dynamic = false) => {
+                        if (!node) return;
+                        const info = [schemaTypeLabel(node)];
+                        if (node.nullable) info.push('可为 null');
+                        if (node.optional) info.push('可缺失');
+                        if (Number.isFinite(node.min)) info.push('最小值/长度 ' + node.min);
+                        if (Number.isFinite(node.max)) info.push('最大值/长度 ' + node.max);
+                        if (Array.isArray(node.enum) && node.enum.length) info.push('取值 ' + JSON.stringify(node.enum));
+                        if (node.desc) info.push(node.desc);
+                        const field = path[path.length - 1];
+                        const format = (ruleFormats[g.name] || {})[field];
+                        if (format) info.push('格式 ' + format);
+                        const range = node.kind === 'number' && Number.isFinite(node.min) && Number.isFinite(node.max)
+                            ? [node.min, node.max] : (node.kind === 'number' || ruleNumeric.has(field) ? ruleRanges[field] : null);
+                        const enumValues = node.enum || ruleEnums[field];
+                        if (range) info.push('范围 ' + range.join('～'));
+                        if (!node.enum && Array.isArray(enumValues)) info.push('取值 ' + JSON.stringify(enumValues));
+                        if (path.length > containerPath.length && !['object', 'array'].includes(node.kind) && (range || Array.isArray(enumValues) && enumValues.length <= 8)) {
+                            if (dynamic) dynamicConstraints = true;
+                            else jsonPathChecks.push({ path: path.slice(containerPath.length), range, enum: enumValues });
+                        }
+                        descriptions.push(path.join('.') + '：' + info.join('；'));
+                        if (node.dynamic) visit(node.value, [...path, '<动态键>'], true);
+                        else for (const [key, child] of Object.entries(node.fields || {})) visit(child, [...path, key], dynamic);
+                        if (node.kind === 'array') visit(node.element, [...path, '<数组元素>'], true);
+                    };
+                    visit(g.containerSchema, containerPath);
+                    column.desc = '本列保存整个 ' + containerPath.join('.') + '，JSON 内部结构与约束：\n' + descriptions.join('\n');
+                    if (jsonPathChecks.length) column.jsonPathChecks = jsonPathChecks;
+                    if (dynamicConstraints) report.note(`可空容器「${containerPath.join('.')}」的动态键/数组元素范围与枚举保留在字段说明；SQLite CHECK 无法遍历任意元素，本表不承诺执行这些内部约束。`);
+                    const checks = ruleCheckPaths.filter(e => {
+                        const path = Array.isArray(e.path) ? e.path : String(e.path || '').split('.');
+                        const prefix = containerPath.slice(0, g.scalarValueCol ? -1 : undefined);
+                        return prefix.length <= path.length && prefix.every((seg, i) => seg === '*' || String(seg) === String(path[i]));
+                    }).flatMap(e => (e.list || []).map(s => (Array.isArray(e.path) ? e.path.join('.') : e.path) + '：' + s));
+                    for (const [field, list] of Object.entries(ruleChecks[g.name] || {})) {
+                        for (const text of Array.isArray(list) ? list : [list]) checks.push(g.name + '.' + field + '：' + text);
+                    }
+                    for (const rule of g.wildcardRules || []) {
+                        for (const check of rule.checks || []) checks.push(rule.path + '：' + check);
+                    }
+                    g.groupChecks = [...new Set([...g.groupChecks, ...checks])];
+                }
                 // 整组 JSON 表：不套用 [mvu_update] 按字段名的规则（避免误命中同名列），
                 // 但组级 check/通配规则已挂上，供“可写判定”使用
                 if (g.kind === 'json') continue;
@@ -4648,14 +5163,14 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
     function columnLayoutType(c) {
             // stat_data 的结构类型优先于 SQL 物理类型；对象/数组列即使受到同名数值
             // 规则污染，也必须按 JSON 解析，不能退化成 number/text。
-            if (c.logicalType === 'jsonScalar') return 'jsonScalar';
+            if (c.logicalType === 'jsonScalar' || (c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional') || c.logicalType === 'jsonObjectOptional') return c.logicalType;
             if (c.isObject) return 'object';
             // SQLite 用 INTEGER 0/1 存布尔值，但 stat_data 必须恢复为真正的
             // boolean；否则卡内 Zod 结构校验会拒绝数字。
             if (c.logicalType === 'boolean' || typeof c.value === 'boolean') return 'boolean';
             if (c.type === 'INTEGER' || c.type === 'REAL') return 'number';
             if (c.isPair) return 'pair';
-            return 'text';
+            return 'textExact';
         }
     
     function buildLayout(schema) {
@@ -4676,10 +5191,10 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         cols: g.columns.map(c => ({
                             zh: c.zh,
                             type: columnLayoutType(c),
-                            fallback: c.value === undefined || c.value === null ? '' : c.value,
+                            fallback: ((c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional') || c.logicalType === 'jsonObjectOptional') ? c.value : (c.value === undefined || c.value === null ? '' : c.value),
                             path: c.path || [g.name, c.zh],
                             isPair: !!c.isPair,
-                            desc: c.desc || '',
+                            desc: c.desc || '', jsonKind: c.jsonKind,
                         })),
                         writePaths: [[g.name]],
                     };
@@ -4699,10 +5214,10 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         cols: g.columns.map(c => ({
                             zh: c.zh,
                             type: columnLayoutType(c),
-                            fallback: c.value === undefined || c.value === null ? '' : c.value,
+                            fallback: ((c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional') || c.logicalType === 'jsonObjectOptional') ? c.value : (c.value === undefined || c.value === null ? '' : c.value),
                             path: c.path || [g.name, c.zh],
                             isPair: !!c.isPair,
-                            desc: c.desc || '',
+                            desc: c.desc || '', jsonKind: c.jsonKind,
                         })),
                     };
                     entries.push(entry);
@@ -4710,6 +5225,11 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     continue;
                 }
                 if (g.kind === 'singleton') {
+                    // 计划只有在该表确实带内部元数据列时才登记：目标 SP 不支持隐藏内部列时
+                    // 生成器不会把该列放进模板，此时运行期也不应看到 VWD 能力。
+                    const metaZh = g.vwdMetaZh;
+                    const hasMetaColumn = !!metaZh && (g.columns || []).some(c => c.zh === metaZh);
+                    const vwdPlan = hasMetaColumn ? buildVwdLayoutPlan(g) : null;
                     const entry = {
                         kind: 'singleton',
                         group: g.name,
@@ -4719,12 +5239,14 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         cols: g.columns.map(c => ({
                             zh: c.zh,
                             type: columnLayoutType(c),
-                            fallback: c.value === undefined || c.value === null ? '' : c.value,
+                            fallback: ((c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional') || c.logicalType === 'jsonObjectOptional') ? c.value : (c.value === undefined || c.value === null ? '' : c.value),
                             path: c.path || [g.name, c.zh],
                             isPair: !!c.isPair,
-                            desc: c.desc || '',
+                            desc: c.desc || '', jsonKind: c.jsonKind,
                         })),
                     };
+                    if (g.valueCol) entry.valueCol = g.valueCol;
+                    if (vwdPlan) entry.vwd = vwdPlan;
                     entries.push(entry);
                     for (const c of g.columns) {
                         pathIndex.set([g.name, c.zh].join('.'), { table: g.tableName, col: c.zh, rowKey: g.keyValue });
@@ -4742,8 +5264,8 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         parentTable: g.parentTable || '',
                         cols: g.columns.map(c => ({
                             zh: c.zh, type: columnLayoutType(c),
-                            fallback: c.isObject ? (c.jsonKind === 'array' ? '[]' : '{}') : (c.value === undefined || c.value === null ? '' : c.value),
-                            path: [], isPair: false, desc: c.desc || '',
+                            fallback: c.logicalType === 'jsonObjectOptional' ? c.value : (c.isObject ? (c.jsonKind === 'array' ? '[]' : '{}') : ((c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional') ? c.value : (c.value === undefined || c.value === null ? '' : c.value))),
+                            path: [], isPair: false, desc: c.desc || '', jsonKind: c.jsonKind,
                         })),
                         valueCol: valueCol ? valueCol.zh : '内容',
                     };
@@ -4768,10 +5290,10 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         cols: g.columns.map(c => ({
                             zh: c.zh,
                             type: columnLayoutType(c),
-                            fallback: c.isObject ? (c.jsonKind === 'array' ? '[]' : '{}') : (c.value === undefined || c.value === null ? '' : c.value),
+                            fallback: c.logicalType === 'jsonObjectOptional' ? c.value : (c.isObject ? (c.jsonKind === 'array' ? '[]' : '{}') : ((c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional') ? c.value : (c.value === undefined || c.value === null ? '' : c.value))),
                             path: c.itemPath || ((c.zh === g.keyCol || (Array.isArray(g.ancestorKeyCols) && g.ancestorKeyCols.some(a => a.col === c.zh)) || c.zh === g.parentKeyCol) ? [] : [c.zh]),
                             isPair: !!c.isPair,
-                            desc: c.desc || '',
+                            desc: c.desc || '', jsonKind: c.jsonKind,
                         })),
                         writePaths: [[...parentPath, '*', g.childKey || g.name]],
                         scalarValueCol: g.scalarValueCol || '',
@@ -4795,14 +5317,14 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     cols: g.columns.map(c => ({
                         zh: c.zh,
                         type: columnLayoutType(c),
-                        fallback: c.isObject ? (c.jsonKind === 'array' ? '[]' : '{}') : (c.value === undefined || c.value === null ? '' : c.value),
+                        fallback: c.logicalType === 'jsonObjectOptional' ? c.value : (c.isObject ? (c.jsonKind === 'array' ? '[]' : '{}') : ((c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional') ? c.value : (c.value === undefined || c.value === null ? '' : c.value))),
                         path: c.itemPath || (c.zh === g.keyCol ? [] : (
                             Array.isArray(c.path) && writePaths[0] && c.path.length > writePaths[0].length
                                 ? c.path.slice(writePaths[0].length)
                                 : [c.zh]
                         )),
                         isPair: !!c.isPair,
-                        desc: c.desc || '',
+                        desc: c.desc || '', jsonKind: c.jsonKind,
                     })),
                     writePaths,
                     scalarValueCol: g.scalarValueCol || '',
@@ -4839,12 +5361,21 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 scalarValueCol: e.scalarValueCol || '',
                 scalarType: e.scalarType,
                 emptyValue: Object.prototype.hasOwnProperty.call(e, 'emptyValue') ? e.emptyValue : undefined,
-                cols: (e.cols || []).map(c => e.kind === 'singleton'
-                    ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
-                    : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']),
+                cols: (e.cols || []).map(c => {
+                    const col = [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || ''];
+                    if (['jsonScalarOptional', 'jsonPairOptional', 'jsonObjectOptional'].includes(c.type) && c.fallback === undefined) col.push(true); // 无初始默认，不在缺表窗口造键
+                    if (c.type === 'jsonObjectOptional') col[7] = c.jsonKind || 'object';
+                    return col;
+                }),
                 writePaths: e.writePaths || [],
                 mirrors: e.mirrors || [],
             }));
+            // 可选的可版本化新增槽位：只在存在 VWD 字段的单例表出现，既有索引 0–7 不变，
+            // 旧读者忽略第 8 项即可。noteTemplate 只在转换期由 buildNote 填充。
+            for (let i = 0; i < safe.length; i++) {
+                const src = layout.entries[i];
+                if (src && src.vwd) safe[i].vwd = src.vwd;
+            }
             return JSON.stringify(safe);
         }
     
@@ -4861,6 +5392,23 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 entry.childKey = resolveValue(entry.childKey);
                 entry.parentPath = resolvePath(entry.parentPath);
                 entry.path = resolvePath(entry.path);
+                if (entry.vwd && typeof entry.vwd === 'object') {
+                    // VWD 说明文本可能含酒馆宏；插槽计划里的默认说明与 note 模板必须和
+                    // 列说明走同一次宏替换，否则运行期回退会得到未替换的原文。
+                    entry.vwd.metaCol = resolveValue(entry.vwd.metaCol);
+                    // 动态提示的 plan 是对 sourceData.note 的结构校验基线；原规则中的宏
+                    // 由实际提示管线执行，不能在布局里先替换后再与原 note 比较。
+                    if (entry.vwd.promptVersion !== 1) {
+                        entry.vwd.noteTemplate = resolveValue(entry.vwd.noteTemplate);
+                        entry.vwd.plan = resolveValue(entry.vwd.plan);
+                    }
+                    if (Array.isArray(entry.vwd.fields)) {
+                        entry.vwd.fields = entry.vwd.fields.map(field => {
+                            if (!field || typeof field !== 'object') return field;
+                            return { ...field, desc: resolveValue(field.desc), noteSlot: resolveValue(field.noteSlot) };
+                        });
+                    }
+                }
                 if (Array.isArray(entry.writePaths)) entry.writePaths = entry.writePaths.map(resolvePath);
                 if (Array.isArray(entry.cols)) {
                     entry.cols = entry.cols.map(col => {
@@ -4878,7 +5426,311 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             }
             return entries;
         }
-    return { leafInfo, maskYamlBlockScalarBodies, yamlStripQuotes, parseInlineEnumValues, yamlCheckItems, yamlExpandTemplateKeys, expandYamlTemplateFieldKey, protectYamlTemplateScalarValues, yamlCollectCheckRanges, collectRulesFromYaml, yamlParseRange, isMvuRulePathKey, registerYamlWildcard, registerWildcardTypeShape, registerYamlField, parseMvuShapes, parseRegisteredZodSchema, mergeZodSchemaNodes, countZodSchemaFlag, mergeRegisteredZodIntoShapeInfo, applyRegisteredZodDefaults, scanGreetingShapeVariation, extractListItems, stripRuleQuotes, scanDynamicKeyNamesFromRules, parseZodStyleRules, isSchemaFieldName, mergeShapeMetadata, parseTypeSchema, parseShapeString, extractYamlBlockScalar, cardTextBlobs, scanStatusUsage, isPairLeaf, isLeaf, collectColumns, inferType, jsonColumnFromObject, schemaTypeLabel, schemaExample, describeObjectSchema, fixedObjectFromValue, fixedObjectSchema, flattenFixedObjectColumns, buildSchema, rowFirstValue, attachFieldRules, sanitizeMacroColumnZh, disambiguateColumnSlugs, columnLayoutType, buildLayout, buildLayoutJson, resolveLayoutMacros };
+    return { leafInfo, maskYamlBlockScalarBodies, yamlStripQuotes, parseInlineEnumValues, yamlCheckItems, yamlExpandTemplateKeys, expandYamlTemplateFieldKey, protectYamlTemplateScalarValues, prepareMvuRuleYaml, yamlCollectCheckRanges, collectRulesFromYaml, yamlParseRange, isMvuRulePathKey, registerYamlWildcard, registerWildcardTypeShape, registerYamlField, parseMvuShapes, parseRegisteredZodSchema, mergeZodSchemaNodes, countZodSchemaFlag, mergeRegisteredZodIntoShapeInfo, applyRegisteredZodDefaults, scanGreetingShapeVariation, extractListItems, stripRuleQuotes, scanDynamicKeyNamesFromRules, parseZodStyleRules, isSchemaFieldName, mergeShapeMetadata, parseTypeSchema, parseShapeString, extractYamlBlockScalar, cardTextBlobs, scanStatusUsage, isPairLeaf, isLeaf, collectColumns, inferType, jsonColumnFromObject, schemaTypeLabel, schemaExample, describeObjectSchema, fixedObjectFromValue, fixedObjectSchema, flattenFixedObjectColumns, buildSchema, rowFirstValue, attachFieldRules, sanitizeMacroColumnZh, disambiguateColumnSlugs, isVwdMetaColumn, vwdFieldId, columnLayoutType, buildLayout, buildLayoutJson, resolveLayoutMacros };
+};
+root.__MVU2SHUJUKU_STATUS_USAGE_FACTORY__ = function createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSchemaFieldName, cardTextBlobs }) {
+    function sourceTexts(text) {
+        const source = String(text || '').replace(/^```(?:html|javascript|js)?[ \t]*\r?$/gm, '');
+        if (!/^\s*<(?:!doctype|html|head|body|div|style|script)\b/i.test(source)) return [source];
+        // HTML/Markdown 不是 JS；先提取可执行片段，避免把围栏当模板字符串吞掉整个前端。
+        const scripts = [...source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)]
+            .filter(m => !/\btype\s*=/.test(m[1]) || /\btype\s*=\s*["']?(?:module|(?:text|application)\/javascript)\b/i.test(m[1]))
+            .map(m => m[2]);
+        const ejs = [...source.matchAll(/<%[-=]?([\s\S]*?)%>/g)].map(m => m[1]);
+        return [...scripts, ...(ejs.length ? [ejs.join('\n')] : [])];
+    }
+
+    function createBindings(text) {
+        const code = maskJsStringsAndComments(text);
+        const root = { start: 0, end: code.length + 1, parent: null, names: new Map() };
+        const scopes = [root], stack = [root], parens = [], pairs = new Map();
+        const previous = index => { while (index >= 0 && /\s/.test(code[index])) index--; return index; };
+        const wordEndingAt = end => {
+            let start = end;
+            while (start >= 0 && /[\w$]/.test(code[start])) start--;
+            return code.slice(start + 1, end + 1);
+        };
+        for (let i = 0; i < code.length; i++) {
+            if (code[i] === '(') parens.push(i);
+            if (code[i] === ')' && parens.length) pairs.set(i, parens.pop());
+            if (code[i] === '{') {
+                const scope = { start: i, end: code.length + 1, parent: stack[stack.length - 1], names: new Map() };
+                let end = previous(i - 1), arrow = false;
+                if (code.slice(end - 1, end + 1) === '=>') { arrow = true; end = previous(end - 2); }
+                let params = '';
+                if (code[end] === ')' && pairs.has(end)) {
+                    const open = pairs.get(end);
+                    const word = wordEndingAt(previous(open - 1));
+                    if (arrow || !['if', 'for', 'while', 'switch', 'with'].includes(word)) params = code.slice(open + 1, end);
+                } else if (arrow) params = wordEndingAt(end);
+                // 参数是当前函数的新绑定；解构或默认参数中的不确定名字也不继承外层别名。
+                for (const param of splitJsTopLevelArgs(params)) {
+                    const declaration = param.split('=')[0];
+                    for (const name of declaration.match(/[A-Za-z_$][\w$]*/g) || []) scope.names.set(name, [{ at: i, value: null }]);
+                }
+                scopes.push(scope); stack.push(scope);
+            } else if (code[i] === '}' && stack.length > 1) stack.pop().end = i + 1;
+        }
+        // 表达式体箭头函数也有参数作用域，例如 rows.map(item => item.字段)。
+        for (const match of code.matchAll(/=>/g)) {
+            let start = match.index + 2;
+            while (/\s/.test(code[start] || '') && start < code.length) start++;
+            if (code[start] === '{') continue;
+            const last = previous(match.index - 1);
+            const params = code[last] === ')' && pairs.has(last) ? code.slice(pairs.get(last) + 1, last) : wordEndingAt(last);
+            let end = start, depth = 0;
+            for (; end < code.length; end++) {
+                const ch = code[end];
+                if ('([{'.includes(ch)) depth++;
+                else if (')]}'.includes(ch)) { if (!depth) break; depth--; }
+                else if (!depth && /[,;\n]/.test(ch)) break;
+            }
+            const scope = { start, end, parent: null, names: new Map() };
+            for (const param of splitJsTopLevelArgs(params)) {
+                for (const name of param.split('=')[0].match(/[A-Za-z_$][\w$]*/g) || []) scope.names.set(name, [{ at: start, value: null }]);
+            }
+            scopes.push(scope);
+        }
+        scopes.sort((a, b) => a.start - b.start || b.end - a.end);
+        const ancestors = [];
+        for (const scope of scopes) {
+            while (ancestors.length && scope.start >= ancestors[ancestors.length - 1].end) ancestors.pop();
+            scope.parent = ancestors[ancestors.length - 1] || null;
+            ancestors.push(scope);
+        }
+        const scopeAt = at => {
+            let lo = 0, hi = scopes.length;
+            while (lo + 1 < hi) { const mid = (lo + hi) >> 1; if (scopes[mid].start <= at) lo = mid; else hi = mid; }
+            let scope = scopes[lo];
+            while (scope.parent && at >= scope.end) scope = scope.parent;
+            return scope;
+        };
+        const bind = (name, value, at) => {
+            const scope = scopeAt(at), list = scope.names.get(name) || [];
+            const existing = list.find(entry => entry.at === at);
+            if (existing) {
+                if (JSON.stringify(existing.value) === JSON.stringify(value)) return false;
+                existing.value = value;
+            }
+            else list.push({ at, value });
+            scope.names.set(name, list);
+            return true;
+        };
+        // 未识别的局部声明/重新赋值也遮蔽旧别名，不把碰巧同名的变量当成数据对象。
+        const declarations = /\b(?:const|let|var)\s+/g;
+        let declaration;
+        while ((declaration = declarations.exec(code))) {
+            let end = declarations.lastIndex, depth = 0;
+            for (; end < code.length; end++) {
+                const ch = code[end];
+                if ('([{'.includes(ch)) depth++;
+                else if (')]}'.includes(ch)) { if (!depth) break; depth--; }
+                else if (!depth && /[;\n]/.test(ch)) break;
+            }
+            for (const part of splitJsTopLevelArgs(code.slice(declarations.lastIndex, end))) {
+                for (const name of part.split('=')[0].match(/[A-Za-z_$][\w$]*/g) || []) bind(name, null, declaration.index);
+            }
+        }
+        const assignments = /(?:^|[;{}\n])\s*([A-Za-z_$][\w$]*)\s*=(?!=|>)/g;
+        while ((declaration = assignments.exec(code))) bind(declaration[1], null, declaration.index + declaration[0].lastIndexOf(declaration[1]));
+        const get = (name, at) => {
+            for (let scope = scopeAt(at); scope; scope = scope.parent) {
+                const entries = scope.names.get(name);
+                if (!entries) continue;
+                let found = null;
+                for (const entry of entries) if (entry.at <= at && (!found || entry.at >= found.at)) found = entry;
+                return found && found.value;
+            }
+            return null;
+        };
+        return { code, bind, get, scopeAt, isCode: at => !!code.slice(at, at + 1).trim() };
+    }
+
+    function scanStatusUsage(card, groupNames) {
+            const usage = {};
+            const usageTypes = {};
+            Object.defineProperty(usage, '__types', { value: usageTypes, enumerable: false });
+            const addField = (group, field, kind) => {
+                if (!field || !isSchemaFieldName(field)) return;
+                if (!usage[group]) usage[group] = [];
+                if (!usage[group].includes(field)) usage[group].push(field);
+                if (kind) {
+                    usageTypes[group] = usageTypes[group] || {};
+                    usageTypes[group][field] = kind;
+                }
+            };
+
+            // 已知组名来自 initvar 顶层键（扫描只针对这些组做归属）
+            const knownGroups = new Set(Array.isArray(groupNames) ? groupNames : []);
+
+            const blobs = cardTextBlobs(card).flatMap(blob => sourceTexts(blob.text).map(text => ({ text, bindings: createBindings(text) })));
+
+            // 阶段1：直接 stat 映射（只跑一轮即可稳定）
+            for (const { text, bindings } of blobs) {
+                // EJS 条件里的 getvar('stat_data.组.条目.字段') / getvar('stat_data.组.字段')
+                const reGetvar = /getvar\s*\(\s*['"]stat_data\.([\u4e00-\u9fff]+)(?:\.([\u4e00-\u9fff]+)(?:\.([\u4e00-\u9fff]+))?)?['"]/g;
+                let gm;
+                while ((gm = reGetvar.exec(text))) {
+                    if (!bindings.isCode(gm.index)) continue;
+                    const group = gm[1];
+                    if (!knownGroups.has(group)) continue;
+                    // 三段式 组.条目.字段 → 条目行表的列；两段式 组.字段 → 单例列（若 initvar 已含则跳过重复）
+                    const field = gm[3] || gm[2];
+                    if (field) addField(group, field);
+                }
+                // const X = ...stat_data.组[键].字段...  → 嵌套对象；只到组 → 组变量
+                const re1 = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:all_variables|getAllVariables\(\))?[^;\n]*?\bstat_data\s*\.\s*([\u4e00-\u9fff]+)((?:\[[^\]]*\])*)((?:\s*\.\s*[\u4e00-\u9fff]+)*)/g;
+                let m;
+                while ((m = re1.exec(text))) {
+                    if (!bindings.isCode(m.index)) continue;
+                    const v = m[1], g = m[2];
+                    if (!knownGroups.has(g)) continue;
+                    const tail = (m[4] || '').trim();
+                    bindings.bind(v, { group: g, nested: tail !== '' }, m.index);
+                }
+                // const X = stat.组 / const X = (stat.组 || {})[键] / const X = stat.组[键]
+                const re1b = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\(?\s*stat\s*\.\s*([\u4e00-\u9fff]+)\s*\)?|stat\s*\.\s*([\u4e00-\u9fff]+))\s*(?:\|\|\s*\{\}\s*)?(\[[^\]]*\])?((?:\s*\.\s*[\u4e00-\u9fff]+)*)/g;
+                while ((m = re1b.exec(text))) {
+                    if (!bindings.isCode(m.index)) continue;
+                    const g = m[2] || m[3];
+                    if (!knownGroups.has(g)) continue;
+                    const tail = (m[5] || '').trim();
+                    bindings.bind(m[1], { group: g, nested: tail !== '' }, m.index);
+                }
+                // const X = <已映射>.子表名
+                const re1c = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*\.\s*([\u4e00-\u9fff]+)/g;
+                while ((m = re1c.exec(text))) {
+                    if (!bindings.isCode(m.index)) continue;
+                    const parentGroup = bindings.get(m[2], m.index);
+                    if (parentGroup && !parentGroup.nested) bindings.bind(m[1], { group: m[3] }, m.index);
+                }
+                // const X = Object.entries(Y)（如 sortedBeauties）
+                const re1d = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*Object\s*\.\s*entries\(\s*([A-Za-z_$][\w$]*)\s*\)/g;
+                while ((m = re1d.exec(text))) {
+                    if (!bindings.isCode(m.index)) continue;
+                    const source = bindings.get(m[2], m.index);
+                    if (source && !source.nested && knownGroups.has(source.group)) bindings.bind(m[1], { group: source.group, entries: true }, m.index);
+                }
+            }
+
+            // helper、条目回调与普通属性读取共用同一作用域/绑定表。
+            // 只在真实代码位置登记，不按 render 方法的字符串切片或变量名 data 猜归属。
+            for (const { text, bindings } of blobs) {
+                const rootRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:get|list)\s*\(\s*d\s*,\s*['"]([^'"]+)['"]/g;
+                let m;
+                while ((m = rootRe.exec(text))) {
+                    if (!bindings.isCode(m.index)) continue;
+                    const group = m[2].split('.').filter(Boolean).pop();
+                    if (knownGroups.has(group)) bindings.bind(m[1], { group, helper: true, level: 0 }, m.index);
+                }
+                // 处理参数体开头，既覆盖 { ... }，也覆盖 item => val(item, '字段')。
+                const callbackBody = at => {
+                    while (at < bindings.code.length && /\s/.test(bindings.code[at])) at++;
+                    return at;
+                };
+                const bindCallback = (name, value, at) => {
+                    const scope = bindings.scopeAt(at);
+                    // 仅允许绑定解析器已经确认的参数；不能向外层或任意 {} 写名字。
+                    const entries = scope.names.get(name);
+                    if (!entries || !entries.some(entry => entry.at === scope.start)) return false;
+                    return bindings.bind(name, value, scope.start);
+                };
+                // 别名可能依赖 callback 参数，callback 又可能依赖 entries 别名。
+                // 每轮仅更新有来源证据的绑定，达到稳定后停止。
+                for (let round = 0; round < 6; round++) {
+                    let changed = false;
+                    const aliasRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[A-Za-z_$][\w$]*\s*\?\s*)?([A-Za-z_$][\w$]*)(\s*\[[^\]\n]+\]|\s*\.\s*[\u4e00-\u9fff]+|\s*\.\s*(?:slice|filter)\s*\(|(?=\s*[;,\n]))/g;
+                    while ((m = aliasRe.exec(text))) {
+                        if (!bindings.isCode(m.index)) continue;
+                        const source = bindings.get(m[2], m.index);
+                        if (!source) continue;
+                        const tail = m[3].trim();
+                        const indexed = tail.startsWith('[');
+                        const member = tail.match(/^\.\s*([\u4e00-\u9fff]+)/);
+                        const level = (source.level || 0) + (indexed || member ? 1 : 0);
+                        // helper 的第二层索引是字段内部对象，不能提升成表格列。
+                        const nested = !!source.nested || !!member || (source.helper && level > 1);
+                        // 旧前端也会从主角对象访问附属组（如 p.功法）。保留这条
+                        // 有直接属性读取支撑的映射；条目内部/辅助函数第二层不能借同名提升。
+                        const next = member && !source.helper && !source.level && !source.nested
+                            ? { group: member[1], nested: false } : { ...source, level, nested };
+                        changed = bindings.bind(m[1], next, m.index) || changed;
+                    }
+                    const entriesRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*Object\.entries\(\s*([A-Za-z_$][\w$]*)\s*\)/g;
+                    while ((m = entriesRe.exec(text))) {
+                        if (!bindings.isCode(m.index)) continue;
+                        const source = bindings.get(m[2], m.index);
+                        if (source && !source.nested) changed = bindings.bind(m[1], { ...source, entries: true }, m.index) || changed;
+                    }
+                    const entriesCallback = /(?:Object\.entries\(\s*([A-Za-z_$][\w$]*)\s*\)|([A-Za-z_$][\w$]*))(?:(?:\s*\.\s*(?:sort|slice|filter))\s*\((?:[^()]|\([^()]*\))*\))*\s*\.\s*(?:forEach|map)\s*\(\s*\(\s*\[[^,\]]+,\s*([A-Za-z_$][\w$]*)\s*\]\s*\)\s*=>/g;
+                    while ((m = entriesCallback.exec(text))) {
+                        if (!bindings.isCode(m.index)) continue;
+                        const source = bindings.get(m[1] || m[2], m.index);
+                        if (!source || source.nested || (!m[1] && !source.entries)) continue;
+                        changed = bindCallback(m[3], { ...source, entries: false, level: (source.level || 0) + 1 }, callbackBody(entriesCallback.lastIndex)) || changed;
+                    }
+                    const helperCallback = /([A-Za-z_$][\w$]*)\s*\.\s*(?:forEach|map|filter|find|some|every)\s*\(\s*(?:function\s*\(\s*([A-Za-z_$][\w$]*)\s*\)|\(\s*([A-Za-z_$][\w$]*)\s*\)\s*=>|([A-Za-z_$][\w$]*)\s*=>)/g;
+                    while ((m = helperCallback.exec(text))) {
+                        if (!bindings.isCode(m.index)) continue;
+                        const source = bindings.get(m[1], m.index);
+                        if (!source || !source.helper || source.entries || source.nested) continue;
+                        const level = (source.level || 0) + 1;
+                        changed = bindCallback(m[2] || m[3] || m[4], { ...source, level, nested: level > 1 }, callbackBody(helperCallback.lastIndex)) || changed;
+                    }
+                    if (!changed) break;
+                }
+                const valRe = /\bval\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*['"]([^'"]+)['"]/g;
+                while ((m = valRe.exec(text))) {
+                    if (!bindings.isCode(m.index)) continue;
+                    const source = bindings.get(m[1], m.index);
+                    if (!source || source.nested || !knownGroups.has(source.group)) continue;
+                    const before = bindings.code.slice(Math.max(0, m.index - 24), m.index);
+                    const after = text.slice(valRe.lastIndex, valRe.lastIndex + 32);
+                    const numeric = /parseInt\s*\(\s*$|Number\s*\(\s*$/.test(before) || /^\s*,\s*-?\d+(?:\.\d+)?\s*\)/.test(after);
+                    addField(source.group, m[2], numeric ? 'number' : '');
+                }
+            }
+
+            // 阶段3：成员访问收集（跳过嵌套对象变量）
+            for (const { text, bindings } of blobs) {
+                const re2 = /([A-Za-z_$][\w$]*)\.([\u4e00-\u9fff]{1,12})/g;
+                let m;
+                while ((m = re2.exec(bindings.code))) {
+                    const v = m[1], field = m[2];
+                    const source = bindings.get(v, m.index);
+                    if (source && !source.nested) addField(source.group, field);
+                }
+            }
+
+            // 阶段4：直接赋值给组/组变量的对象字面量键
+            // 形如：stat.组[键] = { 字段: ... }
+            for (const { text, bindings } of blobs) {
+                const assignRe = /stat_data\s*\.\s*([\u4e00-\u9fff]+)(?:\s*\[[^\]]*\])*(?:\s*\.\s*[\u4e00-\u9fff]+)?\s*=\s*\{([^{}]*)\}/g;
+                let m;
+                while ((m = assignRe.exec(text))) {
+                    if (!bindings.isCode(m.index)) continue;
+                    const g = m[1];
+                    if (!knownGroups.has(g)) continue;
+                    const literal = m[2];
+                    const keyRe = /["']?([\u4e00-\u9fff]{1,12})["']?\s*:/g;
+                    let km;
+                    while ((km = keyRe.exec(literal))) {
+                        if (!knownGroups.has(km[1])) addField(g, km[1]);
+                    }
+                }
+            }
+
+            // 清理：去掉明显不是字段的词
+            const stop = new Set(['length', 'forEach', 'map', 'filter', 'reduce', 'keys', 'values', 'entries', 'push', 'indexOf', 'includes', 'slice', 'join', 'split', 'trim', 'replace', 'toLowerCase', 'toUpperCase', 'some', 'every', 'find', 'string', 'number', 'boolean']);
+            for (const g of Object.keys(usage)) {
+                usage[g] = usage[g].filter(f => !stop.has(f) && !usage[g].includes(f) ? true : !stop.has(f));
+                usage[g] = [...new Set(usage[g])];
+            }
+            return usage;
+        }
+
+
+    return scanStatusUsage;
 };
 root.__MVU2SHUJUKU_RUNTIME_SESSION_FACTORY__ = function createRuntimeSession(readIdentity) {
     let key = '', epoch = 0;
@@ -4907,6 +5759,52 @@ root.__MVU2SHUJUKU_RUNTIME_SESSION_FACTORY__ = function createRuntimeSession(rea
         parts[2] = String(chatKey || 'unknown');
         return JSON.stringify(parts);
     }
+    // Public writers target the AI reply visible when they are called, not a later reply.
+    // All helpers live inside the factory because the browser serializes it with toString().
+    function bindWriteTarget(session, readChat) {
+        if (session.writeTarget) return session; // retries retain the original message identity
+        const chat = readChat();
+        if (!Array.isArray(chat)) return session;
+        const latestIndex = rows => {
+            for (let i = rows.length - 1; i >= 0; i--) if (rows[i] && !rows[i].is_user) return i;
+            return -1;
+        };
+        const index = latestIndex(chat);
+        if (index < 0) return session;
+        const message = chat[index], swipe = message.swipe_id, text = message.mes ?? message.message;
+        const sourceCurrent = () => {
+            const current = readChat();
+            return Array.isArray(current) && latestIndex(current) === index && current[index] === message
+                && message.swipe_id === swipe && (message.mes ?? message.message) === text;
+        };
+        const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+        const isFrame = tag => isRecord(tag) && isRecord(tag.storageFrame)
+            && tag.storageFrame.version === 2 && Array.isArray(tag.storageFrame.logEntries);
+        const canUseCrud = () => {
+            if (!sourceCurrent()) return false;
+            if (index === 0) return true; // no earlier AI reply exists; preserve opening behavior
+            const current = readChat(), targetTags = message.TavernDB_ACU_IsolatedData;
+            // No public active-isolation getter exists in the tested SP API. Prove the floor
+            // for EVERY possible scope instead: any earlier tag must also have a V2 frame here.
+            // If a scope has no history, SP already falls back to the latest AI reply.
+            for (let i = index; i >= 0; i--) {
+                const row = current[i];
+                if (!row || row.is_user) continue;
+                if (row.TavernDB_ACU_IndependentData || row.TavernDB_ACU_Data || row.TavernDB_ACU_SummaryData) return false;
+                const tags = row.TavernDB_ACU_IsolatedData;
+                if (tags == null) continue;
+                // Unknown / serialized legacy formats use the safe snapshot path, not guesses.
+                if (!isRecord(tags)) return false;
+                for (const key of Object.keys(tags)) {
+                    if (!isFrame(tags[key]) || !isRecord(targetTags)
+                        || !Object.prototype.hasOwnProperty.call(targetTags, key) || !isFrame(targetTags[key])) return false;
+                }
+            }
+            return true;
+        };
+        return { ...session, writeTarget: { index, canUseCrud },
+            validate: () => isCurrent(session) && sourceCurrent() };
+    }
     function apiForSession(api, session) {
         if (!api) return api;
         return new Proxy(api, {
@@ -4916,6 +5814,12 @@ root.__MVU2SHUJUKU_RUNTIME_SESSION_FACTORY__ = function createRuntimeSession(rea
                 if (typeof value !== 'function') return value;
                 return function (...args) {
                     assertCurrent(session);
+                    if (session.writeTarget && ['updateCell', 'updateRow', 'insertRow', 'deleteRow'].includes(property)
+                        && !session.writeTarget.canUseCrud()) {
+                        const error = new Error('当前回复尚无可靠表格记录，取消旧楼 CRUD 并重新规划快照');
+                        error.code = 'MVU_WRITE_FLOOR_CHANGED';
+                        throw error;
+                    }
                     const result = value.apply(target, args);
                     if (result && typeof result.then === 'function') {
                         return Promise.resolve(result).then(out => { assertCurrent(session); return out; });
@@ -4926,7 +5830,147 @@ root.__MVU2SHUJUKU_RUNTIME_SESSION_FACTORY__ = function createRuntimeSession(rea
             },
         });
     }
-    return { capture, isCurrent, assertCurrent, scopedChatKey, apiForSession };
+    return { capture, isCurrent, assertCurrent, scopedChatKey, bindWriteTarget, apiForSession };
+};
+root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__ = function createRuntimeWindows(options = {}) {
+    const readRoots = typeof options.readRoots === 'function' ? options.readRoots : () => options.readRoots || [];
+    const readSessionKey = typeof options.readSessionKey === 'function' ? options.readSessionKey : () => undefined;
+    const Observer = options.MutationObserver;
+    const onChange = typeof options.onChange === 'function' ? options.onChange : null;
+    const stats = { scans: 0, queries: 0, hits: 0, enumeratedFrames: 0 };
+    let cached = [];
+    let observers = [];
+    let loads = [];
+    let dirty = true;
+    let cacheable = false;
+    let disposed = false;
+    let sessionKey;
+    let hasSessionKey = false;
+    let notifying = false;
+
+    const safe = (fn, fallback) => { try { return fn(); } catch (e) { return fallback; } };
+    const isIframe = node => {
+        const name = safe(() => String(node && (node.localName || node.tagName || '')).toLowerCase(), '');
+        return name === 'iframe';
+    };
+    const impactsIframe = node => {
+        if (isIframe(node)) return true;
+        try {
+            if (node && typeof node.querySelectorAll === 'function') {
+                stats.queries += 1;
+                return Array.from(node.querySelectorAll('iframe') || []).length > 0;
+            }
+            if (node && typeof node.querySelector === 'function') {
+                stats.queries += 1;
+                return !!node.querySelector('iframe');
+            }
+        } catch (e) {}
+        return false;
+    };
+    const markDirty = () => {
+        if (disposed || dirty) return;
+        dirty = true;
+        if (onChange && !notifying) {
+            notifying = true;
+            try { onChange(); } catch (e) {}
+            notifying = false;
+        }
+    };
+    const drain = () => {
+        let changed = false;
+        for (const observer of observers.slice()) {
+            let records = [];
+            try { records = observer.takeRecords ? observer.takeRecords() || [] : []; } catch (e) {}
+            for (const record of records) {
+                const nodes = [...(record.addedNodes || []), ...(record.removedNodes || [])];
+                if (nodes.some(impactsIframe)) changed = true;
+            }
+        }
+        if (changed) markDirty();
+    };
+    const cleanup = () => {
+        for (const observer of observers.splice(0)) { try { observer.disconnect(); } catch (e) {} }
+        for (const item of loads.splice(0)) { try { item.frame.removeEventListener('load', item.listener); } catch (e) {} }
+    };
+    const currentDocument = win => safe(() => {
+        if (!win || win.closed) return null;
+        return win.document || null;
+    }, null);
+    const rootsNow = () => {
+        const roots = safe(() => readRoots(), []) || [];
+        return Array.from(roots).filter(Boolean);
+    };
+    const scan = () => {
+        cleanup();
+        stats.scans += 1;
+        cacheable = typeof Observer === 'function';
+        const windows = [];
+        const seenWindows = new Set();
+        const seenDocuments = new Set();
+        const visit = win => {
+            if (!win || seenWindows.has(win)) return;
+            const doc = currentDocument(win);
+            if (!doc) return;
+            seenWindows.add(win); windows.push(win);
+            if (seenDocuments.has(doc)) return;
+            seenDocuments.add(doc);
+            let frames = [];
+            try {
+                if (typeof doc.querySelectorAll !== 'function') return;
+                stats.queries += 1;
+                frames = Array.from(doc.querySelectorAll('iframe') || []);
+                stats.enumeratedFrames += frames.length;
+            } catch (e) { return; }
+            for (const frame of frames) {
+                const listener = () => markDirty();
+                try { if (typeof frame.addEventListener === 'function') { frame.addEventListener('load', listener); loads.push({ frame, listener }); } } catch (e) {}
+                const child = safe(() => frame.contentWindow, null);
+                if (child) visit(child);
+            }
+        };
+        for (const root of rootsNow()) visit(root);
+        if (typeof Observer === 'function') {
+            for (const doc of seenDocuments) {
+                try {
+                    const observer = new Observer(records => {
+                        if (records.some(record => [...(record.addedNodes || []), ...(record.removedNodes || [])].some(impactsIframe))) markDirty();
+                    });
+                    observer.observe(doc, { childList: true, subtree: true });
+                    observers.push(observer);
+                } catch (e) { cacheable = false; }
+            }
+        }
+        cached = windows.map(win => ({ win, doc: currentDocument(win) }));
+        cachedRoots = rootsNow();
+        dirty = false;
+        return windows;
+    };
+    let cachedRoots = [];
+    const rootsUnchanged = roots => roots.length === cachedRoots.length && roots.every((root, index) => root === cachedRoots[index]);
+    const cacheStillValid = () => {
+        if (!cached.length) return rootsNow().length === 0;
+        for (const entry of cached) {
+            if (!entry.win || safe(() => entry.win.closed, true) || currentDocument(entry.win) !== entry.doc) return false;
+        }
+        return true;
+    };
+    const getWindows = () => {
+        if (disposed) return [];
+        const nextKey = safe(() => readSessionKey(), undefined);
+        if (!hasSessionKey || nextKey !== sessionKey) {
+            hasSessionKey = true; sessionKey = nextKey; cleanup(); cached = []; dirty = true;
+        }
+        drain();
+        const roots = rootsNow();
+        if (!Observer || !cacheable || !rootsUnchanged(roots)) dirty = true;
+        if (!dirty && !cacheStillValid()) { cleanup(); dirty = true; }
+        if (dirty) return scan().slice();
+        stats.hits += 1;
+        return cached.map(entry => entry.win);
+    };
+    const invalidate = () => { if (!disposed) { cleanup(); dirty = true; } };
+    const dispose = () => { if (disposed) return; disposed = true; cleanup(); cached = []; dirty = true; };
+    return { getWindows, invalidate, dispose, stats };
 };
 root.__MVU2SHUJUKU_SP_ADAPTER_FACTORY__ = function createSpAdapter(host) {
     const window = host, globalThis = host;
@@ -5592,6 +6636,7 @@ root.__MVU2SHUJUKU_SETTINGS_VIEW__ = function settingsView(settings) {
             '  </div>',
             '  <div class="inline-drawer-content">',
             '    <div class="mvu2shujuku-card">',
+            '      <h3 class="mvu2shujuku-section-title">转换角色卡</h3>',
             '      <div class="mvu2shujuku-row">',
             '        <span class="mvu2shujuku-label">输入来源（二选一）</span>',
             '        <label><input type="radio" name="mvu2shujuku-source" value="character" checked /> 酒馆角色卡</label>',
@@ -5614,18 +6659,23 @@ root.__MVU2SHUJUKU_SETTINGS_VIEW__ = function settingsView(settings) {
             '        </div>',
             '      </div>',
             '      <div class="mvu2shujuku-row mvu2shujuku-mode-group">',
-            '        <span class="mvu2shujuku-label" title="模板同时写入 DDL 与 SQL 示例；AI 实际输出 insertRow DSL 还是 SQL，由 SP·数据库 插件自身的填表模式决定，转换器无需选择">填表模式</span>',
+            '        <span class="mvu2shujuku-label" title="模板保留列名、DDL、字段说明及更新规则；SQL 或原生填表格式由 SP·数据库 当前模式提供，转换器无需选择">填表模式</span>',
             '        <span class="mvu2shujuku-hint">双模式（跟随插件当前设置）</span>',
             '      </div>',
             '      <div class="mvu2shujuku-row">',
             '        <label class="mvu2shujuku-label" for="mvu2shujuku-profile-select">转换配置</label>',
-            '        <select id="mvu2shujuku-profile-select" title="可选：把已保存的表格更新参数和外部表来源应用到本次新转换"></select>',
+            '        <select id="mvu2shujuku-profile-select" title="可选：把已保存的表格更新参数、世界书注入设置和外部表来源应用到本次新转换"></select>',
             '        <button id="mvu2shujuku-profile-delete" class="menu_button" disabled title="只删除转换配置，不删除角色卡或数据库预设">删除配置</button>',
             '      </div>',
             '      <div class="mvu2shujuku-help">新卡无需选择配置：下载角色卡/模板或保存到 SillyTavern 时，会按原角色卡名自动保存。重新转换时可在此主动选择已有配置。</div>',
             '      <div class="mvu2shujuku-row">',
-            '        <label class="mvu2shujuku-check-label" title="控制生成的表格 DDL 是否带 CHECK 约束（数值范围、枚举、JSON 表 json_valid）。关闭后仅保留列类型与默认值，新建聊天时 SQLite 不再做这些校验；改动需重新转换生效"><input type="checkbox" id="mvu2shujuku-ddl-check" ' + (settings.ddlIncludeCheck !== false ? 'checked' : '') + ' /> 转换时在表格 DDL 中加入 CHECK 约束（数值范围/枚举/json_valid）</label>',
+            '        <label class="mvu2shujuku-check-label" title="控制生成的表格 DDL 是否带 CHECK 约束（数值范围、枚举、JSON 表 json_valid）。关闭后仅保留列类型与默认值，新建聊天时 SQLite 不再做这些校验；改动需重新转换生效"><input type="checkbox" id="mvu2shujuku-ddl-check" ' + (settings.ddlIncludeCheck !== false ? 'checked' : '') + ' /> 启用数值、枚举和 JSON 结构校验（CHECK）</label>',
             '      </div>',
+            '      <div class="mvu2shujuku-row">',
+            '        <label class="mvu2shujuku-check-label" title="每个顶层对象或数组保留为一张表的一列完整 JSON，合并其子表，准确保存缺失、null、空容器及嵌套说明。推荐 SQLite：可按 JSON 路径局部更新；native 填表需提交整个 JSON 单元格。重新转换后生效"><input type="checkbox" id="mvu2shujuku-json-containers" ' + (settings.jsonContainers === true ? 'checked' : '') + ' /> 将容器保存为完整 JSON（保留空状态与嵌套结构）</label>',
+            '      </div>',
+            '      <details class="mvu2shujuku-detail mvu2shujuku-advanced">',
+            '        <summary>高级兼容选项</summary>',
             '      <div class="mvu2shujuku-row">',
             '        <label class="mvu2shujuku-check-label" title="仅把无 else、无嵌套、静态字段与字面量比较的简单 EJS if 转成数据库 <if db>；循环、函数和复杂分支仍保留 EJS"><input type="checkbox" id="mvu2shujuku-ejs-translate" ' + (settings.translateSimpleEjs ? 'checked' : '') + ' /> 尝试把安全的简单 EJS 条件翻译为数据库语法（实验性）</label>',
             '      </div>',
@@ -5653,6 +6703,7 @@ root.__MVU2SHUJUKU_SETTINGS_VIEW__ = function settingsView(settings) {
             '        状态栏刷新与 MVU 原版一致：数据库一有变动就广播 <code>mag_variable_update_ended</code>（VARIABLE_UPDATE_ENDED），前端原 eventOn 监听直接生效。',
             '        勾选上方选项后，还会在每次 AI 回复结束时补一次刷新，并顺带处理开场白/消息里的 <code>&lt;UpdateVariable&gt;</code> / <code>&lt;json_patch&gt;</code> 旧式更新块。',
             '      </div>',
+            '      </details>',
             '      <div class="mvu2shujuku-row">',
             '        <label class="mvu2shujuku-label" for="mvu2shujuku-png">输出格式</label>',
             '        <select id="mvu2shujuku-png">',
@@ -5679,6 +6730,240 @@ root.__MVU2SHUJUKU_SETTINGS_VIEW__ = function settingsView(settings) {
             '</div>',
         ].join('\n');
     };
+root.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__ = function createResultView({ document: doc, onChange = () => {}, notify = () => {}, createColumnsToggle = () => null, paramState = {} } = {}) {
+    const options = [
+        { key: 'updateFrequency', label: '更新频率', hint: '-1=沿用全局；0=停用该表自动更新' },
+        { key: 'groupId', label: '分组编号', hint: '-1=沿用全局' },
+        { key: 'contextDepth', label: '上下文层数', hint: '-1=沿用全局' },
+        { key: 'batchSize', label: '批处理大小', hint: '-1=沿用全局' },
+        { key: 'skipFloors', label: '跳过楼层', hint: '-1=沿用全局' },
+        { key: 'sendLatestRows', label: '发送最新行数', hint: '-1=沿用全局' },
+    ];
+    const injectionKey = 'injectIntoWorldbook';
+    function normalizeValue(value) {
+        const raw = String(value == null ? '' : value).trim();
+        const n = raw === '' ? -1 : Math.trunc(Number(raw));
+        return Number.isFinite(n) ? Math.max(-1, n) : -1;
+    }
+    function getParam(sheet, key) {
+        const value = sheet && sheet.updateConfig && sheet.updateConfig[key];
+        return value == null ? -1 : normalizeValue(value);
+    }
+    function setParam(sheet, key, value) {
+        if (!options.some(option => option.key === key)) return;
+        if (!sheet.updateConfig || typeof sheet.updateConfig !== 'object') sheet.updateConfig = {};
+        sheet.updateConfig.uiSentinel = -1;
+        sheet.updateConfig[key] = normalizeValue(value);
+    }
+    function getInjection(sheet) {
+        return !(sheet && sheet.exportConfig && sheet.exportConfig.injectIntoWorldbook === false);
+    }
+    function setInjection(sheet, value) {
+        if (!sheet.exportConfig || typeof sheet.exportConfig !== 'object') sheet.exportConfig = {};
+        sheet.exportConfig.injectIntoWorldbook = value === true;
+    }
+    function captureConfig(sheet) {
+        const config = {};
+        for (const option of options) config[option.key] = getParam(sheet, option.key);
+        config.injectIntoWorldbook = getInjection(sheet);
+        return config;
+    }
+    function applyConfig(sheet, config) {
+        if (!config || typeof config !== 'object') return;
+        for (const option of options) {
+            if (Object.prototype.hasOwnProperty.call(config, option.key)) setParam(sheet, option.key, config[option.key]);
+        }
+        // 旧转换配置没有此字段时保留新模板原值；不把字符串 "false" 当作布尔设置。
+        if (typeof config.injectIntoWorldbook === 'boolean') setInjection(sheet, config.injectIntoWorldbook);
+    }
+    function el(tag, cls, text) {
+        const node = doc.createElement(tag);
+        if (cls) node.className = cls;
+        if (text != null) node.textContent = String(text);
+        return node;
+    }
+    function input(type, cls, label) {
+        const node = el('input', cls);
+        node.type = type;
+        node.setAttribute('aria-label', label);
+        return node;
+    }
+    function select(cls, label, entries) {
+        const node = el('select', cls);
+        node.setAttribute('aria-label', label);
+        for (const entry of entries) {
+            const option = el('option', '', entry.label);
+            option.value = entry.key;
+            node.appendChild(option);
+        }
+        return node;
+    }
+    function button(text, cls, action) {
+        const node = el('button', 'menu_button ' + (cls || ''), text);
+        node.type = 'button';
+        node.addEventListener('click', action);
+        return node;
+    }
+    function details(parent, title, items, open, cls) {
+        if (!items.length) return;
+        const section = el('details', 'mvu2shujuku-detail ' + (cls || ''));
+        section.open = open;
+        section.appendChild(el('summary', '', title + '（' + items.length + '）'));
+        const list = el('ul', 'mvu2shujuku-report-list');
+        for (const text of items) list.appendChild(el('li', '', text));
+        section.appendChild(list);
+        parent.appendChild(section);
+    }
+    function renderReport(box, result) {
+        const report = result.report || {};
+        const manual = Array.isArray(report.manualReview) ? report.manualReview : [];
+        const warnings = Array.isArray(report.warnings) ? report.warnings : [];
+        const wrap = el('section', 'mvu2shujuku-report-summary');
+        const head = el('div', 'mvu2shujuku-result-heading');
+        head.appendChild(el('b', '', '转换完成 · ' + result.meta.tableCount + ' 张表'));
+        head.appendChild(el('span', 'mvu2shujuku-hint', manual.length || warnings.length
+            ? '请先查看以下待确认事项，再下载或保存。' : '未报告需人工处理的事项；详细转换记录可在下方展开。'));
+        wrap.appendChild(head);
+        details(wrap, '需人工处理', manual, true, 'mvu2shujuku-attention');
+        details(wrap, '注意事项', warnings.map(w => w && w.message != null ? w.message : String(w)), true, 'mvu2shujuku-attention');
+        // 配置应用摘要追加在 Markdown 后面，不能因结构化呈现而丢失。
+        const base = typeof report.toMarkdown === 'function' ? report.toMarkdown() : '';
+        const extra = base && String(result.reportText || '').startsWith(base)
+            ? result.reportText.slice(base.length).trim() : '';
+        if (extra) details(wrap, '配置应用结果', [extra], true);
+        details(wrap, '已自动转换', report.autoRewrites || [], false);
+        details(wrap, '转换说明', report.notes || [], false);
+        const full = el('details', 'mvu2shujuku-detail mvu2shujuku-full-report');
+        full.open = !result.report;
+        full.appendChild(el('summary', '', '完整报告（可复制，也可下载）'));
+        const area = el('textarea', 'mvu2shujuku-report');
+        area.value = result.reportText || '';
+        area.readOnly = true;
+        area.setAttribute('aria-label', '完整转换报告');
+        full.appendChild(area);
+        wrap.appendChild(full);
+        box.appendChild(wrap);
+    }
+    function renderEditor(box, rows) {
+        if (!rows.length) return;
+        const wrap = el('section', 'mvu2shujuku-param-editor');
+        wrap.appendChild(el('h4', '', '表格设置'));
+        wrap.appendChild(el('p', 'mvu2shujuku-help', '修改会随下载或保存带入新模板，不自动更改已有聊天。数值 -1 表示沿用全局；更新频率 0 表示停用自动更新。'));
+        const tools = el('div', 'mvu2shujuku-row mvu2shujuku-table-tools');
+        const search = input('search', 'mvu2shujuku-table-search', '筛选表名');
+        search.placeholder = '筛选表名…';
+        tools.appendChild(search);
+        const checkAll = input('checkbox', 'mvu2shujuku-select-visible', '全选当前列表');
+        const checkLabel = el('label', 'mvu2shujuku-check-inline');
+        checkLabel.appendChild(checkAll);
+        checkLabel.appendChild(el('span', '', '全选当前列表'));
+        tools.appendChild(checkLabel);
+        const count = el('span', 'mvu2shujuku-selection-count mvu2shujuku-hint');
+        count.setAttribute('aria-live', 'polite');
+        tools.appendChild(count);
+        wrap.appendChild(tools);
+        const bulk = el('div', 'mvu2shujuku-row mvu2shujuku-param-bulk');
+        bulk.appendChild(el('span', 'mvu2shujuku-label', '批量设置'));
+        const operation = select('mvu2shujuku-bulk-param', '批量设置项目', [...options, { key: injectionKey, label: '注入到世界书条目' }]);
+        const value = input('number', 'mvu2shujuku-bulk-value', '批量设置数值');
+        value.min = '-1'; value.step = '1'; value.value = '-1';
+        const toggle = select('mvu2shujuku-bulk-injection', '批量世界书注入状态', [{ key: 'true', label: '开启' }, { key: 'false', label: '关闭' }]);
+        toggle.hidden = true;
+        operation.addEventListener('change', () => {
+            value.hidden = operation.value === injectionKey;
+            toggle.hidden = !value.hidden;
+        });
+        bulk.appendChild(operation); bulk.appendChild(value); bulk.appendChild(toggle);
+        const rowEls = [];
+        function apply(all) {
+            const targets = rowEls.filter(row => all || row.check.checked);
+            if (!targets.length) return;
+            const key = operation.value;
+            for (const row of targets) {
+                if (key === injectionKey) {
+                    setInjection(row.sheet, toggle.value === 'true');
+                    row.injection.checked = getInjection(row.sheet);
+                } else {
+                    setParam(row.sheet, key, value.value);
+                    paramState[row.uid] = key;
+                    row.param.value = key;
+                    row.syncParam();
+                }
+            }
+            onChange();
+            notify('已更新' + (all ? '全部 ' : '所选 ') + targets.length + ' 张表', 'info');
+        }
+        const selectedButton = button('应用到所选', 'mvu2shujuku-apply-selected', () => apply(false));
+        const allButton = button('应用到全部', 'mvu2shujuku-apply-all', () => apply(true));
+        allButton.title = '应用到所有表格，包括当前被筛选隐藏的表格';
+        bulk.appendChild(selectedButton); bulk.appendChild(allButton);
+        wrap.appendChild(bulk);
+        const grid = el('div', 'mvu2shujuku-param-grid');
+        function syncSelection() {
+            const visible = rowEls.filter(row => !row.node.hidden);
+            const selected = rowEls.filter(row => row.check.checked).length;
+            count.textContent = '已选 ' + selected + ' / ' + rows.length + ' 张表 · 显示 ' + visible.length + ' 张';
+            selectedButton.disabled = selected === 0;
+            selectedButton.textContent = '应用到所选（' + selected + '）';
+            checkAll.checked = visible.length > 0 && visible.every(row => row.check.checked);
+            checkAll.indeterminate = !checkAll.checked && visible.some(row => row.check.checked);
+            checkAll.disabled = visible.length === 0;
+        }
+        checkAll.addEventListener('change', () => {
+            for (const row of rowEls) if (!row.node.hidden) row.check.checked = checkAll.checked;
+            syncSelection();
+        });
+        search.addEventListener('input', () => {
+            const query = search.value.trim().toLocaleLowerCase();
+            for (const row of rowEls) row.node.hidden = !row.name.toLocaleLowerCase().includes(query);
+            syncSelection();
+        });
+        for (const { uid, sheet } of rows) {
+            const name = String(sheet.name || uid);
+            const node = el('div', 'mvu2shujuku-table-row');
+            node.dataset.sheetUid = uid;
+            const check = input('checkbox', 'mvu2shujuku-table-select', '选择 ' + name);
+            check.addEventListener('change', syncSelection);
+            const label = el('label', 'mvu2shujuku-param-name mvu2shujuku-check-inline');
+            label.appendChild(check); label.appendChild(el('span', '', name));
+            node.appendChild(label);
+            const param = select('mvu2shujuku-param-select', name + '的更新参数', options);
+            param.value = options.some(o => o.key === paramState[uid]) ? paramState[uid] : options[0].key;
+            const number = input('number', 'mvu2shujuku-param-value', name + '的参数数值');
+            number.min = '-1'; number.step = '1';
+            const syncParam = () => {
+                number.value = String(getParam(sheet, param.value));
+                number.title = param.title = options.find(o => o.key === param.value).hint;
+            };
+            syncParam();
+            param.addEventListener('change', () => { paramState[uid] = param.value; syncParam(); });
+            // 输入过程中保留空串和负号，避免每个按键都格式化打断编辑；失焦再归一化。
+            number.addEventListener('input', () => {
+                if (number.value !== '' && Number.isFinite(Number(number.value))) {
+                    setParam(sheet, param.value, number.value); onChange();
+                }
+            });
+            number.addEventListener('change', () => { setParam(sheet, param.value, number.value); syncParam(); onChange(); });
+            node.appendChild(param); node.appendChild(number);
+            const injection = input('checkbox', 'mvu2shujuku-table-injection', name + '：注入到世界书条目');
+            injection.checked = getInjection(sheet);
+            injection.addEventListener('change', () => { setInjection(sheet, injection.checked); onChange(); });
+            const injectionLabel = el('label', 'mvu2shujuku-injection-label mvu2shujuku-check-inline');
+            injectionLabel.appendChild(injection); injectionLabel.appendChild(el('span', '', '注入世界书'));
+            injectionLabel.title = '数据库中的“注入到世界书条目”开关；不影响自动填表';
+            node.appendChild(injectionLabel);
+            if (sheet.exportConfig && sheet.exportConfig.extraIndexEnabled === true) {
+                node.appendChild(el('span', 'mvu2shujuku-row-note mvu2shujuku-hint', '此表另有额外索引，当前开关不关闭索引条目。'));
+            }
+            const columns = createColumnsToggle(sheet);
+            if (columns) { columns.classList.add('mvu2shujuku-table-columns'); node.appendChild(columns); }
+            grid.appendChild(node);
+            rowEls.push({ uid, sheet, node, name, check, param, injection, syncParam });
+        }
+        wrap.appendChild(grid); box.appendChild(wrap); syncSelection();
+    }
+    return { options, normalizeValue, getParam, setParam, getInjection, setInjection, captureConfig, applyConfig, renderReport, renderEditor };
+};
 root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRuntime(window) {
     'use strict';
     const root = window;
@@ -5840,10 +7125,25 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             chatKey: autoInitChatId(), cardKey: cardCacheKey(ch) };
     });
     function captureRuntimeSession(validate) { return runtimeSessions.capture(validate); }
+    function bindWriteTarget(session) { return runtimeSessions.bindWriteTarget(session, () => getContextSafe().chat); }
     function isRuntimeSessionCurrent(session) { return runtimeSessions.isCurrent(session); }
     function runtimeScopedChatKey(chatKey) { return runtimeSessions.scopedChatKey(chatKey); }
     function assertRuntimeSession(session) { return runtimeSessions.assertCurrent(session); }
     function runtimeApiForSession(api, session) { return runtimeSessions.apiForSession(api, session); }
+    let runtimeWindows = null;
+    function getRuntimeWindows() {
+        // 宿主窗口在安装器后段确定；首次使用时再建立观察器。
+        if (!runtimeWindows) runtimeWindows = window.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__({
+            readRoots: () => {
+                const roots = [window, hostWindow];
+                try { roots.push(window.parent, window.top); } catch (_) {}
+                return [...new Set(roots.filter(Boolean))];
+            },
+            readSessionKey: () => { const session = captureRuntimeSession(); return session.key + ':' + session.epoch; },
+            MutationObserver: hostWindow.MutationObserver || window.MutationObserver,
+        });
+        return runtimeWindows.getWindows();
+    }
 
     // 首楼替换修复：原版道渊“重塑仙缘”等机制用 setChatMessages 替换第零层，会把
     // TavernDB_ACU_ScopedConfig / InternalSheetGuide 从首楼消息上抹掉；插件随后读不到
@@ -6781,12 +8081,13 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 if (!fp || st.processed.has(fp) || st.pending.has(fp)) continue;
                 // 任务不能只绑定聊天：删除、编辑或切换来源消息后，旧更新块也必须失效。
                 // 同一守卫贯穿事件 await、合并窗口、重试以及每次实际数据库调用。
-                const messageSession = captureRuntimeSession(() => {
+                const messageSession = bindWriteTarget(captureRuntimeSession(() => {
                     const currentChat = getContextSafe().chat;
                     return Array.isArray(currentChat) && currentChat[i] === message &&
                         messageUpdateFingerprint(message, i) === fp;
-                });
+                }));
                 messageSession.messageUpdate = true;
+                messageSession.businessEventEmitted = true;
                 const text = String(message.mes != null ? message.mes : (message.message || ''));
                 st.pending.add(fp);
                 let settled = false;
@@ -7077,6 +8378,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 appendPlaceholder: true,
                 asPng: 'auto',
                 ddlIncludeCheck: true,
+                jsonContainers: false,
                 translateSimpleEjs: false,
                 debug: false,
             };
@@ -7320,9 +8622,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
     function captureConversionProfile(name) {
         const tableConfigs = {};
         for (const { sheet } of updateParamSheetRows(lastResult || { template: {} })) {
-            const cfg = {};
-            for (const option of UPDATE_PARAM_OPTIONS) cfg[option.key] = getUpdateParam(sheet, option.key);
-            tableConfigs[String(sheet.name || '')] = cfg;
+            tableConfigs[String(sheet.name || '')] = resultView.captureConfig(sheet);
         }
         return {
             format: 'mvu2shujuku-conversion-profile',
@@ -7399,9 +8699,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             const sheet = next[key];
             const cfg = sheet && configs[String(sheet.name || '')];
             if (!cfg) continue;
-            for (const option of UPDATE_PARAM_OPTIONS) {
-                if (Object.prototype.hasOwnProperty.call(cfg, option.key)) setUpdateParam(sheet, option.key, cfg[option.key]);
-            }
+            resultView.applyConfig(sheet, cfg);
         }
         mergeState.appliedRefs = [];
         const refsBySource = new Map();
@@ -7449,13 +8747,11 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             const sheet = next[key];
             const cfg = sheet && configs[String(sheet.name || '')];
             if (!cfg) continue;
-            for (const option of UPDATE_PARAM_OPTIONS) {
-                if (Object.prototype.hasOwnProperty.call(cfg, option.key)) setUpdateParam(sheet, option.key, cfg[option.key]);
-            }
+            resultView.applyConfig(sheet, cfg);
         }
         const summaryLines = [
             '配置：' + activeProfileName,
-            '自动化参数匹配：' + matchedConfigNames.length + '/' + configNames.length + ' 张表',
+            '表格设置匹配：' + matchedConfigNames.length + '/' + configNames.length + ' 张表',
             '配置中本次不存在：' + (missingConfigNames.length ? missingConfigNames.join('、') : '无'),
             '本次新表：' + (addedTableNames.length ? addedTableNames.join('、') : '无'),
             '外部表：成功 ' + externalAdded + '/' + externalRequested + (externalProblems ? '，异常 ' + externalProblems : ''),
@@ -7556,6 +8852,17 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
     // 跨卡残留前端写库丢弃的限频标记（按聊天去重，避免刷屏）
     let lastForeignWriteDropChat = '';
 
+    // 浏览器和 Node 测试使用同一候选构造工厂；构建时已将工厂及其依赖完整内联。
+    // 每次按当前 core 创建无状态构造器，避免模块替换后仍使用旧 core。
+    function buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate) {
+        const coreNow = window.MVU2SHUJUKU_CORE;
+        if (!coreNow || typeof coreNow.writeStatDiffToDb !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
+        const factory = window.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__;
+        if (typeof factory !== 'function') throw new Error('候选快照构造模块未加载，请使用构建后的 index.js');
+        return factory({ core: coreNow, warn: dbgWarn })
+            .buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate);
+    }
+
     // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
     // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
     const openingWriteSettledChats = new Set();
@@ -7585,43 +8892,6 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         if (resolve) resolve(false);
     }
 
-    function normalizeCellForSync(v) {
-        if (v === null || v === undefined) return '';
-        if (typeof v === 'boolean') return v ? 1 : 0;
-        if (typeof v === 'number') return v;
-        if (typeof v === 'string') return v;
-        try { return JSON.stringify(v); } catch (e) { return String(v); }
-    }
-
-    // 旧 MVU/VWD 在 message stat_data 中可能仍保留 [值, 描述] 叶子。
-    // 开场分支快照合并发生在建表前；若直接把这个数组交给数据库，
-    // TEXT 列会得到 [值,描述] JSON 字符串，并与枚举 CHECK 冲突。
-    // 仅依 layout 中明确的 pair 列拆包，真实 array/object 字段保持不变。
-    function collapseLegacyPairLeaves(stat, layoutEntries) {
-        const out = JSON.parse(JSON.stringify(stat && typeof stat === 'object' ? stat : {}));
-        const getParent = (parts) => {
-            let cur = out;
-            for (let i = 0; i < parts.length - 1; i++) {
-                if (!cur || typeof cur !== 'object') return null;
-                cur = cur[parts[i]];
-            }
-            return cur && typeof cur === 'object' ? cur : null;
-        };
-        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-            for (const col of (L && Array.isArray(L.cols) ? L.cols : [])) {
-                if (!Array.isArray(col) || col[1] !== 'pair' || !Array.isArray(col[3]) || !col[3].length) continue;
-                const parts = col[3].map(String);
-                const parent = getParent(parts);
-                const key = parts[parts.length - 1];
-                const value = parent && parent[key];
-                if (Array.isArray(value) && value.length === 2 && typeof value[1] === 'string') {
-                    parent[key] = value[0];
-                }
-            }
-        }
-        return out;
-    }
-
     // MVU 的原始对象允许省略字段，而数据库会按列类型补齐默认值；两者不能直接
     // JSON.stringify 比较。整表提交的预期值和实际值必须先经过同一 layout 的
     // 表格→stat_data 投影，再做键序无关的确定性比较。
@@ -7634,81 +8904,6 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             return out;
         };
         try { return JSON.stringify(walk(value)); } catch (e) { return ''; }
-    }
-
-    function buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate) {
-        const coreNow = window.MVU2SHUJUKU_CORE;
-        if (!coreNow || typeof coreNow.writeStatDiffToDb !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
-        const tables = JSON.parse(JSON.stringify(baseTemplate || {}));
-        const normalizedPrevStat = collapseLegacyPairLeaves(prevStat, layoutEntries);
-        const normalizedNextStat = collapseLegacyPairLeaves(nextStat, layoutEntries);
-        const fakeApi = {
-            exportTableAsJson: () => tables,
-            importTableAsJson: async json => {
-                const candidate = JSON.parse(json);
-                for (const key of Object.keys(tables)) delete tables[key];
-                Object.assign(tables, candidate);
-                return true;
-            },
-            updateCell: async (tableName, rowIndex, col, value) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s || !s.content[rowIndex]) return false;
-                const ci = s.content[0].indexOf(col);
-                if (ci === -1) return false;
-                s.content[rowIndex][ci] = normalizeCellForSync(value);
-                return true;
-            },
-            updateRow: async (tableName, rowIndex, payload) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s || !s.content[rowIndex] || !payload || typeof payload !== 'object') return false;
-                for (const col of Object.keys(payload)) {
-                    const ci = s.content[0].indexOf(col);
-                    if (ci >= 0) s.content[rowIndex][ci] = normalizeCellForSync(payload[col]);
-                }
-                return true;
-            },
-            insertRow: async (tableName, obj) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s) return 0;
-                const row = s.content[0].map(h => '');
-                for (const k of Object.keys(obj || {})) {
-                    const ci = s.content[0].indexOf(k);
-                    if (ci >= 0) row[ci] = normalizeCellForSync(obj[k]);
-                }
-                // 行号取现有最大行号 +1：deleteRow 发生后 content.length 会与已有
-                // 行号重复（row[0] 是主键列），重复主键会让整表导入被拒或产生重复行。
-                let maxRowId = 0;
-                for (let ri = 1; ri < s.content.length; ri++) {
-                    const rn = Number(s.content[ri] && s.content[ri][0]);
-                    if (Number.isFinite(rn) && rn > maxRowId) maxRowId = rn;
-                }
-                row[0] = maxRowId + 1;
-                s.content.push(row);
-                return row[0];
-            },
-            deleteRow: async (tableName, rowIndex) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s || !s.content[rowIndex]) return false;
-                s.content.splice(rowIndex, 1);
-                return true;
-            },
-        };
-        // 内存模板必须先追平当前数据库状态，再应用 prev→next。本次调用可能只带
-        // 某组的部分字段；若直接从原始模板应用差异，未变化字段会停留在模板默认值，
-        // 随后的整表 initGameSession 会把已有进度回滚。
-        const baseWrap = coreNow.statDataFromTables(layoutEntries, tables);
-        const baseStat = baseWrap && baseWrap.stat_data && typeof baseWrap.stat_data === 'object'
-            ? baseWrap.stat_data
-            : {};
-        return Promise.resolve(coreNow.writeStatDiffToDb(fakeApi, layoutEntries, baseStat, normalizedPrevStat, tables))
-            .then(() => {
-                if (coreNow.lastStatWriteFailed) throw new Error('构建开场模板失败：无法追平当前数据库快照');
-                return coreNow.writeStatDiffToDb(fakeApi, layoutEntries, normalizedPrevStat, normalizedNextStat, tables);
-            })
-            .then(() => {
-                if (coreNow.lastStatWriteFailed) throw new Error('构建开场模板失败：无法应用当前开场快照');
-                return tables;
-            });
     }
 
     // 已有聊天再做整表 import 时，必须沿用 SP 已分配的 sheet key。
@@ -7757,6 +8952,36 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         const imported = await api.importTableAsJson(JSON.stringify(candidate));
         assertRuntimeSession(session);
         if (imported !== true && !(imported && imported.success === true)) throw new Error('消息更新快照未提交成功');
+        return true;
+    }
+
+    async function commitCurrentReplyBatch(api, prevStat, nextStat, persistedTables, session, options = {}) {
+        const factory = window.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__;
+        if (typeof factory !== 'function') throw new Error('候选快照构造模块未加载');
+        const plan = await factory({ core: window.MVU2SHUJUKU_CORE, warn: dbgWarn })
+            .planCurrentReplyWrites(api, activeLayout, prevStat, nextStat, persistedTables);
+        assertRuntimeSession(session);
+        if (!plan.operations.length) return false;
+        if (JSON.stringify(api.exportTableAsJson()) !== plan.beforeJson) throw new Error('批次规划期间数据库已变化，等待重新规划');
+        const op = plan.operations[0];
+        if (typeof options.assertBeforeCommit === 'function') options.assertBeforeCommit();
+        if (options.allowImport === false && (plan.operations.length !== 1 || op.method === 'importTableAsJson')) {
+            throw new Error('旧楼业务修正需要多个宿主操作，缺少指定旧楼的原子提交接口；整笔修正未写入');
+        }
+        let result;
+        if (plan.operations.length === 1 && op.method !== 'importTableAsJson') {
+            // 单次 CRUD 保留差量；宿主拒绝后不拆成多次调用，以免破坏同一行的完整性。
+            if (typeof api[op.method] !== 'function') throw new Error('数据库缺少写入能力：' + op.method);
+            result = await api[op.method](...op.args);
+            const failed = op.method === 'insertRow'
+                ? result === false || result === -1 || result == null : !result;
+            if (failed) throw new Error('当前回复单次写入未提交成功');
+        } else {
+            if (typeof api.importTableAsJson !== 'function') throw new Error('当前回复多步写入需要整表导入能力');
+            result = await api.importTableAsJson(JSON.stringify(plan.tables));
+            if (result !== true && !(result && result.success === true)) throw new Error('当前回复批次未提交成功');
+        }
+        assertRuntimeSession(session);
         return true;
     }
 
@@ -7990,9 +9215,12 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         // 重试必须携带首次调度时的聊天 key：重试间隔内切换聊天（尤其同卡不同聊天，
         // 布局归属校验拦不住）后重新捕获新 key，会让旧聊天的快照通过归属守卫写进新聊天。
         let writeChatKey = '';
-        const requestedSession = originSession || captureRuntimeSession();
-        const writeSession = pendingStatWriteSession && isRuntimeSessionCurrent(pendingStatWriteSession) && pendingStatWriteSession.messageUpdate
-            ? { ...requestedSession, messageUpdate: true } : requestedSession;
+        const sourceSession = originSession || captureRuntimeSession();
+        const requestedSession = explicitInitialization ? sourceSession : bindWriteTarget(sourceSession);
+        const pendingSource = pendingStatWriteSession;
+        const writeSession = pendingSource && pendingSource !== requestedSession && isRuntimeSessionCurrent(pendingSource) && pendingSource.messageUpdate
+            ? { ...requestedSession, messageUpdate: true,
+                validate: () => isRuntimeSessionCurrent(requestedSession) && isRuntimeSessionCurrent(pendingSource) } : requestedSession;
         if (typeof originChatKey === 'string' && originChatKey) {
             writeChatKey = originChatKey;
         } else {
@@ -8183,7 +9411,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     }
                     // 前端/脚本传来的 target 可能不完整：开场读取时布局未就绪，只拿到部分组
                     // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
-                    // 缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
+                    // 普通旧布局缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
                     // 最终 importTableAsJson 还可能存旧 checkpoint，导致“写入未保存”。
                     const effectiveTarget = (() => {
                         if (!target || typeof target !== 'object') return prev || {};
@@ -8191,6 +9419,14 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                         // 切卡隔离：前端可能缓存上一张卡的 stat_data（target 混入当前布局外的组）。
                         // 只接受当前布局内的顶层组，布局外的组一律丢弃，避免串卡数据写进当前聊天。
                         const allowedGroups = new Set((Array.isArray(activeLayout) ? activeLayout : []).map(L => L.group));
+                        // 新完整容器布局明确编码“顶层键缺失”。完整 replace 快照省略它即删除，
+                        // 不能套用旧的补组保护；读完整基线后再改一个字段的操作会保留其他组。
+                        for (const L of Array.isArray(activeLayout) ? activeLayout : []) {
+                            if (L.kind !== 'singleton' || !L.valueCol || Object.prototype.hasOwnProperty.call(target, L.group)) continue;
+                            const whole = (L.cols || []).some(c => c[0] === L.valueCol && c[1] === 'jsonObjectOptional'
+                                && Array.isArray(c[3]) && c[3].length === 1 && c[3][0] === L.group);
+                            if (whole) delete out[L.group];
+                        }
                         for (const k of Object.keys(target)) {
                             if (k === '$internal') continue;
                             if (allowedGroups.has(k)) {
@@ -8266,11 +9502,11 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                             }
                         }
                     } catch (eG) {}
-                    // 参考卡原生路径：写库 = 差异写入（updateCell/insertRow/deleteRow 原生 CRUD）。
-                    // 运行时/checkpoint/落盘全部由插件自己的事务管线维护，与原生数据库卡一致；
-                    // 不做整表快照导入、不做手动物化/锚定/单例补行（转换器只翻译，不参与运行时）。
+                    // 已能证明本楼 CRUD 归属时保留差量；新楼先以最终候选快照正式提交。
+                    // checkpoint/落盘始终由 SP 维护，不创建空锚点或手写历史帧。
                     let n = 0;
                     let bulkInit = false;
+                    let replySnapshot = !!writeSession.messageUpdate;
                     try {
                         // 诊断（保留）：布局组、target/prev 含组、首个非空写入、checkpoint 是否含注入
                         try {
@@ -8330,12 +9566,17 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                             // 待全部落库后由下方统一广播一次。
                             sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) + 1;
                             tableBroadcastSuppressed = true;
-                            bulkInit = writeSession.messageUpdate
+                            const needsReplySnapshot = replySnapshot || !!(writeSession.writeTarget && !writeSession.writeTarget.canUseCrud());
+                            const currentReplyBatch = !needsReplySnapshot && writeSession.writeTarget && writeSession.writeTarget.index > 0;
+                            replySnapshot = needsReplySnapshot || !!currentReplyBatch;
+                            bulkInit = needsReplySnapshot
                                 ? await commitMessageUpdateSnapshot(api, prev, effectiveTarget, writeSession)
-                                : await tryOpeningBulkInit(api, prev, effectiveTarget, chatKeyNow, isInitializationWrite, writeSession);
+                                : currentReplyBatch
+                                    ? await commitCurrentReplyBatch(api, prev, effectiveTarget, persistedForWrite, writeSession)
+                                    : await tryOpeningBulkInit(api, prev, effectiveTarget, chatKeyNow, isInitializationWrite, writeSession);
                         } catch (e) {
-                            if (writeSession.messageUpdate) bulkInit = 'retry';
-                            dbgWarn(' 开局整表初始化快速路径异常：' + (e && e.message ? e.message : e));
+                            if (replySnapshot) bulkInit = 'retry';
+                            dbgWarn(' 回复写入或开局提交异常：' + (e && e.message ? e.message : e));
                         }
                         try {
                             assertRuntimeSession(writeSession);
@@ -8343,7 +9584,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                                 writeUnsettled = true;
                                 if (overlayFlushRetries < 6) {
                                     overlayFlushRetries += 1;
-                                    dbg(' 开局整表初始化尚未落定，延后重试（#' + overlayFlushRetries + '）。');
+                                    dbg(' 回复写入或开局提交尚未落定，延后重试（#' + overlayFlushRetries + '）。');
                                     hostWindow.setTimeout(() => {
                                         if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, null, true, isInitializationWrite, writeChatKey, writeSession);
                                     }, 1000);
@@ -8352,7 +9593,10 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                                 n = 0;
                             } else if (bulkInit) {
                                 n = 1;
-                                dbg(writeSession.messageUpdate ? ' 消息更新快照已提交到最新回复。' : ' 开局整表初始化快速路径完成（一次整表原子提交，跳过逐格 CRUD）。');
+                                dbg(replySnapshot ? ' 更新批次已提交到目标回复。' : ' 开局整表初始化快速路径完成（一次整表原子提交，跳过逐格 CRUD）。');
+                            } else if (replySnapshot) {
+                                // 当前回复无差异时不创建表帧，也不退回未经批次规划的 CRUD。
+                                n = 0;
                             } else {
                                 // 差异明细诊断：包一层 API 代理记录每个 CRUD 的表/行/列与前后值。
                                 // 用于排查“duplicate_snapshot 已判定快照相同、diff 却产生多条操作”的
@@ -8401,7 +9645,8 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                             openingWriteSettledChats.add(chatKeyNow);
                             pruneOrderedCollection(openingWriteSettledChats, 80);
                             lastDbWriteAt = Date.now();
-                            dbg(bulkInit === true ? ' Mvu 写入完成：一次整表提交，插件自行持久化。' : ' Mvu 写入完成：差异 ' + n + ' 条（原生 CRUD，插件自行持久化）');
+                            dbg(replySnapshot ? ' Mvu 写入完成：当前回复批次已提交，由数据库持久化。'
+                                : bulkInit === true ? ' Mvu 写入完成：一次整表提交，插件自行持久化。' : ' Mvu 写入完成：差异 ' + n + ' 条（原生 CRUD，插件自行持久化）');
                         } else {
                             dbg(' 差异写入无操作（运行时与目标一致），跳过。');
                         }
@@ -8411,7 +9656,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                         // 原行回来就直接写、不重复；行真没了才由 seedNeeded 补。
                         try {
                             const coreNow = window.MVU2SHUJUKU_CORE;
-                            if (bulkInit !== true && coreNow && coreNow.lastStatWriteFailed) {
+                            if (!replySnapshot && bulkInit !== true && coreNow && coreNow.lastStatWriteFailed) {
                                 writeUnsettled = true;
                                 if (overlayFlushRetries < 4) {
                                 overlayFlushRetries += 1;
@@ -8453,11 +9698,14 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     if (n > 0 && !writeUnsettled) {
                         // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
                         // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
-                        const afterMvu = { stat_data: effectiveTarget, display_data: effectiveTarget, delta_data: {}, initialized_lorebooks: {} };
+                        const afterMvu = mvuDataFromCompleteTableSnapshot(api.exportTableAsJson()) || { stat_data: effectiveTarget, display_data: JSON.parse(JSON.stringify(effectiveTarget)), delta_data: {}, initialized_lorebooks: {} };
+                        // 自有写入期间抑制了 SP 回调，旧的提交读窗口可能仍存着上一批数据。
+                        // 先发布本批已经提交的 after，保证事件内重读及 Promise 后 getter 一致。
+                        stageFrontendCommittedMvuRead(afterMvu);
                         let hadInternal = false;
                         try { if (effectiveTarget && typeof effectiveTarget === 'object' && effectiveTarget.$internal === undefined) { effectiveTarget.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
-                        if (bulkInit) emitMvuEvent('mag_variable_initialized', afterMvu, 0);
-                        dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
+                        if (bulkInit && !replySnapshot) emitMvuEvent('mag_variable_initialized', afterMvu, 0);
+                        dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} }, !!writeSession.businessEventEmitted);
                         try { if (hadInternal) delete effectiveTarget.$internal; } catch (e) {}
                     }
                     // 写入已落定（含“差异无操作”）：调用方（如开场分支注入）可在此时提交指纹
@@ -8929,13 +10177,15 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             };
         } catch (e) { pendingLateFrontendUpdate = null; }
     }
-    function dispatchVariableUpdateEnded(after, before) {
+    function dispatchVariableUpdateEnded(after, before, eventAlreadyEmitted) {
         try {
             if (!activeLayout) return;
+            if (!eventAlreadyEmitted && (tableBusinessRunning || (pendingStatWrite != null && pendingStatWriteSession && pendingStatWriteSession.businessEventEmitted))) return;
             if (after === undefined || after === null) {
                 try { if (typeof window.getAllVariables === 'function') after = window.getAllVariables(); } catch (e) {}
             }
-            const safeAfter = after || { stat_data: {}, display_data: {}, delta_data: {} };
+            const safeAfter = JSON.parse(JSON.stringify(after || { stat_data: {}, display_data: {}, delta_data: {} }));
+            if (safeAfter.stat_data) delete safeAfter.stat_data.$internal;
             const chatKey = autoInitChatId();
             if (lastVariableUpdateChatKey !== chatKey) {
                 lastVariableUpdateChatKey = chatKey;
@@ -8944,7 +10194,9 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             const safeBefore = before && typeof before === 'object'
                 ? before
                 : (lastVariableUpdateSnapshot || safeAfter);
-            emitMvuEvent('mag_variable_update_ended', safeAfter, safeBefore);
+            // 提交后的广播只提供隔离视图。业务变换由文本周期或有来源的 SP
+            // 提交管线等待并落库；刷新/回放监听不能污染权威读缓存。
+            if (!eventAlreadyEmitted) emitMvuEvent('mag_variable_update_ended', JSON.parse(JSON.stringify(safeAfter)), JSON.parse(JSON.stringify(safeBefore)));
             // 数据库原生前端常用的兼容事件。转换卡前端可能只监听其中一种，
             // 同一份权威快照同时广播；事件监听型前端仍由各自的事件名自行去重。
             emitMvuEvent('shujuku-table-updated', null);
@@ -8962,22 +10214,47 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
     // 事件广播：与 MVU 原版一致，优先走 TH 事件总线（eventEmit，前端 eventOn 监听的就是它）；
     // 另发同名 CustomEvent + ST eventSource，覆盖 window/parent/top/同源 iframe；
     // 缺少 ST 事件总线的窗口（如消息 iframe）补一个绑定到同名 CustomEvent 的 eventOn/eventOff 兜底。
-    function installEarlyEventOnFallback() {
+    function installEarlyEventOnFallback(targets) {
         try {
-            for (const w of [window, hostWindow]) {
+            const recordsByWindow = new WeakMap();
+            for (const w of targets || [window, hostWindow]) {
                 if (!w || typeof w.addEventListener !== 'function' || typeof w.eventOn === 'function') continue;
+                if (recordsByWindow.has(w)) continue;
+                const recordsByEvent = new Map();
+                recordsByWindow.set(w, recordsByEvent);
+                const removeRecord = (evName, handler, record) => {
+                    const handlers = recordsByEvent.get(evName);
+                    const records = handlers && handlers.get(handler);
+                    if (!records || !records.has(record)) return;
+                    records.delete(record);
+                    try { w.removeEventListener(evName, record.wrapped); } catch (e2) {}
+                    if (!records.size) handlers.delete(handler);
+                    if (!handlers.size) recordsByEvent.delete(evName);
+                };
                 w.eventOn = (evName, handler) => {
                     const wrapped = (e) => {
                         try {
                             const d = e && e.detail;
-                            if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
+                            if (d && Array.isArray(d.args)) handler(...d.args);
+                            else if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
                             else handler(d);
                         } catch (err) {}
                     };
+                    let handlers = recordsByEvent.get(evName);
+                    if (!handlers) recordsByEvent.set(evName, handlers = new Map());
+                    let records = handlers.get(handler);
+                    if (!records) handlers.set(handler, records = new Set());
+                    const record = { wrapped };
+                    records.add(record);
                     w.addEventListener(evName, wrapped);
-                    return { stop: () => { try { w.removeEventListener(evName, wrapped); } catch (e2) {} } };
+                    return { stop: () => removeRecord(evName, handler, record) };
                 };
-                w.eventOff = (evName, handler) => { try { w.removeEventListener(evName, handler); } catch (e2) {} };
+                w.eventOff = (evName, handler) => {
+                    const handlers = recordsByEvent.get(evName);
+                    const records = handlers && handlers.get(handler);
+                    if (!records) return;
+                    for (const record of Array.from(records)) removeRecord(evName, handler, record);
+                };
                 w.eventOn.__mvu2shujukuFallback = true;
                 w.eventOff.__mvu2shujukuFallback = true;
             }
@@ -8988,18 +10265,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         // 即使新 iframe 恰好在 2s 复查和 MutationObserver 之间创建，
         // 前端在事件回调里读 window.Mvu/getAllVariables 也一定能拿到。
         if (activeLayout) { try { applyWindowMvuShim(); } catch (e) {} }
-        const targets = [];
-        const add = (t) => { try { if (t && typeof t.dispatchEvent === 'function' && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
-        add(window);
-        add(hostWindow);
-        try { add(window.parent); } catch (e) {}
-        try { add(window.top); } catch (e) {}
-        for (const r of [window, hostWindow]) {
-            try {
-                const frames = r.document ? r.document.querySelectorAll('iframe') : [];
-                for (const f of frames) { try { add(f.contentWindow); } catch (e) {} }
-            } catch (e) {}
-        }
+        const targets = getRuntimeWindows();
         const pending = [];
         const emitted = [];
         const invoke = (fn, owner) => {
@@ -9025,31 +10291,58 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         // 没有 TavernHelper eventEmit 时才回退到 ST eventSource，避免同链双发。
         if (!busEmitted) {
             for (const t of targets) {
-                try { if (t.eventSource && invoke(t.eventSource.emit, t.eventSource)) break; } catch (e) {}
+                try { if (t.eventSource && invoke(t.eventSource.emit, t.eventSource)) { busEmitted = true; break; } } catch (e) {}
+            }
+            // ST 扩展的总线通常只在 getContext() 中，主窗口不一定暴露 eventSource。
+            // 尚无 TH iframe 发射器时也必须进入同一业务总线并等待其 Promise。
+            if (!busEmitted) {
+                try {
+                    const context = getContextSafe();
+                    const source = context && (context.eventSource || context.event_source);
+                    if (source) invoke(source.emit, source);
+                } catch (e) {}
             }
         }
-        for (const t of targets) {
-            try {
-                if (t && typeof t.eventOn !== 'function' && typeof t.addEventListener === 'function') {
-                    t.eventOn = (evName, handler) => {
-                        const wrapped = (e) => {
-                            try {
-                                const d = e && e.detail;
-                                if (d && Array.isArray(d.args)) handler(...d.args);
-                                else if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
-                                else handler(d);
-                            } catch (err) {}
-                        };
-                        t.addEventListener(evName, wrapped);
-                        return { stop: () => { try { t.removeEventListener(evName, wrapped); } catch (e) {} } };
-                    };
-                    t.eventOff = (evName, handler) => { try { t.removeEventListener(evName, handler); } catch (e) {} };
-                    t.eventOn.__mvu2shujukuFallback = true;
-                    t.eventOff.__mvu2shujukuFallback = true;
-                }
-            } catch (e) {}
-        }
+        installEarlyEventOnFallback(targets);
         if (pending.length) await Promise.allSettled(pending);
+    }
+
+    // V2 已保存日志是来源凭据；回调本身并不区分业务提交与历史回放。
+    // 只读日志，不修改宿主帧，也不从 fill-start 或时间窗口猜事务归属。
+    function readSpCommitEntries(chat) {
+        const entries = [];
+        for (let index = 0; index < (chat || []).length; index++) {
+            const message = chat[index];
+            let isolated = message && message.TavernDB_ACU_IsolatedData;
+            if (typeof isolated === 'string') { try { isolated = JSON.parse(isolated); } catch (_) { continue; } }
+            if (!isolated || typeof isolated !== 'object') continue;
+            for (const [scope, storage] of Object.entries(isolated)) {
+                const frame = storage && storage.storageFrame;
+                if (!frame || frame.version !== 2 || !Array.isArray(frame.logEntries)) continue;
+                for (const entry of frame.logEntries) {
+                    if (!entry || typeof entry.entryId !== 'string' || !entry.entryId) continue;
+                    entries.push({ id: JSON.stringify([scope, entry.entryId]), scope, entry, index, message });
+                }
+            }
+        }
+        return entries;
+    }
+    function createSpCommitTracker() {
+        let seen = new Set();
+        const businessSources = new Set(['auto_fill', 'manual_fill', 'group_fill', 'manual_crud', 'raw_sql_mutation', 'raw_sql_batch']);
+        return {
+            seed(entries) { seen = new Set(entries.map(record => record.id)); },
+            consume(entries, sheetKeys, allowed) {
+                const fresh = entries.filter(record => !seen.has(record.id));
+                for (const record of entries) seen.add(record.id);
+                if (!allowed) return [];
+                return fresh.filter(({ entry, index }) => businessSources.has(entry.source)
+                    && entry.targetMessageIndex === index
+                    && [...(entry.changedSheetKeys || []), ...(entry.filledSheetKeys || []),
+                        ...(entry.operations || []).map(op => op && op.sheetKey)]
+                        .some(key => sheetKeys.has(key)));
+            },
+        };
     }
 
     let tableUpdateHookApi = null;
@@ -9057,8 +10350,85 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
     let tableUpdateHookPendingData = null;
     let tableUpdateHookSession = null;
     let tableUpdateHookRetryCount = 0;
-    function tableSnapshotHasSheets(data) {
-        if (!data || typeof data !== 'object') return false;
+    const tableBusinessTracker = createSpCommitTracker();
+    let tableBusinessSession = null;
+    let tableBusinessSnapshot = null;
+    let tableBusinessPending = null;
+    let tableBusinessRunning = false;
+    let tableBusinessRevision = 0;
+    function syncTableBusinessBaseline(data) {
+        if (isRuntimeSessionCurrent(tableBusinessSession)) return;
+        tableBusinessSession = captureRuntimeSession();
+        tableBusinessTracker.seed(readSpCommitEntries(getContextSafe().chat));
+        tableBusinessSnapshot = mvuDataFromCompleteTableSnapshot(data);
+        tableBusinessPending = null;
+        tableBusinessRevision++;
+    }
+    async function applySpBusinessCorrection(data, task, session) {
+        const api = runtimeApiForSession(getAcuApi(), session);
+        const revision = tableBusinessRevision;
+        const beforeJson = JSON.stringify(api.exportTableAsJson());
+        const entries = readSpCommitEntries(getContextSafe().chat);
+        const entryStamp = JSON.stringify(entries.map(record => record.id));
+        const validSource = () => {
+            const chat = getContextSafe().chat || [];
+            return task.entries.every(record => chat[record.index] === record.message)
+                && entryStamp === JSON.stringify(readSpCommitEntries(chat).map(record => record.id));
+        };
+        const assertUnchanged = () => {
+            assertRuntimeSession(session);
+            if (revision !== tableBusinessRevision || !validSource()
+                || JSON.stringify(api.exportTableAsJson()) !== beforeJson) throw new Error('业务监听期间数据库或来源消息已变化，取消旧修正');
+        };
+        const original = mvuDataFromCompleteTableSnapshot(data);
+        if (!original || beforeJson !== JSON.stringify(data)) return false;
+        const after = JSON.parse(JSON.stringify(original));
+        after.display_data = JSON.parse(JSON.stringify(after.stat_data));
+        after.delta_data = {};
+        // SP 不提供逐 MVU 命令的 reason；这里只把变化叶子记录为本轮差量。
+        const delta = (current, prior, display, changes) => {
+            for (const key of new Set([...Object.keys(current || {}), ...Object.keys(prior || {})])) {
+                const value = current && current[key], old = prior && prior[key];
+                if (canonicalJsonForSync(value) === canonicalJsonForSync(old)) continue;
+                if (value && old && typeof value === 'object' && typeof old === 'object' && !Array.isArray(value) && !Array.isArray(old)) {
+                    changes[key] = {}; delta(value, old, display[key], changes[key]);
+                } else display[key] = changes[key] = String(old) + '->' + JSON.stringify(value);
+            }
+        };
+        delta(after.stat_data, task.before && task.before.stat_data, after.display_data, after.delta_data);
+        after.stat_data.$internal = { display_data: after.display_data, delta_data: after.delta_data };
+        await emitMvuEvent('mag_variable_update_ended', after, task.before || original);
+        delete after.stat_data.$internal;
+        assertUnchanged();
+        if (canonicalJsonForSync(original.stat_data) !== canonicalJsonForSync(after.stat_data)) {
+            const chat = getContextSafe().chat || [];
+            let latestAi = chat.length - 1;
+            while (latestAi >= 0 && (!chat[latestAi] || chat[latestAi].is_user)) latestAi--;
+            sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) + 1;
+            try {
+                if (task.entries.every(record => record.index === latestAi)) {
+                    const candidate = await buildUpdatedTemplateFromStat(activeLayout, original.stat_data, after.stat_data, data);
+                    assertUnchanged();
+                    if (!candidate) throw new Error('业务修正快照构造失败');
+                    const result = await api.importTableAsJson(JSON.stringify(candidate));
+                    if (result !== true && !(result && result.success === true)) throw new Error('SP 未接受业务修正快照');
+                } else {
+                    // 公共导入不能指定旧楼。复用真实 writer 在内存规划，只有一次
+                    // CRUD 才提交；多步整笔拒绝，不留下先完成的步骤或移写最新楼。
+                    await commitCurrentReplyBatch(api, original.stat_data, after.stat_data, data, session,
+                        { allowImport: false, assertBeforeCommit: assertUnchanged });
+                }
+                assertRuntimeSession(session);
+            } finally {
+                sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = Math.max(0, (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 1) - 1);
+            }
+        }
+        const committed = api.exportTableAsJson();
+        tableBusinessSnapshot = mvuDataFromCompleteTableSnapshot(committed);
+        publishCommittedTableSnapshot(committed, 'SP 业务修正', true, true);
+        return true;
+    }
+    function tableSnapshotHasSheets(data) {        if (!data || typeof data !== 'object') return false;
         for (const k in data) {
             if (k.indexOf('sheet_') === 0 && data[k] && data[k].name) return true;
         }
@@ -9099,7 +10469,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
     // 所有表格变化共用同一个前端出口：SP 的提交回调、聊天历史回放兜底都必须
     // 先暂存同一份权威 after，再驱动事件、无副作用的直接重读入口和明确刷新控件。
     // 整页 body.load/iframe reload 只允许手动执行，避免普通改单元格清空前端局部状态。
-    function publishCommittedTableSnapshot(data, source, force) {
+    function publishCommittedTableSnapshot(data, source, force, eventAlreadyEmitted) {
         const after = mvuDataFromCompleteTableSnapshot(data);
         if (!after) return false;
         try {
@@ -9112,6 +10482,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             stageFrontendCommittedMvuRead(after);
             const result = refreshCurrentCardFrontends({
                 after,
+                eventAlreadyEmitted,
                 allowHardReload: false,
             });
             dbg('[' + source + '] 已同步前端：直接 ' + result.direct +
@@ -9194,6 +10565,9 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         delays.forEach((delay, index) => {
             const timer = hostWindow.setTimeout(() => {
                 if (chatMutationFrontendSyncState !== state || state.generation !== chatMutationFrontendSyncGeneration) return;
+                // 当前业务提交会在落定后统一发布；回放兜底不能抢在它前面
+                // 广播同一后态，使已经等待过的业务结束监听再次执行。
+                if (tableBusinessRunning || (pendingStatWrite != null && pendingStatWriteSession && pendingStatWriteSession.businessEventEmitted)) return;
                 try {
                     if (autoInitChatId() !== state.chatKey || cardCacheKey(currentCharacter()) !== state.cardKey) {
                         finish();
@@ -9298,8 +10672,12 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         return '';
     }
 
-    function flushTableUpdateHook() {
+    async function flushTableUpdateHook() {
         tableUpdateHookTimer = null;
+        if (tableBusinessRunning) {
+            tableUpdateHookTimer = hostWindow.setTimeout(flushTableUpdateHook, 120);
+            return;
+        }
         if (!isRuntimeSessionCurrent(tableUpdateHookSession)) {
             tableUpdateHookPendingData = null;
             tableUpdateHookSession = null;
@@ -9338,10 +10716,38 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             return;
         }
         tableUpdateHookRetryCount = 0;
+        const task = tableBusinessPending;
+        tableBusinessPending = null;
+        if (task && task.entries.length) {
+            const session = tableUpdateHookSession;
+            tableBusinessRunning = true;
+            try {
+                if (await applySpBusinessCorrection(data, task, session)) return;
+            } catch (e) {
+                dbgWarn(' SP 业务修正未应用：', e && e.message ? e.message : e);
+                // 不自动重跑监听器；重试奖励/扣费会产生二次业务效果。
+                if (!isRuntimeSessionCurrent(session)) return;
+                try { data = getAcuApi().exportTableAsJson(); } catch (_) {}
+                publishCommittedTableSnapshot(data, 'SP 业务修正取消', true, true);
+                return;
+            } finally { tableBusinessRunning = false; }
+        }
         publishCommittedTableSnapshot(data, '表格更新回调', false);
     }
-    const tableUpdateHookCallback = (latestTableData) => {
+    const tableUpdateHookCallback = (latestTableData, meta) => {
         if (!activeLayout) return;
+        syncTableBusinessBaseline(latestTableData);
+        const currentSnapshot = mvuDataFromCompleteTableSnapshot(latestTableData);
+        const sheetNames = new Set((activeLayout || []).map(layout => layout.table));
+        const sheetKeys = new Set(Object.keys(latestTableData || {}).filter(key => latestTableData[key] && sheetNames.has(latestTableData[key].name)));
+        const allowed = !!(meta && meta.persisted === true) && !(Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) > 0);
+        const fresh = tableBusinessTracker.consume(readSpCommitEntries(getContextSafe().chat), sheetKeys, allowed);
+        if (fresh.length && currentSnapshot) {
+            tableBusinessPending = { entries: [...(tableBusinessPending ? tableBusinessPending.entries : []), ...fresh],
+                before: tableBusinessPending ? tableBusinessPending.before : tableBusinessSnapshot };
+        }
+        if (currentSnapshot) tableBusinessSnapshot = JSON.parse(JSON.stringify(currentSnapshot));
+        tableBusinessRevision++;
         tableUpdateHookSession = captureRuntimeSession();
         // SP 每次事务提交都代表运行时数据已变化（含被抑制广播的批量 CRUD），
         // 投影缓存必须立即失效。
@@ -9356,6 +10762,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         const api = getAcuApi();
         if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
         try {
+            syncTableBusinessBaseline(typeof api.exportTableAsJson === 'function' ? api.exportTableAsJson() : null);
             if (tableUpdateHookApi && tableUpdateHookApi !== api && typeof tableUpdateHookApi.unregisterTableUpdateCallback === 'function') {
                 try { tableUpdateHookApi.unregisterTableUpdateCallback(tableUpdateHookCallback); } catch (e0) {}
             }
@@ -9377,6 +10784,10 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         tableUpdateHookRetryCount = 0;
         tableUpdateHookSession = null;
         tableUpdateHookApi = null;
+        tableBusinessSession = null;
+        tableBusinessSnapshot = null;
+        tableBusinessPending = null;
+        tableBusinessRevision++;
     }
 
     function refreshCurrentCardFrontends(options) {
@@ -9423,7 +10834,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         }
         // 普通状态栏应通过 MVU 原生更新事件刷新；这里也补发一次，
         // 手动按钮因此同时适用于监听式前端和旧式 body.load 整页前端。
-        dispatchVariableUpdateEnded(opts.after, opts.before);
+        dispatchVariableUpdateEnded(opts.after, opts.before, opts.eventAlreadyEmitted);
         result.control += refreshExplicitFrontendDataControls(occupied.concat(reloadTargets));
         for (const target of reloadTargets) {
             try { target.location.reload(); result.reload++; } catch (e) {}
@@ -9571,9 +10982,12 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             cur[parts[parts.length - 1]] = value;
         };
         const note = (path, oldV, newV, reason) => {
-            if (!display) return;
             const r = reason ? ' (' + reason + ')' : '';
-            display[path] = String(oldV) + '->' + String(newV) + r;
+            const parts = String(path).split('.').filter(Boolean);
+            const value = String(oldV) + '->' + String(newV) + r;
+            if (display) setPathArr(display, parts, value);
+            const delta = stat.$internal && stat.$internal.delta_data;
+            if (delta) setPathArr(delta, parts, value);
         };
         for (const cmd of cmds) {
             if (!cmd.path) continue;
@@ -9728,9 +11142,10 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         try { openingBulkClosedChats.add(runtimeScopedChatKey(autoInitChatId())); pruneOrderedCollection(openingBulkClosedChats, 80); } catch (e) {}
         const out = JSON.parse(JSON.stringify(oldData || {}));
         if (!out.stat_data || typeof out.stat_data !== 'object') out.stat_data = {};
-        if (!out.display_data || typeof out.display_data !== 'object') out.display_data = {};
-        if (!out.delta_data || typeof out.delta_data !== 'object') out.delta_data = {};
         const before = JSON.parse(JSON.stringify(out));
+        delete out.stat_data.$internal;
+        out.display_data = JSON.parse(JSON.stringify(out.stat_data));
+        out.delta_data = {};
         out.stat_data.$internal = { display_data: out.display_data, delta_data: out.delta_data };
         await emitMvuEvent('mag_variable_update_started', out);
         const originalMessage = String(message || '');
@@ -9750,14 +11165,31 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         await emitMvuEvent('mag_command_parsed_ended_for_zod', zodOut, zodInfos, originalMessage);
         const commands = infos.map(mvuInternalFromCommandInfo).filter(Boolean);
         if (commands.length) await applyMvuCommandsWithEvents(out.stat_data, commands, out.display_data);
-        out.delta_data = JSON.parse(JSON.stringify(out.display_data || {}));
-        if (out.stat_data.$internal) out.stat_data.$internal.delta_data = out.delta_data;
         await emitMvuEvent('mag_variable_update_ended', out, before);
         delete out.stat_data.$internal;
         const zodEnded = JSON.parse(JSON.stringify(out));
         const zodBefore = JSON.parse(JSON.stringify(before));
         await emitMvuEvent('mag_variable_update_ended_for_zod', zodEnded, zodBefore);
+        Object.defineProperty(out, '__mvu2shujukuBusinessProcessed', { value: true });
         return out;
+    }
+
+    // 公共 MVU API 使用 Lodash 路径语义；与 AI 文本命令的路径修正规则分开。
+    function mvuVariablePathParts(path, data) {
+        if (Array.isArray(path)) return path.map(String);
+        const text = String(path == null ? '' : path);
+        if (data != null && Object.prototype.hasOwnProperty.call(Object(data), text)) return [text];
+        const lodash = window._ || hostWindow._;
+        if (lodash && typeof lodash.toPath === 'function') return lodash.toPath(text);
+        // 早期 shim 尚无 Lodash 时也支持数字下标、引号键、转义与空键。
+        const parts = [];
+        if (text[0] === '.') parts.push('');
+        text.replace(/[^.[\]]+|\[(?:(-?\d+(?:\.\d+)?)|(["'])((?:(?!\2)[^\\]|\\.)*?)\2)\]|(?=(?:\.|\[\])(?:\.|\[\]|$))/g,
+            (match, number, quote, quoted) => {
+                parts.push(quote ? quoted.replace(/\\(\\)?/g, '$1') : (number || match));
+                return match;
+            });
+        return parts.length ? parts : [''];
     }
 
     let windowMvuShimTimer = null;
@@ -9861,11 +11293,11 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     opts = opts || {};
                     const cat = opts.category || 'stat';
                     const data = cat === 'display' ? (mvu_data && mvu_data.display_data) : cat === 'delta' ? (mvu_data && mvu_data.delta_data) : (mvu_data && mvu_data.stat_data);
-                    const parts = String(path || '').split('.').filter((p) => p !== '');
+                    const parts = mvuVariablePathParts(path, data);
                     let cur = data;
-                    for (const p of parts) { if (cur == null) break; cur = cur[p]; }
+                    for (const p of parts) { if (cur == null) { cur = undefined; break; } cur = cur[p]; }
                     const v = cur === undefined ? opts.default_value : cur;
-                    return (Array.isArray(v) && v.length === 2) ? v[0] : v;
+                    return (Array.isArray(v) && v.length === 2 && typeof v[1] === 'string') ? v[0] : v;
                 } catch (e) { return opts && opts.default_value !== undefined ? opts.default_value : undefined; }
             };
             windowMvuFake.getRecordFromMvuData = function (mvu_data, category) {
@@ -9879,26 +11311,28 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     opts = opts || {};
                     if (!mvu_data || typeof mvu_data !== 'object') return false;
                     if (!mvu_data.stat_data || typeof mvu_data.stat_data !== 'object') mvu_data.stat_data = {};
-                    const parts = String(path || '').split('.').filter((p) => p !== '');
-                    if (!parts.length) return false;
-                    const hasObjPath = (obj, arr) => { let c = obj; for (const p of arr) { if (c == null || typeof c !== 'object') return false; c = c[p]; } return c !== undefined; };
-                    const setObjPath = (obj, arr, v) => { let c = obj; for (let i = 0; i < arr.length - 1; i++) { if (c[arr[i]] == null || typeof c[arr[i]] !== 'object') c[arr[i]] = {}; c = c[arr[i]]; } c[arr[arr.length - 1]] = v; };
+                    const parts = mvuVariablePathParts(path, mvu_data.stat_data);
+                    if (!parts.length || parts.some(p => p === '__proto__' || p === 'constructor' || p === 'prototype')) return false;
+                    const hasObjPath = (obj, arr) => { let c = obj; for (const p of arr) { if (c == null || !Object.prototype.hasOwnProperty.call(Object(c), p)) return false; c = c[p]; } return true; };
+                    const setObjPath = (obj, arr, v) => { let c = obj; for (let i = 0; i < arr.length - 1; i++) { if (c[arr[i]] == null || typeof c[arr[i]] !== 'object') c[arr[i]] = /^\d+$/.test(arr[i + 1]) ? [] : {}; c = c[arr[i]]; } c[arr[arr.length - 1]] = v; };
                     // 与官方 updateVariable 一致：路径不存在时不写（返回 false），不自动创建
                     if (!hasObjPath(mvu_data.stat_data, parts)) return false;
                     const display_data = mvu_data.stat_data.$internal && mvu_data.stat_data.$internal.display_data;
                     const delta_data = mvu_data.stat_data.$internal && mvu_data.stat_data.$internal.delta_data;
                     const curPath = (() => { let c = mvu_data.stat_data; for (let i = 0; i < parts.length - 1; i++) { c = c[parts[i]]; } return c; })();
                     const lastKey = parts[parts.length - 1];
-                    let oldVal = curPath[lastKey];
-                    const isVWD = Array.isArray(oldVal) && oldVal.length === 2 && typeof oldVal[1] === 'string' && !Array.isArray(oldVal[0]);
-                    let finalValue = new_value;
-                    if (new_value instanceof Date) finalValue = new_value.toISOString();
+                    const previousValue = curPath[lastKey];
+                    const isVWD = Array.isArray(previousValue) && previousValue.length === 2 && typeof previousValue[1] === 'string';
+                    const cloneForEvent = value => {
+                        if (value === undefined || value === null || typeof value !== 'object') return value;
+                        try { if (typeof structuredClone === 'function') return structuredClone(value); } catch (e) {}
+                        try { return JSON.parse(JSON.stringify(value)); } catch (e) { return value; }
+                    };
+                    const oldVal = isVWD ? cloneForEvent(previousValue[0]) : previousValue;
+                    const finalValue = new_value;
                     if (isVWD) {
-                        oldVal = JSON.parse(JSON.stringify(oldVal[0]));
-                        finalValue = (typeof oldVal === 'number' && finalValue !== null) ? Number(finalValue) : finalValue;
-                        curPath[lastKey] = [finalValue, curPath[lastKey][1]];
+                        curPath[lastKey] = [finalValue, previousValue[1]];
                     } else {
-                        if (typeof oldVal === 'number' && finalValue !== null && !isNaN(Number(finalValue))) finalValue = Number(finalValue);
                         curPath[lastKey] = finalValue;
                     }
                     const reason = opts.reason || '';
@@ -9907,7 +11341,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     if (delta_data) { try { setObjPath(delta_data, parts, ds); } catch (e) {} }
                     dbg(' Mvu.setMvuVariable:', path, '=', String(new_value) + (reason ? ' (' + reason + ')' : ''));
                     if (opts.is_recursive) {
-                        emitMvuEvent('mag_variable_updated', mvu_data.stat_data, path, oldVal, finalValue);
+                        await emitMvuEvent('mag_variable_updated', mvu_data.stat_data, path, oldVal, finalValue);
                     }
                     return true;
                 } catch (e) {
@@ -9933,13 +11367,14 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             };
             windowMvuFake.replaceMvuData = async function (data) {
                 try {
-                    assertRuntimeSession(shimSession);
+                    const callerSession = bindWriteTarget(shimSession);
+                    assertRuntimeSession(callerSession);
                     let api = getAcuApi();
                     if (!api || !activeLayout) {
                         // 外部 UI/开场脚本可能在自动建表完成前就调用写库：不要直接失败，
                         // 等待布局/API 就绪后再继续（最长约 10 秒，避免 UI 永久卡住）。
                         const ready = await waitForRuntimeBasics(10000);
-                        assertRuntimeSession(shimSession);
+                        assertRuntimeSession(callerSession);
                         if (!ready) {
                             dbgWarn(' Mvu.replaceMvuData 被跳过：等待 10s 后 API/布局仍未就绪（api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空') + '，自动建表尚未缓存布局，或当前卡不是转换产物）');
                             return false;
@@ -9962,7 +11397,8 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     }
                     const nextStat = (data && data.stat_data) || {};
                     const writeChatKey = autoInitChatId();
-                    const ok = await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, shimSession);
+                    const writeSession = { ...callerSession, businessEventEmitted: !!(data && data.__mvu2shujukuBusinessProcessed) };
+                    const ok = await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, writeSession);
                     if (ok && isRuntimeSessionCurrent(shimSession)) refreshOpeningContinuityAfterWrite(writeChatKey, nextStat);
                     return !!ok;
                 } catch (e) {
@@ -9997,18 +11433,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             windowMvuFake.replaceCurrentMvuData = async function (mvu_data) { return sessionMvu.replaceMvuData(mvu_data, { type: 'message', message_id: 'latest' }); };
             windowMvuFake.isDuringExtraAnalysis = function () { return false; };
         }
-        const targets = [];
-        const addTarget = (t) => { try { if (t && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
-        addTarget(window);
-        addTarget(hostWindow);
-        try { addTarget(window.parent); } catch (e) {}
-        try { addTarget(window.top); } catch (e) {}
-        for (const r of [window, hostWindow]) {
-            try {
-                const frames = r.document ? r.document.querySelectorAll('iframe') : [];
-                for (const f of frames) { try { addTarget(f.contentWindow); } catch (e) {} }
-            } catch (e) {}
-        }
+        const targets = getRuntimeWindows();
         for (const w of targets) {
             try {
                 // 覆盖前先登记真原始值（Mvu/getAllVariables/三个全局函数），
@@ -10301,6 +11726,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
     }
     // 撤销 Mvu 接管：恢复各窗口原 window.Mvu，停止周期复查，切回转换卡时再接管。
     function restoreWindowMvuShim() {
+        if (runtimeWindows) runtimeWindows.invalidate();
         pendingLateFrontendUpdate = null;
         if (windowMvuShimTimer) {
             hostWindow.clearInterval(windowMvuShimTimer);
@@ -10459,6 +11885,15 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         }
     }
 
+    async function readTargetSpVersion() {
+        try {
+            const extensions = await import('/scripts/extensions.js');
+            const matches = (extensions.extensionNames || []).map(name => extensions.getExtensionManifest(name))
+                .filter(manifest => manifest && /^SP[·・\s]*数据库(?:\s|$)/i.test(String(manifest.display_name || '')));
+            if (matches.length === 1 && typeof matches[0].version === 'string') return matches[0].version;
+        } catch (_) {}
+        return 'unknown';
+    }
     async function doConvert(inputBytes, sourceIsPng, sourceCharacter) {
         const settings = getSettings();
         const core = window.MVU2SHUJUKU_CORE;
@@ -10470,6 +11905,10 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         const mode = 'both';
         const opts = {
             mode,
+            targetSpVersion: await readTargetSpVersion(),
+            jsonContainers: settings.jsonContainers === true,
+            vwdDescriptions: !!(window.EjsTemplate && window.EjsTemplate.evalTemplate
+                && window.EjsTemplate.evalTemplate.__mvu2shujukuContextBridge),
             asPng: settings.asPng === 'auto' ? sourceIsPng : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
             ddlIncludeCheck: settings.ddlIncludeCheck !== false,
@@ -10910,20 +12349,13 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         toast(title + '：' + body, 'info');
     }
 
-    // 表格“自动化更新参数”快速编辑器（只改转换结果模板 JSON，不走插件 API）
-    // 字段与 SP·数据库 插件「自动化更新参数」面板一一对应；缺省 -1 = 沿用插件全局设置。
-    const UPDATE_PARAM_OPTIONS = [
-        { key: 'updateFrequency', label: '更新频率', hint: '-1=沿用全局；0=停用该表自动更新' },
-        { key: 'groupId', label: '分组编号', hint: '-1=沿用全局' },
-        { key: 'contextDepth', label: '上下文层数', hint: '-1=沿用全局' },
-        { key: 'batchSize', label: '批处理大小', hint: '-1=沿用全局' },
-        { key: 'skipFloors', label: '跳过楼层', hint: '-1=沿用全局' },
-        { key: 'sendLatestRows', label: '发送最新行数', hint: '-1=沿用全局' },
-    ];
-    // 每行当前选择的参数（uid -> key），重渲染后保持下拉选择不变
+    // 结果视图只改本次模板；下载/保存时刷新卡内模板与登记桥。
     const updateParamState = {};
-    // 参数是否有未落盘的改动：下载/保存时据此重新生成转换结果（模板 JSON 改动本身是实时的）
     let updateParamsDirty = false;
+    const resultView = window.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__({
+        document: hostDocument, paramState: updateParamState, createColumnsToggle,
+        onChange: () => { updateParamsDirty = true; }, notify: toast,
+    });
 
     function refreshConvertedResult() {
         // 模板参数编辑仅刷新产物；转换规则变化时核心自动退回完整转换。
@@ -10951,30 +12383,6 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         return result;
     }
 
-    function updateConfigOf(sheet) {
-        if (!sheet || typeof sheet !== 'object') return {};
-        if (!sheet.updateConfig || typeof sheet.updateConfig !== 'object') sheet.updateConfig = {};
-        return sheet.updateConfig;
-    }
-
-    function getUpdateParam(sheet, key) {
-        const v = updateConfigOf(sheet)[key];
-        return Number.isFinite(Number(v)) ? Number(v) : -1;
-    }
-
-    function normalizeUpdateParamValue(value) {
-        const raw = String(value == null ? '' : value).trim();
-        const n = raw === '' ? -1 : Math.trunc(Number(raw));
-        return Number.isFinite(n) ? n : -1;
-    }
-
-    function setUpdateParam(sheet, key, value) {
-        const cfg = updateConfigOf(sheet);
-        cfg.uiSentinel = -1; // 与插件 UI 一致：标记已由用户显式设置
-        cfg[key] = normalizeUpdateParamValue(value);
-        return cfg[key];
-    }
-
     function updateParamSheetRows(result) {
         return Object.keys(result.template || {})
             .filter(k => k.startsWith('sheet_'))
@@ -10987,135 +12395,16 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             });
     }
 
-    function paramOptionHtml(selectedKey) {
-        return UPDATE_PARAM_OPTIONS.map(o =>
-            '<option value="' + o.key + '"' + (o.key === selectedKey ? ' selected' : '') + '>' + o.label + '</option>'
-        ).join('');
-    }
-
     function renderUpdateConfigEditor(box, result) {
-        const rows = updateParamSheetRows(result);
-        if (!rows.length) return;
-        const wrap = hostDocument.createElement('div');
-        wrap.className = 'mvu2shujuku-param-editor';
-        const head = hostDocument.createElement('div');
-        head.className = 'mvu2shujuku-row';
-        head.innerHTML = '<b>表格自动化更新参数</b>';
-        wrap.appendChild(head);
-        const help = hostDocument.createElement('div');
-        help.className = 'mvu2shujuku-help';
-        help.innerHTML = '直接修改转换结果模板 JSON，改动实时写入（下载/保存时自动带上，无需再点确定）。' +
-            '参数 -1 = 沿用插件全局设置；更新频率 0 = 停用该表自动更新。' +
-            '已创建聊天中的表格不会自动变更（聊天作用域持有自己的模板副本），如需同步请重新导入模板或在新聊天中建表。';
-        wrap.appendChild(help);
-
-        // 整体编辑：一个参数+数值应用到全部表格（始终可用，不另设开关）
-        const bulk = hostDocument.createElement('div');
-        bulk.className = 'mvu2shujuku-row mvu2shujuku-param-bulk';
-        const bulkLabel = hostDocument.createElement('span');
-        bulkLabel.className = 'mvu2shujuku-label';
-        bulkLabel.textContent = '整体编辑';
-        const bulkSel = hostDocument.createElement('select');
-        bulkSel.className = 'mvu2shujuku-param-select';
-        bulkSel.innerHTML = paramOptionHtml('updateFrequency');
-        const bulkInput = hostDocument.createElement('input');
-        bulkInput.type = 'number';
-        bulkInput.min = '-1';
-        bulkInput.step = '1';
-        bulkInput.value = '-1';
-        bulkInput.className = 'mvu2shujuku-param-value';
-        const bulkBtn = hostDocument.createElement('button');
-        bulkBtn.className = 'menu_button';
-        bulkBtn.textContent = '应用到全部表格';
-        bulkBtn.addEventListener('click', () => {
-            const key = bulkSel.value;
-            const v = normalizeUpdateParamValue(bulkInput.value);
-            let count = 0;
-            for (const r of rowEls) {
-                setUpdateParam(r.sheet, key, v);
-                updateParamState[r.uid] = key;
-                r.sel.value = key;
-                r.sel.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
-                r.input.value = String(v);
-                r.input.title = r.sel.title;
-                count++;
-            }
-            updateParamsDirty = true;
-            const label = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).label || key;
-            toast('已把「' + label + '」设为 ' + v + '，应用到全部 ' + count + ' 张表', 'info');
-            dbg(' 整体应用: ' + key + ' = ' + v + ' → ' + count + ' 张表');
-        });
-        bulk.appendChild(bulkLabel);
-        bulk.appendChild(bulkSel);
-        bulk.appendChild(bulkInput);
-        bulk.appendChild(bulkBtn);
-        wrap.appendChild(bulk);
-
-        // 逐表编辑：表名 | 参数 | 数值（实时写入模板 JSON）
-        const grid = hostDocument.createElement('div');
-        grid.className = 'mvu2shujuku-param-grid';
-        const mkCell = (cls, text) => {
-            const cell = hostDocument.createElement('div');
-            cell.className = cls;
-            cell.textContent = text;
-            return cell;
-        };
-        grid.appendChild(mkCell('mvu2shujuku-param-head', '表名'));
-        grid.appendChild(mkCell('mvu2shujuku-param-head', '参数'));
-        grid.appendChild(mkCell('mvu2shujuku-param-head', '数值'));
-        const rowEls = [];
-        for (const { uid, sheet } of rows) {
-            const key = updateParamState[uid] && UPDATE_PARAM_OPTIONS.some(o => o.key === updateParamState[uid])
-                ? updateParamState[uid]
-                : 'updateFrequency';
-            const nameEl = mkCell('mvu2shujuku-param-name', String(sheet.name || uid));
-            const sel = hostDocument.createElement('select');
-            sel.className = 'mvu2shujuku-param-select';
-            sel.innerHTML = paramOptionHtml(key);
-            sel.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
-            const input = hostDocument.createElement('input');
-            input.type = 'number';
-            input.min = '-1';
-            input.step = '1';
-            input.className = 'mvu2shujuku-param-value';
-            input.value = String(getUpdateParam(sheet, key));
-            input.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
-            sel.addEventListener('change', () => {
-                updateParamState[uid] = sel.value;
-                input.value = String(getUpdateParam(sheet, sel.value));
-                input.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === sel.value) || {}).hint || '';
-                sel.title = input.title;
-                dbg(' 参数行切换: ' + String(sheet.name || uid) + ' → ' + sel.value + ' = ' + input.value);
-            });
-            input.addEventListener('input', () => {
-                const v = setUpdateParam(sheet, sel.value, input.value);
-                input.value = String(v);
-                updateParamsDirty = true;
-                dbg(' 参数行修改: ' + String(sheet.name || uid) + '.' + sel.value + ' = ' + v);
-            });
-            const cellSel = hostDocument.createElement('div');
-            cellSel.className = 'mvu2shujuku-param-cell';
-            cellSel.appendChild(sel);
-            const cellVal = hostDocument.createElement('div');
-            cellVal.className = 'mvu2shujuku-param-cell';
-            cellVal.appendChild(input);
-            grid.appendChild(nameEl);
-            grid.appendChild(cellSel);
-            grid.appendChild(cellVal);
-            const colDetails = createColumnsToggle(sheet);
-            colDetails.style.gridColumn = '1 / -1';
-            grid.appendChild(colDetails);
-            rowEls.push({ uid, sheet, sel, input });
-        }
-        wrap.appendChild(grid);
-        box.appendChild(wrap);
+        resultView.renderEditor(box, updateParamSheetRows(result));
     }
 
     // 合并数据库插件现有模板区块：放在参数编辑器与转换报告之间，转换后边改边并更方便
     function renderMergeSection(box, panel) {
-        const sec = hostDocument.createElement('div');
-        sec.className = 'mvu2shujuku-merge-section';
+        const sec = hostDocument.createElement('details');
+        sec.className = 'mvu2shujuku-merge-section mvu2shujuku-detail';
         sec.innerHTML =
+            '<summary>合并其他数据库表格（可选）</summary>' +
             '<div class="mvu2shujuku-row">' +
             '  <label class="mvu2shujuku-label" for="mvu2shujuku-merge-source">合并数据库现有表格模板（转换完成后可用）</label>' +
             '  <select id="mvu2shujuku-merge-source" title="选择模板来源：当前聊天模板 / 全局模板 / 全局预设"></select>' +
@@ -11153,20 +12442,9 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         box.innerHTML = '';
         // 每次渲染出的转换结果都是最新状态（含刚合并/刚改完参数），重置“待刷新”标记
         updateParamsDirty = false;
-        const head = hostDocument.createElement('div');
-        head.className = 'mvu2shujuku-row';
-        head.innerHTML = '<b>转换完成</b>：' + result.meta.tableCount + ' 张表';
-        box.appendChild(head);
-        // 自动化更新参数快速编辑器（只改转换结果模板 JSON）
+        resultView.renderReport(box, result);
         renderUpdateConfigEditor(box, result);
-        // 合并数据库现有表格（参数编辑器与报告之间）
         renderMergeSection(box, panel);
-        // 第一步：先看报告
-        const report = hostDocument.createElement('textarea');
-        report.className = 'mvu2shujuku-report';
-        report.value = result.reportText;
-        report.readOnly = true;
-        box.appendChild(report);
         // 最后一步：下载与保存到酒馆（放在合并模板区块之后）
         const downloadsBox = panel.querySelector('#mvu2shujuku-downloads');
         if (downloadsBox) {
@@ -11394,6 +12672,15 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 }
             });
         }
+        const jsonContainersBox = panel.querySelector('#mvu2shujuku-json-containers');
+        if (jsonContainersBox && jsonContainersBox.dataset.bound !== 'true') {
+            jsonContainersBox.dataset.bound = 'true';
+            jsonContainersBox.addEventListener('change', () => {
+                getSettings().jsonContainers = jsonContainersBox.checked;
+                saveSettings();
+                if (lastResult) toast('完整 JSON 容器选项已保存；重新转换后生效', 'info');
+            });
+        }
         const ejsTranslateBox = panel.querySelector('#mvu2shujuku-ejs-translate');
         if (ejsTranslateBox && ejsTranslateBox.dataset.bound !== 'true') {
             ejsTranslateBox.dataset.bound = 'true';
@@ -11504,6 +12791,18 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             mvu2shujukuGetAllVariables: safeDefine,
             mvu2shujukuGetMessageVar: getMessageDefine,
             mvu2shujukuFormatMessageVariable: formatMessageDefine,
+            mvu2shujukuVwdDescriptions: function (table, fieldIds) {
+                if (!ensureActiveLayoutLazy()) throw new Error('动态说明布局尚未就绪');
+                const entry = activeLayout.find(item => item && item.table === table && item.vwd && item.vwd.promptVersion === 1);
+                if (!entry || JSON.stringify(entry.vwd.fields.map(field => field.id)) !== JSON.stringify(fieldIds)) {
+                    throw new Error('动态说明模板不属于当前布局');
+                }
+                const api = getAcuApi();
+                // 一次读取一张表的所有说明，不读取 pendingStatWrite，也不重建完整变量树。
+                const tables = api && typeof api.exportTableAsJson === 'function' ? api.exportTableAsJson() : null;
+                const sheet = Object.values(tables || {}).find(item => item && item.name === table);
+                return window.MVU2SHUJUKU_CORE.vwdPromptDescriptions(entry, sheet);
+            },
             mvu2shujukuSetMessageVar: setMessageDefine,
             mvu2shujukuResolveMacro: resolveMacroDefine,
             mvu2shujukuApplyWorldInfoRegex: applyWorldInfoRegexDefine,
@@ -11518,7 +12817,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             const originalEvalTemplate = ejs.evalTemplate;
             const wrappedEvalTemplate = async function (code, context, options) {
                 // 只介入包含本转换器 helper 的模板，其他卡/模板完全走原调用。
-                if (!/\bmvu2shujuku(?:GetAllVariables|GetMessageVar|FormatMessageVariable|SetMessageVar|ResolveMacro|ApplyWorldInfoRegex)\b/.test(String(code || ''))) {
+                if (!/\bmvu2shujuku(?:GetAllVariables|GetMessageVar|FormatMessageVariable|VwdDescriptions|SetMessageVar|ResolveMacro|ApplyWorldInfoRegex)\b/.test(String(code || ''))) {
                     return originalEvalTemplate.apply(this, arguments);
                 }
                 const defines = templateDatabaseDefines();
@@ -11710,6 +13009,180 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         } catch (e) {}
     }
 };
+root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__ = function createCandidateBuilderFactory(deps) {
+    'use strict';
+    const { core = null, debug: dbg = () => {}, warn: dbgWarn = () => {} } = deps || {};
+    const coreNow = core;
+
+    // 必须留在工厂内：浏览器通过 toString 内联时没有 Node 模块外部作用域。
+    function normalizeCellForSync(v) {
+        if (v === null || v === undefined) return '';
+        if (typeof v === 'boolean') return v ? 1 : 0;
+        if (typeof v === 'number') return v;
+        if (typeof v === 'string') return v;
+        try { return JSON.stringify(v); } catch (e) { return String(v); }
+    }
+
+    // 旧 MVU/VWD 在 message stat_data 中可能仍保留 [值, 描述] 叶子。
+    // 开场分支快照合并发生在建表前；若直接把这个数组交给数据库，
+    // TEXT 列会得到 [值,描述] JSON 字符串，并与枚举 CHECK 冲突。
+    // 仅依 layout 中明确的 pair 列拆包，真实 array/object 字段保持不变。
+    function collapseLegacyPairLeaves(stat, layoutEntries) {
+        const out = JSON.parse(JSON.stringify(stat && typeof stat === 'object' ? stat : {}));
+        const getParent = (parts) => {
+            let cur = out;
+            for (let i = 0; i < parts.length - 1; i++) {
+                if (!cur || typeof cur !== 'object') return null;
+                cur = cur[parts[i]];
+            }
+            return cur && typeof cur === 'object' ? cur : null;
+        };
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            if (L && L.vwd && L.vwd.promptVersion === 1) continue;
+            for (const col of (L && Array.isArray(L.cols) ? L.cols : [])) {
+                if (!Array.isArray(col) || !['pair', 'jsonPairOptional'].includes(col[1]) || !Array.isArray(col[3]) || !col[3].length) continue;
+                const parts = col[3].map(String);
+                const parent = getParent(parts);
+                const key = parts[parts.length - 1];
+                const value = parent && parent[key];
+                if (Array.isArray(value) && value.length === 2 && typeof value[1] === 'string') {
+                    parent[key] = value[0];
+                }
+            }
+        }
+        return out;
+    }
+
+    // VWD 登记字段的说明差量必须在**折叠之前**用原始数据判定：折叠会丢掉 pair 的第二项，
+    // 候选构造若只看折叠后的数据就会漏掉说明变化，产出“新值 + 旧说明”的错误候选。
+    // 这里只做检查并在发现问题时整笔拒绝；放行后仍走原有的折叠兼容路径。
+    function vwdDescriptionRejection(core, layoutEntries, prevStat, nextStat, tables) {
+        if (!core || typeof core.vwdDescriptionDelta !== 'function') return '';
+        const unsupported = (layoutEntries || []).filter(entry => !core.canWriteVwdDescriptions
+            || !core.canWriteVwdDescriptions(entry, tables));
+        return core.vwdDescriptionDelta(unsupported, prevStat, nextStat) || '';
+    }
+
+    // 开场候选与当前回复批次共用内存适配器。只在草稿中执行真实 writer，
+    // 记录其最终 API 调用，不另写一套字段/数组/关联变更规划器。
+    function createTableDraft(baseTemplate, sourceApi) {
+        const tables = JSON.parse(JSON.stringify(baseTemplate || {}));
+        const operations = [];
+        const fakeApi = {
+            exportTableAsJson: () => tables,
+            importTableAsJson: async json => {
+                const candidate = JSON.parse(json);
+                for (const key of Object.keys(tables)) delete tables[key];
+                Object.assign(tables, candidate);
+                return true;
+            },
+            updateCell: async (tableName, rowIndex, col, value) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s || !s.content[rowIndex]) return false;
+                const ci = s.content[0].indexOf(col);
+                if (ci === -1) return false;
+                s.content[rowIndex][ci] = normalizeCellForSync(value);
+                return true;
+            },
+            updateRow: async (tableName, rowIndex, payload) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s || !s.content[rowIndex] || !payload || typeof payload !== 'object') return false;
+                if (Object.keys(payload).some(col => s.content[0].indexOf(col) < 0)) return false;
+                for (const col of Object.keys(payload)) {
+                    const ci = s.content[0].indexOf(col);
+                    if (ci >= 0) s.content[rowIndex][ci] = normalizeCellForSync(payload[col]);
+                }
+                return true;
+            },
+            insertRow: async (tableName, obj) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s) return -1;
+                const row = s.content[0].map(h => '');
+                for (const k of Object.keys(obj || {})) {
+                    const ci = s.content[0].indexOf(k);
+                    if (ci >= 0) row[ci] = normalizeCellForSync(obj[k]);
+                }
+                // 行号取现有最大行号 +1：deleteRow 发生后 content.length 会与已有
+                // 行号重复（row[0] 是主键列），重复主键会让整表导入被拒或产生重复行。
+                let maxRowId = 0;
+                for (let ri = 1; ri < s.content.length; ri++) {
+                    const rn = Number(s.content[ri] && s.content[ri][0]);
+                    if (Number.isFinite(rn) && rn > maxRowId) maxRowId = rn;
+                }
+                row[0] = maxRowId + 1;
+                s.content.push(row);
+                return row[0];
+            },
+            deleteRow: async (tableName, rowIndex) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s || !s.content[rowIndex]) return false;
+                s.content.splice(rowIndex, 1);
+                return true;
+            },
+        };
+        if (sourceApi) {
+            if (typeof sourceApi.updateRow !== 'function') delete fakeApi.updateRow;
+            if (typeof sourceApi.getTableTemplate === 'function') fakeApi.getTableTemplate = (...args) => sourceApi.getTableTemplate(...args);
+            for (const method of ['updateCell', 'updateRow', 'insertRow', 'deleteRow', 'importTableAsJson']) {
+                const apply = fakeApi[method];
+                if (!apply) continue;
+                fakeApi[method] = async (...args) => {
+                    // import 的最终内容统一取 tables，不额外保留整份 JSON 字符串。
+                    const savedArgs = method === 'importTableAsJson' ? null : JSON.parse(JSON.stringify(args));
+                    const result = await apply(...args);
+                    operations.push({ method, args: savedArgs });
+                    return result;
+                };
+            }
+        }
+        return { tables, fakeApi, operations };
+    }
+
+    async function planCurrentReplyWrites(api, layoutEntries, prevStat, nextStat, persistedTables) {
+        const before = api.exportTableAsJson() || {};
+        const beforeJson = JSON.stringify(before);
+        const draft = createTableDraft(before, api);
+        await coreNow.writeStatDiffToDb(draft.fakeApi, layoutEntries, prevStat, nextStat, persistedTables);
+        if (coreNow.lastStatWriteFailed) throw new Error('当前回复批次规划失败，未调用宿主写入');
+        return { tables: draft.tables, operations: draft.operations, beforeJson };
+    }
+
+    function buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate) {
+        if (!coreNow || typeof coreNow.writeStatDiffToDb !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
+        const rejection = vwdDescriptionRejection(coreNow, layoutEntries, prevStat, nextStat, baseTemplate);
+        if (rejection) {
+            dbgWarn(' VWD 说明变化无法与提示词同步，候选构造已在任何写入前拒绝：' + rejection);
+            return null;
+        }
+        const { tables, fakeApi } = createTableDraft(baseTemplate);
+        const normalizedPrevStat = collapseLegacyPairLeaves(prevStat, layoutEntries);
+        const normalizedNextStat = collapseLegacyPairLeaves(nextStat, layoutEntries);
+        // 内存模板必须先追平当前数据库状态，再应用 prev→next。本次调用可能只带
+        // 某组的部分字段；若直接从原始模板应用差异，未变化字段会停留在模板默认值，
+        // 随后的整表 initGameSession 会把已有进度回滚。
+        const baseWrap = coreNow.statDataFromTables(layoutEntries, tables);
+        const baseStat = baseWrap && baseWrap.stat_data && typeof baseWrap.stat_data === 'object'
+            ? baseWrap.stat_data
+            : {};
+        return Promise.resolve(coreNow.writeStatDiffToDb(fakeApi, layoutEntries, baseStat, normalizedPrevStat, tables))
+            .then(() => {
+                if (coreNow.lastStatWriteFailed) throw new Error('构建开场模板失败：无法追平当前数据库快照');
+                return coreNow.writeStatDiffToDb(fakeApi, layoutEntries, normalizedPrevStat, normalizedNextStat, tables);
+            })
+            .then(() => {
+                if (coreNow.lastStatWriteFailed) throw new Error('构建开场模板失败：无法应用当前开场快照');
+                return tables;
+            });
+    }
+
+
+    return {
+        buildUpdatedTemplateFromStat,
+        planCurrentReplyWrites,
+        collapseLegacyPairLeaves,
+        vwdRejectionReason: (layoutEntries, prevStat, nextStat, tables) => vwdDescriptionRejection(coreNow, layoutEntries, prevStat, nextStat, tables),
+    };
+};
 root.__MVU2SHUJUKU_CARD_BRIDGE_INSTALLER__ = function installCardBridge(payload, frame) {
     let host = frame;
     try { host = frame.top || frame; } catch (_) {}
@@ -11773,6 +13246,8 @@ root.__MVU2SHUJUKU_CARD_BRIDGE_INSTALLER__ = function installCardBridge(payload,
 root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependencies) {
     const { parseJson: safeParseJson, readCachedTemplate = () => null,
         debugOn: mvu2shujukuDebugOn = () => false,
+        // 调用方验证对应布局、真实 note 和运行期渲染能力。缺少能力仍整笔拒绝。
+        vwdNoteSyncSupported: vwdNoteSync = () => false,
         debug: dbg = () => {}, warn: dbgWarn = () => {} } = dependencies;
     if (typeof safeParseJson !== 'function') throw new Error('写入模块需要 JSON 解析函数');
     let statWriteHadFailure = false;
@@ -11786,6 +13261,13 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
             else dbgWarn(' ' + label + ' 返回失败结果。');
         };
         const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
+        // 登记、更新和新增共用同一判定，避免标量化的数字/布尔 pair 只在更新路径识别。
+        const pairColumnType = col => {
+            if (!Array.isArray(col)) return '';
+            const type = col[1];
+            return ['pair', 'jsonPairOptional'].includes(type)
+                || (col[4] === true && ['number', 'boolean'].includes(type)) ? type : '';
+        };
         const pathParts = (s) => String(s || '').split('.');
         const tableEntryByPath = (pathStr) => {
             let best = null;
@@ -11909,8 +13391,248 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
             return String(na) === String(nb);
         };
         const ops = [];
+        /* ---------------- VWD 动态说明差量 ----------------
+         * 说明覆盖集合只保存与静态默认不同的条目；显式 "" 是有效覆盖。字段身份用布局
+         * 登记路径数组的 JSON 串，不用显示列名。值列类型、nullable/optional 与缺失语义
+         * 都不变，覆盖值只写进该表已登记的隐藏元数据列，绝不绕入 _扩展数据。
+         */
+        const vwdSlots = [];
+        for (const L of entries) {
+            if (!L || L.kind !== 'singleton') continue;
+            const fields = L.vwd && typeof L.vwd === 'object' && Array.isArray(L.vwd.fields) ? L.vwd.fields : null;
+            const metaCol = L.vwd && typeof L.vwd.metaCol === 'string' ? L.vwd.metaCol : '';
+            if (!fields || !metaCol || !fields.length) continue;
+            const byPath = new Map();
+            // 登记范围内的**所有**字段都参与说明检查，与它有没有生成 note 插槽无关：
+            // 初始没有说明、说明被通用规则过滤等没有插槽的字段，新说明无法呈现，
+            // 这时必须明确拒绝，不能静默丢弃后返回成功。
+            for (const field of fields) {
+                if (!field || typeof field !== 'object' || !field.id || !Array.isArray(field.path) || !field.path.length) continue;
+                byPath.set(field.path.map(String).join('\u0000'), field);
+            }
+            if (byPath.size) vwdSlots.push({ layout: L, metaCol, byPath });
+        }
+        // 说明变化只可能从 pair 叶子的第二项来；未提供说明不等于清除旧说明。
+        const vwdDescriptionAt = (node, path) => {
+            let cur = node;
+            for (const part of path) {
+                if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+                cur = cur[part];
+            }
+            return Array.isArray(cur) && cur.length === 2 && typeof cur[1] === 'string' ? cur[1] : undefined;
+        };
+        // 与说明同一位置的当前值（pair 叶子取第一项；非 pair 一律视作未提供）。
+        const vwdValueAt = (node, path) => {
+            let cur = node;
+            for (const part of path) {
+                if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+                cur = cur[part];
+            }
+            return Array.isArray(cur) && cur.length === 2 ? cur[0] : undefined;
+        };
+        const vwdEncode = (node, slot, fallback) => {
+            const overrides = {};
+            for (const [key, field] of slot.byPath) {
+                const path = key.split('\u0000');
+                const given = vwdDescriptionAt(node, path);
+                const desc = given === undefined && fallback ? vwdDescriptionAt(fallback, path) : given;
+                if (desc === undefined || desc === field.desc) continue;
+                overrides[field.id] = desc;
+            }
+            try { return JSON.stringify({ v: 1, o: overrides }); } catch (e) { return ''; }
+        };
+        // 每张变化表都须有匹配的动态渲染模板；不能用全局开关放行旧静态布局。
+        let vwdTables = persistedTables;
+        const vwdTablesForCheck = () => {
+            if (!vwdTables) vwdTables = api && typeof api.exportTableAsJson === 'function' ? api.exportTableAsJson() : null;
+            return vwdTables;
+        };
+        // 逐字段比较说明本身（不比较整份覆盖集合），只有真的出现说明差量才进入下面两步。
+        let vwdDescChanged = false;
+        for (const slot of vwdSlots) {
+            let slotDescChanged = false;
+            const nextDescs = {};
+            const prevDescs = {};
+            for (const [key, field] of slot.byPath) {
+                const path = key.split('\u0000');
+                const nd = vwdDescriptionAt(nextStat, path);
+                const pd = vwdDescriptionAt(prevStat, path);
+                if (nd !== undefined) nextDescs[field.id] = nd;
+                if (pd !== undefined) prevDescs[field.id] = pd;
+                // 只有“确实提供了一个字符串说明、且与原说明不同”才算说明变化：
+                // 字段被删除、值不是 [值, 说明] 形状时都不是说明差量，按原有语义处理。
+                if (nd !== undefined && nd !== pd) slotDescChanged = vwdDescChanged = true;
+            }
+            if (slotDescChanged && !vwdNoteSync(slot.layout, vwdTablesForCheck())) {
+                const code = slot.layout.vwd && slot.layout.vwd.hostSync ? 'hostSyncUnsupported' : 'descChangeUnsupported';
+                markWriteFailure('表「' + slot.layout.table + '」的动态说明变化未落库：' + code
+                    + '（缺少匹配的动态说明模板或 EJS 渲染能力）');
+                if (mvu2shujukuDebugOn()) {
+                    dbg('[VWD] ' + code + ' table=' + slot.layout.table
+                        + ' next=' + JSON.stringify(nextDescs) + ' prev=' + JSON.stringify(prevDescs));
+                }
+                return 0;
+            }
+        }
+        // 说明是否真的变化：比较“覆盖集合”而不是整份快照，未变化时不写元数据列。
+        const vwdMetaAfter = new Map();
+        if (vwdDescChanged) {
+            for (const slot of vwdSlots) {
+                const after = vwdEncode(nextStat, slot, prevStat);
+                if (!after) { markWriteFailure('VWD 说明覆盖集合无法序列化（表「' + slot.layout.table + '」）'); continue; }
+                if (after !== vwdEncode(prevStat, slot)) vwdMetaAfter.set(slot, after);
+            }
+        }
+        // MVU/VWD 的 message stat_data 里可能仍是 [值, 说明] 叶子。值路由必须按“值”走
+        // layout 明确登记的 pair 列，否则 TEXT 列会拿到 [值,说明] 的逗号拼接文本、数值/布尔
+        // 列会拿到整段数组。登记范围只由 layout 决定，与 VWD 实验开关无关：写库边界
+        // 必须把“当前值”交给宿主，这是编码契约，不是可选功能。
+        const pairPathTypes = new Map();
+        for (const L of entries) {
+            if (!L) continue;
+            const entryPrefix = L.kind === 'singleton' ? [L.group] : ((L.writePaths || [])[0] || [L.group]);
+            for (const c of (Array.isArray(L.cols) ? L.cols : [])) {
+                if (!Array.isArray(c)) continue;
+                // pair / jsonPairOptional 一定是 pair 列；number/boolean 列为 pair 叶子时
+                // columnLayoutType 会把它映射成普通标量，但布局仍保留 isPair 标记，
+                // 值也仍是 [值, 说明]，写库边界同样只能取当前值。
+                if (!pairColumnType(c)) continue;
+                const cp = Array.isArray(c[3]) && c[3].length ? c[3] : null;
+                if (!cp) continue;
+                if (L.kind === 'singleton') {
+                    pairPathTypes.set(cp.map(String).join('.'), c[1]);
+                    continue;
+                }
+                // 行表：相对段接到每个 writePath 上，与 writer 解析出的单元格路径一致
+                // （如 关系.*.背包.*.效果.描述）。
+                const rel = cp[0] === entryPrefix[0] && cp.length >= entryPrefix.length ? cp.slice(entryPrefix.length) : cp;
+                for (const wp of (L.writePaths && L.writePaths.length ? L.writePaths : [entryPrefix])) {
+                    pairPathTypes.set([...wp.map(String), '*', ...rel.map(String)].join('.'), c[1]);
+                }
+            }
+        }
+        // 叶子折叠（把 pair 折成值）只在 VWD 实验布局下启用：说明差量需要拿到未折叠的说明，
+        // 且 writer 要能区分“只改说明”。普通布局不折叶子，值仍按 pair 形状参与差异比较，
+        // 只在写库边界取出当前值（见下方 encoder），因此读回与旧行为一致。
+        const pairLeafFolding = vwdSlots.length > 0;
+        // 该单元格是否落在 layout 明确登记的 pair 列上：决定写库边界取“当前值”还是整段
+        // 编码。与 VWD 实验开关无关，只用 layout 声明判断，不按“任意二元素数组”猜测。
+        // op.np 相对该 entry 的逻辑路径：singleton 去掉组名，rows/nestedRows 去掉行键。
+        const valuesRelPath = (entry, np) => {
+            if (!entry || !Array.isArray(entry.prefix)) return null;
+            const parts = pathParts(np);
+            if (parts.length <= entry.prefix.length) return null;
+            return (entry.kind === 'rows' || entry.kind === 'nestedRows')
+                ? parts.slice(entry.prefix.length + 1)
+                : parts.slice(entry.prefix.length);
+        };
+        const declaredPairTypeOf = (entry, logicalPath) => {
+            if (!entry || !entry.layout || !Array.isArray(logicalPath)) return '';
+            if (entry.layout.kind === 'singleton') {
+                return pairPathTypes.get([entry.layout.group, ...logicalPath.map(String)].join('.')) || '';
+            }
+            // 行表/关系行表：登记键里带行键通配段（R.*.好感），与读取端同一套路径。
+            const wp = (entry.layout.writePaths && entry.layout.writePaths[0]) || [entry.layout.group];
+            return pairPathTypes.get([...wp.map(String), '*', ...logicalPath.map(String)].join('.')) || '';
+        };
+
+        const collapsePairLeaves = (stat) => {
+            if (!pairLeafFolding || !pairPathTypes.size || !stat || typeof stat !== 'object') return stat;
+            const out = JSON.parse(JSON.stringify(stat));
+            const collapseLeaf = (node, key) => {
+                const v = node[key];
+                if (Array.isArray(v) && v.length === 2 && typeof v[1] === 'string') node[key] = v[0];
+            };
+            const walkPath = (node, parts, pos) => {
+                if (!node || typeof node !== 'object') return;
+                const token = parts[pos];
+                if (pos === parts.length - 1) {
+                    if (token === '*') { for (const k of Object.keys(node)) collapseLeaf(node, k); }
+                    else collapseLeaf(node, token);
+                    return;
+                }
+                if (token === '*') {
+                    for (const k of Object.keys(node)) walkPath(node[k], parts, pos + 1);
+                    return;
+                }
+                walkPath(node[token], parts, pos + 1);
+            };
+            for (const pathStr of pairPathTypes.keys()) walkPath(out, pathStr.split('.'), 0);
+            return out;
+        };
+        let prevValueStat = null;
+        let nextValueStat = null;
+        const prevForValues = () => (prevValueStat || (prevValueStat = collapsePairLeaves(prevStat) || {}));
+        const nextForValues = () => (nextValueStat || (nextValueStat = collapsePairLeaves(nextStat) || {}));
+        // 值单元格路径（"." 拼接，与 op.np 同一写法）→ 元数据写入内容。值路由会先把
+        // [值, 说明] 折叠成值，因此按路径匹配而不是按叶子形状识别，任何一条 push 分支
+        // 产生的单元格操作都能被正确附带说明。
+        const vwdMetaByPath = new Map();
+        const vwdPathOf = (layout, logicalPath) => {
+            const wp = (layout.writePaths && layout.writePaths[0]) || [layout.group];
+            return [...wp, ...logicalPath].join('.');
+        };
+        for (const slot of vwdSlots) {
+            if (!vwdMetaAfter.has(slot)) continue;
+            for (const [, field] of slot.byPath) {
+                const cp = Array.isArray(field.path) && field.path.length ? field.path : [slot.layout.group, field.col];
+                const logical = cp[0] === slot.layout.group ? cp.slice(1) : cp;
+                vwdMetaByPath.set(vwdPathOf(slot.layout, logical), { col: slot.metaCol, value: vwdMetaAfter.get(slot), slot });
+            }
+        }
+        // 已随值单元格提交的 VWD 槽位：其余需要单独补一条元数据写入。
+        const vwdAttached = new Set();
+        const encodeJsonScalar = (value, type) => {
+            if (type === 'jsonPairOptional' && Array.isArray(value) && value.length === 2 && typeof value[1] === 'string') value = value[0];
+            if ((type === 'jsonScalarOptional' || type === 'jsonPairOptional')) {
+                if (value === undefined) return '';
+                if (value !== null && !['string', 'boolean', 'number'].includes(typeof value)
+                    || typeof value === 'number' && !Number.isFinite(value)) {
+                    markWriteFailure('nullable 标量列只接受字符串、有限数字、布尔、null 或缺失值');
+                    return '';
+                }
+            }
+            return JSON.stringify(value);
+        };
+        const validJsonContainer = (value, kind, seen = new Set()) => {
+            const plainObject = value => {
+                if (!value || Object.prototype.toString.call(value) !== '[object Object]') return false;
+                const proto = Object.getPrototypeOf(value);
+                return proto === null || Object.prototype.hasOwnProperty.call(proto, 'constructor')
+                    && Function.prototype.toString.call(proto.constructor) === Function.prototype.toString.call(Object);
+            };
+            if (kind === 'array' && value !== null && !Array.isArray(value)) return false;
+            if (kind === 'object' && value !== null && !plainObject(value)) return false;
+            if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+            if (typeof value === 'number') return Number.isFinite(value);
+            if (!value || typeof value !== 'object' || seen.has(value)) return false;
+            if (!Array.isArray(value) && !plainObject(value)) return false;
+            seen.add(value);
+            if (Array.isArray(value)) {
+                for (let i = 0; i < value.length; i++) if (!(i in value) || !validJsonContainer(value[i], undefined, seen)) return false;
+            } else for (const k of Object.keys(value)) if (!validJsonContainer(value[k], undefined, seen)) return false;
+            seen.delete(value);
+            return true;
+        };
         const collect = (prevObj, nextObj, pathStr) => {
             const keys = Object.keys(nextObj || {});
+            // 仅新 nullable 编码有“删除已建列叶子”的无损表示。父行/旧布局的删除
+            // 继续交给原有流程，不能因遍历 prevStat 就把整张行表当成空值更新。
+            for (const k of Object.keys(prevObj || {})) {
+                if (Object.prototype.hasOwnProperty.call(nextObj || {}, k)) continue;
+                const np = pathStr ? pathStr + '.' + k : k;
+                const entry = tableEntryByPath(np);
+                if (!entry || !entry.prefix) continue;
+                let rel = pathParts(np).slice(entry.prefix.length);
+                if (entry.kind === 'rows' || entry.kind === 'nestedRows') rel = rel.slice(1);
+                const col = (entry.layout.cols || []).find(c => {
+                    if (c[1] !== 'jsonScalarOptional' && c[1] !== 'jsonPairOptional' && c[1] !== 'jsonObjectOptional') return false;
+                    let cp = c[3] || [];
+                    if (entry.kind === 'singleton' && cp[0] === entry.layout.group) cp = cp.slice(1);
+                    return cp.length === rel.length && cp.every((p, i) => p === rel[i]);
+                });
+                if (col) keys.push(k);
+            }
             for (const k of keys) {
                 const np = pathStr ? pathStr + '.' + k : k;
                 const nv = nextObj[k];
@@ -11934,6 +13656,31 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                     const pre = entry.prefix.join('.');
                     const rel = np === pre ? [] : np.slice(pre.length + 1).split('.');
                     const fIdx = (entry.kind === 'rows' || entry.kind === 'nestedRows') ? 1 : 0;
+                    if (fIdx === 1 && rel.length === 1 && entry.layout.scalarValueCol) {
+                        const col = (entry.layout.cols || []).find(c => c[0] === entry.layout.scalarValueCol && c[1] === 'jsonObjectOptional');
+                        if (col) {
+                            if (nv !== undefined && !validJsonContainer(nv, col[7])) {
+                                markWriteFailure('整条可空记录只接受声明的对象/数组、null 或缺失值');
+                                continue;
+                            }
+                            ops.push({ np, entry, value: nv, prev: pv, jsonCell: true, col: col[0] });
+                            continue;
+                        }
+                    }
+                    if (entry.kind === 'singleton' && entry.layout.valueCol && rel.length === 0) {
+                        const col = (entry.layout.cols || []).find(c => c[0] === entry.layout.valueCol && c[1] === 'jsonObjectOptional');
+                        if (!col || nv !== undefined && !validJsonContainer(nv, col[7])) {
+                            markWriteFailure('整组可空容器只接受声明的对象/数组、null 或缺失值');
+                            continue;
+                        }
+                        ops.push({ np, entry, value: nv, prev: pv, jsonCell: true, col: col[0] });
+                        continue;
+                    }
+                    if (nv === null && (rel.length === 0 && (entry.kind === 'singleton' || entry.layout.emptyValue !== null)
+                        || fIdx === 1 && rel.length === 1 && !entry.layout.scalarValueCol)) {
+                        markWriteFailure('表「' + entry.layout.table + '」无法区分整组/整行 null；请使用字段级可空 JSON 列');
+                        continue;
+                    }
                     if (rel.length > fIdx) {
                         // 展平后的嵌套 JSON 列也必须在容器边界整块写入。例如动态行表的
                         // 登神长阶.要素 对应列 path=[登神长阶,要素]。旧逻辑只按首段
@@ -11946,6 +13693,10 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                             return Array.isArray(cp) && cp.length === logicalPath.length && cp.every((p, i) => p === logicalPath[i]);
                         });
                         const exactColType = exactColDef && (Array.isArray(exactColDef) ? exactColDef[1] : exactColDef.type);
+                        if (exactColDef && nv === null && pv !== null && !/jsonScalar|jsonPair|jsonObjectOptional/.test(String(exactColType || ''))) {
+                            markWriteFailure('列「' + (exactColDef[0] || exactColDef.zh) + '」的现有布局无法无损存储 null；请按 nullable 声明重新转换并迁移模板');
+                            continue;
+                        }
                         if (exactColDef && /object|json/i.test(String(exactColType || ''))) {
                             ops.push({
                                 np,
@@ -12032,13 +13783,34 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                     }
                 }
                 if (nv && typeof nv === 'object' && !Array.isArray(nv)) {
+                    if (entry && ['rows', 'nestedRows'].includes(entry.kind)
+                        && pathParts(np).length === entry.prefix.length + 1 && !entry.layout.scalarValueCol
+                        && pv === undefined) {
+                        // 新记录可能只有子表字段，仍需先登记本行身份，供后代关联。
+                        ops.push({ np, entry, kind: 'row-create' });
+                    }
                     collect(pv && typeof pv === 'object' && !Array.isArray(pv) ? pv : {}, nv, np);
                 } else {
-                    ops.push({ np, entry, value: nv, prev: pv });
+                    // 该单元格落在 layout 明确登记的 pair 列时记下类型（含数字/布尔 pair：
+                    // columnLayoutType 会把它们映射为 number/boolean，登记键仍是 pair 路径）。
+                    const relPath = valuesRelPath(entry, np);
+                    const pairType = relPath ? declaredPairTypeOf(entry, relPath) : '';
+                    ops.push({ np, entry, value: nv, prev: pv, pairType });
                 }
             }
         };
-        collect(prevStat || {}, nextStat || {}, '');
+        collect(prevForValues(), nextForValues(), '');
+        // 说明差量按完整路径贴到对应单元格操作上：说明变了而值没变时也返回真，
+        // 阻止“值未变化 → 跳过写入”。
+        for (const op of ops) {
+            if (!op || op.kind || op.overflow || op.overflowRemove || op.replace || op.json) continue;
+            const hit = op.np && vwdMetaByPath.get(op.np);
+            if (!hit) continue;
+            op.vwdMetaCol = hit.col;
+            op.vwdMetaValue = hit.value;
+            op.vwdSlot = hit.slot;
+            if (sameValue(op.value, op.prev)) vwdAttached.add(hit.slot);
+        }
         // 行表删除检测：stat_data 中已不存在的行键 → 对应表行应删除（补齐 diff 路径的删除方向；
         // 参考卡前端删除直接走 api.deleteRow，这里把 stat_data 删键翻译成删行）
         for (const L of entries) {
@@ -12049,8 +13821,8 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                 for (const p of wp) { if (c === null || c === undefined || typeof c !== 'object') return undefined; c = c[p]; }
                 return c;
             };
-            const prevDict = dictAt(prevStat);
-            const nextDict = dictAt(nextStat);
+            const prevDict = dictAt(prevForValues());
+            const nextDict = dictAt(nextForValues());
             if (!prevDict || typeof prevDict !== 'object' || Array.isArray(prevDict)) continue;
             const nextObj = (nextDict && typeof nextDict === 'object' && !Array.isArray(nextDict)) ? nextDict : null;
             const nextKeys = nextObj ? new Set(Object.keys(nextObj)) : new Set();
@@ -12094,7 +13866,7 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                     walk(prevNode[token], nextNode && nextNode[token], pos + 1, [...concrete, token], ancestors);
                 }
             };
-            walk(prevStat, nextStat, 0, [], []);
+            walk(prevForValues(), nextForValues(), 0, [], []);
         }
         // 溢出字段删除检测：stat_data 中整个被移除的动态字段（未声明列/子表）要从对应行
         // _扩展数据 里同步删除（只处理“第一层未声明字段”整个消失；字段仍在但子键减少时，
@@ -12146,7 +13918,30 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                 });
             }
         };
-        detectOverflowRemovals(prevStat || {}, nextStat || {}, '');
+        detectOverflowRemovals(prevForValues(), nextForValues(), '');
+
+        // 说明变化但没有对应值单元格的 VWD 字段（例如该 pair 说明在此次写入里完全没有
+        // 出现其它变化）：补一条只写内部元数据列的单元格操作。值列一并带上当前值，
+        // 不改变“值单元格是否变化”在调用层的可判定性。
+        for (const [slot, value] of vwdMetaAfter) {
+            if (vwdAttached.has(slot)) continue;
+            const wp = slot.layout.writePaths && slot.layout.writePaths[0];
+            const prefix = Array.isArray(wp) && wp.length ? wp : [slot.layout.group];
+            let current;
+            for (const [, field] of slot.byPath) {
+                const raw = vwdValueAt(nextStat, field.path);
+                if (raw !== undefined) { current = raw; break; }
+            }
+            ops.push({
+                np: prefix.join('.'),
+                entry: { layout: slot.layout, kind: 'singleton', prefix },
+                value: current,
+                prev: current,
+                vwdMetaCol: slot.metaCol,
+                vwdMetaValue: value,
+                vwdOnly: true,
+            });
+        }
 
         // 组级判定：`_` 前缀内部字段的“回声候选”仅在同表没有其他真实写入时才跳过。
         // 前端真实操作（如成就领取：当前MC点 +PT 与 _hypnoos 同批写回）会带声明列/真实
@@ -12224,7 +14019,11 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                     const colZh = Array.isArray(c) ? c[0] : (c && c.zh);
                     if (!colZh || colZh === '_扩展数据') continue;
                     const fb = Array.isArray(c) ? c[2] : c.fallback;
-                    sObj[colZh] = (fb === undefined || fb === null) ? '' : fb;
+                    const type = Array.isArray(c) ? c[1] : c.type;
+                    if (((type === 'jsonScalarOptional' || type === 'jsonPairOptional') || type === 'jsonObjectOptional') && c[6] === true) continue;
+                    sObj[colZh] = (type === 'jsonScalarOptional' || type === 'jsonPairOptional') ? (fb === undefined ? '' : JSON.stringify(fb))
+                        : type === 'jsonObjectOptional' ? (fb === undefined ? '' : (typeof fb === 'string' ? fb : JSON.stringify(fb)))
+                        : (fb === undefined || fb === null) ? '' : fb;
                 }
                 if (tplSrc && typeof tplSrc === 'object') {
                     for (const k in tplSrc) {
@@ -12324,7 +14123,7 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                     dbgWarn(' 整组JSON表「' + L.table + '」缺少「内容」列（旧模板/旧聊天），写入已跳过；请重新转换角色卡并新开聊天。');
                     continue;
                 }
-                const jNew = L.scalarType === 'number' ? op.value : (op.value === undefined || op.value === null ? '{}' : JSON.stringify(op.value));
+                const jNew = L.scalarType === 'number' ? op.value : (op.value === undefined ? '{}' : JSON.stringify(op.value));
                 const jCur = sheet.content[1] ? sheet.content[1][jcIdx] : undefined;
                 if (sameValue(jCur, jNew)) continue;
                 directOps.push({ kind: 'json', key: found.key, sheet, header, layout: L, value: jNew });
@@ -12459,18 +14258,25 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                         : L.table + '\u0000' + keyVal;
                     let nr = newRows.get(nk);
                     if (!nr) { nr = { table: L.table, header, layout: L, keyCol: L.keyCol, keyVal, ancestorKeyCols: E.kind === 'nestedRows' ? (L.ancestorKeyCols || [L.parentKeyCol]) : [], ancestorValues, cells: {} }; newRows.set(nk, nr); }
+                    if (op.kind === 'row-create') continue;
                     // 对象列（JSON 存储，如 宗门.资源/建筑）：新行合并时整对象 JSON 序列化，
                     // 否则 String(对象) 会落成 '[object Object]'（旧行更新有 jsonCell 处理，
                     // 新行合并路径此前漏了）。
                     const colDefN = (L.cols || []).find(c => c[0] === colZh);
                     const colTypeN = colDefN ? String(Array.isArray(colDefN) ? colDefN[1] : (colDefN.type || '')) : '';
-                    const objColN = /object/i.test(colTypeN);
-                    nr.cells[colZh] = /jsonScalar/i.test(colTypeN)
-                        ? JSON.stringify(op.value)
+                    const objColN = /object|jsonObjectOptional/i.test(colTypeN);
+                    if (colTypeN === 'jsonObjectOptional') {
+                        if (op.value === undefined) nr.cells[colZh] = '';
+                        else if (validJsonContainer(op.value, Array.isArray(colDefN) ? colDefN[7] : colDefN.jsonKind)) {
+                            try { nr.cells[colZh] = JSON.stringify(op.value); } catch (e) { markWriteFailure('可空 JSON 容器必须可序列化', e); }
+                        } else markWriteFailure('可空 JSON 容器只接受对象、数组、null 或缺失值');
+                    } else nr.cells[colZh] = /jsonScalar|jsonPair/i.test(colTypeN)
+                        ? encodeJsonScalar(op.value, colTypeN)
                         : ((objColN && op.value && typeof op.value === 'object') ? JSON.stringify(op.value) : op.value);
                     continue;
                 }
             }
+            if (op.kind === 'row-create') continue; // 已存在身份行时不修改单元格。
             if (rowIndex < 0 && !newRowArr) continue;
             let colZh = op.col || parts[parts.length - 1];
             let colIdx = header.indexOf(colZh);
@@ -12495,26 +14301,48 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
             if (colIdx === -1) continue;
             const targetColDef = (L.cols || []).find(c => (Array.isArray(c) ? c[0] : c.zh) === colZh);
             const targetColType = targetColDef ? String(Array.isArray(targetColDef) ? targetColDef[1] : (targetColDef.type || '')) : '';
-            if (/jsonScalar/i.test(targetColType)) {
-                const encoded = JSON.stringify(op.value);
-                const cur = sheet.content[rowIndex] ? sheet.content[rowIndex][colIdx] : undefined;
-                if (sameValue(cur, encoded)) continue;
-                resolved.push({ kind: 'cell', key: found.key, sheet, header, layout: L, rowIndex, colIdx, colZh, value: encoded, newRowArr, newRowObj });
-                continue;
-            }
-            if (op.jsonCell) {
+            // VWD：一次算出该单元格的最终值。值没变但说明变了 → 改写成“只写内部元数据
+            // 列”（值列保持原样）；两者都变 → 元数据列挂到值单元格上，由执行阶段的同一次
+            // updateRow 提交。说明没变时行为与原来完全一致。
+            let cellValue;
+            if (/jsonScalar|jsonPair/i.test(targetColType)) {
+                cellValue = encodeJsonScalar(op.value, targetColType);
+            } else if (op.jsonCell) {
                 // 对象列：整对象 JSON 序列化后写入（脚本对 系统._管理考核 这类嵌套状态整体读写）
-                const jNew = JSON.stringify(op.value === undefined || op.value === null ? {} : op.value);
-                const cur = sheet.content[rowIndex] ? sheet.content[rowIndex][colIdx] : undefined;
-                if (sameValue(cur, jNew)) continue;
-                resolved.push({ kind: 'cell', key: found.key, sheet, header, layout: L, rowIndex, colIdx, colZh, value: jNew, newRowArr, newRowObj });
+                if (targetColType === 'jsonObjectOptional') {
+                    if (op.value === undefined) cellValue = '';
+                    else if (validJsonContainer(op.value, Array.isArray(targetColDef) ? targetColDef[7] : targetColDef.jsonKind)) {
+                        try { cellValue = JSON.stringify(op.value); } catch (e) { markWriteFailure('可空 JSON 容器必须是可序列化对象、数组、null 或缺失值', e); continue; }
+                    } else { markWriteFailure('可空 JSON 容器只接受对象、数组、null 或缺失值'); continue; }
+                } else {
+                    cellValue = JSON.stringify(op.value === undefined || op.value === null ? {} : op.value);
+                }
+            } else {
+                cellValue = op.value;
+            }
+            const curCell = newRowArr ? undefined : (sheet.content[rowIndex] ? sheet.content[rowIndex][colIdx] : undefined);
+            if (!newRowArr && sameValue(curCell, cellValue)) {
+                if (!op.vwdMetaCol) continue;
+                const metaIdx = header.indexOf(op.vwdMetaCol);
+                if (metaIdx === -1) {
+                    dbgWarn(' 表「' + L.table + '」缺少内部说明元数据列「' + op.vwdMetaCol + '」，动态说明写入已跳过（旧模板/旧聊天）。');
+                    continue;
+                }
+                if (sameValue(sheet.content[rowIndex] ? sheet.content[rowIndex][metaIdx] : undefined, op.vwdMetaValue)) continue;
+                resolved.push({
+                    kind: 'cell', key: found.key, sheet, header, layout: L, rowIndex,
+                    colIdx: metaIdx, colZh: op.vwdMetaCol, value: op.vwdMetaValue, vwdMeta: true,
+                });
                 continue;
             }
-            if (!newRowArr) {
-                const cur = sheet.content[rowIndex] ? sheet.content[rowIndex][colIdx] : undefined;
-                if (sameValue(cur, op.value)) continue;
+            const cell = { kind: 'cell', key: found.key, sheet, header, layout: L, rowIndex, colIdx, colZh, value: cellValue, newRowArr, newRowObj };
+            if (op.vwdMetaCol && !newRowArr) {
+                const metaIdx = header.indexOf(op.vwdMetaCol);
+                if (metaIdx === -1) dbgWarn(' 表「' + L.table + '」缺少内部说明元数据列「' + op.vwdMetaCol + '」，动态说明写入已跳过（旧模板/旧聊天）。');
+                else { cell.vwdMetaCol = op.vwdMetaCol; cell.vwdMetaValue = op.vwdMetaValue; cell.vwdMeta = true; }
             }
-            resolved.push({ kind: 'cell', key: found.key, sheet, header, layout: L, rowIndex, colIdx, colZh, value: op.value, newRowArr, newRowObj });
+            cell.pairType = op.pairType || '';
+            resolved.push(cell);
         }
         // 把合并后的新行转换成单个 resolved 条目（批量 SQL 一条 INSERT / 回退路径一次 insertRow）
         for (const nr of newRows.values()) {
@@ -12526,7 +14354,12 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
             for (const c of (nr.layout.cols || [])) {
                 const colZh = Array.isArray(c) ? c[0] : c.zh;
                 const colType = Array.isArray(c) ? c[1] : c.type;
-                if (!colZh || Object.prototype.hasOwnProperty.call(nr.cells, colZh) || !/object/i.test(String(colType || ''))) continue;
+                if (!colZh || Object.prototype.hasOwnProperty.call(nr.cells, colZh)) continue;
+                if (colType === 'jsonObjectOptional') {
+                    nr.cells[colZh] = ''; // 未提供的可缺失字段不能复制模板中另一条记录的初始值
+                    continue;
+                }
+                if (!/object/i.test(String(colType || ''))) continue;
                 let fallback = Array.isArray(c) ? c[2] : c.fallback;
                 if (typeof fallback !== 'string' || !/^\s*[\[{]/.test(fallback)) fallback = '{}';
                 nr.cells[colZh] = fallback;
@@ -12543,11 +14376,136 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
             });
             resolved.push({ kind: 'cell', key: nr.table, sheet: null, header: nr.header, layout: nr.layout, rowIndex: -1, colIdx: -1, colZh: '', value: undefined, newRowArr: arr, newRowObj: obj });
         }
+        // SP 没有物理外键。只传播本次明确删除的父行，不能因省略整组或发现历史
+        // 孤儿就清表。完整祖先键定位后代，同名条目不会串到其他父记录。
+        const childrenByParent = new Map(), childIndexes = new Map();
+        for (const child of entries) {
+            if (!['nestedRows', 'nestedArray'].includes(child.kind) || !child.parentTable) continue;
+            const list = childrenByParent.get(child.parentTable) || [];
+            list.push(child); childrenByParent.set(child.parentTable, list);
+        }
+        const deletions = resolved.filter(r => r.kind === 'row-delete');
+        const deletionKeys = new Set(deletions.map(r => JSON.stringify([r.key, r.rowIndex])));
+        for (let qi = 0; qi < deletions.length; qi++) {
+            const parent = deletions[qi], parentCols = [...(parent.layout.ancestorKeyCols || []), parent.layout.keyCol];
+            const pi = parentCols.map(col => parent.header.indexOf(col));
+            if (pi.some(i => i < 0) || !parent.sheet.content[parent.rowIndex]) continue;
+            const tuple = JSON.stringify(pi.map(i => String(parent.sheet.content[parent.rowIndex][i])));
+            for (const child of childrenByParent.get(parent.layout.table) || []) {
+                if (!childIndexes.has(child)) {
+                    const found = sheetOf(child.table), cols = child.ancestorKeyCols?.length ? child.ancestorKeyCols : [child.parentKeyCol];
+                    const header = found?.sheet?.content?.[0] || [], indices = cols.map(col => header.indexOf(col));
+                    const rows = new Map();
+                    if (found && cols.length === parentCols.length && indices.every(i => i >= 0)) {
+                        for (let ri = 1; ri < found.sheet.content.length; ri++) {
+                            const row = found.sheet.content[ri]; if (!row) continue;
+                            const key = JSON.stringify(indices.map(i => String(row[i]))), list = rows.get(key) || [];
+                            list.push(ri); rows.set(key, list);
+                        }
+                    }
+                    childIndexes.set(child, { found, header, rows });
+                }
+                const { found, header, rows } = childIndexes.get(child);
+                for (const rowIndex of rows.get(tuple) || []) {
+                    const key = JSON.stringify([found.key, rowIndex]);
+                    if (deletionKeys.has(key)) continue;
+                    deletionKeys.add(key);
+                    const op = { kind: 'row-delete', key: found.key, sheet: found.sheet, header, layout: child, rowIndex };
+                    resolved.push(op); deletions.push(op);
+                }
+            }
+        }
         if (resolved.length === 0 && directOps.length === 0) return 0;
+
+        /* ---------------- 写库边界编码（值语义 → 物理单元格） ----------------
+         * 宿主单元格只接受字符串/数字：SP SyncBridge 对其它类型调用 .replace 会直接
+         * 抛错（SQLite hydrate 报 val.replace is not a function 并回退 native）。
+         * 旧式 pair 叶子的第二项是说明，不是数据；值列必须只拿到“当前值”。
+         * 这里按 layout 明确登记的列类型编码，不按“任意二元素数组”猜测：
+         *  - pair / jsonPairOptional：取第一项作为当前值（缺失回退列声明默认值）；
+         *  - 其余列：数组/对象序列化为 JSON 文本，字符串/数字/布尔原样保留。
+         */
+        const boundaryEncode = (value, pairType, colType, fallback) => {
+            // 数字/布尔 pair 的读回已经是标量；SQLite 物理单元格又可能返回 "0"/"1"。
+            // 对登记的布尔 pair 同样先编码，避免 false 与 "0" 被重复判成变化。
+            if (pairType && colType === 'boolean' && typeof value === 'boolean') return value ? 1 : 0;
+            // 声明为 pair 的列：布局类型可能是 number/boolean（该列被映射为普通标量），
+            // 但值仍是 [当前值, 说明]。此时只取当前值，并按该列真实的物理类型编码
+            // （jsonPairOptional 走 JSON 标量，数字/布尔/文本按物理列类型处理）。
+            if (pairType && Array.isArray(value) && value.length === 2 && typeof value[1] === 'string') {
+                // JSON 可空标量必须先处理 null/缺失，不能套用普通列默认值。
+                if (colType === 'jsonPairOptional') return encodeJsonScalar(value, colType);
+                const current = value[0] === undefined || value[0] === null
+                    ? (fallback === undefined ? '' : fallback) : value[0];
+                // SP native updateRow/insertRow 直接保存传入值，不会替我们归一化布尔值。
+                if (colType === 'boolean' && typeof current === 'boolean') return current ? 1 : 0;
+                if (colType === 'number' || colType === 'boolean') return current;
+                return String(current);
+            }
+            if (Array.isArray(value) || (value !== null && typeof value === 'object')) {
+                try { const encoded = JSON.stringify(value); return encoded === undefined ? '' : encoded; } catch (e) { return String(value); }
+            }
+            return value;
+        };
+        const colDefOf = (layout, col) => {
+            if (!layout || !Array.isArray(layout.cols) || col === undefined || col === null) return null;
+            return layout.cols.find(c => c && c[0] === col) || null;
+        };
+        // 一次性编码所有待写单元格：同一次 updateRow、insertRow、updateCell 与
+        // importTableAsJson 都从这里取值，避免某条路径漏编码又把数组交给宿主。
+        for (const r of resolved) {
+            if (!r || r.kind === 'row-delete') continue;
+            if (r.kind === 'array' || r.kind === 'nested-array') {
+                // 数组元素已有自己的 JSON 标量编码（encodeArrayItem）；这里只在值列被
+                // 声明为 pair 列时取出当前值，其余类型保持原样，避免重复编码。
+                const vc = r.layout && r.layout.valueCol;
+                const vcDef = colDefOf(r.layout, vc);
+                const vcType = vcDef ? String(vcDef[1] || '') : '';
+                const vcPair = pairColumnType(vcDef);
+                if (vcPair) r.arr = (Array.isArray(r.arr) ? r.arr : []).map(v => boundaryEncode(v, vcPair, vcType, vcDef ? vcDef[2] : undefined));
+                continue;
+            }
+            if (r.newRowArr) {
+                for (let ci = 1; ci < r.newRowArr.length; ci++) {
+                    const col = r.header ? r.header[ci] : undefined;
+                    const def = colDefOf(r.layout, col);
+                    const type = def ? String(def[1] || '') : '';
+                    // 新行的单元格已由 newRows.cells 按列类型编码过；这里只处理
+                    // 布局声明为 pair 的列（其值是 [当前值, 说明] 叶子）。
+                    const pair = pairColumnType(def);
+                    if (!pair) continue;
+                    // newRows 合并时 arr 已转为字符串，原始 pair 仍保留在 obj。
+                    // 必须在这里使用原始值，不能把“乙,名称”当成已经编码好的文本。
+                    const raw = r.newRowObj && Object.prototype.hasOwnProperty.call(r.newRowObj, col)
+                        ? r.newRowObj[col] : r.newRowArr[ci];
+                    const encoded = boundaryEncode(raw, pair, type, def ? def[2] : undefined);
+                    r.newRowArr[ci] = encoded;
+                    if (r.newRowObj && col !== undefined) r.newRowObj[col] = encoded;
+                }
+                continue;
+            }
+            const cellDef = colDefOf(r.layout, r.colZh);
+            const cellType = cellDef ? String(cellDef[1] || '') : '';
+            r.value = boundaryEncode(r.value, r.pairType || pairColumnType(cellDef), cellType, cellDef ? cellDef[2] : undefined);
+        }
+
+        // pair 的旧比较发生在取当前值之前，导致 [值, 说明] 与标量单元格永远不同。
+        // 编码后再剔除无变化的已有单元格；新行和动态说明的原子写入仍必须保留。
+        let kept = 0;
+        for (const r of resolved) {
+            const pairCell = r.kind === 'cell' && !r.newRowArr && !r.vwdMetaCol
+                && (r.pairType || pairColumnType(colDefOf(r.layout, r.colZh)));
+            const row = pairCell && r.sheet && r.sheet.content && r.sheet.content[r.rowIndex];
+            if (!row || !sameValue(row[r.colIdx], r.value)) resolved[kept++] = r;
+        }
+        resolved.length = kept;
+
         // 多行删除时，先删的行会让后续行索引前移：按行索引降序执行删除，
         // 避免整组替换行表（如切换开场分支）时误删其他行。
         resolved.sort((a, b) => {
             if (a.kind === 'row-delete' && b.kind === 'row-delete') return (b.rowIndex || 0) - (a.rowIndex || 0);
+            if (a.kind === 'row-delete') return 1;
+            if (b.kind === 'row-delete') return -1;
             return 0;
         });
 
@@ -12605,6 +14563,15 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
             for (let i = targetRows.length - 1; i >= r.arr.length; i--) deletes.push({ rowIndex: targetRows[i].rowIndex });
             arrayPlans.push({ r, updates, deletes, appends });
             if (!expectedArraySheets.has(r.key)) expectedArraySheets.set(r.key, JSON.stringify(r.sheet.content));
+        }
+        // 父行删除与同张子数组表的其他更新共用计划，避免数组先删行后级联仍用旧行号。
+        for (const r of deletions) {
+            if (r.layout.kind !== 'nestedArray') continue;
+            let plan = arrayPlans.find(p => p.r.key === r.key);
+            if (!plan) { plan = { r, updates: [], deletes: [], appends: [] }; arrayPlans.push(plan); }
+            if (!plan.deletes.some(op => op.rowIndex === r.rowIndex)) plan.deletes.push({ rowIndex: r.rowIndex });
+            if (!expectedArraySheets.has(r.key)) expectedArraySheets.set(r.key, JSON.stringify(r.sheet.content));
+            r.arrayDeletion = true;
         }
         const arrayOperationCount = arrayPlans.reduce((n, p) => n + p.updates.length + p.deletes.length + p.appends.length, 0);
         const arrayResultFailed = (value) => value === false || value === -1 || value === null || value === undefined;
@@ -12695,6 +14662,7 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
             const L = r.layout;
             try {
                 if (r.kind === 'row-delete') {
+                    if (r.arrayDeletion) continue;
                     try {
                         const ok = await Promise.resolve(api.deleteRow(L.table, r.rowIndex));
                         if (!ok) markWriteFailure('deleteRow(' + L.table + ')');
@@ -12710,15 +14678,11 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                     if (persistedTables && typeof persistedTables === 'object') {
                         const pSheet2 = Object.values(persistedTables).find(s => s && s.name === L.table);
                         if (pSheet2 && Array.isArray(pSheet2.content) && pSheet2.content.length > 1) {
-                            const ki2 = pSheet2.content[0] ? pSheet2.content[0].indexOf(L.keyCol) : -1;
-                            let dupKey = false;
-                            if (ki2 >= 0) {
-                                const want = String(r.newRowObj[L.keyCol] == null ? '' : r.newRowObj[L.keyCol]);
-                                for (let ri2 = 1; ri2 < pSheet2.content.length; ri2++) {
-                                    const row2 = pSheet2.content[ri2];
-                                    if (Array.isArray(row2) && String(row2[ki2] == null ? '' : row2[ki2]) === want) { dupKey = true; break; }
-                                }
-                            }
+                            const ancestorCols = L.kind === 'nestedRows'
+                                ? (L.ancestorKeyCols && L.ancestorKeyCols.length ? L.ancestorKeyCols : [L.parentKeyCol]) : [];
+                            const dupKey = L.kind === 'nestedRows'
+                                ? findRelationRowByAncestors(pSheet2, L, ancestorCols.map(col => r.newRowObj[col]), r.newRowObj[L.keyCol]) >= 1
+                                : findRowByColumn(pSheet2, L.keyCol, r.newRowObj[L.keyCol]) >= 1;
                             if (dupKey) {
                                 dbg(' 行表「' + L.table + '」持久化已有键「' + r.newRowObj[L.keyCol] + '」而运行时空（回放中），跳过 INSERT 稍后重试。');
                                 statWriteHadFailure = true;
@@ -12752,16 +14716,40 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                     const sameRow = [];
                     if (updateRowUsable) for (const x of group) if (x !== r && !consumedCellUpdates.has(x)) sameRow.push(x);
                     let ok = false;
+                    // VWD：值和说明必须一次提交。updateRow 不可用时整笔拒绝，绝不先写值
+                    // 再单独写说明（否则会出现“新值 + 旧说明”）。
+                    const vwdCols = [r.vwdMetaCol, ...sameRow.map(x => x.vwdMetaCol)].filter(Boolean);
+                    const needsUpdateRow = !!r.vwdMeta;
+                    if (needsUpdateRow && !updateRowUsable) {
+                        markWriteFailure('动态说明需要 updateRow 才能与值一起提交（表「' + L.table + '」）');
+                        continue;
+                    }
                     if (sameRow.length > 0 && updateRowUsable) {
                         const payload = { [r.colZh]: r.value };
                         for (const x of sameRow) payload[x.colZh] = x.value;
+                        for (const col of vwdCols) payload[col] = r.vwdMetaCol === col ? r.vwdMetaValue : (sameRow.find(x => x.vwdMetaCol === col) || {}).vwdMetaValue;
                         try {
                             ok = !!(await Promise.resolve(api.updateRow(L.table, r.rowIndex, payload)));
                         } catch (e) { ok = false; }
                         if (ok) for (const x of sameRow) consumedCellUpdates.add(x);
                         else updateRowUsable = false;
+                    } else if (r.vwdMeta) {
+                        // 只改说明：一次 updateRow 同时带上元数据列与当前值列，保持与
+                        // “值和说明一起改”相同的提交形状。
+                        const payload = {};
+                        if (r.vwdValueCol) payload[r.vwdValueCol] = r.vwdValue;
+                        payload[r.colZh] = r.value;
+                        try {
+                            ok = !!(await Promise.resolve(api.updateRow(L.table, r.rowIndex, payload)));
+                        } catch (e) { ok = false; }
+                        if (ok) consumedCellUpdates.add(r);
+                        else updateRowUsable = false;
                     }
                     if (!ok) {
+                        if (needsUpdateRow) {
+                            markWriteFailure('动态说明与值未能原子提交（表「' + L.table + '」）');
+                            continue;
+                        }
                         ok = !!(await Promise.resolve(api.updateCell(L.table, r.rowIndex, r.colZh, r.value)));
                     }
                     if (!ok) {
@@ -12935,7 +14923,17 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
 (function (root) {
     'use strict';
 
-    const VERSION = '0.3.18';
+    const VERSION = '0.4.0';
+
+    /* VWD 动态说明实验开关（内部）。
+     * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
+     * 说明拒绝策略，结构、DDL、note 与旧布局行为保持交接前的样子。
+     * 只有显式打开（测试或本地实验）才登记该能力；这不是面向用户的设置，也不承诺
+     * “接上宿主接口即可启用”——完整的说明同步协议尚未接入，见 2026-09-15 返工结果。
+     */
+    let vwdExperimental = false;
+    function setVwdExperimental(on) { vwdExperimental = !!on; }
+    function isVwdExperimental() { return vwdExperimental; }
 
     let sharedTableCodec = null;
     function getTableCodecFactory() {
@@ -12959,6 +14957,11 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         if (typeof require === 'function') return require('./runtime-session.js');
         throw new Error('运行会话模块未加载，请使用构建后的 index.js');
     }
+    function getRuntimeWindowsFactory() {
+        if (typeof root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__ === 'function') return root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__;
+        if (typeof require === 'function') return require('./runtime-windows.js');
+        throw new Error('运行窗口模块未加载，请使用构建后的 index.js');
+    }
     function getStAdapterFactory() {
         if (typeof root.__MVU2SHUJUKU_ST_ADAPTER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_ST_ADAPTER_FACTORY__;
         if (typeof require === 'function') return require('./st-adapter.js');
@@ -12969,14 +14972,26 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         if (typeof require === 'function') return require('./settings-view.js');
         throw new Error('设置视图模块未加载，请使用构建后的 index.js');
     }
+    function getResultViewFactory() {
+        if (typeof root.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__ === 'function') return root.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__;
+        if (typeof require === 'function') return require('./result-view.js');
+        throw new Error('转换结果视图未加载，请使用构建后的 index.js');
+    }
     function getSchemaLayoutFactory() {
         if (typeof root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ === 'function') return root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__;
         if (typeof require === 'function') return require('./schema-layout.js');
         throw new Error('结构推导模块未加载，请使用构建后的 index.js');
     }
+    function getStatusUsageFactory() {
+        if (typeof root.__MVU2SHUJUKU_STATUS_USAGE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_STATUS_USAGE_FACTORY__;
+        if (typeof require === 'function') return require('./status-usage.js');
+        throw new Error('前端字段扫描模块未加载，请使用构建后的 index.js');
+    }
     function getSchemaLayout() {
         if (!sharedSchemaLayout) sharedSchemaLayout = getSchemaLayoutFactory()({
             getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf,
+            maskJsStringsAndComments, createStatusUsage: getStatusUsageFactory(), isPromptVisibleColumn,
+            vwdExperimental: isVwdExperimental,
         });
         return sharedSchemaLayout;
     }
@@ -13024,6 +15039,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
     function getTableWriter() {
         if (!sharedTableWriter) sharedTableWriter = getTableWriterFactory()({
             parseJson: safeParseJson, debugOn: mvu2shujukuDebugOn, debug: dbg, warn: dbgWarn,
+            vwdNoteSyncSupported: canWriteVwdDescriptions,
             readCachedTemplate: () => {
                 const holder = typeof window !== 'undefined' ? window : root;
                 return holder && holder.__mvu2shujukuTemplateCache;
@@ -13523,6 +15539,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
     function yamlExpandTemplateKeys(...args) { return getSchemaLayout().yamlExpandTemplateKeys(...args); }
     function expandYamlTemplateFieldKey(...args) { return getSchemaLayout().expandYamlTemplateFieldKey(...args); }
     function protectYamlTemplateScalarValues(...args) { return getSchemaLayout().protectYamlTemplateScalarValues(...args); }
+    function prepareMvuRuleYaml(...args) { return getSchemaLayout().prepareMvuRuleYaml(...args); }
     function yamlCollectCheckRanges(...args) { return getSchemaLayout().yamlCollectCheckRanges(...args); }
     function collectRulesFromYaml(...args) { return getSchemaLayout().collectRulesFromYaml(...args); }
     function yamlParseRange(...args) { return getSchemaLayout().yamlParseRange(...args); }
@@ -13620,6 +15637,40 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         return String(v == null ? '' : v).replace(/'/g, "''");
     }
 
+    function jsonPathChecksSql(column) {
+        if (!Array.isArray(column.jsonPathChecks) || !column.jsonPathChecks.length) return '';
+        let initial;
+        try { initial = JSON.parse(column.value); } catch (_) {}
+        const initialValues = Array.isArray(column.initialJsonValues) ? column.initialJsonValues : [initial];
+        const literal = v => typeof v === 'number' ? String(v) : typeof v === 'boolean' ? (v ? '1' : '0') : `'${sqlQuote(v)}'`;
+        const checks = [];
+        for (const check of column.jsonPathChecks || []) {
+            const path = '$' + check.path.map(key => typeof key === 'number' && Number.isInteger(key) && key >= 0
+                ? '[' + key + ']' : '.' + JSON.stringify(String(key))).join('');
+            const value = `json_extract(${column.ident}, '${sqlQuote(path)}')`;
+            const type = `json_type(${column.ident}, '${sqlQuote(path)}')`;
+            const fallbacks = [...new Set(initialValues.map(initial => {
+                let value = initial;
+                for (const key of check.path) value = value == null ? undefined : value[key];
+                return value;
+            }).filter(value => value !== undefined && value !== null && ['string', 'number', 'boolean'].includes(typeof value)))];
+            const wrap = expr => ` CHECK(CASE WHEN ${column.ident} = '' OR NOT json_valid(${column.ident}) THEN 1 WHEN ${type} IS NULL OR ${type} = 'null' THEN 1 ELSE (${expr}) END)`;
+            if (check.range && check.range.length === 2 && check.range.every(Number.isFinite)) {
+                let expr = `${value} BETWEEN ${check.range[0]} AND ${check.range[1]}`;
+                // JSON 提取结果没有数值列亲和性，初值 "5" 仍是字符串；沿用原初值放行契约。
+                const rangeFallbacks = Array.isArray(column.initialJsonValues)
+                    ? fallbacks.filter(v => typeof v !== 'number' || v < check.range[0] || v > check.range[1]) : fallbacks;
+                for (const fallback of rangeFallbacks) expr += ` OR ${value} = ${literal(fallback)}`;
+                checks.push(wrap(expr));
+            }
+            if (Array.isArray(check.enum) && check.enum.length && check.enum.length <= 8) {
+                const values = [...new Set([...check.enum, ...fallbacks])];
+                checks.push(wrap(`${value} IN (${values.map(literal).join(', ')})`));
+            }
+        }
+        return checks.join('');
+    }
+
     function buildDdl(group, opts = {}) {
         // 用户可关掉 DDL 里的 CHECK（数值范围/枚举/json_valid），只保留列类型与默认值。
         const includeCheck = opts.includeCheck !== false;
@@ -13649,7 +15700,31 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                     }
                 }
             }
-            if (c.type === 'INTEGER' || c.type === 'REAL') {
+            if ((c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional')) {
+                const encodedDefault = dv === undefined ? '' : JSON.stringify(dv);
+                def += ` NOT NULL DEFAULT '${sqlQuote(encodedDefault)}'`;
+                if (includeCheck) {
+                    def += ` CHECK(${c.ident} = '' OR (json_valid(${c.ident}) AND json_type(${c.ident}) IN ('null', 'text', 'integer', 'real', 'true', 'false')))`;
+                    const valueExpr = `json_extract(${c.ident}, '$')`;
+                    const emptyExpr = `${c.ident} = '' OR json_type(${c.ident}) = 'null'`;
+                    if (range) {
+                        const allowed = extras.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`);
+                        def += ` CHECK(${emptyExpr} OR ${valueExpr} BETWEEN ${range[0]} AND ${range[1]}${allowed.length ? ` OR ${valueExpr} IN (${allowed.join(', ')})` : ''})`;
+                    }
+                    if (c.enum && c.enum.length <= 8) {
+                        const allowed = [...new Set([...c.enum, ...(dv === undefined || dv === null ? [] : [dv]), ...extras])];
+                        if (allowed.length) def += ` CHECK(${emptyExpr} OR ${valueExpr} IN (${allowed.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`).join(', ')}))`;
+                    }
+                }
+            } else if (c.logicalType === 'jsonObjectOptional') {
+                const encodedDefault = c.jsonDefaultMissing === true || dv === undefined ? '' : (typeof dv === 'string' ? dv : JSON.stringify(dv));
+                def += ` NOT NULL DEFAULT '${sqlQuote(encodedDefault)}'`;
+                if (includeCheck) {
+                    const kinds = c.jsonKind === 'array' ? "'array'" : "'object'";
+                    def += ` CHECK(${c.ident} = '' OR (json_valid(${c.ident}) AND json_type(${c.ident}) IN ('null', ${kinds})))`;
+                    def += jsonPathChecksSql(c);
+                }
+            } else if (c.type === 'INTEGER' || c.type === 'REAL') {
                 let defaultExpr = 0;
                 if (typeof dv === 'boolean') {
                     defaultExpr = dv ? 1 : 0;
@@ -13718,34 +15793,86 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             return '数组表：每行一个数组元素，行号即数组顺序；按行新增、移除或更新元素。';
         }
         if (group.kind === 'nestedRows') {
-            const ancestors = (group.ancestorKeyCols && group.ancestorKeyCols.length)
-                ? group.ancestorKeyCols : [{ col: group.parentKeyCol, parentTable: group.parentTable, parentKeyCol: group.keyCol }];
-            if (ancestors.length === 1) {
-                const a = ancestors[0];
-                const entity = a.entity || group.relationEntity || String(a.col || '').replace(/_键名$/, '') || '关联记录';
-                return `关系表：每行记录「${a.parentTable || group.parentTable}」中某条${entity}记录的一项${group.childKey || group.name}数据；「${a.col}」取自「${a.parentTable || group.parentTable}.${a.parentKeyCol || group.keyCol}」，并与「${group.keyCol}」共同定位该记录。`;
-            }
-            const keys = [...ancestors.map(a => `「${a.col}」`), `「${group.keyCol}」`].join('、');
-            return `关系表：每行记录一项${group.childKey || group.name}数据；${keys}组成完整关系键，共同定位所属记录。`;
+            return `每行记录一项${group.childKey || group.name}数据。`;
         }
         return `行表，以「${group.keyCol}」为唯一标识；同名记录只存在一行，已有记录按需更新，新记录按需新增。`;
     }
 
-    function buildNote(group) {
+    function isRelationshipKeyColumn(group, column) {
+        return column && (column.zh === group.keyCol || column.zh === group.parentKeyCol
+            || (group.ancestorKeyCols || []).some(a => a && a.col === column.zh));
+    }
+    function isDollarPrivateColumn(group, column) {
+        if (!column || isRelationshipKeyColumn(group, column)) return false;
+        return String(group.name || '').startsWith('$')
+            || String(column.zh || '').startsWith('$')
+            || (Array.isArray(column.path) && column.path.some(part => String(part).startsWith('$')));
+    }
+    function isUnderscoreReadonlyColumn(group, column) {
+        return column && (String(column.zh || '').startsWith('_')
+            || (!isRelationshipKeyColumn(group, column) && Array.isArray(column.path)
+                && column.path.some(part => String(part).startsWith('_'))));
+    }
+    function isAiPromptColumn(group, column) {
+        return column && column.zh !== '_扩展数据'
+            && !isUnderscoreReadonlyColumn(group, column)
+            && !isDollarPrivateColumn(group, column);
+    }
+
+    // 模型确实能看到该列说明（= 会进 buildNote 的【字段说明与规则】）。VWD 只登记
+    // 这些列：私有/只读列不进提示词，也就不该为它保存“当前说明”。
+    // 与 buildNote 里 aiCols 的过滤条件保持同一套判定。
+    function isPromptVisibleColumn(group, column) {
+        if (!isAiPromptColumn(group, column)) return false;
+        if (group && group.scalarType === 'number') return false;
+        if (group && group.kind === 'json') return false;
+        return true;
+    }
+
+    function aiJsonColumns(group) {
+        if (group.scalarType === 'number') return [];
+        if (group.kind === 'json') {
+            return (group.wildcardRules || []).length || (group.groupChecks || []).length
+                ? (group.columns || []).filter(c => c.zh === '内容') : [];
+        }
+        return (group.columns || []).filter(c => isAiPromptColumn(group, c)
+            && !isRelationshipKeyColumn(group, c) && (c.isObject || c.logicalType === 'jsonObjectOptional'));
+    }
+
+    function jsonUpdateGuide(group, mode) {
+        const cols = aiJsonColumns(group);
+        if (!cols.length) return '';
+        const label = group.kind === 'json' ? '内容列' : cols.map(c => `「${c.zh}」`).join('、');
+        if (mode === 'native') return `${label}以 JSON 存储；更新单元格时提供完整的新 JSON，保留未改动的字段和元素。`;
+        return `${label}以 JSON 存储。SQL 模式优先用 json_set(列, '$."键"', 新值)、json_replace 或 json_remove 局部更新，仅操作规则允许的路径；对象/数组/布尔/null 新值用 json('...')，字符串用 SQL 字符串。数组从 0 索引，末尾追加用 [#]，中间插入/移动需重建受影响数组。空单元格或 JSON null 容器先按规则初始化，保留未改字段；json_patch 的 null 会删键，不作路径更新替代。`
+            + (mode === 'both' ? ' native 模式仍提供完整的新单元格 JSON，保留未改内容。' : '');
+    }
+
+    function buildNote(group, opts = {}) {
+        const mode = opts.mode || 'both';
         const L = [];
         if (group.scalarType === 'number') {
+            const scriptReadonly = /^[_$]/.test(String(group.name || ''));
             const rules = [...(group.groupChecks || []), ...(group.wildcardRules || []).flatMap(r => r.checks || [])];
             L.push('数值表（row_id=1，全表固定一行）：「内容」直接保存一个数字，可含小数；禁止写入对象、数组、布尔值或带引号的 JSON 字符串。禁止新增/删除行。');
             if (rules.length) {
                 L.push('【更新规则】', ...rules.map(rule => '- ' + sanitizeCheckRule(rule, { group })).filter(s => s !== '- '));
-                L.push('只在本轮发生相应变化时更新数值；未发生变化则保持原值。');
-            } else L.push('本数值由脚本/前端维护，AI 不应直接修改本表。');
+                if (!scriptReadonly) L.push('只在本轮发生相应变化时更新数值；未发生变化则保持原值。');
+            } else if (scriptReadonly) L.push('本数值由脚本/前端维护，AI 不应直接修改本表。');
+            else L.push('根据正文、设定与本表规则，数值发生明确变化时按需更新；未发生变化则保持原值。');
+            if (scriptReadonly && rules.length) L.push('本数值由脚本/前端维护，AI 不应直接修改本表。');
             return L.join('\n');
         }
-        const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+        const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => isAiPromptColumn(group, c));
+        if (group.kind === 'singleton' && group.valueCol && aiCols.length) {
+            L.push(`「${group.valueCol}」直接保存整个「${group.name}」变量；空单元格表示该变量不存在，JSON null 表示空值，{} / [] 表示相应空容器。状态切换也只更新此单元格，不能删除身份行。JSON 路径从内容内部开始，不再重复外层组名；内部以 _ 开头的字段由脚本维护，不主动修改。`);
+        }
+        if (group.scalarValueCol && group.containerSchema && aiCols.length) {
+            L.push(`「${group.scalarValueCol}」保存当前键名对应的完整记录；JSON null 表示该记录为空值，{} / [] 表示空容器，删除行表示该键不存在（空单元格读回也视为缺失）。JSON 路径从记录内部开始，不重复键名或关联列。修改内部字段须保留其他字段；内部以 _ 开头的字段由脚本维护。`);
+        }
         // 所有下划线前缀列都是只读状态；内部溢出列 _扩展数据虽不进列定义/写入示例，
         // 但 AI 仍能在真实表头/DDL 里看到，因此同样要触发现有只读提示。
-        const userReadonlyCols = (group.columns || []).filter(c => String(c.zh).startsWith('_'));
+        const userReadonlyCols = (group.columns || []).filter(c => isUnderscoreReadonlyColumn(group, c));
         const hasUserReadonly = userReadonlyCols.length > 0;
         const allReadonly = hasUserReadonly && aiCols.length === 0;
         if (group.kind === 'json') {
@@ -13753,8 +15880,8 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             const gc = group.groupChecks || [];
             if (wr.length || gc.length) {
                 // 规则声明了 AI 可写路径（如 户.<门牌>.妻.好感值）：JSON 表不再一刀切只读，
-                // 而是列出可写路径与约束，AI 读取现有 JSON 仅改对应路径后整体写回「内容」列。
-                L.push('整组 JSON 存储表（row_id=1，全表固定一行）：本表以 JSON 保存动态结构。AI 可更新「内容」列——读取当前 JSON，只改变【可写路径与约束】中列出的路径，其余字段保持原样，再把整个 JSON 写回；禁止新增/删除行。');
+                // 而是列出可写路径与约束；SQL 可在单元格内按路径更新。
+                L.push('整组 JSON 存储表（row_id=1，全表固定一行）：本表以 JSON 保存动态结构。AI 可更新「内容」列，只改变【可写路径与约束】中列出的路径，其余字段保持原样；禁止新增/删除行。');
                 L.push('【可写路径与约束】');
                 for (const r of wr) {
                     const parts = [];
@@ -13770,7 +15897,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 // 的路径（否则空 JSON 表永远无法初始化，如大荒 宗门表）。不做关键词检测。
                 L.push('- 只更新【可写路径与约束】中列出的路径；未列出的字段一律只读（它们仍存在于同一 JSON 中，由脚本/系统维护，AI 不得改动）。规则要求 insert/初始化/新增 的路径允许创建对应字段、对象或记录；严禁新增未声明的字段、对象或记录');
                 L.push('- 只更新本轮剧情中明确出现并被影响到的对象；其余对象的数据保持原样');
-                L.push('- 写回时必须完整保留 JSON 中其余全部字段；数值字段保持数字类型、字符串字段保持字符串类型');
+                L.push('- 更新后必须保留 JSON 中其余全部字段及其原有类型');
             } else {
                 L.push(`整组 JSON 存储表（row_id=1，全表固定一行）。本表整组数据由脚本/前端读写，AI 不应直接修改本表，也不要新增或删除行。`);
             }
@@ -13784,12 +15911,42 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 // 避免“AI 无需填表”让人以为整组数据都不存在。
                 const childNames = (group.childTables || []).map(ct => ct.tableName || (ct.key + '表'));
                 L.push(childNames.length
-                    ? `本表为容器（row_id=1 占位），数据在子表「${childNames.join('、')}」中；本表自身无 AI 可填字段，全部字段由脚本/系统维护，AI 无需填表。`
+                    ? `本表为容器（row_id=1 占位），数据保存在「${childNames.join('、')}」中；本表自身无 AI 可填字段，全部字段由脚本/系统维护，AI 无需填表。`
                     : `本表唯一记录已由开局模板初始化（row_id=1）；全部字段由脚本/系统维护，AI 无需填表。`);
             }
         } else {
             // 与插件默认模板一致：note 不重复表名（插件会在表头显示表名），直接给表类型说明
             L.push(describeGroup(group));
+        }
+        if (group.kind === 'nestedRows' || group.kind === 'nestedArray') {
+            const ancestors = (group.ancestorKeyCols && group.ancestorKeyCols.length)
+                ? group.ancestorKeyCols : [{ col: group.parentKeyCol, parentTable: group.parentTable }];
+            const fields = ancestors.filter(a => a && a.col);
+            if (fields.length) {
+                const origins = fields.map(a => a.parentTable && a.parentKeyCol
+                    ? `「${a.col}」对应「${a.parentTable}.${a.parentKeyCol}」` : `「${a.col}」用于确定所属记录`);
+                L.push(`关联字段：${origins.join('；')}。`);
+                const locator = [...new Set([...fields.map(a => a.col), ...(group.kind === 'nestedRows' ? [group.keyCol] : [])])].filter(Boolean);
+                if (group.kind === 'nestedRows') {
+                    L.push(`定位记录须同时匹配${locator.map(k => `「${k}」`).join('、')}；不得只匹配其中一个字段。`);
+                    const example = locator.map((key, i) => `「${key}」=“示例值${i + 1}”`).join('、');
+                    L.push(`定位示例（值仅为占位，须换成当前表格的实际值）：${example}。只更新或删除完整组合匹配的记录，其他来源下的同名条目保持不变。`);
+                } else {
+                    L.push(`先核对${locator.map(k => `「${k}」`).join('、')}确认所属记录，再定位要操作的数组元素。`);
+                    L.push('定位示例：不同来源各有第 2 个元素时，先确认来源，再取目标元素在本表中的行标识；不能把来源内的序号 1 直接当成本表行号。');
+                }
+            }
+            const knownParent = ancestors.some(a => a && a.parentTable);
+            if (knownParent) L.push('关联来源记录删除时，一并删除本表对应记录；来源标识值变更时，同步修改本表对应的关联字段。请在本次填表中完成这些操作。');
+        }
+        if (['array', 'pathArray', 'nestedArray'].includes(group.kind)) {
+            const nativeLocator = 'native 使用本表提示中方括号里的行号（从 0 开始），不填 SQL row_id';
+            const sqlLocator = 'SQL 使用当前数据中的 row_id，不按显示顺序推算';
+            L.push(mode === 'native' ? nativeLocator + '。' : mode === 'sqlite' ? sqlLocator + '。' : nativeLocator + '；' + sqlLocator + '。');
+        }
+        if (Array.isArray(group.childTables) && group.childTables.length) {
+            const childNames = group.childTables.map(ct => ct.tableName || (ct.key + '表')).filter(Boolean);
+            if (childNames.length) L.push(`相关数据保存在「${childNames.join('、')}」；删除本表记录时，一并删除其中对应记录；本表标识值变更时，同步修改其中对应的关联字段。请在本次填表中完成这些操作。`);
         }
         // JSON 表整组由脚本/前端管理：完全不展示列定义与约束；其余表隐藏内部列（_扩展数据）
         // 下划线开头字段 = 脚本维护的只读状态：不进填表规则（AI 仍能在数据表里看到值，
@@ -13799,12 +15956,24 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             // 注意：只声明“不列入填表字段/严禁更新”，不要声称“更新会被回滚”——
             // 转换器没有回滚机制（下划线字段只是不进填表规则，AI 若硬写 SQL 不会被回滚）。
             L.push('下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。');
+            // 展平后表头可能丢失开头的下划线，必须用实际列名说明只读范围。
+            const flattenedReadonly = userReadonlyCols.filter(c => !String(c.zh || '').startsWith('_') && !isDollarPrivateColumn(group, c));
+            if (flattenedReadonly.length) L.push(`只读列：${flattenedReadonly.map(c => `「${c.zh}」`).join('、')}；AI 只能读取、严禁更新。`);
+            for (const c of userReadonlyCols) {
+                if (c.zh !== '_扩展数据' && !isDollarPrivateColumn(group, c) && c.desc) {
+                    L.push(`只读字段「${c.zh}」说明：${String(c.desc).trim().replace(/\n/g, '\n  ')}`);
+                }
+            }
         }
         if (aiCols.length) {
-            L.push('【列定义】');
-            // 对齐默认模板：列定义只列中文名 + 标识符；字段说明与约束放【强制约束】
-            aiCols.forEach((c, i) => L.push(`- 列${i + 1}: ${c.zh} ${c.ident}`));
-            L.push('【强制约束】');
+            const rulesStart = L.length;
+            L.push('【字段说明与规则】');
+            const nullableCols = aiCols.filter(c => (c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional'));
+            if (nullableCols.length) L.push(`- ${nullableCols.map(c => c.zh).join('、')}：按 JSON 标量填值；null 表示空值，字符串保留 JSON 双引号（空字符串为 ""），空单元格表示缺失字段。`);
+            const encodedCols = aiCols.filter(c => c.logicalType === 'jsonScalar');
+            if (encodedCols.length) L.push(`- ${encodedCols.map(c => `「${c.zh}」`).join('、')}：单元格保存完整 JSON 值，遵守原字段/数组元素的类型；字符串保留 JSON 双引号（如 \"文字\"），数字、布尔、null 不加 JSON 引号，对象/数组保存完整 JSON。SQL 字符串外围的单引号只是 SQL 写法，不属于单元格内容。`);
+            const nullableContainers = aiCols.filter(c => c.logicalType === 'jsonObjectOptional');
+            if (nullableContainers.length) L.push(`- ${nullableContainers.map(c => c.zh).join('、')}：保存 JSON 对象/数组；JSON null 表示空值，空单元格表示缺失字段。`);
             if (group.kind === 'nestedRows') {
                 const entity = group.relationEntity || String(group.parentKeyCol || '').replace(/_键名$/, '') || '关联记录';
                 L.push(`- 维护本表时，同时遵循对应${entity}记录中与「${group.childKey || group.name}」相关的整体规则`);
@@ -13818,62 +15987,46 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 const checks = (c.check || []).map(rule => sanitizeCheckRule(rule, { group, column: c })).filter(Boolean);
                 return { parts, checks };
             };
-            const compactTemplateLabel = (cols) => {
-                const names = cols.map(c => String(c.zh || ''));
-                if (names.length < 2 || names.some(x => !x)) return '';
-                const chars = names.map(x => Array.from(x));
-                let prefix = 0;
-                while (chars.every(x => prefix < x.length && x[prefix] === chars[0][prefix])) prefix++;
-                let suffix = 0;
-                while (chars.every(x => suffix < x.length - prefix && x[x.length - 1 - suffix] === chars[0][chars[0].length - 1 - suffix])) suffix++;
-                const choices = chars.map(x => x.slice(prefix, x.length - suffix).join(''));
-                // 至少共享前缀或后缀，才能证明这是一组可读的模板列；
-                // 不把仅仅恰好有相同枚举/check 的无关列硬拼成 ${A|B}。
-                if ((!prefix && !suffix) || choices.some(x => !x) || new Set(choices).size !== choices.length) return '';
-                return chars[0].slice(0, prefix).join('') + '${' + choices.join('|') + '}' + (suffix ? chars[0].slice(-suffix).join('') : '');
-            };
-            // 模板键会展开为真实列以便绑定 DDL，但提示词不必复制同一套
-            // 规则。仅在同表多列的范围/枚举/格式/check 完全一致时折叠；
-            // 各列自己的 [值,描述] 仍分别展示。
-            const ruleViews = new Map(aiCols.map(c => [c, columnRuleView(c)]));
-            const sameRuleSets = new Map();
-            for (const c of aiCols) {
-                const view = ruleViews.get(c);
-                if (!view.parts.length && !view.checks.length) continue;
-                const sig = JSON.stringify([view.parts, view.checks]);
-                if (!sameRuleSets.has(sig)) sameRuleSets.set(sig, []);
-                sameRuleSets.get(sig).push(c);
-            }
-            const groupedRuleOwner = new Map();
-            for (const cols of sameRuleSets.values()) {
-                const label = compactTemplateLabel(cols);
-                if (!label) continue;
-                groupedRuleOwner.set(cols[0], { label, cols });
-                for (let i = 1; i < cols.length; i++) groupedRuleOwner.set(cols[i], null);
-            }
             const emitColumnRules = (label, items) => {
-                const rules = items.map(x => String(x == null ? '' : x).trim()).filter(Boolean);
+                const rules = [...new Set(items.map(x => String(x == null ? '' : x).trim()).filter(Boolean))];
                 if (!rules.length) return;
                 if (rules.length === 1) {
-                    L.push(`- ${label}：${rules[0]}`);
+                    L.push(`- ${label}：${rules[0].replace(/\n/g, '\n  ')}`);
                     return;
                 }
                 L.push(`- ${label}：`);
-                for (const rule of rules) L.push(`  - ${rule}`);
+                for (const rule of rules) L.push(`  - ${rule.replace(/\n/g, '\n    ')}`);
+            };
+            // 字段含义比篇幅更重要：逐列展示实际名称，不把不同字段的说明
+            // 或业务条件折叠成模板标签。只在同一字段内部去掉逐字相同的项目。
+            // VWD 字段的静态说明在这里换成唯一插槽：运行期只替换“该字段”的当前说明，
+            // 不靠 replace(旧说明, 新说明) 猜位置（两个字段说明相同也能正确归属）。
+            const vwdPlan = opts.vwdSlotPlan && typeof opts.vwdSlotPlan === 'object' ? opts.vwdSlotPlan : null;
+            const vwdByCol = new Map();
+            if (vwdPlan && Array.isArray(vwdPlan.fields)) {
+                for (const field of vwdPlan.fields) {
+                    if (field && field.col && !vwdByCol.has(String(field.col))) vwdByCol.set(String(field.col), field);
+                }
+            }
+            const slotDesc = (c, desc) => {
+                const field = vwdByCol.get(String(c.zh));
+                if (!field || !vwdPlan) return desc;
+                if (!field.noteSlot) {
+                    field.noteSlot = vwdToken(vwdPlan.tokens.length);
+                    vwdPlan.tokens.push(field.id);
+                }
+                return field.noteSlot;
             };
             for (const c of aiCols) {
-                const view = ruleViews.get(c);
-                const grouped = groupedRuleOwner.get(c);
-                // 真实字段说明（如 [值,说明] 的更新条件）；通用描述（唯一标识/键名/JSON 提示）不重复
-                let desc = c.desc ? String(c.desc).replace(/\n/g, ' ').trim() : '';
-                // 关系列的关联含义已经在表级说明中完整表达，不再作为“强制约束”重复一遍。
-                if (group.kind === 'nestedRows' && (c.zh === group.keyCol || (group.ancestorKeyCols || []).some(a => a.col === c.zh) || c.zh === group.parentKeyCol)) desc = '';
+                const view = columnRuleView(c);
+                const desc = c.desc ? String(c.desc).trim() : '';
                 const generic = desc === '唯一标识' || desc === '对象（JSON 存储，读取时还原）';
-                if (grouped) {
-                    emitColumnRules(grouped.label, [...view.parts, ...view.checks, (!generic ? desc : '')]);
-                } else if (grouped !== null) {
-                    emitColumnRules(c.zh, [...view.parts, ...view.checks, (!generic ? desc : '')]);
-                }
+                const generatedRelation = (group.ancestorKeyCols || []).some(a => c.zh === a.col
+                    && desc === `关联「${a.parentTable}.${a.parentKeyCol}」`);
+                const dynamicDescription = vwdPlan && vwdPlan.promptVersion === 1 && vwdByCol.has(String(c.zh));
+                const items = [...(dynamicDescription ? [slotDesc(c, desc)] : (!generic && !generatedRelation ? [desc] : [])), ...view.parts, ...view.checks]
+                    .map(x => (!dynamicDescription && x && vwdByCol.has(String(c.zh)) && String(x) === desc ? slotDesc(c, desc) : x));
+                emitColumnRules(c.zh, items);
             }
             // 子表/动态字典的组级规则（如 世界.动向 的“最多维持2个大事件”）：以表级约束列出
             // 注意：这些行已位于本表自己的 note 内，不再重复表名前缀（避免“道侣表：性别：…”式噪音）
@@ -13897,6 +16050,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 if (parts.length) L.push(`- ${wr.path}（${parts.join('；')}）`);
             }
             (group.reminders || []).forEach(r => L.push(`- 每次回复必须维护：${r}`));
+            if (L.length === rulesStart + 1) L.pop();
         }
         if (allReadonly && group.kind !== 'json') {
             L.push('本表全部字段均为脚本/系统维护的只读状态：AI 无需填表，仅供读取。');
@@ -13906,18 +16060,23 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             // “每次回复必须更新/replace 整个对象”这类每轮强制规则冲突。
             L.push('更新以正文和规则为依据，不得为凑表而虚构数据。');
         }
+        const jsonGuide = jsonUpdateGuide(group, mode);
+        if (jsonGuide) L.push(jsonGuide);
         return L.join('\n');
     }
 
     function buildInitNode(group) {
-        if (group.scalarType === 'number') return '开局已初始化唯一数值记录（row_id=1）；不得再次初始化或新增/删除行，后续更新遵循 note。';
+        if (group.scalarType === 'number') {
+            if (/^[_$]/.test(String(group.name || ''))) return '开局已初始化唯一数值记录（row_id=1）；不得再次初始化或新增/删除行，后续由脚本/前端维护，自动填表阶段不修改本表。';
+            return '开局已初始化唯一数值记录（row_id=1）；不得再次初始化或新增/删除行，后续根据正文、设定与 note 按需更新。';
+        }
         if (group.kind === 'json') {
             return ((group.wildcardRules || []).length || (group.groupChecks || []).length)
                 ? `开局模板已初始化整组数据（row_id=1）；自动填表阶段仅按 note 中「可写路径与约束」更新「内容」列，其余由脚本/前端维护。`
                 : `开局模板已初始化整组数据（row_id=1）；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
         }
         if (group.kind === 'singleton') {
-            const aiCols = (group.columns || []).filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+            const aiCols = (group.columns || []).filter(c => isAiPromptColumn(group, c));
             return aiCols.length
                 ? `开局模板已初始化唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。`
                 : `开局模板已初始化唯一记录（row_id=1）；全部字段由脚本/系统维护，自动填表阶段不修改本表。`;
@@ -13935,61 +16094,130 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         return '开局为空表；出现符合本表定义的新记录时，新增一行完整记录。';
     }
 
-    // SQL 示例取值：优先真实初始行值 → 其次 DDL 默认值（INTEGER 未给默认按 0，对象列按 '{}'）
-    // → 最后“列中文名示例”兜底（主要覆盖无默认值的 TEXT 列）。
+    // INSERT 延续初始行值 → 默认值的策略；没有值时按列约束选择有效的
+    // 类型示例，不把字段名占位符写进枚举/数值/JSON。标识和业务值均需按本轮替换。
     function exampleCellValue(col, rowValue) {
-        if (rowValue !== undefined && rowValue !== null && String(rowValue) !== '') {
-            const isNum = col && col.type === 'INTEGER' && typeof rowValue === 'number';
-            return isNum ? String(rowValue) : `'${sqlQuote(String(rowValue))}'`;
+        const value = rowValue === undefined ? col.value : rowValue;
+        const quote = v => `'${sqlQuote(v)}'`;
+        if (['jsonScalarOptional', 'jsonPairOptional'].includes(col.logicalType)) {
+            return quote(value === undefined ? '' : JSON.stringify(value));
         }
-        if (col) {
-            const dv = col.value === undefined || col.value === null ? '' : col.value;
-            if (col.type === 'INTEGER') {
-                const num = dv === '' ? 0 : Number(dv);
-                return String(Number.isFinite(num) ? num : 0);
-            }
-            if (String(dv) !== '') return `'${sqlQuote(String(dv))}'`;
-            if (col.isObject) {
-                const example = col.objectSchema ? JSON.stringify(schemaExample(col.objectSchema)) : (col.jsonKind === 'array' ? '[]' : '{}');
-                return `'${sqlQuote(example)}'`;
-            }
+        if (col.logicalType === 'jsonObjectOptional') {
+            return quote(value === undefined ? '' : typeof value === 'string' ? value : JSON.stringify(value));
         }
-        return col && col.zh ? `'${sqlQuote(col.zh)}示例'` : '';
+        if (col.logicalType === 'jsonScalar') {
+            try { JSON.parse(value); return quote(value); } catch (_) { return quote('null'); }
+        }
+        if (col.isObject) {
+            if (value !== undefined && value !== null && value !== '') return quote(typeof value === 'string' ? value : JSON.stringify(value));
+            return quote(JSON.stringify(col.objectSchema ? schemaExample(col.objectSchema) : col.jsonKind === 'array' ? [] : {}));
+        }
+        if (col.logicalType === 'boolean' || typeof value === 'boolean') return value === true || value === 1 || value === 'true' || value === '1' ? '1' : '0';
+        if (value !== undefined && value !== null && value !== '') {
+            return typeof value === 'number' ? String(value) : quote(value);
+        }
+        if (col.enum && col.enum.length) {
+            const selected = col.enum[0];
+            return typeof selected === 'number' ? String(selected) : quote(selected);
+        }
+        if (col.type === 'INTEGER' || col.type === 'REAL') return String(col.range ? col.range[0] : 0);
+        return quote(`${col.zh || '字段'}示例`);
     }
 
-    // UPDATE 示例取值：不能拿当前值/默认值当示例值，否则会读成“把它更新成原值”的指令
-    // （如 SET 当前时间 = '未知'，而当前时间本来就是 '未知'）。TEXT 一律用 '新值' 占位；
-    // INTEGER 给 DDL 默认数字（0 或初始值）。示例统一不带“示例值仅为格式演示”后缀，
-    // 与插件内置模板风格一致；占位语义由“SQL示例”标签与 note 的“不得虚构数据”约束兜底。
-    function exampleUpdateValue(col) {
-        if (col && col.type === 'INTEGER') {
-            const dv = col.value === undefined || col.value === null ? '' : col.value;
-            const num = dv === '' ? 0 : Number(dv);
-            return String(Number.isFinite(num) ? num : 0);
+    // 示例只演示语法，不定义业务变化。选择符合已知类型/范围/枚举的值，
+    // 不把通用“新值”写进数字、布尔或 JSON 编码列。
+    function exampleScalarValue(col, current) {
+        const allowed = value => (!col.range || (typeof value === 'number' && value >= col.range[0] && value <= col.range[1]));
+        if (Array.isArray(col.enum) && col.enum.length) {
+            const values = col.enum.filter(v => (v === null || ['string', 'number', 'boolean'].includes(typeof v)) && allowed(v));
+            const different = values.find(v => v !== current);
+            return different !== undefined ? different : values.length ? values[0] : current;
         }
-        return "'新值'";
+        if (col.logicalType === 'boolean' || typeof current === 'boolean') return !current;
+        if (col.range || col.logicalType === 'number' || col.type === 'INTEGER' || col.type === 'REAL' || typeof current === 'number') {
+            const number = Number(current);
+            const candidates = [number + 1, number - 1, ...(col.range || []), 1, 0];
+            return candidates.find(v => Number.isFinite(v) && allowed(v) && v !== current)
+                ?? candidates.find(v => Number.isFinite(v) && allowed(v)) ?? current;
+        }
+        if (current === null || current === undefined) {
+            // 可空列没有非空类型证据时，不猜测原作者希望数字还是文本。
+            if (['jsonScalarOptional', 'jsonPairOptional', 'jsonScalar'].includes(col.logicalType)) return null;
+        }
+        return '新值';
     }
 
-    // 卡内 check 规则是写给 MVU JSON Patch 机制看的，转换后需要洗掉机制性残留，
-    // 只保留业务规则，避免与数据库填表通道（DSL/SQL）打架：
-    //  1. 括号机制注释（op: delta/replace、勿用delta）整段删除
-    //  2. 纯机制句（【防崩警告】…严禁 replace/delta、严禁对整个对象使用 replace/delta）整句删除
-    //  3. “必须分N条指令更新：一条replaceA，另一条replaceB” → “A；B”（保留业务语义）
-    //  4. “如 /组/字段/子字段” 这类路径写法 → 点分路径（机制句删掉后罕见，兜底处理）
+    function exampleUpdateValue(col, group) {
+        const index = group ? group.columns.indexOf(col) + 1 : 0;
+        const raw = [...(group && group.rows || []).map(row => row[index]), col.value];
+        const candidates = col.logicalType === 'jsonScalar'
+            ? raw.map(value => { try { return JSON.parse(value); } catch (_) { return undefined; } }) : raw;
+        let current = candidates.find(value => value !== null && value !== undefined && value !== '');
+        if (current === undefined) current = candidates.find(value => value !== undefined);
+        if (current === undefined) current = col.value;
+        // jsonScalar 也能承载数组/对象元素，不用字符串示例替换它们。
+        if (col.logicalType === 'jsonScalar' && current && typeof current === 'object') return null;
+        const value = exampleScalarValue(col, current);
+        if (['jsonScalar', 'jsonScalarOptional', 'jsonPairOptional'].includes(col.logicalType)) return `'${sqlQuote(JSON.stringify(value))}'`;
+        if (typeof value === 'boolean') return value ? '1' : '0';
+        return typeof value === 'number' && Number.isFinite(value) ? String(value) : `'${sqlQuote(value)}'`;
+    }
+
+    // SQL 专用模板的示例从实际 JSON 单元格选一条已有公开路径，避免教模型
+    // 用残缺对象覆盖整格。整组 JSON 的可写范围另由规则决定，不猜示例路径。
+    function exampleUpdateAssignment(group, col) {
+        if (!aiJsonColumns(group).includes(col) || group.kind === 'json') {
+            const value = exampleUpdateValue(col, group);
+            return value === null ? null : `${col.ident} = ${value}`;
+        }
+        const index = group.columns.indexOf(col) + 1;
+        const values = [...(group.rows || []).map(row => row[index]), col.value];
+        const findLeaf = (value, path, depth = 0) => {
+            if (depth > 12) return null;
+            if (value === null || typeof value !== 'object') return path === '$' ? null : { path, value };
+            for (const key of Object.keys(value)) {
+                // 引号/反斜线等键的 SQLite 路径兼容性因引擎版本而异，示例不猜转义。
+                if (/^[_$]|["\\\x00-\x1f]/.test(key)) continue;
+                const next = Array.isArray(value) ? `${path}[${key}]` : `${path}."${key}"`;
+                const leaf = findLeaf(value[key], next, depth + 1);
+                if (leaf) return leaf;
+            }
+            return null;
+        };
+        for (const cell of values) {
+            let value;
+            try { value = typeof cell === 'string' ? JSON.parse(cell) : cell; } catch (_) { continue; }
+            if (!value || typeof value !== 'object') continue;
+            const leaf = findLeaf(value, '$');
+            if (!leaf) continue;
+            const newValue = typeof leaf.value === 'string' ? "'新值'"
+                : typeof leaf.value === 'number' && Number.isFinite(leaf.value) ? String(leaf.value)
+                    : `json('${leaf.value === null ? 'null' : JSON.stringify(leaf.value)}')`;
+            return `${col.ident} = json_replace(${col.ident}, '${sqlQuote(leaf.path)}', ${newValue})`;
+        }
+        // 缺失、null、空对象或仅含私有字段时没有可证明的局部路径，不编造键。
+        return null;
+    }
+
+    // 仅改写能完整识别的 MVU 机制语句。业务中的“指令”、英文名称、路径或
+    // 括号条件不能作为删除依据；无法确定时保留原文，不以清洁/精简牺牲含义。
     function sanitizeCheckRule(line, context) {
         let s = String(line || '').trim();
         if (!s) return s;
         const ctx = context || {};
         const col = ctx.column || null;
         const jsonArray = !!(ctx.jsonContainer || (col && col.isObject && col.jsonKind === 'array'));
+        const containerOnly = /^(?:【[^】]*(?:警告|防崩|注意)[^】]*】\s*)?(?:更新时必须精确到子字段(?:（如[^（）]*）|\(如[^()]*\))?\s*[，,]\s*)?(?:严禁|不要|避免|请勿|勿)(?:直接)?对整个(?:对象|数组)使用\s*["'“”]?(?:replace|delta)["'“”]?(?:\s*(?:或|和|\/)\s*["'“”]?(?:replace|delta)["'“”]?)?\s*[。！!]?$/i;
+        if (containerOnly.test(s)) return '更新时只修改发生变化的字段或元素，保留其他内容。';
+
         // 先把 JSON Patch 的“怎么发指令”还原为业务/存储语义。不能机械地把
         // add/remove 替换成 INSERT/DELETE：JSON 数组列在两种数据库模式下都仍是
-        // 一个单元格，增删元素实际需要更新并完整写回该列，而不是增删表格行。
+        // 一个单元格，增删元素应修改列内内容，而不是增删表格行。
         if (jsonArray) {
             s = s.replace(/更改(.+?)内容时[，,]?\s*(?:必须)?(?:使用|用|采用)\s*["'“”]?replace["'“”]?\s*(?:操作|指令)?将整个数组重新输出更新/gi,
-                '更改$1内容时，必须完整写回更新后的数组，并保留未改动的元素');
-            s = s.replace(/清除(.+?)时[，,]?\s*(?:必须)?(?:使用|用|采用)\s*["'“”]?remove["'“”]?\s*(?:操作|指令)?并指定精确索引(?:（[^）]*）|\([^)]*\))?[。；;]?\s*需先读取数组内容确认索引[，,]?避免误删[。]?/gi,
-                '移除$1中的记录前，必须先读取现有数组并确认目标元素；更新后完整写回数组并保留其他记录，避免误删');
+                '更改$1内容时，更新目标元素并保留未改动的元素');
+            s = s.replace(/清除(.+?)时[，,]?\s*(?:必须)?(?:使用|用|采用)\s*["'“”]?remove["'“”]?\s*(?:操作|指令)?并指定精确索引((?:（[^）]*）|\([^)]*\))?)[。；;]?\s*需先读取数组内容确认索引[，,]?避免误删[。]?/gi,
+                (_, target, condition) => `移除${target}中的记录前${condition || ''}，必须先读取现有数组并确认目标元素；移除后保留其他记录，避免误删`);
         }
         // 动态对象在 MVU 中修改一个 value 时，部分规则会要求
         // remove 旧键 + insert 新键；拆成数据库行后可直接更新该记录的值。
@@ -14000,38 +16228,49 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         s = s.replace(/(?:使用|用|采用)\s*["'“”]?(add|replace|remove)["'“”]?\s*(?:操作|指令)/gi,
             (m, op) => opVerb[String(op).toLowerCase()] || '执行对应变更');
         s = s.replace(/(?:并)?指定精确索引/gi, '并准确定位目标元素');
-        s = s.replace(/(?:（|\()[^）)]*\/[\u3400-\u9fffA-Za-z0-9_$-]+(?:\/[\u3400-\u9fffA-Za-z0-9_$-]+)+[^）)]*(?:）|\))/g, '');
-        // 1) 括号机制注释（中文括号与英文括号都处理）
-        s = s.replace(/（[^）]*?(?:op\s*[:：]|delta|replace|指令)[^）]*?）/gi, '')
-             .replace(/\([^)]*?(?:op\s*[:：]|delta|replace)[^)]*?\)/gi, '');
-        // 2) 纯机制句：整句删除
-        if (/^【[^】]*(?:警告|防崩|注意)[^】]*】/.test(s) && /(?:replace|delta|指令|op\s*[:：]|json\s*patch|patch)/i.test(s)) return '';
-        if (/^(?:严禁|不要|避免|请勿|勿)/.test(s) && /(?:replace|delta|指令|op\s*[:：]|json\s*patch|patch)/i.test(s)) return '';
+        // 只转换整个括号都是 op/value 标量参数的情形；参数里的数值也是
+        // 更新规则的一部分，不能因为去掉旧语法而丢掉增量、重置值或例外条件。
+        s = s.replace(/（([^（）]*)）|\(([^()]*)\)/g, (whole, chinese, english) => {
+            const body = chinese === undefined ? english : chinese;
+            const op = body.trim().match(/^op\s*[:：]\s*(delta|replace)\s*[,，]\s*value\s*[:：]\s*(.+)$/i);
+            if (op) {
+                try {
+                    const value = JSON.parse(op[2]);
+                    const numeric = typeof value === 'number' && Number.isFinite(value);
+                    const representable = op[1].toLowerCase() === 'delta' ? numeric : numeric || value === null || ['boolean', 'string'].includes(typeof value);
+                    if (representable) {
+                        const meaning = op[1].toLowerCase() === 'delta' ? '增量' : '新值';
+                        return `（${meaning}：${JSON.stringify(value)}）`;
+                    }
+                } catch (_) { /* 混合业务、表达式或不完整参数均保留，不猜测。 */ }
+            }
+            if (/^(?:勿用|不要使用)\s*delta\s*导致超限[。！!]?$/i.test(body.trim())) return '（增量更新不得导致超限）';
+            return whole;
+        });
         // 3) “必须分N条指令更新：一条replaceA，另一条replaceB” → 保留前半句 + “A；B”
-        const dm = s.match(/([\s\S]*?)分\s*(?:\d+|[一二三四五六七八九十两])\s*条指令更新[：:]\s*一条(?:replace\s*)?([^，,。]+?)，另一条(?:replace\s*)?([^，,。]+?)(?:（[^）]*）)?\s*$/);
+        const dm = s.match(/([\s\S]*?)分\s*(?:\d+|[一二三四五六七八九十两])\s*条指令更新[：:]\s*一条(?:replace\s*)?([^，,。]+?)，另一条(?:replace\s*)?([^，,。]+?)(（[^）]*）|\([^)]*\))?\s*$/);
         if (dm) {
             const prefix = String(dm[1] || '').trim().replace(/[，,。;；\s]+$/, '').replace(/必须$/, '');
             const a = String(dm[2]).trim();
             const b = String(dm[3]).trim();
-            s = (prefix ? prefix : '') + a + '；' + b;
+            s = (prefix ? prefix + '，' : '') + '必须同时完成：' + a + '；' + b + (dm[4] || '');
         }
-        // 4) “如 /组/字段/子字段” 路径写法 → 点分路径
-        s = s.replace(/(?:如|为|到|写)\s*\/[\u4e00-\u9fff$]+(?:\/[\u4e00-\u9fff$]+)+/g, (m) => m.replace(/\//g, '.'));
         return s.trim();
     }
 
     function buildNodeProse(group, kind) {
         if (group.scalarType === 'number') {
             if (kind !== 'update') return '禁止。';
-            if (!(group.groupChecks || []).length && !(group.wildcardRules || []).length) return '本数值由脚本/前端维护，AI 不应直接修改。';
+            if (/^[_$]/.test(String(group.name || ''))) return '本数值由脚本/前端维护，AI 不应直接修改。';
             const col = group.columns[0];
-            return `根据 note 中的更新规则修改数值，只允许 UPDATE，禁止 INSERT / DELETE。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = ${col.value} WHERE row_id=1;`;
+            const hasRules = (group.groupChecks || []).length || (group.wildcardRules || []).length;
+            const basis = hasRules ? '根据 note 中的更新规则' : '根据正文、设定与本表规则';
+            return `${basis}修改数值，只允许 UPDATE，禁止 INSERT / DELETE。\nSQL示例: UPDATE ${group.ident} SET ${exampleUpdateAssignment(group, col)} WHERE row_id=1;`;
         }
         if (group.kind === 'json') {
             if (kind === 'update') {
                 if ((group.wildcardRules || []).length || (group.groupChecks || []).length) {
-                    const col = (group.columns || []).find(c => c.zh === '内容') || { ident: 'neirong', zh: '内容' };
-                    return `只允许 UPDATE（整组 JSON 固定 row_id=1，禁止 INSERT / DELETE）；正文明确造成字段变化时，按 note 中【可写路径与约束】只改实际存在的可写字段（未列出字段一律只读）、其余字段原样保留后整体写回。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = '{"可写键名":"新值"}' WHERE row_id=1;`;
+                    return '只允许 UPDATE（整组 JSON 固定 row_id=1，禁止 INSERT / DELETE）；正文明确造成字段变化时，按 note 中【可写路径与约束】维护允许的路径（未列出字段一律只读），保留其余字段。';
                 }
                 return '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
             }
@@ -14041,28 +16280,40 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             if (kind === 'update') {
                 // 用首个可写业务列给出具体示例（有初始值用真实值，否则“列名示例”）；
                 // 全只读单例（全部为 _ 字段）不生成可执行的 UPDATE 示例，避免教 AI 写只读字段
-                const col = (group.columns || []).find(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+                const col = (group.columns || []).find(c => isAiPromptColumn(group, c));
                 if (!col) return '本表全部字段均为脚本/系统维护的只读状态，AI 不应修改本表。';
-                const ident = col.ident;
-                const val = exampleUpdateValue(col);
-                return `只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；根据正文、设定与本表规则，已有字段的值发生变化时更新。\nSQL示例: UPDATE ${group.ident} SET ${ident} = ${val} WHERE row_id=1;`;
+                const assignment = exampleUpdateAssignment(group, col);
+                return '只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；根据正文、设定与本表规则，已有字段的值发生变化时更新。'
+                    + (assignment ? `\nSQL示例: UPDATE ${group.ident} SET ${assignment} WHERE row_id=1;` : ' JSON 操作遵循 note，仅在规则要求时初始化容器。');
             }
             return '禁止。';
         }
         if (group.kind === 'array' || group.kind === 'pathArray' || group.kind === 'nestedArray') {
-            // 数组表与插件按行 DSL 对齐：每行一个数组元素，支持按行增删改；
-            // 不再写“整体替换”（插件没有整表替换指令，且与禁止增删自相矛盾）
-            const col = (group.columns || []).find(c => c.zh === '内容') || (group.columns && group.columns[0]) || { ident: 'neirong', zh: '内容' };
-            const parent = group.kind === 'nestedArray' ? (group.columns || []).find(c => c.zh === group.parentKeyCol) : null;
+            const col = (group.columns || []).find(c => c.zh === '内容') || group.columns[0];
+            const ancestors = group.kind === 'nestedArray'
+                ? (group.ancestorKeyCols && group.ancestorKeyCols.length ? group.ancestorKeyCols
+                    : [{ col: group.parentKeyCol, parentTable: group.parentTable }]) : [];
+            const parents = ancestors.map(a => group.columns.find(c => c.zh === a.col)).filter(Boolean);
+            const parentValues = parents.map(c => {
+                const index = group.columns.indexOf(c) + 1;
+                const value = group.rows && group.rows[0] && group.rows[0][index];
+                return `'${sqlQuote(value === undefined ? '所属记录标识' : value)}'`;
+            });
+            const where = [...parents.map((c, i) => `${c.ident} = ${parentValues[i]}`), 'row_id = 1'].join(' AND ');
+            const value = exampleUpdateValue(col, group);
             if (kind === 'update') {
-                return `根据正文、设定与本表规则，已有数组元素的内容发生变化时更新该行。\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = '新内容' WHERE row_id = 1;`;
+                return '根据正文、设定与本表规则，已有数组元素的内容发生变化时更新该行。'
+                    + (value === null ? ' 按 note 的编码规则提供完整的新元素，保留其他行。'
+                        : `\nSQL示例: UPDATE ${group.ident} SET ${col.ident} = ${value} WHERE ${where};`);
             }
             if (kind === 'insert') {
-                return parent
-                    ? `根据正文、设定与本表规则，对应${group.relationEntity || '关联'}记录的数组出现本表尚未记录的新元素时添加；「${group.parentKeyCol}」必须取自「${group.parentTable}.${group.keyCol || '键名'}」。\nSQL示例: INSERT INTO ${group.ident} (${parent.ident}, ${col.ident}) VALUES ('${group.relationEntity || '关联'}键名', '新元素');`
-                    : `根据正文、设定与本表规则，数组出现本表尚未记录的新元素时添加（行号自动分配，行序即数组顺序）。\nSQL示例: INSERT INTO ${group.ident} (${col.ident}) VALUES ('新元素');`;
+                const association = parents.length
+                    ? ` 必须填写所有关联字段${parents.map(c => `「${c.zh}」`).join('、')}，取值对应 note 列出的来源记录。` : '';
+                return '根据正文、设定与本表规则，数组出现本表尚未记录的新元素时添加（行号自动分配，行序即数组顺序）。' + association
+                    + (value === null ? ' 按 note 的编码规则填写完整的新元素。'
+                        : `\nSQL示例: INSERT INTO ${group.ident} (${[...parents, col].map(c => c.ident).join(', ')}) VALUES (${[...parentValues, value].join(', ')});`);
             }
-            return `根据正文、设定与本表规则，已有数组元素不再属于当前数组时删除对应行。\nSQL示例: DELETE FROM ${group.ident} WHERE row_id = 1;`;
+            return `根据正文、设定与本表规则，已有数组元素不再属于当前数组时删除对应行。\nSQL示例: DELETE FROM ${group.ident} WHERE ${where};`;
         }
         if (group.kind === 'nestedRows') {
             const ancestorDefs = (group.ancestorKeyCols && group.ancestorKeyCols.length)
@@ -14070,7 +16321,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             const parents = ancestorDefs.map(a => group.columns.find(c => c.zh === a.col)).filter(Boolean);
             const key = group.columns.find(c => c.zh === group.keyCol) || group.columns[1];
             const ancestorNames = new Set(ancestorDefs.map(a => a.col));
-            const valueCols = group.columns.filter(c => !ancestorNames.has(c.zh) && c.zh !== group.keyCol && c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+            const valueCols = group.columns.filter(c => !ancestorNames.has(c.zh) && c.zh !== group.keyCol && isAiPromptColumn(group, c));
             const value = valueCols[0];
             const entity = group.relationEntity || String(group.parentKeyCol || '').replace(/_键名$/, '') || '关联';
             const whereParts = parents.map((p, i) => `${p.ident} = '${ancestorDefs[i].entity || String(ancestorDefs[i].col).replace(/_键名$/, '')}键名'`);
@@ -14078,9 +16329,10 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             const where = whereParts.join(' AND ');
             const keyNames = [...ancestorDefs.map(a => `「${a.col}」`), `「${group.keyCol}」`].join('、');
             if (kind === 'update') {
-                return value
-                    ? `根据正文、设定与本表规则，对应${entity}记录中已有${group.childKey || group.name}数据的字段值发生变化时更新；WHERE 必须同时带${keyNames}。\nSQL示例: UPDATE ${group.ident} SET ${value.ident} = ${exampleUpdateValue(value)} WHERE ${where};`
-                    : '本表无 AI 可更新的业务列。';
+                if (!value) return '本表无 AI 可更新的业务列。';
+                const assignment = exampleUpdateAssignment(group, value);
+                return `根据正文、设定与本表规则，对应${entity}记录中已有${group.childKey || group.name}数据的字段值发生变化时更新；WHERE 必须同时带${keyNames}。`
+                    + (assignment ? `\nSQL示例: UPDATE ${group.ident} SET ${assignment} WHERE ${where};` : ' JSON 操作遵循 note，仅在规则要求时初始化容器。');
             }
             if (kind === 'insert') {
                 const cols = [...parents, key, ...valueCols];
@@ -14088,7 +16340,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                     ...parents.map((p, i) => `'${ancestorDefs[i].entity || String(ancestorDefs[i].col).replace(/_键名$/, '')}键名'`),
                     "'键名'", ...valueCols.map(c => exampleCellValue(c, c.value) || "'值'"),
                 ];
-                return `根据正文、设定与本表规则，对应${entity}记录中出现本表尚未记录的新${group.childKey || group.name}时添加；必须填写完整关系键 ${keyNames}。\nSQL示例: INSERT INTO ${group.ident} (${cols.map(c => c.ident).join(', ')}) VALUES (${vals.join(', ')});`;
+                return `根据正文、设定与本表规则，对应${entity}记录中出现本表尚未记录的新${group.childKey || group.name}时添加；必须填写所有定位字段 ${keyNames}。\nSQL示例: INSERT INTO ${group.ident} (${cols.map(c => c.ident).join(', ')}) VALUES (${vals.join(', ')});`;
             }
             return `根据正文、设定与本表规则，对应${entity}记录中已有${group.childKey || group.name}不再属于其「${group.childKey || group.name}」数据时删除；WHERE 必须同时带${keyNames}。\nSQL示例: DELETE FROM ${group.ident} WHERE ${where};`;
         }
@@ -14105,13 +16357,14 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             ? `'${sqlQuote(sampleRow[1])}'`
             : "'键名'";
         // 示例列排除内部溢出列（_扩展数据）与下划线只读字段：AI 不应直接修改
-        const exampleCols = group.columns.filter(c => c.zh !== '_扩展数据' && !String(c.zh).startsWith('_'));
+        const exampleCols = group.columns.filter(c => isAiPromptColumn(group, c));
         const allIdents = exampleCols.map(c => c.ident);
-        const firstNonKey = allIdents[1] || '字段';
         if (kind === 'update') {
-            const updCol = exampleCols[1] || exampleCols[0];
-            const updVal = updCol ? exampleUpdateValue(updCol) : "'新值'";
-            return `根据正文、设定与本表规则，已有记录的字段值发生变化时更新。\nSQL示例: UPDATE ${group.ident} SET ${firstNonKey} = ${updVal} WHERE ${keyIdent} = ${keyValue};`;
+            const updCol = exampleCols.find(c => !isRelationshipKeyColumn(group, c));
+            if (!updCol) return '本表无 AI 可更新的业务列。';
+            const assignment = exampleUpdateAssignment(group, updCol);
+            return '根据正文、设定与本表规则，已有记录的字段值发生变化时更新。'
+                + (assignment ? `\nSQL示例: UPDATE ${group.ident} SET ${assignment} WHERE ${keyIdent} = ${keyValue};` : ' JSON 操作遵循 note，仅在规则要求时初始化容器。');
         }
         if (kind === 'insert') {
             // 完整列示例：全部列都列出，列数与 VALUES 一一对应；
@@ -14127,14 +16380,165 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         return `根据正文、设定与本表规则，已有记录所对应的对象不再属于本表记录范围时删除。\nSQL示例: DELETE FROM ${group.ident} WHERE ${keyIdent} = ${keyValue};`;
     }
 
+    // buildSchema 先收集顶层表、再追加派生表，所以同一逻辑组的表在原数组中可能被拆开。
+    // 这里仅为新模板排版建立一个副本：绝不改写 schema 或 layout 的既有顺序。
+    function orderSchemaTables(schema) {
+        const groups = Array.isArray(schema) ? schema.slice() : [];
+        const tableOwners = new Map();
+        const addOwner = (tableName, index) => {
+            if (!tableName) return;
+            const list = tableOwners.get(tableName) || [];
+            list.push(index);
+            tableOwners.set(tableName, list);
+        };
+        groups.forEach((group, index) => addOwner(group && group.tableName, index));
+
+        const parentOf = new Array(groups.length).fill(-1);
+        const uniqueOwner = tableName => {
+            const owners = tableOwners.get(tableName) || [];
+            return owners.length === 1 ? owners[0] : -1;
+        };
+
+        // 关系表会带精确的 parentTable；这是最可靠的父子依据。
+        groups.forEach((group, index) => {
+            if (!group || !group.parentTable) return;
+            const parent = uniqueOwner(group.parentTable);
+            if (parent >= 0 && parent !== index) parentOf[index] = parent;
+        });
+
+        // 非关系派生表在父组 childTables 中保留最终 tableName（含去重后的名称）。
+        groups.forEach((group, index) => {
+            if (!group || parentOf[index] >= 0) return;
+            const candidates = [];
+            groups.forEach((parent, parentIndex) => {
+                if (parentIndex === index || !Array.isArray(parent && parent.childTables)) return;
+                if (parent.childTables.some(child => child && child.tableName === group.tableName)) candidates.push(parentIndex);
+            });
+            if (candidates.length === 1) parentOf[index] = candidates[0];
+        });
+
+        // 旧/手工 schema 可能没有上面的关联元数据。只以完整逻辑路径作最后兜底，
+        // 不根据物理表名前缀或可能重名的 parentGroup 猜测。
+        const logicalPaths = group => {
+            const out = [];
+            const add = path => {
+                if (!Array.isArray(path) || !path.length || path.some(part => typeof part !== 'string' || !part)) return;
+                const signature = JSON.stringify(path);
+                if (!out.some(existing => JSON.stringify(existing) === signature)) out.push(path);
+            };
+            add(group && group.arrayPath);
+            if (group && Array.isArray(group.writePaths)) group.writePaths.forEach(add);
+            add(group && group.path);
+            // 顶层 InitVar 组的完整逻辑路径就是它自身；这不是按 parentGroup 猜测。
+            if (group && (group.source === 'initvar' || group.source === 'top-level-array' || group.source === 'top-level-scalar')) add([group.name]);
+            return out;
+        };
+        const paths = groups.map(logicalPaths);
+        const isPathPrefix = (parent, child) => parent.length < child.length && parent.every((part, index) => part === '*' || part === child[index]);
+        groups.forEach((group, index) => {
+            if (!group || parentOf[index] >= 0 || !paths[index].length) return;
+            let bestLength = -1;
+            let candidates = [];
+            paths.forEach((parentPaths, parentIndex) => {
+                if (parentIndex === index) return;
+                for (const parentPath of parentPaths) {
+                    if (!paths[index].some(childPath => isPathPrefix(parentPath, childPath))) continue;
+                    if (parentPath.length > bestLength) { bestLength = parentPath.length; candidates = [parentIndex]; }
+                    else if (parentPath.length === bestLength) candidates.push(parentIndex);
+                }
+            });
+            candidates = [...new Set(candidates)];
+            if (candidates.length === 1) parentOf[index] = candidates[0];
+        });
+
+        const children = groups.map(() => []);
+        parentOf.forEach((parent, index) => { if (parent >= 0) children[parent].push(index); });
+        const ordered = [];
+        const visited = new Set();
+        const visit = index => {
+            if (visited.has(index)) return;
+            visited.add(index);
+            ordered.push(groups[index]);
+            children[index].forEach(visit);
+        };
+        // 根组仍按原有顺序；DFS 让所有可证明的后代紧随其祖先。
+        groups.forEach((group, index) => { if (group && parentOf[index] < 0) visit(index); });
+        // 循环或不完整元数据不能阻断生成，保留其原顺序。
+        groups.forEach((group, index) => { if (group) visit(index); });
+        return ordered;
+    }
+
     /**
      * schema → 完整模板对象
      * mode: 'both' | 'native' | 'sqlite'
      */
+    // 该表的说明插槽计划（只有含 VWD 字段的单例表才有）。直接复用 buildSchema 阶段
+    // 建好、并由 buildLayout 原样带进布局的同一对象，保证 layout 里保存的
+    // tokens/noteTemplate 与 note 完全一致。
+    function vwdSlotPlanForGroup(group) {
+        if (!group || group.kind !== 'singleton' || !group.vwdMetaZh) return null;
+        return group.vwd && typeof group.vwd === 'object' && Array.isArray(group.vwd.fields) ? group.vwd : null;
+    }
+
+    // 用当前 note 重建一份干净的插槽计划（幂等：重复调用只保留最后一次结果）。
+    // note 省略时按同一规则现算；给定 note 时直接以它为准，不重置已登记的插槽。
+    function applyVwdSlotPlan(group, note, plan) {
+        const target = plan || vwdSlotPlanForGroup(group);
+        if (!target) return null;
+        if (note === undefined || note === null) {
+            target.tokens = [];
+            for (const field of target.fields || []) field.noteSlot = '';
+            target.plan = buildNote(group, { mode: 'both', vwdSlotPlan: target });
+        } else {
+            target.plan = String(note);
+        }
+        target.noteTemplate = target.plan;
+        return target;
+    }
+
+    // 转换复用调用方已有模板时不会有新的 note：用同一规则现算一份插槽计划，
+    // 填进 group（buildLayout 随后把它带进布局），否则运行期无法按字段替换说明。
+    // 目标 SP 不支持隐藏内部物理列时不登记：与 generateTemplate 同一门槛。
+    function ensureVwdSlotPlans(schema, opts = {}) {
+        if (!vwdHostSupportsHiddenColumns(opts.targetSpVersion)) return;
+        for (const group of Array.isArray(schema) ? schema : []) {
+            const plan = vwdSlotPlanForGroup(group);
+            if (!plan) continue;
+            const sheet = opts.template ? Object.values(opts.template).find(s => s && s.name === group.tableName) : null;
+            const note = sheet && sheet.sourceData ? sheet.sourceData.note : null;
+            if (plan.promptVersion === 1) {
+                plan.tokens = [];
+                for (const field of plan.fields) field.noteSlot = '';
+                applyVwdSlotPlan(group, buildNote(group, { mode: opts.mode || 'both', vwdSlotPlan: plan }), plan);
+                getTableCodec().bindVwdPromptNote(plan, group.tableName, note);
+            } else applyVwdSlotPlan(group, note, plan);
+        }
+    }
+
+    // VWD 依赖隐藏内部物理列的能力（SP 9.2.5+）。与 generateTemplate 内的门槛同源。
+    function vwdHostSupportsHiddenColumns(targetSpVersion) {
+        const parts = String(targetSpVersion === undefined ? '9.2.5' : targetSpVersion).trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:\.\d+)?$/);
+        if (!parts) return false;
+        return Number(parts[1]) > 9
+            || (Number(parts[1]) === 9 && (Number(parts[2]) > 2 || (Number(parts[2]) === 2 && Number(parts[3]) >= 5)));
+    }
+
     function generateTemplate(schema, opts = {}) {
         const mode = opts.mode || 'both';
         const includeCheck = opts.ddlIncludeCheck !== false;
         const report = opts.report || createReport();
+        const targetVersion = opts.targetSpVersion === undefined ? '9.2.5' : opts.targetSpVersion;
+        const canHidePhysicalColumns = vwdHostSupportsHiddenColumns(targetVersion);
+        let warnedHiddenColumnGate = false;
+        let warnedVwdGate = false;
+        const hasPrivateJsonKey = value => {
+            if (!value || typeof value !== 'object') return false;
+            if (Array.isArray(value)) return value.some(hasPrivateJsonKey);
+            return Object.entries(value).some(([key, child]) => {
+                if (key === '_vendor') return false;
+                return key.startsWith('$') || hasPrivateJsonKey(child);
+            });
+        };
         const template = {
             mate: {
                 type: 'chatSheets',
@@ -14151,7 +16555,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             },
         };
         const order = {};
-        schema.forEach((g, idx) => {
+        orderSchemaTables(schema).forEach((g, idx) => {
             // 统计每列“超出规则但必须放行”的初始值（不改动初始值，只放宽 CHECK）
             const extraAllowed = {};
             for (const c of g.columns) extraAllowed[c.ident] = [];
@@ -14176,12 +16580,42 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 }
             }
             g.extraAllowed = extraAllowed;
+            const hiddenColumns = g.columns.filter(c => c.zh === '_扩展数据' || isDollarPrivateColumn(g, c));
+            if (hiddenColumns.length && !canHidePhysicalColumns && !warnedHiddenColumnGate) {
+                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）不支持可靠隐藏内部物理列，内部列仍可能对 AI 可见，请升级至 9.2.5 或更高版本。`, 'template');
+                warnedHiddenColumnGate = true;
+            }
+            // VWD 动态说明依赖一个内部元数据列。没有可靠隐藏能力时不登记该能力：
+            // 宁可明确降级（静态说明 + 重新转换提示），也不新增可能对 AI 可见的内部列。
+            const vwdAllowed = canHidePhysicalColumns && g.kind === 'singleton' && !!g.vwdMetaZh;
+            if (g.vwdMetaZh && !canHidePhysicalColumns && !warnedVwdGate) {
+                warnedVwdGate = true;
+                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）无法可靠隐藏内部物理列，动态说明（VWD）实验路径本次不登记；说明仍按静态文本写入提示词。该能力处于实验阶段，即使版本满足也默认关闭。`, 'template');
+            }
+            // 目标 SP 无法隐藏内部物理列时，VWD 元数据列整列不进模板：宁可不提供动态
+            // 说明，也不能让内部覆盖集合出现在模型可见的表头、DDL 与更新示例里。
+            // 在这里就整列摘掉，后续 content/rows/DDL/extraAllowed 才共用同一套列。
+            if (!vwdAllowed && g.vwdMetaZh) {
+                g.columns = g.columns.filter(c => c.zh !== g.vwdMetaZh);
+                for (const row of g.rows || []) row.length = g.columns.length + 1;
+            }
+            for (let ci = 0; ci < g.columns.length; ci++) {
+                const column = g.columns[ci];
+                if (hiddenColumns.includes(column) || !(column.isObject || g.kind === 'json')) continue;
+                const hasPrivate = (g.rows || []).some(row => {
+                    try { const value = row[ci + 1]; return hasPrivateJsonKey(typeof value === 'string' ? JSON.parse(value) : value); }
+                    catch (_) { return false; }
+                });
+                if (hasPrivate) report.warn(`表「${g.tableName}」的 JSON 列「${column.zh}」含深层 $ 私有键；物理列隐藏无法单独隐藏 JSON 内部键，此列仍会整体进入提示词，请核对展示规则。`, 'template');
+            }
             // 归一化行号 1..N（初始值原样保留）
             const content = [['row_id', ...g.columns.map(c => c.zh)]];
             // 插件 SyncBridge 的 escapeValue 只放行 null/数字，其余值必须能 .replace()：
             // 布尔（false）会直接 TypeError（实测 val.replace is not a function），
             // 因此内容单元格统一归一化——布尔 → 1/0，null/undefined → ''，其余转字符串。
             const normalizeCell = (v, c) => {
+                if (c && (c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional')) return v === undefined ? '' : JSON.stringify(v);
+                if (c && c.logicalType === 'jsonObjectOptional') return v === undefined ? '' : (typeof v === 'string' ? v : JSON.stringify(v));
                 if (c && c.isObject && (v === null || v === undefined || v === '')) return c.jsonKind === 'array' ? '[]' : '{}';
                 if (v === null || v === undefined) return '';
                 if (typeof v === 'boolean') return v ? 1 : 0;
@@ -14203,15 +16637,29 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 }
             }
             const uid = 'sheet_' + g.ident;
+            const trigger = kind => {
+                const prose = buildNodeProse(g, kind);
+                // 双模式模板也可能交给 native 填表；共享触发说明不混入 SQL 协议。
+                // 只截去本生成器附在末尾的示例，不处理作者规则正文。
+                return mode === 'sqlite' ? prose.replace('\nSQL示例:', '\n以下仅演示 SQL 写法；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。\nSQL示例:') : prose.split('\nSQL示例:')[0];
+            };
+            const vwdSlotPlan = vwdAllowed ? vwdSlotPlanForGroup(g) : null;
+            const noteText = buildNote(g, { mode, vwdSlotPlan });
+            // 落进 sourceData/卡的是静态说明版：没有运行期覆盖时与旧版逐字节相同，
+            // 插槽只存在于内部布局，模型请求不会看到 \u0000VWD·n\u0000。
+            if (vwdSlotPlan) applyVwdSlotPlan(g, noteText, vwdSlotPlan);
+            const displayNote = vwdSlotPlan && vwdSlotPlan.promptVersion === 1
+                ? buildVwdPromptNote(vwdSlotPlan, g.tableName)
+                : vwdSlotPlan ? stripVwdNoteTokens(noteText, vwdSlotPlan.fields) : noteText;
             template[uid] = {
                 uid,
                 name: g.tableName,
                 sourceData: {
-                    note: buildNote(g),
+                    note: displayNote,
                     initNode: buildInitNode(g),
-                    deleteNode: buildNodeProse(g, 'delete'),
-                    updateNode: buildNodeProse(g, 'update'),
-                    insertNode: buildNodeProse(g, 'insert'),
+                    deleteNode: trigger('delete'),
+                    updateNode: trigger('update'),
+                    insertNode: trigger('insert'),
                     ddl: buildDdl(g, { includeCheck }),
                 },
                 content,
@@ -14219,6 +16667,12 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 exportConfig: { enabled: false, splitByRow: false },
                 orderNo: idx,
             };
+            // 说明插槽计划随布局保存：note 模板 + 插槽↔字段登记。没有 VWD 字段的表
+            // 不产生计划，note 与旧版逐字节相同。插槽计划本身不进入模型请求。
+            if (vwdSlotPlan && vwdSlotPlan.promptVersion === 1) getTableCodec().bindVwdPromptNote(vwdSlotPlan, g.tableName, displayNote);
+            if (canHidePhysicalColumns && hiddenColumns.length) {
+                template[uid].sourceData.hiddenPhysicalColumns = hiddenColumns.map(c => c.ident);
+            }
             order[uid] = idx;
         });
         return template;
@@ -14369,6 +16823,34 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
     function statDataFromTables(layoutEntries, tables) {
         return getTableCodec().statDataFromTables(layoutEntries, tables);
     }
+    function vwdFieldId(...args) { return getTableCodec().vwdFieldId(...args); }
+    function vwdOverridesFromRow(...args) { return getTableCodec().vwdOverridesFromRow(...args); }
+    function vwdNoteFromSlots(...args) { return getTableCodec().vwdNoteFromSlots(...args); }
+    function vwdCurrentDescriptions(...args) { return getTableCodec().vwdCurrentDescriptions(...args); }
+    function resolveVwdNote(...args) { return getTableCodec().resolveVwdNote(...args); }
+    function formatVwdPromptDescription(...args) { return getTableCodec().formatVwdPromptDescription(...args); }
+    function buildVwdPromptNote(...args) { return getTableCodec().buildVwdPromptNote(...args); }
+    function vwdPromptDescriptions(...args) { return getTableCodec().vwdPromptDescriptions(...args); }
+    function canWriteVwdDescriptions(entry, tables) {
+        if (!entry || !entry.vwd || entry.vwd.promptVersion !== 1) return false;
+        const holder = typeof window !== 'undefined' ? window : root;
+        if (!holder || !holder.EjsTemplate || typeof holder.EjsTemplate.evalTemplate !== 'function'
+            || !holder.EjsTemplate.evalTemplate.__mvu2shujukuContextBridge) return false;
+        const sheet = Object.values(tables || {}).find(s => s && s.name === (entry && entry.table));
+        return !!getTableCodec().vwdPromptMatches(entry, sheet);
+    }
+    function warnVwdPromptTemplates(layout, tables, report) {
+        for (const entry of layout || []) {
+            if (!entry || !entry.vwd || entry.vwd.promptVersion !== 1) continue;
+            const sheet = Object.values(tables || {}).find(s => s && s.name === entry.table);
+            if (!getTableCodec().vwdPromptMatches(entry, sheet)) {
+                report.warn(`「${entry.table}」使用的自定义模板不含匹配的动态说明入口；本表说明变化将被拒绝，请保留生成的说明模板或重新转换。`, 'template');
+            }
+        }
+    }
+    function stripVwdNoteTokens(...args) { return getTableCodec().stripVwdNoteTokens(...args); }
+    function vwdDescriptionDelta(...args) { return getTableCodec().vwdDescriptionDelta(...args); }
+    function vwdToken(index) { return getTableCodec().vwdNoteTokens().token(index); }
 
     /**
      * 把 stat_data 的差异写回数据库表格（Mvu.replaceMvuData 等价物）。
@@ -14430,7 +16912,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         if (/<%|&lt;%/i.test(content)) return false;
         try {
             const clean = String(content).replace(/<!--[\s\S]*?-->/g, '');
-            const doc = getMvuYamlLibs().YAML.parseDocument(protectYamlTemplateScalarValues(clean), { merge: true });
+            const doc = getMvuYamlLibs().YAML.parseDocument(prepareMvuRuleYaml(clean), { merge: true });
             if (doc.errors && doc.errors.length) return false;
             const value = doc.toJS();
             if (!isPlainObject(value)) return false;
@@ -15123,13 +17605,29 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 'schema'
             );
         }
-        const schema = buildSchema(initvar, usage, report, shapeInfo);
-        const layout = buildLayout(schema);
-        const template = opts.template || generateTemplate(schema, { mode, report, ddlIncludeCheck: opts.ddlIncludeCheck });
+        const schema = buildSchema(initvar, usage, report, shapeInfo, { vwdDescriptions: opts.vwdDescriptions, jsonContainers: opts.jsonContainers });
+        if ([data.first_mes, ...(data.alternate_greetings || [])].some(text => /<initvar\b/i.test(String(text || '')))) {
+            report.warn('开场消息含 <initvar>：SP 独立填表会读取原始聊天正文，可能重复发送初始变量（包括已从表格隐藏的字段）。请在 SP 填表设置的标签排除规则中配置起始 <initvar、结束 </initvar>，并检查最终请求；酒馆显示正则不替代此设置。', 'template');
+        }
+        // 说明插槽计划（VWD）需要先生成模板才能确定 note 文本与插槽位置；buildLayout
+        // 复用 group 上已经填好插槽的同一计划对象，因此顺序必须是先 generateTemplate
+        // 再 buildLayout。布局本身不依赖模板内容，两者仍从同一 schema 派生。
+        const template = opts.template || generateTemplate(schema, { mode, report, ddlIncludeCheck: opts.ddlIncludeCheck, targetSpVersion: opts.targetSpVersion });
+        // 复用调用方已有模板时不会有新的 note，用同一规则现算一份插槽计划，避免布局里
+        // 存下空计划而运行期无法按字段替换说明。
+        if (opts.template) ensureVwdSlotPlans(schema, { template, mode, report, targetSpVersion: opts.targetSpVersion });
         const sourceRegexScripts = (data.extensions && Array.isArray(data.extensions.regex_scripts))
             ? data.extensions.regex_scripts
             : [];
         migrateTemplatePromptRuntime(template, sourceRegexScripts, report);
+        // 固定原规则/宏迁移后的完整模板，运行期只替换说明数据，不再修改 note。
+        for (const group of schema) {
+            if (!group.vwd || group.vwd.promptVersion !== 1) continue;
+            const sheet = Object.values(template).find(s => s && s.name === group.tableName);
+            getTableCodec().bindVwdPromptNote(group.vwd, group.tableName, sheet && sheet.sourceData && sheet.sourceData.note);
+        }
+        const layout = buildLayout(schema);
+        warnVwdPromptTemplates(layout.entries, template, report);
 
         // 2. 检测卡内是否依赖 MVU API
         // 静态扫描只能看到卡内文本；tavern_helper 里 `import 'https://…'` 的外部脚本
@@ -15513,7 +18011,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
     }
     function conversionOptionKey(opts) {
         const normalized = { mode: 'both', nameSuffix: '_数据库', appendPlaceholder: true,
-            ddlIncludeCheck: true, translateSimpleEjs: false, ...opts };
+            ddlIncludeCheck: true, translateSimpleEjs: false, jsonContainers: false, ...opts };
         return JSON.stringify(Object.keys(normalized).sort().filter(k =>
             !['template', 'asPng', 'report'].includes(k) && normalized[k] !== undefined
         ).map(k => [k, normalized[k]]));
@@ -15592,6 +18090,11 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         if (!session) throw new Error('转换会话不存在，请重新转换原卡');
         const options = { ...session.options, ...opts, template: opts.template || previous.template };
         if (conversionOptionKey(options) !== session.key) {
+            // 容器存储方式改变会改变列和表，不能把旧模板隐式套在新布局上。
+            // 调用方显式提供的新模板仍按既有模板覆盖契约处理。
+            if (!opts.template && JSON.stringify(options.jsonContainers || false) !== JSON.stringify(session.options.jsonContainers || false)) {
+                delete options.template;
+            }
             const result = convert(session.input, options);
             result.meta.sourceCharacter = previous.meta.sourceCharacter || null;
             if (previous.meta.avatarBytes) {
@@ -15630,15 +18133,28 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 }
             }
         }
+        const refreshedLayout = JSON.parse(data.extensions.mvu2shujuku.layout || '[]');
+        const refreshedSchema = previous.schema.some(group => group.vwd && group.vwd.promptVersion === 1) ? previous.schema.map(group => {
+            if (!group.vwd || group.vwd.promptVersion !== 1) return group;
+            const next = { ...group, vwd: { ...group.vwd } };
+            const sheet = Object.values(template).find(s => s && s.name === group.tableName);
+            if (getTableCodec().bindVwdPromptNote(next.vwd, group.tableName, sheet && sheet.sourceData && sheet.sourceData.note)) {
+                const entry = refreshedLayout.find(item => item.table === group.tableName && item.vwd);
+                if (entry) entry.vwd.noteTemplate = next.vwd.noteTemplate;
+            }
+            return next;
+        }) : previous.schema;
+        data.extensions.mvu2shujuku.layout = JSON.stringify(refreshedLayout);
+        warnVwdPromptTemplates(refreshedLayout, template, report);
         const entry = data.character_book.entries.find(e => Array.isArray(e.keys) && e.keys.includes('__ACU_TEMPLATE_DATA__'));
         const scripts = data.extensions.tavern_helper.scripts;
         const bridge = scripts.find(s => s.content === previous.bridgeScript);
         if (!entry || !bridge) throw new Error('转换产物的模板或数据桥缺失，请重新转换原卡');
         entry.content = toBase64(JSON.stringify(template));
-        const bridgeScript = generateBridgeScript(previous.schema, template, session.bridgeOptions);
+        const bridgeScript = generateBridgeScript(refreshedSchema, template, session.bridgeOptions);
         bridge.content = bridgeScript;
         data.extensions.mvu2shujuku.templateUid = Object.keys(template).filter(k => k.startsWith('sheet_')).map(k => template[k].uid);
-        const result = packageConversion(session.input, options, { card, template, schema: previous.schema, bridgeScript, report }, previous.meta.isPngInput, previous.meta);
+        const result = packageConversion(session.input, options, { card, template, schema: refreshedSchema, bridgeScript, report }, previous.meta.isPngInput, previous.meta);
         // UI 配置应用摘要属于本次转换说明，刷新产物时保留，不叠加重复摘要。
         const oldReport = previous.report.toMarkdown();
         if (previous.reportText.startsWith(oldReport)) result.reportText += previous.reportText.slice(oldReport.length);
@@ -15725,7 +18241,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             '#mvu2shujuku-settings #mvu2shujuku-downloads { flex: 1 1 100%; flex-wrap: wrap; }',
             '#mvu2shujuku-settings .mvu2shujuku-hint { font-size: 12px; opacity: 0.75; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-editor { margin: 10px 0; padding: 8px 10px; border: 1px dashed var(--SmartThemeBorderColor, #666); border-radius: 6px; }',
-            '#mvu2shujuku-settings .mvu2shujuku-param-grid { display: grid; grid-template-columns: minmax(90px, 1.2fr) minmax(110px, 1fr) 76px; gap: 6px 8px; align-items: center; margin: 6px 0; }',
+            '#mvu2shujuku-settings .mvu2shujuku-param-grid { display: grid; gap: 8px; margin: 10px 0; max-height: 540px; overflow-y: auto; padding-right: 4px; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-head { font-weight: 600; font-size: 12px; opacity: 0.8; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-name { word-break: break-all; font-size: 13px; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-cell { min-width: 0; }',
@@ -15733,11 +18249,49 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             // 批量行在 flex 行里不能用 100% 宽（会被撑出界面），给固定窄宽
             '#mvu2shujuku-settings .mvu2shujuku-param-bulk .mvu2shujuku-param-select { width: 150px; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-bulk .mvu2shujuku-param-value { width: 76px; }',
-            '#mvu2shujuku-settings .mvu2shujuku-param-select { color: var(--SmartThemeBodyColor, #ddd); }',
-            '#mvu2shujuku-settings .mvu2shujuku-param-value { color: #222; text-align: right; }',
             '#mvu2shujuku-settings .mvu2shujuku-check-label { flex: 1 1 auto; min-width: 0; word-break: break-word; }',
             '#mvu2shujuku-settings .mvu2shujuku-param-bulk { padding-top: 6px; border-top: 1px solid var(--SmartThemeBorderColor, #666); }',
             '#mvu2shujuku-settings .mvu2shujuku-merge-section { margin: 10px 0; padding: 8px 10px; border: 1px dashed var(--SmartThemeBorderColor, #666); border-radius: 6px; }',
+            "#mvu2shujuku-settings [hidden] { display: none !important; }",
+            "#mvu2shujuku-settings { --mvu2shujuku-accent: var(--SmartThemeQuoteColor, #79bbd1); }",
+            "#mvu2shujuku-settings input[type=\"number\"], #mvu2shujuku-settings input[type=\"search\"], #mvu2shujuku-settings input[type=\"text\"], #mvu2shujuku-settings select, #mvu2shujuku-settings textarea { box-sizing: border-box; min-height: 34px; padding: 6px 9px; border: 1px solid var(--SmartThemeBorderColor, #626262); border-radius: 6px; background: var(--SmartThemeBlurTintColor, #252525); color: var(--SmartThemeBodyColor, #ddd); font: inherit; line-height: 1.35; box-shadow: none; }",
+            "#mvu2shujuku-settings input[type=\"number\"] { text-align: right; font-variant-numeric: tabular-nums; }",
+            "#mvu2shujuku-settings select option { background: var(--SmartThemeBlurTintColor, #252525); color: var(--SmartThemeBodyColor, #ddd); }",
+            "#mvu2shujuku-settings input::placeholder { color: inherit; opacity: .55; }",
+            "#mvu2shujuku-settings input:focus-visible, #mvu2shujuku-settings select:focus-visible, #mvu2shujuku-settings textarea:focus-visible, #mvu2shujuku-settings button:focus-visible, #mvu2shujuku-settings summary:focus-visible { outline: 2px solid var(--mvu2shujuku-accent); outline-offset: 2px; }",
+            "#mvu2shujuku-settings .menu_button { min-height: 34px; font: inherit; }",
+            "#mvu2shujuku-settings .mvu2shujuku-param-editor { padding: 12px; border-radius: 8px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-param-bulk { padding: 10px 0; margin-bottom: 0; gap: 8px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-apply-selected:not(:disabled) { border-color: var(--mvu2shujuku-accent); }",
+            "#mvu2shujuku-settings .mvu2shujuku-table-row { border-radius: 8px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-table-row:focus-within { border-color: var(--mvu2shujuku-accent); }",
+
+            "#mvu2shujuku-settings .mvu2shujuku-section-title, #mvu2shujuku-settings h4 { margin: 6px 0 10px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-detail { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--SmartThemeBorderColor, #555); border-radius: 6px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-detail > summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }",
+            "#mvu2shujuku-settings .mvu2shujuku-detail[open] > summary { margin-bottom: 8px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-attention { border-left: 4px solid #d9a441; }",
+            "#mvu2shujuku-settings .mvu2shujuku-report-summary { margin: 16px 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-result-heading { display: flex; flex-direction: column; gap: 5px; padding: 8px 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-report-list { margin: 0; padding-left: 22px; max-height: 280px; overflow-y: auto; }",
+            "#mvu2shujuku-settings .mvu2shujuku-report-list li { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }",
+            "#mvu2shujuku-settings .mvu2shujuku-param-editor { container-type: inline-size; border-style: solid; }",
+            "#mvu2shujuku-settings .mvu2shujuku-table-row { display: grid; grid-template-columns: minmax(0, 1fr) 68px; align-items: center; gap: 8px; padding: 10px; border: 1px solid var(--SmartThemeBorderColor, #555); border-radius: 6px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-param-name { grid-column: 1 / -1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }",
+            "#mvu2shujuku-settings .mvu2shujuku-check-inline { display: flex; align-items: center; gap: 7px; cursor: pointer; margin: 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-check-inline input { flex: 0 0 auto; margin: 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-injection-label { grid-column: 1 / -1; font-size: 12px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-table-columns, #mvu2shujuku-settings .mvu2shujuku-row-note { grid-column: 1 / -1; min-width: 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-table-search { flex: 1 1 180px; min-width: 0; }",
+            "#mvu2shujuku-settings .mvu2shujuku-bulk-value { width: 76px; }",
+            "#mvu2shujuku-settings .mvu2shujuku-bulk-param { max-width: 100%; }",
+            "#mvu2shujuku-settings .mvu2shujuku-row > #mvu2shujuku-char-select, #mvu2shujuku-settings .mvu2shujuku-row > #mvu2shujuku-profile-select { flex: 1 1 180px; min-width: 0; max-width: 100%; }",
+            "#mvu2shujuku-settings .mvu2shujuku-advanced .mvu2shujuku-help { margin-left: 0; }",
+            "#mvu2shujuku-settings #mvu2shujuku-actions { padding-top: 10px; border-top: 1px solid var(--SmartThemeBorderColor, #555); }",
+            "@container (min-width: 420px) { #mvu2shujuku-settings .mvu2shujuku-table-row { grid-template-columns: minmax(100px, 1fr) 68px 115px; } #mvu2shujuku-settings .mvu2shujuku-injection-label { grid-column: auto; } }",
+            "@container (min-width: 620px) { #mvu2shujuku-settings .mvu2shujuku-table-row { grid-template-columns: minmax(140px, 1fr) 150px 76px 115px; } #mvu2shujuku-settings .mvu2shujuku-param-name { grid-column: auto; } }",
+            "@media (max-width: 420px) { #mvu2shujuku-settings .mvu2shujuku-table-row { grid-template-columns: minmax(100px, 1fr) 68px; } #mvu2shujuku-settings .mvu2shujuku-injection-label { grid-column: 1 / -1; } #mvu2shujuku-settings .mvu2shujuku-card { padding: 8px; } }",
+
         ].join('\n');
     }
 
@@ -15745,6 +18299,15 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         if (typeof root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ === 'function') return root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__;
         if (typeof require === 'function') return require('./extension-runtime.js');
         throw new Error('扩展运行时模块未加载，请使用构建后的 index.js');
+    }
+    // 候选快照构造与运行时同源：浏览器端从内联工厂取，Node 端从同一模块取。
+    function getCandidateBuilderFactory() {
+        if (typeof root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__;
+        if (typeof require === 'function') {
+            const installer = require('./extension-runtime.js');
+            if (installer && typeof installer.createCandidateBuilder === 'function') return installer.createCandidateBuilder;
+        }
+        throw new Error('候选快照构造模块未加载，请使用构建后的 index.js');
     }
     function extensionIndexUi() {
         return 'if (typeof window !== "undefined") window.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__(window);';
@@ -15768,11 +18331,15 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             'root.__MVU2SHUJUKU_INPUT_PARSER_FACTORY__ = ' + getInputParserFactory().toString() + ';',
             'root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = ' + getEjsTransformFactory().toString() + ';',
             'root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = ' + getSchemaLayoutFactory().toString() + ';',
+            'root.__MVU2SHUJUKU_STATUS_USAGE_FACTORY__ = ' + getStatusUsageFactory().toString() + ';',
             'root.__MVU2SHUJUKU_RUNTIME_SESSION_FACTORY__ = ' + getRuntimeSessionFactory().toString() + ';',
+            'root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__ = ' + getRuntimeWindowsFactory().toString() + ';',
             'root.__MVU2SHUJUKU_SP_ADAPTER_FACTORY__ = ' + getSpAdapterFactory().toString() + ';',
             'root.__MVU2SHUJUKU_ST_ADAPTER_FACTORY__ = ' + getStAdapterFactory().toString() + ';',
             'root.__MVU2SHUJUKU_SETTINGS_VIEW__ = ' + getSettingsView().toString() + ';',
+            'root.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__ = ' + getResultViewFactory().toString() + ';',
             'root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = ' + getExtensionRuntimeInstaller().toString() + ';',
+            'root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__ = ' + getCandidateBuilderFactory().toString() + ';',
             'root.__MVU2SHUJUKU_CARD_BRIDGE_INSTALLER__ = ' + getCardBridgeInstaller().toString() + ';',
             'root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = ' + getTableWriterFactory().toString() + ';',
             'root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = ' + getBridgeLifecycleFactory().toString() + ';',
@@ -15842,6 +18409,19 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         generateBridgeScript,
         resolveLayoutMacros,
         statDataFromTables,
+        vwdFieldId,
+        vwdOverridesFromRow,
+        vwdNoteFromSlots,
+        vwdCurrentDescriptions,
+        resolveVwdNote,
+        formatVwdPromptDescription,
+        buildVwdPromptNote,
+        vwdPromptDescriptions,
+        canWriteVwdDescriptions,
+        vwdDescriptionDelta,
+        getCandidateBuilderFactory,
+        setVwdExperimental,
+        isVwdExperimental,
         writeStatDiffToDb,
         get lastStatWriteFailed() { return getTableWriter().lastStatWriteFailed; },
         rewriteEjsConditions,

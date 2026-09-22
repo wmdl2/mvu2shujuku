@@ -162,10 +162,25 @@ function installExtensionRuntime(window) {
             chatKey: autoInitChatId(), cardKey: cardCacheKey(ch) };
     });
     function captureRuntimeSession(validate) { return runtimeSessions.capture(validate); }
+    function bindWriteTarget(session) { return runtimeSessions.bindWriteTarget(session, () => getContextSafe().chat); }
     function isRuntimeSessionCurrent(session) { return runtimeSessions.isCurrent(session); }
     function runtimeScopedChatKey(chatKey) { return runtimeSessions.scopedChatKey(chatKey); }
     function assertRuntimeSession(session) { return runtimeSessions.assertCurrent(session); }
     function runtimeApiForSession(api, session) { return runtimeSessions.apiForSession(api, session); }
+    let runtimeWindows = null;
+    function getRuntimeWindows() {
+        // 宿主窗口在安装器后段确定；首次使用时再建立观察器。
+        if (!runtimeWindows) runtimeWindows = window.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__({
+            readRoots: () => {
+                const roots = [window, hostWindow];
+                try { roots.push(window.parent, window.top); } catch (_) {}
+                return [...new Set(roots.filter(Boolean))];
+            },
+            readSessionKey: () => { const session = captureRuntimeSession(); return session.key + ':' + session.epoch; },
+            MutationObserver: hostWindow.MutationObserver || window.MutationObserver,
+        });
+        return runtimeWindows.getWindows();
+    }
 
     // 首楼替换修复：原版道渊“重塑仙缘”等机制用 setChatMessages 替换第零层，会把
     // TavernDB_ACU_ScopedConfig / InternalSheetGuide 从首楼消息上抹掉；插件随后读不到
@@ -1103,12 +1118,13 @@ function installExtensionRuntime(window) {
                 if (!fp || st.processed.has(fp) || st.pending.has(fp)) continue;
                 // 任务不能只绑定聊天：删除、编辑或切换来源消息后，旧更新块也必须失效。
                 // 同一守卫贯穿事件 await、合并窗口、重试以及每次实际数据库调用。
-                const messageSession = captureRuntimeSession(() => {
+                const messageSession = bindWriteTarget(captureRuntimeSession(() => {
                     const currentChat = getContextSafe().chat;
                     return Array.isArray(currentChat) && currentChat[i] === message &&
                         messageUpdateFingerprint(message, i) === fp;
-                });
+                }));
                 messageSession.messageUpdate = true;
+                messageSession.businessEventEmitted = true;
                 const text = String(message.mes != null ? message.mes : (message.message || ''));
                 st.pending.add(fp);
                 let settled = false;
@@ -1399,6 +1415,7 @@ function installExtensionRuntime(window) {
                 appendPlaceholder: true,
                 asPng: 'auto',
                 ddlIncludeCheck: true,
+                jsonContainers: false,
                 translateSimpleEjs: false,
                 debug: false,
             };
@@ -1642,9 +1659,7 @@ function installExtensionRuntime(window) {
     function captureConversionProfile(name) {
         const tableConfigs = {};
         for (const { sheet } of updateParamSheetRows(lastResult || { template: {} })) {
-            const cfg = {};
-            for (const option of UPDATE_PARAM_OPTIONS) cfg[option.key] = getUpdateParam(sheet, option.key);
-            tableConfigs[String(sheet.name || '')] = cfg;
+            tableConfigs[String(sheet.name || '')] = resultView.captureConfig(sheet);
         }
         return {
             format: 'mvu2shujuku-conversion-profile',
@@ -1721,9 +1736,7 @@ function installExtensionRuntime(window) {
             const sheet = next[key];
             const cfg = sheet && configs[String(sheet.name || '')];
             if (!cfg) continue;
-            for (const option of UPDATE_PARAM_OPTIONS) {
-                if (Object.prototype.hasOwnProperty.call(cfg, option.key)) setUpdateParam(sheet, option.key, cfg[option.key]);
-            }
+            resultView.applyConfig(sheet, cfg);
         }
         mergeState.appliedRefs = [];
         const refsBySource = new Map();
@@ -1771,13 +1784,11 @@ function installExtensionRuntime(window) {
             const sheet = next[key];
             const cfg = sheet && configs[String(sheet.name || '')];
             if (!cfg) continue;
-            for (const option of UPDATE_PARAM_OPTIONS) {
-                if (Object.prototype.hasOwnProperty.call(cfg, option.key)) setUpdateParam(sheet, option.key, cfg[option.key]);
-            }
+            resultView.applyConfig(sheet, cfg);
         }
         const summaryLines = [
             '配置：' + activeProfileName,
-            '自动化参数匹配：' + matchedConfigNames.length + '/' + configNames.length + ' 张表',
+            '表格设置匹配：' + matchedConfigNames.length + '/' + configNames.length + ' 张表',
             '配置中本次不存在：' + (missingConfigNames.length ? missingConfigNames.join('、') : '无'),
             '本次新表：' + (addedTableNames.length ? addedTableNames.join('、') : '无'),
             '外部表：成功 ' + externalAdded + '/' + externalRequested + (externalProblems ? '，异常 ' + externalProblems : ''),
@@ -1878,6 +1889,17 @@ function installExtensionRuntime(window) {
     // 跨卡残留前端写库丢弃的限频标记（按聊天去重，避免刷屏）
     let lastForeignWriteDropChat = '';
 
+    // 浏览器和 Node 测试使用同一候选构造工厂；构建时已将工厂及其依赖完整内联。
+    // 每次按当前 core 创建无状态构造器，避免模块替换后仍使用旧 core。
+    function buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate) {
+        const coreNow = window.MVU2SHUJUKU_CORE;
+        if (!coreNow || typeof coreNow.writeStatDiffToDb !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
+        const factory = window.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__;
+        if (typeof factory !== 'function') throw new Error('候选快照构造模块未加载，请使用构建后的 index.js');
+        return factory({ core: coreNow, warn: dbgWarn })
+            .buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate);
+    }
+
     // 每聊天首次写库已通过 initGameSession 完成“合并注入数据建表”的标记：
     // 之后该聊天的写库走快照/增量提交，不再重复 initGameSession（避免反复重置表格）。
     const openingWriteSettledChats = new Set();
@@ -1907,43 +1929,6 @@ function installExtensionRuntime(window) {
         if (resolve) resolve(false);
     }
 
-    function normalizeCellForSync(v) {
-        if (v === null || v === undefined) return '';
-        if (typeof v === 'boolean') return v ? 1 : 0;
-        if (typeof v === 'number') return v;
-        if (typeof v === 'string') return v;
-        try { return JSON.stringify(v); } catch (e) { return String(v); }
-    }
-
-    // 旧 MVU/VWD 在 message stat_data 中可能仍保留 [值, 描述] 叶子。
-    // 开场分支快照合并发生在建表前；若直接把这个数组交给数据库，
-    // TEXT 列会得到 [值,描述] JSON 字符串，并与枚举 CHECK 冲突。
-    // 仅依 layout 中明确的 pair 列拆包，真实 array/object 字段保持不变。
-    function collapseLegacyPairLeaves(stat, layoutEntries) {
-        const out = JSON.parse(JSON.stringify(stat && typeof stat === 'object' ? stat : {}));
-        const getParent = (parts) => {
-            let cur = out;
-            for (let i = 0; i < parts.length - 1; i++) {
-                if (!cur || typeof cur !== 'object') return null;
-                cur = cur[parts[i]];
-            }
-            return cur && typeof cur === 'object' ? cur : null;
-        };
-        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
-            for (const col of (L && Array.isArray(L.cols) ? L.cols : [])) {
-                if (!Array.isArray(col) || col[1] !== 'pair' || !Array.isArray(col[3]) || !col[3].length) continue;
-                const parts = col[3].map(String);
-                const parent = getParent(parts);
-                const key = parts[parts.length - 1];
-                const value = parent && parent[key];
-                if (Array.isArray(value) && value.length === 2 && typeof value[1] === 'string') {
-                    parent[key] = value[0];
-                }
-            }
-        }
-        return out;
-    }
-
     // MVU 的原始对象允许省略字段，而数据库会按列类型补齐默认值；两者不能直接
     // JSON.stringify 比较。整表提交的预期值和实际值必须先经过同一 layout 的
     // 表格→stat_data 投影，再做键序无关的确定性比较。
@@ -1956,81 +1941,6 @@ function installExtensionRuntime(window) {
             return out;
         };
         try { return JSON.stringify(walk(value)); } catch (e) { return ''; }
-    }
-
-    function buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate) {
-        const coreNow = window.MVU2SHUJUKU_CORE;
-        if (!coreNow || typeof coreNow.writeStatDiffToDb !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
-        const tables = JSON.parse(JSON.stringify(baseTemplate || {}));
-        const normalizedPrevStat = collapseLegacyPairLeaves(prevStat, layoutEntries);
-        const normalizedNextStat = collapseLegacyPairLeaves(nextStat, layoutEntries);
-        const fakeApi = {
-            exportTableAsJson: () => tables,
-            importTableAsJson: async json => {
-                const candidate = JSON.parse(json);
-                for (const key of Object.keys(tables)) delete tables[key];
-                Object.assign(tables, candidate);
-                return true;
-            },
-            updateCell: async (tableName, rowIndex, col, value) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s || !s.content[rowIndex]) return false;
-                const ci = s.content[0].indexOf(col);
-                if (ci === -1) return false;
-                s.content[rowIndex][ci] = normalizeCellForSync(value);
-                return true;
-            },
-            updateRow: async (tableName, rowIndex, payload) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s || !s.content[rowIndex] || !payload || typeof payload !== 'object') return false;
-                for (const col of Object.keys(payload)) {
-                    const ci = s.content[0].indexOf(col);
-                    if (ci >= 0) s.content[rowIndex][ci] = normalizeCellForSync(payload[col]);
-                }
-                return true;
-            },
-            insertRow: async (tableName, obj) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s) return 0;
-                const row = s.content[0].map(h => '');
-                for (const k of Object.keys(obj || {})) {
-                    const ci = s.content[0].indexOf(k);
-                    if (ci >= 0) row[ci] = normalizeCellForSync(obj[k]);
-                }
-                // 行号取现有最大行号 +1：deleteRow 发生后 content.length 会与已有
-                // 行号重复（row[0] 是主键列），重复主键会让整表导入被拒或产生重复行。
-                let maxRowId = 0;
-                for (let ri = 1; ri < s.content.length; ri++) {
-                    const rn = Number(s.content[ri] && s.content[ri][0]);
-                    if (Number.isFinite(rn) && rn > maxRowId) maxRowId = rn;
-                }
-                row[0] = maxRowId + 1;
-                s.content.push(row);
-                return row[0];
-            },
-            deleteRow: async (tableName, rowIndex) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s || !s.content[rowIndex]) return false;
-                s.content.splice(rowIndex, 1);
-                return true;
-            },
-        };
-        // 内存模板必须先追平当前数据库状态，再应用 prev→next。本次调用可能只带
-        // 某组的部分字段；若直接从原始模板应用差异，未变化字段会停留在模板默认值，
-        // 随后的整表 initGameSession 会把已有进度回滚。
-        const baseWrap = coreNow.statDataFromTables(layoutEntries, tables);
-        const baseStat = baseWrap && baseWrap.stat_data && typeof baseWrap.stat_data === 'object'
-            ? baseWrap.stat_data
-            : {};
-        return Promise.resolve(coreNow.writeStatDiffToDb(fakeApi, layoutEntries, baseStat, normalizedPrevStat, tables))
-            .then(() => {
-                if (coreNow.lastStatWriteFailed) throw new Error('构建开场模板失败：无法追平当前数据库快照');
-                return coreNow.writeStatDiffToDb(fakeApi, layoutEntries, normalizedPrevStat, normalizedNextStat, tables);
-            })
-            .then(() => {
-                if (coreNow.lastStatWriteFailed) throw new Error('构建开场模板失败：无法应用当前开场快照');
-                return tables;
-            });
     }
 
     // 已有聊天再做整表 import 时，必须沿用 SP 已分配的 sheet key。
@@ -2079,6 +1989,36 @@ function installExtensionRuntime(window) {
         const imported = await api.importTableAsJson(JSON.stringify(candidate));
         assertRuntimeSession(session);
         if (imported !== true && !(imported && imported.success === true)) throw new Error('消息更新快照未提交成功');
+        return true;
+    }
+
+    async function commitCurrentReplyBatch(api, prevStat, nextStat, persistedTables, session, options = {}) {
+        const factory = window.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__;
+        if (typeof factory !== 'function') throw new Error('候选快照构造模块未加载');
+        const plan = await factory({ core: window.MVU2SHUJUKU_CORE, warn: dbgWarn })
+            .planCurrentReplyWrites(api, activeLayout, prevStat, nextStat, persistedTables);
+        assertRuntimeSession(session);
+        if (!plan.operations.length) return false;
+        if (JSON.stringify(api.exportTableAsJson()) !== plan.beforeJson) throw new Error('批次规划期间数据库已变化，等待重新规划');
+        const op = plan.operations[0];
+        if (typeof options.assertBeforeCommit === 'function') options.assertBeforeCommit();
+        if (options.allowImport === false && (plan.operations.length !== 1 || op.method === 'importTableAsJson')) {
+            throw new Error('旧楼业务修正需要多个宿主操作，缺少指定旧楼的原子提交接口；整笔修正未写入');
+        }
+        let result;
+        if (plan.operations.length === 1 && op.method !== 'importTableAsJson') {
+            // 单次 CRUD 保留差量；宿主拒绝后不拆成多次调用，以免破坏同一行的完整性。
+            if (typeof api[op.method] !== 'function') throw new Error('数据库缺少写入能力：' + op.method);
+            result = await api[op.method](...op.args);
+            const failed = op.method === 'insertRow'
+                ? result === false || result === -1 || result == null : !result;
+            if (failed) throw new Error('当前回复单次写入未提交成功');
+        } else {
+            if (typeof api.importTableAsJson !== 'function') throw new Error('当前回复多步写入需要整表导入能力');
+            result = await api.importTableAsJson(JSON.stringify(plan.tables));
+            if (result !== true && !(result && result.success === true)) throw new Error('当前回复批次未提交成功');
+        }
+        assertRuntimeSession(session);
         return true;
     }
 
@@ -2312,9 +2252,12 @@ function installExtensionRuntime(window) {
         // 重试必须携带首次调度时的聊天 key：重试间隔内切换聊天（尤其同卡不同聊天，
         // 布局归属校验拦不住）后重新捕获新 key，会让旧聊天的快照通过归属守卫写进新聊天。
         let writeChatKey = '';
-        const requestedSession = originSession || captureRuntimeSession();
-        const writeSession = pendingStatWriteSession && isRuntimeSessionCurrent(pendingStatWriteSession) && pendingStatWriteSession.messageUpdate
-            ? { ...requestedSession, messageUpdate: true } : requestedSession;
+        const sourceSession = originSession || captureRuntimeSession();
+        const requestedSession = explicitInitialization ? sourceSession : bindWriteTarget(sourceSession);
+        const pendingSource = pendingStatWriteSession;
+        const writeSession = pendingSource && pendingSource !== requestedSession && isRuntimeSessionCurrent(pendingSource) && pendingSource.messageUpdate
+            ? { ...requestedSession, messageUpdate: true,
+                validate: () => isRuntimeSessionCurrent(requestedSession) && isRuntimeSessionCurrent(pendingSource) } : requestedSession;
         if (typeof originChatKey === 'string' && originChatKey) {
             writeChatKey = originChatKey;
         } else {
@@ -2505,7 +2448,7 @@ function installExtensionRuntime(window) {
                     }
                     // 前端/脚本传来的 target 可能不完整：开场读取时布局未就绪，只拿到部分组
                     // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
-                    // 缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
+                    // 普通旧布局缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
                     // 最终 importTableAsJson 还可能存旧 checkpoint，导致“写入未保存”。
                     const effectiveTarget = (() => {
                         if (!target || typeof target !== 'object') return prev || {};
@@ -2513,6 +2456,14 @@ function installExtensionRuntime(window) {
                         // 切卡隔离：前端可能缓存上一张卡的 stat_data（target 混入当前布局外的组）。
                         // 只接受当前布局内的顶层组，布局外的组一律丢弃，避免串卡数据写进当前聊天。
                         const allowedGroups = new Set((Array.isArray(activeLayout) ? activeLayout : []).map(L => L.group));
+                        // 新完整容器布局明确编码“顶层键缺失”。完整 replace 快照省略它即删除，
+                        // 不能套用旧的补组保护；读完整基线后再改一个字段的操作会保留其他组。
+                        for (const L of Array.isArray(activeLayout) ? activeLayout : []) {
+                            if (L.kind !== 'singleton' || !L.valueCol || Object.prototype.hasOwnProperty.call(target, L.group)) continue;
+                            const whole = (L.cols || []).some(c => c[0] === L.valueCol && c[1] === 'jsonObjectOptional'
+                                && Array.isArray(c[3]) && c[3].length === 1 && c[3][0] === L.group);
+                            if (whole) delete out[L.group];
+                        }
                         for (const k of Object.keys(target)) {
                             if (k === '$internal') continue;
                             if (allowedGroups.has(k)) {
@@ -2588,11 +2539,11 @@ function installExtensionRuntime(window) {
                             }
                         }
                     } catch (eG) {}
-                    // 参考卡原生路径：写库 = 差异写入（updateCell/insertRow/deleteRow 原生 CRUD）。
-                    // 运行时/checkpoint/落盘全部由插件自己的事务管线维护，与原生数据库卡一致；
-                    // 不做整表快照导入、不做手动物化/锚定/单例补行（转换器只翻译，不参与运行时）。
+                    // 已能证明本楼 CRUD 归属时保留差量；新楼先以最终候选快照正式提交。
+                    // checkpoint/落盘始终由 SP 维护，不创建空锚点或手写历史帧。
                     let n = 0;
                     let bulkInit = false;
+                    let replySnapshot = !!writeSession.messageUpdate;
                     try {
                         // 诊断（保留）：布局组、target/prev 含组、首个非空写入、checkpoint 是否含注入
                         try {
@@ -2652,12 +2603,17 @@ function installExtensionRuntime(window) {
                             // 待全部落库后由下方统一广播一次。
                             sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) + 1;
                             tableBroadcastSuppressed = true;
-                            bulkInit = writeSession.messageUpdate
+                            const needsReplySnapshot = replySnapshot || !!(writeSession.writeTarget && !writeSession.writeTarget.canUseCrud());
+                            const currentReplyBatch = !needsReplySnapshot && writeSession.writeTarget && writeSession.writeTarget.index > 0;
+                            replySnapshot = needsReplySnapshot || !!currentReplyBatch;
+                            bulkInit = needsReplySnapshot
                                 ? await commitMessageUpdateSnapshot(api, prev, effectiveTarget, writeSession)
-                                : await tryOpeningBulkInit(api, prev, effectiveTarget, chatKeyNow, isInitializationWrite, writeSession);
+                                : currentReplyBatch
+                                    ? await commitCurrentReplyBatch(api, prev, effectiveTarget, persistedForWrite, writeSession)
+                                    : await tryOpeningBulkInit(api, prev, effectiveTarget, chatKeyNow, isInitializationWrite, writeSession);
                         } catch (e) {
-                            if (writeSession.messageUpdate) bulkInit = 'retry';
-                            dbgWarn(' 开局整表初始化快速路径异常：' + (e && e.message ? e.message : e));
+                            if (replySnapshot) bulkInit = 'retry';
+                            dbgWarn(' 回复写入或开局提交异常：' + (e && e.message ? e.message : e));
                         }
                         try {
                             assertRuntimeSession(writeSession);
@@ -2665,7 +2621,7 @@ function installExtensionRuntime(window) {
                                 writeUnsettled = true;
                                 if (overlayFlushRetries < 6) {
                                     overlayFlushRetries += 1;
-                                    dbg(' 开局整表初始化尚未落定，延后重试（#' + overlayFlushRetries + '）。');
+                                    dbg(' 回复写入或开局提交尚未落定，延后重试（#' + overlayFlushRetries + '）。');
                                     hostWindow.setTimeout(() => {
                                         if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, null, true, isInitializationWrite, writeChatKey, writeSession);
                                     }, 1000);
@@ -2674,7 +2630,10 @@ function installExtensionRuntime(window) {
                                 n = 0;
                             } else if (bulkInit) {
                                 n = 1;
-                                dbg(writeSession.messageUpdate ? ' 消息更新快照已提交到最新回复。' : ' 开局整表初始化快速路径完成（一次整表原子提交，跳过逐格 CRUD）。');
+                                dbg(replySnapshot ? ' 更新批次已提交到目标回复。' : ' 开局整表初始化快速路径完成（一次整表原子提交，跳过逐格 CRUD）。');
+                            } else if (replySnapshot) {
+                                // 当前回复无差异时不创建表帧，也不退回未经批次规划的 CRUD。
+                                n = 0;
                             } else {
                                 // 差异明细诊断：包一层 API 代理记录每个 CRUD 的表/行/列与前后值。
                                 // 用于排查“duplicate_snapshot 已判定快照相同、diff 却产生多条操作”的
@@ -2723,7 +2682,8 @@ function installExtensionRuntime(window) {
                             openingWriteSettledChats.add(chatKeyNow);
                             pruneOrderedCollection(openingWriteSettledChats, 80);
                             lastDbWriteAt = Date.now();
-                            dbg(bulkInit === true ? ' Mvu 写入完成：一次整表提交，插件自行持久化。' : ' Mvu 写入完成：差异 ' + n + ' 条（原生 CRUD，插件自行持久化）');
+                            dbg(replySnapshot ? ' Mvu 写入完成：当前回复批次已提交，由数据库持久化。'
+                                : bulkInit === true ? ' Mvu 写入完成：一次整表提交，插件自行持久化。' : ' Mvu 写入完成：差异 ' + n + ' 条（原生 CRUD，插件自行持久化）');
                         } else {
                             dbg(' 差异写入无操作（运行时与目标一致），跳过。');
                         }
@@ -2733,7 +2693,7 @@ function installExtensionRuntime(window) {
                         // 原行回来就直接写、不重复；行真没了才由 seedNeeded 补。
                         try {
                             const coreNow = window.MVU2SHUJUKU_CORE;
-                            if (bulkInit !== true && coreNow && coreNow.lastStatWriteFailed) {
+                            if (!replySnapshot && bulkInit !== true && coreNow && coreNow.lastStatWriteFailed) {
                                 writeUnsettled = true;
                                 if (overlayFlushRetries < 4) {
                                 overlayFlushRetries += 1;
@@ -2775,11 +2735,14 @@ function installExtensionRuntime(window) {
                     if (n > 0 && !writeUnsettled) {
                         // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
                         // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
-                        const afterMvu = { stat_data: effectiveTarget, display_data: effectiveTarget, delta_data: {}, initialized_lorebooks: {} };
+                        const afterMvu = mvuDataFromCompleteTableSnapshot(api.exportTableAsJson()) || { stat_data: effectiveTarget, display_data: JSON.parse(JSON.stringify(effectiveTarget)), delta_data: {}, initialized_lorebooks: {} };
+                        // 自有写入期间抑制了 SP 回调，旧的提交读窗口可能仍存着上一批数据。
+                        // 先发布本批已经提交的 after，保证事件内重读及 Promise 后 getter 一致。
+                        stageFrontendCommittedMvuRead(afterMvu);
                         let hadInternal = false;
                         try { if (effectiveTarget && typeof effectiveTarget === 'object' && effectiveTarget.$internal === undefined) { effectiveTarget.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
-                        if (bulkInit) emitMvuEvent('mag_variable_initialized', afterMvu, 0);
-                        dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} });
+                        if (bulkInit && !replySnapshot) emitMvuEvent('mag_variable_initialized', afterMvu, 0);
+                        dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} }, !!writeSession.businessEventEmitted);
                         try { if (hadInternal) delete effectiveTarget.$internal; } catch (e) {}
                     }
                     // 写入已落定（含“差异无操作”）：调用方（如开场分支注入）可在此时提交指纹
@@ -3251,13 +3214,15 @@ function installExtensionRuntime(window) {
             };
         } catch (e) { pendingLateFrontendUpdate = null; }
     }
-    function dispatchVariableUpdateEnded(after, before) {
+    function dispatchVariableUpdateEnded(after, before, eventAlreadyEmitted) {
         try {
             if (!activeLayout) return;
+            if (!eventAlreadyEmitted && (tableBusinessRunning || (pendingStatWrite != null && pendingStatWriteSession && pendingStatWriteSession.businessEventEmitted))) return;
             if (after === undefined || after === null) {
                 try { if (typeof window.getAllVariables === 'function') after = window.getAllVariables(); } catch (e) {}
             }
-            const safeAfter = after || { stat_data: {}, display_data: {}, delta_data: {} };
+            const safeAfter = JSON.parse(JSON.stringify(after || { stat_data: {}, display_data: {}, delta_data: {} }));
+            if (safeAfter.stat_data) delete safeAfter.stat_data.$internal;
             const chatKey = autoInitChatId();
             if (lastVariableUpdateChatKey !== chatKey) {
                 lastVariableUpdateChatKey = chatKey;
@@ -3266,7 +3231,9 @@ function installExtensionRuntime(window) {
             const safeBefore = before && typeof before === 'object'
                 ? before
                 : (lastVariableUpdateSnapshot || safeAfter);
-            emitMvuEvent('mag_variable_update_ended', safeAfter, safeBefore);
+            // 提交后的广播只提供隔离视图。业务变换由文本周期或有来源的 SP
+            // 提交管线等待并落库；刷新/回放监听不能污染权威读缓存。
+            if (!eventAlreadyEmitted) emitMvuEvent('mag_variable_update_ended', JSON.parse(JSON.stringify(safeAfter)), JSON.parse(JSON.stringify(safeBefore)));
             // 数据库原生前端常用的兼容事件。转换卡前端可能只监听其中一种，
             // 同一份权威快照同时广播；事件监听型前端仍由各自的事件名自行去重。
             emitMvuEvent('shujuku-table-updated', null);
@@ -3284,22 +3251,47 @@ function installExtensionRuntime(window) {
     // 事件广播：与 MVU 原版一致，优先走 TH 事件总线（eventEmit，前端 eventOn 监听的就是它）；
     // 另发同名 CustomEvent + ST eventSource，覆盖 window/parent/top/同源 iframe；
     // 缺少 ST 事件总线的窗口（如消息 iframe）补一个绑定到同名 CustomEvent 的 eventOn/eventOff 兜底。
-    function installEarlyEventOnFallback() {
+    function installEarlyEventOnFallback(targets) {
         try {
-            for (const w of [window, hostWindow]) {
+            const recordsByWindow = new WeakMap();
+            for (const w of targets || [window, hostWindow]) {
                 if (!w || typeof w.addEventListener !== 'function' || typeof w.eventOn === 'function') continue;
+                if (recordsByWindow.has(w)) continue;
+                const recordsByEvent = new Map();
+                recordsByWindow.set(w, recordsByEvent);
+                const removeRecord = (evName, handler, record) => {
+                    const handlers = recordsByEvent.get(evName);
+                    const records = handlers && handlers.get(handler);
+                    if (!records || !records.has(record)) return;
+                    records.delete(record);
+                    try { w.removeEventListener(evName, record.wrapped); } catch (e2) {}
+                    if (!records.size) handlers.delete(handler);
+                    if (!handlers.size) recordsByEvent.delete(evName);
+                };
                 w.eventOn = (evName, handler) => {
                     const wrapped = (e) => {
                         try {
                             const d = e && e.detail;
-                            if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
+                            if (d && Array.isArray(d.args)) handler(...d.args);
+                            else if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
                             else handler(d);
                         } catch (err) {}
                     };
+                    let handlers = recordsByEvent.get(evName);
+                    if (!handlers) recordsByEvent.set(evName, handlers = new Map());
+                    let records = handlers.get(handler);
+                    if (!records) handlers.set(handler, records = new Set());
+                    const record = { wrapped };
+                    records.add(record);
                     w.addEventListener(evName, wrapped);
-                    return { stop: () => { try { w.removeEventListener(evName, wrapped); } catch (e2) {} } };
+                    return { stop: () => removeRecord(evName, handler, record) };
                 };
-                w.eventOff = (evName, handler) => { try { w.removeEventListener(evName, handler); } catch (e2) {} };
+                w.eventOff = (evName, handler) => {
+                    const handlers = recordsByEvent.get(evName);
+                    const records = handlers && handlers.get(handler);
+                    if (!records) return;
+                    for (const record of Array.from(records)) removeRecord(evName, handler, record);
+                };
                 w.eventOn.__mvu2shujukuFallback = true;
                 w.eventOff.__mvu2shujukuFallback = true;
             }
@@ -3310,18 +3302,7 @@ function installExtensionRuntime(window) {
         // 即使新 iframe 恰好在 2s 复查和 MutationObserver 之间创建，
         // 前端在事件回调里读 window.Mvu/getAllVariables 也一定能拿到。
         if (activeLayout) { try { applyWindowMvuShim(); } catch (e) {} }
-        const targets = [];
-        const add = (t) => { try { if (t && typeof t.dispatchEvent === 'function' && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
-        add(window);
-        add(hostWindow);
-        try { add(window.parent); } catch (e) {}
-        try { add(window.top); } catch (e) {}
-        for (const r of [window, hostWindow]) {
-            try {
-                const frames = r.document ? r.document.querySelectorAll('iframe') : [];
-                for (const f of frames) { try { add(f.contentWindow); } catch (e) {} }
-            } catch (e) {}
-        }
+        const targets = getRuntimeWindows();
         const pending = [];
         const emitted = [];
         const invoke = (fn, owner) => {
@@ -3347,31 +3328,58 @@ function installExtensionRuntime(window) {
         // 没有 TavernHelper eventEmit 时才回退到 ST eventSource，避免同链双发。
         if (!busEmitted) {
             for (const t of targets) {
-                try { if (t.eventSource && invoke(t.eventSource.emit, t.eventSource)) break; } catch (e) {}
+                try { if (t.eventSource && invoke(t.eventSource.emit, t.eventSource)) { busEmitted = true; break; } } catch (e) {}
+            }
+            // ST 扩展的总线通常只在 getContext() 中，主窗口不一定暴露 eventSource。
+            // 尚无 TH iframe 发射器时也必须进入同一业务总线并等待其 Promise。
+            if (!busEmitted) {
+                try {
+                    const context = getContextSafe();
+                    const source = context && (context.eventSource || context.event_source);
+                    if (source) invoke(source.emit, source);
+                } catch (e) {}
             }
         }
-        for (const t of targets) {
-            try {
-                if (t && typeof t.eventOn !== 'function' && typeof t.addEventListener === 'function') {
-                    t.eventOn = (evName, handler) => {
-                        const wrapped = (e) => {
-                            try {
-                                const d = e && e.detail;
-                                if (d && Array.isArray(d.args)) handler(...d.args);
-                                else if (d && Object.prototype.hasOwnProperty.call(d, 'after')) handler(d.after, d.before);
-                                else handler(d);
-                            } catch (err) {}
-                        };
-                        t.addEventListener(evName, wrapped);
-                        return { stop: () => { try { t.removeEventListener(evName, wrapped); } catch (e) {} } };
-                    };
-                    t.eventOff = (evName, handler) => { try { t.removeEventListener(evName, handler); } catch (e) {} };
-                    t.eventOn.__mvu2shujukuFallback = true;
-                    t.eventOff.__mvu2shujukuFallback = true;
-                }
-            } catch (e) {}
-        }
+        installEarlyEventOnFallback(targets);
         if (pending.length) await Promise.allSettled(pending);
+    }
+
+    // V2 已保存日志是来源凭据；回调本身并不区分业务提交与历史回放。
+    // 只读日志，不修改宿主帧，也不从 fill-start 或时间窗口猜事务归属。
+    function readSpCommitEntries(chat) {
+        const entries = [];
+        for (let index = 0; index < (chat || []).length; index++) {
+            const message = chat[index];
+            let isolated = message && message.TavernDB_ACU_IsolatedData;
+            if (typeof isolated === 'string') { try { isolated = JSON.parse(isolated); } catch (_) { continue; } }
+            if (!isolated || typeof isolated !== 'object') continue;
+            for (const [scope, storage] of Object.entries(isolated)) {
+                const frame = storage && storage.storageFrame;
+                if (!frame || frame.version !== 2 || !Array.isArray(frame.logEntries)) continue;
+                for (const entry of frame.logEntries) {
+                    if (!entry || typeof entry.entryId !== 'string' || !entry.entryId) continue;
+                    entries.push({ id: JSON.stringify([scope, entry.entryId]), scope, entry, index, message });
+                }
+            }
+        }
+        return entries;
+    }
+    function createSpCommitTracker() {
+        let seen = new Set();
+        const businessSources = new Set(['auto_fill', 'manual_fill', 'group_fill', 'manual_crud', 'raw_sql_mutation', 'raw_sql_batch']);
+        return {
+            seed(entries) { seen = new Set(entries.map(record => record.id)); },
+            consume(entries, sheetKeys, allowed) {
+                const fresh = entries.filter(record => !seen.has(record.id));
+                for (const record of entries) seen.add(record.id);
+                if (!allowed) return [];
+                return fresh.filter(({ entry, index }) => businessSources.has(entry.source)
+                    && entry.targetMessageIndex === index
+                    && [...(entry.changedSheetKeys || []), ...(entry.filledSheetKeys || []),
+                        ...(entry.operations || []).map(op => op && op.sheetKey)]
+                        .some(key => sheetKeys.has(key)));
+            },
+        };
     }
 
     let tableUpdateHookApi = null;
@@ -3379,8 +3387,85 @@ function installExtensionRuntime(window) {
     let tableUpdateHookPendingData = null;
     let tableUpdateHookSession = null;
     let tableUpdateHookRetryCount = 0;
-    function tableSnapshotHasSheets(data) {
-        if (!data || typeof data !== 'object') return false;
+    const tableBusinessTracker = createSpCommitTracker();
+    let tableBusinessSession = null;
+    let tableBusinessSnapshot = null;
+    let tableBusinessPending = null;
+    let tableBusinessRunning = false;
+    let tableBusinessRevision = 0;
+    function syncTableBusinessBaseline(data) {
+        if (isRuntimeSessionCurrent(tableBusinessSession)) return;
+        tableBusinessSession = captureRuntimeSession();
+        tableBusinessTracker.seed(readSpCommitEntries(getContextSafe().chat));
+        tableBusinessSnapshot = mvuDataFromCompleteTableSnapshot(data);
+        tableBusinessPending = null;
+        tableBusinessRevision++;
+    }
+    async function applySpBusinessCorrection(data, task, session) {
+        const api = runtimeApiForSession(getAcuApi(), session);
+        const revision = tableBusinessRevision;
+        const beforeJson = JSON.stringify(api.exportTableAsJson());
+        const entries = readSpCommitEntries(getContextSafe().chat);
+        const entryStamp = JSON.stringify(entries.map(record => record.id));
+        const validSource = () => {
+            const chat = getContextSafe().chat || [];
+            return task.entries.every(record => chat[record.index] === record.message)
+                && entryStamp === JSON.stringify(readSpCommitEntries(chat).map(record => record.id));
+        };
+        const assertUnchanged = () => {
+            assertRuntimeSession(session);
+            if (revision !== tableBusinessRevision || !validSource()
+                || JSON.stringify(api.exportTableAsJson()) !== beforeJson) throw new Error('业务监听期间数据库或来源消息已变化，取消旧修正');
+        };
+        const original = mvuDataFromCompleteTableSnapshot(data);
+        if (!original || beforeJson !== JSON.stringify(data)) return false;
+        const after = JSON.parse(JSON.stringify(original));
+        after.display_data = JSON.parse(JSON.stringify(after.stat_data));
+        after.delta_data = {};
+        // SP 不提供逐 MVU 命令的 reason；这里只把变化叶子记录为本轮差量。
+        const delta = (current, prior, display, changes) => {
+            for (const key of new Set([...Object.keys(current || {}), ...Object.keys(prior || {})])) {
+                const value = current && current[key], old = prior && prior[key];
+                if (canonicalJsonForSync(value) === canonicalJsonForSync(old)) continue;
+                if (value && old && typeof value === 'object' && typeof old === 'object' && !Array.isArray(value) && !Array.isArray(old)) {
+                    changes[key] = {}; delta(value, old, display[key], changes[key]);
+                } else display[key] = changes[key] = String(old) + '->' + JSON.stringify(value);
+            }
+        };
+        delta(after.stat_data, task.before && task.before.stat_data, after.display_data, after.delta_data);
+        after.stat_data.$internal = { display_data: after.display_data, delta_data: after.delta_data };
+        await emitMvuEvent('mag_variable_update_ended', after, task.before || original);
+        delete after.stat_data.$internal;
+        assertUnchanged();
+        if (canonicalJsonForSync(original.stat_data) !== canonicalJsonForSync(after.stat_data)) {
+            const chat = getContextSafe().chat || [];
+            let latestAi = chat.length - 1;
+            while (latestAi >= 0 && (!chat[latestAi] || chat[latestAi].is_user)) latestAi--;
+            sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) + 1;
+            try {
+                if (task.entries.every(record => record.index === latestAi)) {
+                    const candidate = await buildUpdatedTemplateFromStat(activeLayout, original.stat_data, after.stat_data, data);
+                    assertUnchanged();
+                    if (!candidate) throw new Error('业务修正快照构造失败');
+                    const result = await api.importTableAsJson(JSON.stringify(candidate));
+                    if (result !== true && !(result && result.success === true)) throw new Error('SP 未接受业务修正快照');
+                } else {
+                    // 公共导入不能指定旧楼。复用真实 writer 在内存规划，只有一次
+                    // CRUD 才提交；多步整笔拒绝，不留下先完成的步骤或移写最新楼。
+                    await commitCurrentReplyBatch(api, original.stat_data, after.stat_data, data, session,
+                        { allowImport: false, assertBeforeCommit: assertUnchanged });
+                }
+                assertRuntimeSession(session);
+            } finally {
+                sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = Math.max(0, (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 1) - 1);
+            }
+        }
+        const committed = api.exportTableAsJson();
+        tableBusinessSnapshot = mvuDataFromCompleteTableSnapshot(committed);
+        publishCommittedTableSnapshot(committed, 'SP 业务修正', true, true);
+        return true;
+    }
+    function tableSnapshotHasSheets(data) {        if (!data || typeof data !== 'object') return false;
         for (const k in data) {
             if (k.indexOf('sheet_') === 0 && data[k] && data[k].name) return true;
         }
@@ -3421,7 +3506,7 @@ function installExtensionRuntime(window) {
     // 所有表格变化共用同一个前端出口：SP 的提交回调、聊天历史回放兜底都必须
     // 先暂存同一份权威 after，再驱动事件、无副作用的直接重读入口和明确刷新控件。
     // 整页 body.load/iframe reload 只允许手动执行，避免普通改单元格清空前端局部状态。
-    function publishCommittedTableSnapshot(data, source, force) {
+    function publishCommittedTableSnapshot(data, source, force, eventAlreadyEmitted) {
         const after = mvuDataFromCompleteTableSnapshot(data);
         if (!after) return false;
         try {
@@ -3434,6 +3519,7 @@ function installExtensionRuntime(window) {
             stageFrontendCommittedMvuRead(after);
             const result = refreshCurrentCardFrontends({
                 after,
+                eventAlreadyEmitted,
                 allowHardReload: false,
             });
             dbg('[' + source + '] 已同步前端：直接 ' + result.direct +
@@ -3516,6 +3602,9 @@ function installExtensionRuntime(window) {
         delays.forEach((delay, index) => {
             const timer = hostWindow.setTimeout(() => {
                 if (chatMutationFrontendSyncState !== state || state.generation !== chatMutationFrontendSyncGeneration) return;
+                // 当前业务提交会在落定后统一发布；回放兜底不能抢在它前面
+                // 广播同一后态，使已经等待过的业务结束监听再次执行。
+                if (tableBusinessRunning || (pendingStatWrite != null && pendingStatWriteSession && pendingStatWriteSession.businessEventEmitted)) return;
                 try {
                     if (autoInitChatId() !== state.chatKey || cardCacheKey(currentCharacter()) !== state.cardKey) {
                         finish();
@@ -3620,8 +3709,12 @@ function installExtensionRuntime(window) {
         return '';
     }
 
-    function flushTableUpdateHook() {
+    async function flushTableUpdateHook() {
         tableUpdateHookTimer = null;
+        if (tableBusinessRunning) {
+            tableUpdateHookTimer = hostWindow.setTimeout(flushTableUpdateHook, 120);
+            return;
+        }
         if (!isRuntimeSessionCurrent(tableUpdateHookSession)) {
             tableUpdateHookPendingData = null;
             tableUpdateHookSession = null;
@@ -3660,10 +3753,38 @@ function installExtensionRuntime(window) {
             return;
         }
         tableUpdateHookRetryCount = 0;
+        const task = tableBusinessPending;
+        tableBusinessPending = null;
+        if (task && task.entries.length) {
+            const session = tableUpdateHookSession;
+            tableBusinessRunning = true;
+            try {
+                if (await applySpBusinessCorrection(data, task, session)) return;
+            } catch (e) {
+                dbgWarn(' SP 业务修正未应用：', e && e.message ? e.message : e);
+                // 不自动重跑监听器；重试奖励/扣费会产生二次业务效果。
+                if (!isRuntimeSessionCurrent(session)) return;
+                try { data = getAcuApi().exportTableAsJson(); } catch (_) {}
+                publishCommittedTableSnapshot(data, 'SP 业务修正取消', true, true);
+                return;
+            } finally { tableBusinessRunning = false; }
+        }
         publishCommittedTableSnapshot(data, '表格更新回调', false);
     }
-    const tableUpdateHookCallback = (latestTableData) => {
+    const tableUpdateHookCallback = (latestTableData, meta) => {
         if (!activeLayout) return;
+        syncTableBusinessBaseline(latestTableData);
+        const currentSnapshot = mvuDataFromCompleteTableSnapshot(latestTableData);
+        const sheetNames = new Set((activeLayout || []).map(layout => layout.table));
+        const sheetKeys = new Set(Object.keys(latestTableData || {}).filter(key => latestTableData[key] && sheetNames.has(latestTableData[key].name)));
+        const allowed = !!(meta && meta.persisted === true) && !(Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) > 0);
+        const fresh = tableBusinessTracker.consume(readSpCommitEntries(getContextSafe().chat), sheetKeys, allowed);
+        if (fresh.length && currentSnapshot) {
+            tableBusinessPending = { entries: [...(tableBusinessPending ? tableBusinessPending.entries : []), ...fresh],
+                before: tableBusinessPending ? tableBusinessPending.before : tableBusinessSnapshot };
+        }
+        if (currentSnapshot) tableBusinessSnapshot = JSON.parse(JSON.stringify(currentSnapshot));
+        tableBusinessRevision++;
         tableUpdateHookSession = captureRuntimeSession();
         // SP 每次事务提交都代表运行时数据已变化（含被抑制广播的批量 CRUD），
         // 投影缓存必须立即失效。
@@ -3678,6 +3799,7 @@ function installExtensionRuntime(window) {
         const api = getAcuApi();
         if (!api || typeof api.registerTableUpdateCallback !== 'function') return false;
         try {
+            syncTableBusinessBaseline(typeof api.exportTableAsJson === 'function' ? api.exportTableAsJson() : null);
             if (tableUpdateHookApi && tableUpdateHookApi !== api && typeof tableUpdateHookApi.unregisterTableUpdateCallback === 'function') {
                 try { tableUpdateHookApi.unregisterTableUpdateCallback(tableUpdateHookCallback); } catch (e0) {}
             }
@@ -3699,6 +3821,10 @@ function installExtensionRuntime(window) {
         tableUpdateHookRetryCount = 0;
         tableUpdateHookSession = null;
         tableUpdateHookApi = null;
+        tableBusinessSession = null;
+        tableBusinessSnapshot = null;
+        tableBusinessPending = null;
+        tableBusinessRevision++;
     }
 
     function refreshCurrentCardFrontends(options) {
@@ -3745,7 +3871,7 @@ function installExtensionRuntime(window) {
         }
         // 普通状态栏应通过 MVU 原生更新事件刷新；这里也补发一次，
         // 手动按钮因此同时适用于监听式前端和旧式 body.load 整页前端。
-        dispatchVariableUpdateEnded(opts.after, opts.before);
+        dispatchVariableUpdateEnded(opts.after, opts.before, opts.eventAlreadyEmitted);
         result.control += refreshExplicitFrontendDataControls(occupied.concat(reloadTargets));
         for (const target of reloadTargets) {
             try { target.location.reload(); result.reload++; } catch (e) {}
@@ -3893,9 +4019,12 @@ function installExtensionRuntime(window) {
             cur[parts[parts.length - 1]] = value;
         };
         const note = (path, oldV, newV, reason) => {
-            if (!display) return;
             const r = reason ? ' (' + reason + ')' : '';
-            display[path] = String(oldV) + '->' + String(newV) + r;
+            const parts = String(path).split('.').filter(Boolean);
+            const value = String(oldV) + '->' + String(newV) + r;
+            if (display) setPathArr(display, parts, value);
+            const delta = stat.$internal && stat.$internal.delta_data;
+            if (delta) setPathArr(delta, parts, value);
         };
         for (const cmd of cmds) {
             if (!cmd.path) continue;
@@ -4050,9 +4179,10 @@ function installExtensionRuntime(window) {
         try { openingBulkClosedChats.add(runtimeScopedChatKey(autoInitChatId())); pruneOrderedCollection(openingBulkClosedChats, 80); } catch (e) {}
         const out = JSON.parse(JSON.stringify(oldData || {}));
         if (!out.stat_data || typeof out.stat_data !== 'object') out.stat_data = {};
-        if (!out.display_data || typeof out.display_data !== 'object') out.display_data = {};
-        if (!out.delta_data || typeof out.delta_data !== 'object') out.delta_data = {};
         const before = JSON.parse(JSON.stringify(out));
+        delete out.stat_data.$internal;
+        out.display_data = JSON.parse(JSON.stringify(out.stat_data));
+        out.delta_data = {};
         out.stat_data.$internal = { display_data: out.display_data, delta_data: out.delta_data };
         await emitMvuEvent('mag_variable_update_started', out);
         const originalMessage = String(message || '');
@@ -4072,14 +4202,31 @@ function installExtensionRuntime(window) {
         await emitMvuEvent('mag_command_parsed_ended_for_zod', zodOut, zodInfos, originalMessage);
         const commands = infos.map(mvuInternalFromCommandInfo).filter(Boolean);
         if (commands.length) await applyMvuCommandsWithEvents(out.stat_data, commands, out.display_data);
-        out.delta_data = JSON.parse(JSON.stringify(out.display_data || {}));
-        if (out.stat_data.$internal) out.stat_data.$internal.delta_data = out.delta_data;
         await emitMvuEvent('mag_variable_update_ended', out, before);
         delete out.stat_data.$internal;
         const zodEnded = JSON.parse(JSON.stringify(out));
         const zodBefore = JSON.parse(JSON.stringify(before));
         await emitMvuEvent('mag_variable_update_ended_for_zod', zodEnded, zodBefore);
+        Object.defineProperty(out, '__mvu2shujukuBusinessProcessed', { value: true });
         return out;
+    }
+
+    // 公共 MVU API 使用 Lodash 路径语义；与 AI 文本命令的路径修正规则分开。
+    function mvuVariablePathParts(path, data) {
+        if (Array.isArray(path)) return path.map(String);
+        const text = String(path == null ? '' : path);
+        if (data != null && Object.prototype.hasOwnProperty.call(Object(data), text)) return [text];
+        const lodash = window._ || hostWindow._;
+        if (lodash && typeof lodash.toPath === 'function') return lodash.toPath(text);
+        // 早期 shim 尚无 Lodash 时也支持数字下标、引号键、转义与空键。
+        const parts = [];
+        if (text[0] === '.') parts.push('');
+        text.replace(/[^.[\]]+|\[(?:(-?\d+(?:\.\d+)?)|(["'])((?:(?!\2)[^\\]|\\.)*?)\2)\]|(?=(?:\.|\[\])(?:\.|\[\]|$))/g,
+            (match, number, quote, quoted) => {
+                parts.push(quote ? quoted.replace(/\\(\\)?/g, '$1') : (number || match));
+                return match;
+            });
+        return parts.length ? parts : [''];
     }
 
     let windowMvuShimTimer = null;
@@ -4183,11 +4330,11 @@ function installExtensionRuntime(window) {
                     opts = opts || {};
                     const cat = opts.category || 'stat';
                     const data = cat === 'display' ? (mvu_data && mvu_data.display_data) : cat === 'delta' ? (mvu_data && mvu_data.delta_data) : (mvu_data && mvu_data.stat_data);
-                    const parts = String(path || '').split('.').filter((p) => p !== '');
+                    const parts = mvuVariablePathParts(path, data);
                     let cur = data;
-                    for (const p of parts) { if (cur == null) break; cur = cur[p]; }
+                    for (const p of parts) { if (cur == null) { cur = undefined; break; } cur = cur[p]; }
                     const v = cur === undefined ? opts.default_value : cur;
-                    return (Array.isArray(v) && v.length === 2) ? v[0] : v;
+                    return (Array.isArray(v) && v.length === 2 && typeof v[1] === 'string') ? v[0] : v;
                 } catch (e) { return opts && opts.default_value !== undefined ? opts.default_value : undefined; }
             };
             windowMvuFake.getRecordFromMvuData = function (mvu_data, category) {
@@ -4201,26 +4348,28 @@ function installExtensionRuntime(window) {
                     opts = opts || {};
                     if (!mvu_data || typeof mvu_data !== 'object') return false;
                     if (!mvu_data.stat_data || typeof mvu_data.stat_data !== 'object') mvu_data.stat_data = {};
-                    const parts = String(path || '').split('.').filter((p) => p !== '');
-                    if (!parts.length) return false;
-                    const hasObjPath = (obj, arr) => { let c = obj; for (const p of arr) { if (c == null || typeof c !== 'object') return false; c = c[p]; } return c !== undefined; };
-                    const setObjPath = (obj, arr, v) => { let c = obj; for (let i = 0; i < arr.length - 1; i++) { if (c[arr[i]] == null || typeof c[arr[i]] !== 'object') c[arr[i]] = {}; c = c[arr[i]]; } c[arr[arr.length - 1]] = v; };
+                    const parts = mvuVariablePathParts(path, mvu_data.stat_data);
+                    if (!parts.length || parts.some(p => p === '__proto__' || p === 'constructor' || p === 'prototype')) return false;
+                    const hasObjPath = (obj, arr) => { let c = obj; for (const p of arr) { if (c == null || !Object.prototype.hasOwnProperty.call(Object(c), p)) return false; c = c[p]; } return true; };
+                    const setObjPath = (obj, arr, v) => { let c = obj; for (let i = 0; i < arr.length - 1; i++) { if (c[arr[i]] == null || typeof c[arr[i]] !== 'object') c[arr[i]] = /^\d+$/.test(arr[i + 1]) ? [] : {}; c = c[arr[i]]; } c[arr[arr.length - 1]] = v; };
                     // 与官方 updateVariable 一致：路径不存在时不写（返回 false），不自动创建
                     if (!hasObjPath(mvu_data.stat_data, parts)) return false;
                     const display_data = mvu_data.stat_data.$internal && mvu_data.stat_data.$internal.display_data;
                     const delta_data = mvu_data.stat_data.$internal && mvu_data.stat_data.$internal.delta_data;
                     const curPath = (() => { let c = mvu_data.stat_data; for (let i = 0; i < parts.length - 1; i++) { c = c[parts[i]]; } return c; })();
                     const lastKey = parts[parts.length - 1];
-                    let oldVal = curPath[lastKey];
-                    const isVWD = Array.isArray(oldVal) && oldVal.length === 2 && typeof oldVal[1] === 'string' && !Array.isArray(oldVal[0]);
-                    let finalValue = new_value;
-                    if (new_value instanceof Date) finalValue = new_value.toISOString();
+                    const previousValue = curPath[lastKey];
+                    const isVWD = Array.isArray(previousValue) && previousValue.length === 2 && typeof previousValue[1] === 'string';
+                    const cloneForEvent = value => {
+                        if (value === undefined || value === null || typeof value !== 'object') return value;
+                        try { if (typeof structuredClone === 'function') return structuredClone(value); } catch (e) {}
+                        try { return JSON.parse(JSON.stringify(value)); } catch (e) { return value; }
+                    };
+                    const oldVal = isVWD ? cloneForEvent(previousValue[0]) : previousValue;
+                    const finalValue = new_value;
                     if (isVWD) {
-                        oldVal = JSON.parse(JSON.stringify(oldVal[0]));
-                        finalValue = (typeof oldVal === 'number' && finalValue !== null) ? Number(finalValue) : finalValue;
-                        curPath[lastKey] = [finalValue, curPath[lastKey][1]];
+                        curPath[lastKey] = [finalValue, previousValue[1]];
                     } else {
-                        if (typeof oldVal === 'number' && finalValue !== null && !isNaN(Number(finalValue))) finalValue = Number(finalValue);
                         curPath[lastKey] = finalValue;
                     }
                     const reason = opts.reason || '';
@@ -4229,7 +4378,7 @@ function installExtensionRuntime(window) {
                     if (delta_data) { try { setObjPath(delta_data, parts, ds); } catch (e) {} }
                     dbg(' Mvu.setMvuVariable:', path, '=', String(new_value) + (reason ? ' (' + reason + ')' : ''));
                     if (opts.is_recursive) {
-                        emitMvuEvent('mag_variable_updated', mvu_data.stat_data, path, oldVal, finalValue);
+                        await emitMvuEvent('mag_variable_updated', mvu_data.stat_data, path, oldVal, finalValue);
                     }
                     return true;
                 } catch (e) {
@@ -4255,13 +4404,14 @@ function installExtensionRuntime(window) {
             };
             windowMvuFake.replaceMvuData = async function (data) {
                 try {
-                    assertRuntimeSession(shimSession);
+                    const callerSession = bindWriteTarget(shimSession);
+                    assertRuntimeSession(callerSession);
                     let api = getAcuApi();
                     if (!api || !activeLayout) {
                         // 外部 UI/开场脚本可能在自动建表完成前就调用写库：不要直接失败，
                         // 等待布局/API 就绪后再继续（最长约 10 秒，避免 UI 永久卡住）。
                         const ready = await waitForRuntimeBasics(10000);
-                        assertRuntimeSession(shimSession);
+                        assertRuntimeSession(callerSession);
                         if (!ready) {
                             dbgWarn(' Mvu.replaceMvuData 被跳过：等待 10s 后 API/布局仍未就绪（api=' + !!api + ' activeLayout=' + (activeLayout ? '有' : '空') + '，自动建表尚未缓存布局，或当前卡不是转换产物）');
                             return false;
@@ -4284,7 +4434,8 @@ function installExtensionRuntime(window) {
                     }
                     const nextStat = (data && data.stat_data) || {};
                     const writeChatKey = autoInitChatId();
-                    const ok = await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, shimSession);
+                    const writeSession = { ...callerSession, businessEventEmitted: !!(data && data.__mvu2shujukuBusinessProcessed) };
+                    const ok = await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, writeSession);
                     if (ok && isRuntimeSessionCurrent(shimSession)) refreshOpeningContinuityAfterWrite(writeChatKey, nextStat);
                     return !!ok;
                 } catch (e) {
@@ -4319,18 +4470,7 @@ function installExtensionRuntime(window) {
             windowMvuFake.replaceCurrentMvuData = async function (mvu_data) { return sessionMvu.replaceMvuData(mvu_data, { type: 'message', message_id: 'latest' }); };
             windowMvuFake.isDuringExtraAnalysis = function () { return false; };
         }
-        const targets = [];
-        const addTarget = (t) => { try { if (t && targets.indexOf(t) === -1) targets.push(t); } catch (e) {} };
-        addTarget(window);
-        addTarget(hostWindow);
-        try { addTarget(window.parent); } catch (e) {}
-        try { addTarget(window.top); } catch (e) {}
-        for (const r of [window, hostWindow]) {
-            try {
-                const frames = r.document ? r.document.querySelectorAll('iframe') : [];
-                for (const f of frames) { try { addTarget(f.contentWindow); } catch (e) {} }
-            } catch (e) {}
-        }
+        const targets = getRuntimeWindows();
         for (const w of targets) {
             try {
                 // 覆盖前先登记真原始值（Mvu/getAllVariables/三个全局函数），
@@ -4623,6 +4763,7 @@ function installExtensionRuntime(window) {
     }
     // 撤销 Mvu 接管：恢复各窗口原 window.Mvu，停止周期复查，切回转换卡时再接管。
     function restoreWindowMvuShim() {
+        if (runtimeWindows) runtimeWindows.invalidate();
         pendingLateFrontendUpdate = null;
         if (windowMvuShimTimer) {
             hostWindow.clearInterval(windowMvuShimTimer);
@@ -4781,6 +4922,15 @@ function installExtensionRuntime(window) {
         }
     }
 
+    async function readTargetSpVersion() {
+        try {
+            const extensions = await import('/scripts/extensions.js');
+            const matches = (extensions.extensionNames || []).map(name => extensions.getExtensionManifest(name))
+                .filter(manifest => manifest && /^SP[·・\s]*数据库(?:\s|$)/i.test(String(manifest.display_name || '')));
+            if (matches.length === 1 && typeof matches[0].version === 'string') return matches[0].version;
+        } catch (_) {}
+        return 'unknown';
+    }
     async function doConvert(inputBytes, sourceIsPng, sourceCharacter) {
         const settings = getSettings();
         const core = window.MVU2SHUJUKU_CORE;
@@ -4792,6 +4942,10 @@ function installExtensionRuntime(window) {
         const mode = 'both';
         const opts = {
             mode,
+            targetSpVersion: await readTargetSpVersion(),
+            jsonContainers: settings.jsonContainers === true,
+            vwdDescriptions: !!(window.EjsTemplate && window.EjsTemplate.evalTemplate
+                && window.EjsTemplate.evalTemplate.__mvu2shujukuContextBridge),
             asPng: settings.asPng === 'auto' ? sourceIsPng : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
             ddlIncludeCheck: settings.ddlIncludeCheck !== false,
@@ -5232,20 +5386,13 @@ function installExtensionRuntime(window) {
         toast(title + '：' + body, 'info');
     }
 
-    // 表格“自动化更新参数”快速编辑器（只改转换结果模板 JSON，不走插件 API）
-    // 字段与 SP·数据库 插件「自动化更新参数」面板一一对应；缺省 -1 = 沿用插件全局设置。
-    const UPDATE_PARAM_OPTIONS = [
-        { key: 'updateFrequency', label: '更新频率', hint: '-1=沿用全局；0=停用该表自动更新' },
-        { key: 'groupId', label: '分组编号', hint: '-1=沿用全局' },
-        { key: 'contextDepth', label: '上下文层数', hint: '-1=沿用全局' },
-        { key: 'batchSize', label: '批处理大小', hint: '-1=沿用全局' },
-        { key: 'skipFloors', label: '跳过楼层', hint: '-1=沿用全局' },
-        { key: 'sendLatestRows', label: '发送最新行数', hint: '-1=沿用全局' },
-    ];
-    // 每行当前选择的参数（uid -> key），重渲染后保持下拉选择不变
+    // 结果视图只改本次模板；下载/保存时刷新卡内模板与登记桥。
     const updateParamState = {};
-    // 参数是否有未落盘的改动：下载/保存时据此重新生成转换结果（模板 JSON 改动本身是实时的）
     let updateParamsDirty = false;
+    const resultView = window.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__({
+        document: hostDocument, paramState: updateParamState, createColumnsToggle,
+        onChange: () => { updateParamsDirty = true; }, notify: toast,
+    });
 
     function refreshConvertedResult() {
         // 模板参数编辑仅刷新产物；转换规则变化时核心自动退回完整转换。
@@ -5273,30 +5420,6 @@ function installExtensionRuntime(window) {
         return result;
     }
 
-    function updateConfigOf(sheet) {
-        if (!sheet || typeof sheet !== 'object') return {};
-        if (!sheet.updateConfig || typeof sheet.updateConfig !== 'object') sheet.updateConfig = {};
-        return sheet.updateConfig;
-    }
-
-    function getUpdateParam(sheet, key) {
-        const v = updateConfigOf(sheet)[key];
-        return Number.isFinite(Number(v)) ? Number(v) : -1;
-    }
-
-    function normalizeUpdateParamValue(value) {
-        const raw = String(value == null ? '' : value).trim();
-        const n = raw === '' ? -1 : Math.trunc(Number(raw));
-        return Number.isFinite(n) ? n : -1;
-    }
-
-    function setUpdateParam(sheet, key, value) {
-        const cfg = updateConfigOf(sheet);
-        cfg.uiSentinel = -1; // 与插件 UI 一致：标记已由用户显式设置
-        cfg[key] = normalizeUpdateParamValue(value);
-        return cfg[key];
-    }
-
     function updateParamSheetRows(result) {
         return Object.keys(result.template || {})
             .filter(k => k.startsWith('sheet_'))
@@ -5309,135 +5432,16 @@ function installExtensionRuntime(window) {
             });
     }
 
-    function paramOptionHtml(selectedKey) {
-        return UPDATE_PARAM_OPTIONS.map(o =>
-            '<option value="' + o.key + '"' + (o.key === selectedKey ? ' selected' : '') + '>' + o.label + '</option>'
-        ).join('');
-    }
-
     function renderUpdateConfigEditor(box, result) {
-        const rows = updateParamSheetRows(result);
-        if (!rows.length) return;
-        const wrap = hostDocument.createElement('div');
-        wrap.className = 'mvu2shujuku-param-editor';
-        const head = hostDocument.createElement('div');
-        head.className = 'mvu2shujuku-row';
-        head.innerHTML = '<b>表格自动化更新参数</b>';
-        wrap.appendChild(head);
-        const help = hostDocument.createElement('div');
-        help.className = 'mvu2shujuku-help';
-        help.innerHTML = '直接修改转换结果模板 JSON，改动实时写入（下载/保存时自动带上，无需再点确定）。' +
-            '参数 -1 = 沿用插件全局设置；更新频率 0 = 停用该表自动更新。' +
-            '已创建聊天中的表格不会自动变更（聊天作用域持有自己的模板副本），如需同步请重新导入模板或在新聊天中建表。';
-        wrap.appendChild(help);
-
-        // 整体编辑：一个参数+数值应用到全部表格（始终可用，不另设开关）
-        const bulk = hostDocument.createElement('div');
-        bulk.className = 'mvu2shujuku-row mvu2shujuku-param-bulk';
-        const bulkLabel = hostDocument.createElement('span');
-        bulkLabel.className = 'mvu2shujuku-label';
-        bulkLabel.textContent = '整体编辑';
-        const bulkSel = hostDocument.createElement('select');
-        bulkSel.className = 'mvu2shujuku-param-select';
-        bulkSel.innerHTML = paramOptionHtml('updateFrequency');
-        const bulkInput = hostDocument.createElement('input');
-        bulkInput.type = 'number';
-        bulkInput.min = '-1';
-        bulkInput.step = '1';
-        bulkInput.value = '-1';
-        bulkInput.className = 'mvu2shujuku-param-value';
-        const bulkBtn = hostDocument.createElement('button');
-        bulkBtn.className = 'menu_button';
-        bulkBtn.textContent = '应用到全部表格';
-        bulkBtn.addEventListener('click', () => {
-            const key = bulkSel.value;
-            const v = normalizeUpdateParamValue(bulkInput.value);
-            let count = 0;
-            for (const r of rowEls) {
-                setUpdateParam(r.sheet, key, v);
-                updateParamState[r.uid] = key;
-                r.sel.value = key;
-                r.sel.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
-                r.input.value = String(v);
-                r.input.title = r.sel.title;
-                count++;
-            }
-            updateParamsDirty = true;
-            const label = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).label || key;
-            toast('已把「' + label + '」设为 ' + v + '，应用到全部 ' + count + ' 张表', 'info');
-            dbg(' 整体应用: ' + key + ' = ' + v + ' → ' + count + ' 张表');
-        });
-        bulk.appendChild(bulkLabel);
-        bulk.appendChild(bulkSel);
-        bulk.appendChild(bulkInput);
-        bulk.appendChild(bulkBtn);
-        wrap.appendChild(bulk);
-
-        // 逐表编辑：表名 | 参数 | 数值（实时写入模板 JSON）
-        const grid = hostDocument.createElement('div');
-        grid.className = 'mvu2shujuku-param-grid';
-        const mkCell = (cls, text) => {
-            const cell = hostDocument.createElement('div');
-            cell.className = cls;
-            cell.textContent = text;
-            return cell;
-        };
-        grid.appendChild(mkCell('mvu2shujuku-param-head', '表名'));
-        grid.appendChild(mkCell('mvu2shujuku-param-head', '参数'));
-        grid.appendChild(mkCell('mvu2shujuku-param-head', '数值'));
-        const rowEls = [];
-        for (const { uid, sheet } of rows) {
-            const key = updateParamState[uid] && UPDATE_PARAM_OPTIONS.some(o => o.key === updateParamState[uid])
-                ? updateParamState[uid]
-                : 'updateFrequency';
-            const nameEl = mkCell('mvu2shujuku-param-name', String(sheet.name || uid));
-            const sel = hostDocument.createElement('select');
-            sel.className = 'mvu2shujuku-param-select';
-            sel.innerHTML = paramOptionHtml(key);
-            sel.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
-            const input = hostDocument.createElement('input');
-            input.type = 'number';
-            input.min = '-1';
-            input.step = '1';
-            input.className = 'mvu2shujuku-param-value';
-            input.value = String(getUpdateParam(sheet, key));
-            input.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === key) || {}).hint || '';
-            sel.addEventListener('change', () => {
-                updateParamState[uid] = sel.value;
-                input.value = String(getUpdateParam(sheet, sel.value));
-                input.title = (UPDATE_PARAM_OPTIONS.find(o => o.key === sel.value) || {}).hint || '';
-                sel.title = input.title;
-                dbg(' 参数行切换: ' + String(sheet.name || uid) + ' → ' + sel.value + ' = ' + input.value);
-            });
-            input.addEventListener('input', () => {
-                const v = setUpdateParam(sheet, sel.value, input.value);
-                input.value = String(v);
-                updateParamsDirty = true;
-                dbg(' 参数行修改: ' + String(sheet.name || uid) + '.' + sel.value + ' = ' + v);
-            });
-            const cellSel = hostDocument.createElement('div');
-            cellSel.className = 'mvu2shujuku-param-cell';
-            cellSel.appendChild(sel);
-            const cellVal = hostDocument.createElement('div');
-            cellVal.className = 'mvu2shujuku-param-cell';
-            cellVal.appendChild(input);
-            grid.appendChild(nameEl);
-            grid.appendChild(cellSel);
-            grid.appendChild(cellVal);
-            const colDetails = createColumnsToggle(sheet);
-            colDetails.style.gridColumn = '1 / -1';
-            grid.appendChild(colDetails);
-            rowEls.push({ uid, sheet, sel, input });
-        }
-        wrap.appendChild(grid);
-        box.appendChild(wrap);
+        resultView.renderEditor(box, updateParamSheetRows(result));
     }
 
     // 合并数据库插件现有模板区块：放在参数编辑器与转换报告之间，转换后边改边并更方便
     function renderMergeSection(box, panel) {
-        const sec = hostDocument.createElement('div');
-        sec.className = 'mvu2shujuku-merge-section';
+        const sec = hostDocument.createElement('details');
+        sec.className = 'mvu2shujuku-merge-section mvu2shujuku-detail';
         sec.innerHTML =
+            '<summary>合并其他数据库表格（可选）</summary>' +
             '<div class="mvu2shujuku-row">' +
             '  <label class="mvu2shujuku-label" for="mvu2shujuku-merge-source">合并数据库现有表格模板（转换完成后可用）</label>' +
             '  <select id="mvu2shujuku-merge-source" title="选择模板来源：当前聊天模板 / 全局模板 / 全局预设"></select>' +
@@ -5475,20 +5479,9 @@ function installExtensionRuntime(window) {
         box.innerHTML = '';
         // 每次渲染出的转换结果都是最新状态（含刚合并/刚改完参数），重置“待刷新”标记
         updateParamsDirty = false;
-        const head = hostDocument.createElement('div');
-        head.className = 'mvu2shujuku-row';
-        head.innerHTML = '<b>转换完成</b>：' + result.meta.tableCount + ' 张表';
-        box.appendChild(head);
-        // 自动化更新参数快速编辑器（只改转换结果模板 JSON）
+        resultView.renderReport(box, result);
         renderUpdateConfigEditor(box, result);
-        // 合并数据库现有表格（参数编辑器与报告之间）
         renderMergeSection(box, panel);
-        // 第一步：先看报告
-        const report = hostDocument.createElement('textarea');
-        report.className = 'mvu2shujuku-report';
-        report.value = result.reportText;
-        report.readOnly = true;
-        box.appendChild(report);
         // 最后一步：下载与保存到酒馆（放在合并模板区块之后）
         const downloadsBox = panel.querySelector('#mvu2shujuku-downloads');
         if (downloadsBox) {
@@ -5716,6 +5709,15 @@ function installExtensionRuntime(window) {
                 }
             });
         }
+        const jsonContainersBox = panel.querySelector('#mvu2shujuku-json-containers');
+        if (jsonContainersBox && jsonContainersBox.dataset.bound !== 'true') {
+            jsonContainersBox.dataset.bound = 'true';
+            jsonContainersBox.addEventListener('change', () => {
+                getSettings().jsonContainers = jsonContainersBox.checked;
+                saveSettings();
+                if (lastResult) toast('完整 JSON 容器选项已保存；重新转换后生效', 'info');
+            });
+        }
         const ejsTranslateBox = panel.querySelector('#mvu2shujuku-ejs-translate');
         if (ejsTranslateBox && ejsTranslateBox.dataset.bound !== 'true') {
             ejsTranslateBox.dataset.bound = 'true';
@@ -5826,6 +5828,18 @@ function installExtensionRuntime(window) {
             mvu2shujukuGetAllVariables: safeDefine,
             mvu2shujukuGetMessageVar: getMessageDefine,
             mvu2shujukuFormatMessageVariable: formatMessageDefine,
+            mvu2shujukuVwdDescriptions: function (table, fieldIds) {
+                if (!ensureActiveLayoutLazy()) throw new Error('动态说明布局尚未就绪');
+                const entry = activeLayout.find(item => item && item.table === table && item.vwd && item.vwd.promptVersion === 1);
+                if (!entry || JSON.stringify(entry.vwd.fields.map(field => field.id)) !== JSON.stringify(fieldIds)) {
+                    throw new Error('动态说明模板不属于当前布局');
+                }
+                const api = getAcuApi();
+                // 一次读取一张表的所有说明，不读取 pendingStatWrite，也不重建完整变量树。
+                const tables = api && typeof api.exportTableAsJson === 'function' ? api.exportTableAsJson() : null;
+                const sheet = Object.values(tables || {}).find(item => item && item.name === table);
+                return window.MVU2SHUJUKU_CORE.vwdPromptDescriptions(entry, sheet);
+            },
             mvu2shujukuSetMessageVar: setMessageDefine,
             mvu2shujukuResolveMacro: resolveMacroDefine,
             mvu2shujukuApplyWorldInfoRegex: applyWorldInfoRegexDefine,
@@ -5840,7 +5854,7 @@ function installExtensionRuntime(window) {
             const originalEvalTemplate = ejs.evalTemplate;
             const wrappedEvalTemplate = async function (code, context, options) {
                 // 只介入包含本转换器 helper 的模板，其他卡/模板完全走原调用。
-                if (!/\bmvu2shujuku(?:GetAllVariables|GetMessageVar|FormatMessageVariable|SetMessageVar|ResolveMacro|ApplyWorldInfoRegex)\b/.test(String(code || ''))) {
+                if (!/\bmvu2shujuku(?:GetAllVariables|GetMessageVar|FormatMessageVariable|VwdDescriptions|SetMessageVar|ResolveMacro|ApplyWorldInfoRegex)\b/.test(String(code || ''))) {
                     return originalEvalTemplate.apply(this, arguments);
                 }
                 const defines = templateDatabaseDefines();
@@ -6033,4 +6047,186 @@ function installExtensionRuntime(window) {
     }
 }
 
+/* ================================================================
+ * 候选快照构造（可独立调用）
+ * 只依赖注入的 core，不安装事件、不选聊天、不碰宿主数据；扩展运行时与公开合成测试
+ * 调用的是同一份实现——测试不需要复制源码，也不用替身预检替代真实函数。
+ * ================================================================ */
+// 与运行时同源：宿主表格单元格只接受字符串/数字，布尔归一化为 1/0。
+function createCandidateBuilderFactory(deps) {
+    'use strict';
+    const { core = null, debug: dbg = () => {}, warn: dbgWarn = () => {} } = deps || {};
+    const coreNow = core;
+
+    // 必须留在工厂内：浏览器通过 toString 内联时没有 Node 模块外部作用域。
+    function normalizeCellForSync(v) {
+        if (v === null || v === undefined) return '';
+        if (typeof v === 'boolean') return v ? 1 : 0;
+        if (typeof v === 'number') return v;
+        if (typeof v === 'string') return v;
+        try { return JSON.stringify(v); } catch (e) { return String(v); }
+    }
+
+    // 旧 MVU/VWD 在 message stat_data 中可能仍保留 [值, 描述] 叶子。
+    // 开场分支快照合并发生在建表前；若直接把这个数组交给数据库，
+    // TEXT 列会得到 [值,描述] JSON 字符串，并与枚举 CHECK 冲突。
+    // 仅依 layout 中明确的 pair 列拆包，真实 array/object 字段保持不变。
+    function collapseLegacyPairLeaves(stat, layoutEntries) {
+        const out = JSON.parse(JSON.stringify(stat && typeof stat === 'object' ? stat : {}));
+        const getParent = (parts) => {
+            let cur = out;
+            for (let i = 0; i < parts.length - 1; i++) {
+                if (!cur || typeof cur !== 'object') return null;
+                cur = cur[parts[i]];
+            }
+            return cur && typeof cur === 'object' ? cur : null;
+        };
+        for (const L of (Array.isArray(layoutEntries) ? layoutEntries : [])) {
+            if (L && L.vwd && L.vwd.promptVersion === 1) continue;
+            for (const col of (L && Array.isArray(L.cols) ? L.cols : [])) {
+                if (!Array.isArray(col) || !['pair', 'jsonPairOptional'].includes(col[1]) || !Array.isArray(col[3]) || !col[3].length) continue;
+                const parts = col[3].map(String);
+                const parent = getParent(parts);
+                const key = parts[parts.length - 1];
+                const value = parent && parent[key];
+                if (Array.isArray(value) && value.length === 2 && typeof value[1] === 'string') {
+                    parent[key] = value[0];
+                }
+            }
+        }
+        return out;
+    }
+
+    // VWD 登记字段的说明差量必须在**折叠之前**用原始数据判定：折叠会丢掉 pair 的第二项，
+    // 候选构造若只看折叠后的数据就会漏掉说明变化，产出“新值 + 旧说明”的错误候选。
+    // 这里只做检查并在发现问题时整笔拒绝；放行后仍走原有的折叠兼容路径。
+    function vwdDescriptionRejection(core, layoutEntries, prevStat, nextStat, tables) {
+        if (!core || typeof core.vwdDescriptionDelta !== 'function') return '';
+        const unsupported = (layoutEntries || []).filter(entry => !core.canWriteVwdDescriptions
+            || !core.canWriteVwdDescriptions(entry, tables));
+        return core.vwdDescriptionDelta(unsupported, prevStat, nextStat) || '';
+    }
+
+    // 开场候选与当前回复批次共用内存适配器。只在草稿中执行真实 writer，
+    // 记录其最终 API 调用，不另写一套字段/数组/关联变更规划器。
+    function createTableDraft(baseTemplate, sourceApi) {
+        const tables = JSON.parse(JSON.stringify(baseTemplate || {}));
+        const operations = [];
+        const fakeApi = {
+            exportTableAsJson: () => tables,
+            importTableAsJson: async json => {
+                const candidate = JSON.parse(json);
+                for (const key of Object.keys(tables)) delete tables[key];
+                Object.assign(tables, candidate);
+                return true;
+            },
+            updateCell: async (tableName, rowIndex, col, value) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s || !s.content[rowIndex]) return false;
+                const ci = s.content[0].indexOf(col);
+                if (ci === -1) return false;
+                s.content[rowIndex][ci] = normalizeCellForSync(value);
+                return true;
+            },
+            updateRow: async (tableName, rowIndex, payload) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s || !s.content[rowIndex] || !payload || typeof payload !== 'object') return false;
+                if (Object.keys(payload).some(col => s.content[0].indexOf(col) < 0)) return false;
+                for (const col of Object.keys(payload)) {
+                    const ci = s.content[0].indexOf(col);
+                    if (ci >= 0) s.content[rowIndex][ci] = normalizeCellForSync(payload[col]);
+                }
+                return true;
+            },
+            insertRow: async (tableName, obj) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s) return -1;
+                const row = s.content[0].map(h => '');
+                for (const k of Object.keys(obj || {})) {
+                    const ci = s.content[0].indexOf(k);
+                    if (ci >= 0) row[ci] = normalizeCellForSync(obj[k]);
+                }
+                // 行号取现有最大行号 +1：deleteRow 发生后 content.length 会与已有
+                // 行号重复（row[0] 是主键列），重复主键会让整表导入被拒或产生重复行。
+                let maxRowId = 0;
+                for (let ri = 1; ri < s.content.length; ri++) {
+                    const rn = Number(s.content[ri] && s.content[ri][0]);
+                    if (Number.isFinite(rn) && rn > maxRowId) maxRowId = rn;
+                }
+                row[0] = maxRowId + 1;
+                s.content.push(row);
+                return row[0];
+            },
+            deleteRow: async (tableName, rowIndex) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s || !s.content[rowIndex]) return false;
+                s.content.splice(rowIndex, 1);
+                return true;
+            },
+        };
+        if (sourceApi) {
+            if (typeof sourceApi.updateRow !== 'function') delete fakeApi.updateRow;
+            if (typeof sourceApi.getTableTemplate === 'function') fakeApi.getTableTemplate = (...args) => sourceApi.getTableTemplate(...args);
+            for (const method of ['updateCell', 'updateRow', 'insertRow', 'deleteRow', 'importTableAsJson']) {
+                const apply = fakeApi[method];
+                if (!apply) continue;
+                fakeApi[method] = async (...args) => {
+                    // import 的最终内容统一取 tables，不额外保留整份 JSON 字符串。
+                    const savedArgs = method === 'importTableAsJson' ? null : JSON.parse(JSON.stringify(args));
+                    const result = await apply(...args);
+                    operations.push({ method, args: savedArgs });
+                    return result;
+                };
+            }
+        }
+        return { tables, fakeApi, operations };
+    }
+
+    async function planCurrentReplyWrites(api, layoutEntries, prevStat, nextStat, persistedTables) {
+        const before = api.exportTableAsJson() || {};
+        const beforeJson = JSON.stringify(before);
+        const draft = createTableDraft(before, api);
+        await coreNow.writeStatDiffToDb(draft.fakeApi, layoutEntries, prevStat, nextStat, persistedTables);
+        if (coreNow.lastStatWriteFailed) throw new Error('当前回复批次规划失败，未调用宿主写入');
+        return { tables: draft.tables, operations: draft.operations, beforeJson };
+    }
+
+    function buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate) {
+        if (!coreNow || typeof coreNow.writeStatDiffToDb !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
+        const rejection = vwdDescriptionRejection(coreNow, layoutEntries, prevStat, nextStat, baseTemplate);
+        if (rejection) {
+            dbgWarn(' VWD 说明变化无法与提示词同步，候选构造已在任何写入前拒绝：' + rejection);
+            return null;
+        }
+        const { tables, fakeApi } = createTableDraft(baseTemplate);
+        const normalizedPrevStat = collapseLegacyPairLeaves(prevStat, layoutEntries);
+        const normalizedNextStat = collapseLegacyPairLeaves(nextStat, layoutEntries);
+        // 内存模板必须先追平当前数据库状态，再应用 prev→next。本次调用可能只带
+        // 某组的部分字段；若直接从原始模板应用差异，未变化字段会停留在模板默认值，
+        // 随后的整表 initGameSession 会把已有进度回滚。
+        const baseWrap = coreNow.statDataFromTables(layoutEntries, tables);
+        const baseStat = baseWrap && baseWrap.stat_data && typeof baseWrap.stat_data === 'object'
+            ? baseWrap.stat_data
+            : {};
+        return Promise.resolve(coreNow.writeStatDiffToDb(fakeApi, layoutEntries, baseStat, normalizedPrevStat, tables))
+            .then(() => {
+                if (coreNow.lastStatWriteFailed) throw new Error('构建开场模板失败：无法追平当前数据库快照');
+                return coreNow.writeStatDiffToDb(fakeApi, layoutEntries, normalizedPrevStat, normalizedNextStat, tables);
+            })
+            .then(() => {
+                if (coreNow.lastStatWriteFailed) throw new Error('构建开场模板失败：无法应用当前开场快照');
+                return tables;
+            });
+    }
+
+
+    return {
+        buildUpdatedTemplateFromStat,
+        planCurrentReplyWrites,
+        collapseLegacyPairLeaves,
+        vwdRejectionReason: (layoutEntries, prevStat, nextStat, tables) => vwdDescriptionRejection(coreNow, layoutEntries, prevStat, nextStat, tables),
+    };
+}
+
 module.exports = installExtensionRuntime;
+module.exports.createCandidateBuilder = createCandidateBuilderFactory;

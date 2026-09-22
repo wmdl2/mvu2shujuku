@@ -1,0 +1,44 @@
+{
+  "node": "v22.23.2",
+  "platform": "linux",
+  "floor": [
+    {
+      "messages": 100,
+      "medianMs": 0.01804999999995971
+    },
+    {
+      "messages": 1000,
+      "medianMs": 0.01635900000002266
+    },
+    {
+      "messages": 10000,
+      "medianMs": 0.12938600000001088
+    }
+  ],
+  "write": [
+    {
+      "rows": 100,
+      "snapshotBytes": 6224,
+      "diffMedianMs": 2.7086649999999963,
+      "candidateMedianMs": 3.314435000000003,
+      "batchSingleMedianMs": 2.308824999999956,
+      "batchMixedMedianMs": 2.3317969999999377
+    },
+    {
+      "rows": 1000,
+      "snapshotBytes": 39526,
+      "diffMedianMs": 8.82682699999998,
+      "candidateMedianMs": 20.727847999999994,
+      "batchSingleMedianMs": 10.986741000000052,
+      "batchMixedMedianMs": 11.218510000000038
+    },
+    {
+      "rows": 10000,
+      "snapshotBytes": 399528,
+      "diffMedianMs": 50.593037000000095,
+      "candidateMedianMs": 125.9391579999999,
+      "batchSingleMedianMs": 56.94443200000023,
+      "batchMixedMedianMs": 58.45342000000005
+    }
+  ]
+}

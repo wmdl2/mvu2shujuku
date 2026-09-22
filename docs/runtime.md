@@ -29,24 +29,71 @@ Node 核心惰性 require `table-codec.js`；`assembleExtension` 将同一工厂
 核心原则：
 
 - `Mvu.getMvuData` 返回包含 `stat_data`、`display_data`、`delta_data`、`initialized_lorebooks` 的 MvuData 形状。
-- `Mvu.replaceMvuData` 是完整目标快照写入，在短窗口内合并后落库。
+- `Mvu.replaceMvuData` 是完整目标快照写入，在短窗口内合并后落库。普通写入绑定调用时最新 AI 回复；开场初始化沿用原契约。
+- 对新布局中用单例 `valueCol` 保存整个可空容器的组，完整替换时省略顶层键表示删除，运行时不再补回旧值。普通旧布局仍保留遗漏组保护。修改单个字段应读取完整基线后修改并提交，不能把部分 stat_data 当成完整替换快照。三态存储与验收见[整组空值](validation/2026-09-16-container-presence.md)。
+- 可空动态记录在记录边界一次校验并编码；新增身份行与子记录一并规划。重放守卫按完整祖先键与记录键定位，其他归属的同名条目不阻止新增。见[可空记录验收](validation/2026-09-21-nullable-records.md)。
 - `Mvu.setMvuVariable` 保持原版“路径不存在返回 false”的语义，不默认创建未知 schema 键。
+- 公共 `getMvuVariable/setMvuVariable` 支持点号、数字下标和引号键路径；已有同名字面键优先。getter 仅对第二项为字符串的二元素 VWD 拆包，普通数值/布尔数组保持数组。setter 的 `is_recursive: true` 会等待兼容事件总线的异步监听器完成再返回；该承诺不将原生 DOM CustomEvent 变为可等待事件。
+- setter 在内存中保留传入类型，不把数字字符串转成数字，也不把 Date 提前转成字符串。其 VWD 判定与 getter 一致；这是对上游已弃用 setter「任意二元素数组」判定的有意修正。写入数据库时仍须满足物理列的类型与 JSON 编码，不能把内存赋值成功理解为任意类型都能持久化。
 - `reloadInitVar` 恢复转换模板的初始快照。
 - `eventOn` 兜底遵循 TavernHelper 契约，返回带 `.stop()` 的监听句柄对象。
-- 事件优先通过 TavernHelper `eventEmit` 总线发送，缺失时才回退 CustomEvent / SillyTavern eventSource，避免同一总线重复放大。
+- 事件向 DOM 发送兼容通知，同时优先等待一个 TavernHelper `eventEmit` 总线入口；缺失时从窗口或 `getContext().eventSource`（兼容 `event_source`）寻找宿主共享总线，避免无 iframe 发射器时漏发业务事件，也避免同一总线重复放大。DOM 通知本身不等待异步监听器。
 - `VARIABLE_INITIALIZED` 用于新聊天/完整初始化；`VARIABLE_UPDATE_ENDED` 只在数据实际改变后广播。
 - SP 表更新回调是所有 CRUD、SQL、自动填表和回放变化的主通知入口。回调撞上批量写抑制窗口时必须保留最后快照并延迟重试，不能直接丢弃。
 - `MESSAGE_DELETED/SWIPED/SENT/RECEIVED/UPDATED/EDITED` 与生成收尾是聊天历史变化的兼容兜底：记录事件前完整运行时指纹，等待事件后完整快照确实变化再广播；用聊天、角色和代次守卫取消跨聊天任务。不得在消息事件到达时立即读取仍未回放的旧表。
 - 已确认的表变化统一广播 `VARIABLE_UPDATE_ENDED` 和 `shujuku-table-updated`，并驱动事件型前端、安全内联重读入口与精确刷新控件。自动路径不得调用 `body.load` 或 iframe reload；硬重载只允许魔法棒手动刷新。
 - `parseMessage` / AI 更新周期的事件顺序以对应版本 MVU 上游 `src/function/update_variables.ts` 为基线，包含 Zod 专用的 `*_for_zod` 阶段。
 - 接管 MVU `exported_events` 的 `mag_invoke_mvu` 和 `mag_update_variable`，不要只维护 `Mvu.*` 对象方法。
+
+### 更新入口与提交契约
+
+| 入口 | 监听器参数能否改变结果 | 等待与提交 | 取消与失败 |
+| --- | --- | --- | --- |
+| `getMvuData` / getter | 返回当前数据库视图 | 不写库；历史 `message_id` 不是历史查询 | 失效会话返回空视图/缺省值 |
+| setter | 改调用方传入对象；递归监听可继续修正 | 等待兼容总线；调用方随后 replace 才持久化 | 不存在路径返回 false |
+| `parseMessage` / `mag_invoke_mvu` | 普通命令及结束监听可修改候选数据 | 等待后返回；单独解析不提交 | 不模拟任意 Zod transform |
+| 消息中的 MVU 更新块 | 同上 | 在内存完成业务变换，整表快照提交到该次最新回复 | 会话、来源消息内容/身份改变则取消 |
+| 公共 replace | 保存调用方的候选数据 | 合并窗口结束后返回实际写入结果；已解析对象不再重发业务结束事件 | 会话守卫贯穿异步等待与 API 调用 |
+| SP V2 业务提交 | 结束监听可修正提交后候选数据 | 根据新事务来源执行一次有限补写；等待业务监听 | 并发数据库变化、来源消息删除或切聊天则取消，不重跑监听器 |
+| 刷新、历史回放、初始化后的前端通知 | 仅隔离副本，修改不会写库 | 通知当前已提交状态 | 不触发业务补写；提交期间延后重复通知 |
+
+SP 回调的 `persisted: true` 只是必要条件。补写还要求 V2 日志包含新的 `entryId`、匹配的
+`targetMessageIndex` 与当前布局表，来源限于 auto/manual/group fill、manual CRUD 和 raw SQL。
+进入聊天时先登记既有日志；import、system、历史回放、自身写入和未持久化回调只更新读缓存。
+同一短合并窗口的提交以一次结束事件处理，不把每个内部 CRUD 放大成业务执行。
+无法证明来源的旧 SP 格式只提供通知，不猜测填表事务。
+
+最新回复上的修正使用 SP 的一次整表导入。较早楼层的修正先在内存运行真实 writer，
+检查来源及原表未变化后，只允许一次 CRUD；同行多个字段可合为一次 updateRow。需要多次
+调用或整表导入时，在第一次真实写入前整笔拒绝，不把状态挪到最新回复，也不拆分补写。
+这不撤销 SP 已保存的原始提交；两阶段之间可能短暂读到其原值。任意旧楼整体提交仍需宿主接口。
+业务脚本应修改事件数据；监听器自行发起的外部副作用不在转换器事务内。
+
+每轮文本更新用当前 `stat_data` 初始化完整 `display_data`，以空对象初始化 `delta_data`，
+只把本轮变更写入嵌套路径。事件期间的 `$internal` 引用这两个临时视图，事件后移除。
+它们是解析返回值/事件视图，不另存历史展示账本；普通数据库读取的 delta 仍为空。
+
+### 窗口发现与事件兜底
+
+`runtime-windows.js` 维护同源窗口缓存，供 shim 安装与事件发送共用。MutationObserver、iframe
+load、文档导航、移除和会话代次使缓存失效；同步发送前 drain `takeRecords()`，覆盖观察器回调
+尚未执行的新增窗口。缺少可用观察器时退回扫描。撤销接管时释放观察器与 load 监听。
+只缓存窗口身份，不缓存事件数据或跳过异步业务监听。
+
+早期 DOM `eventOn` 兜底保存原 handler 与包装器的对应关系。`eventOff(name, handler)` 移除该
+handler 的全部注册，单个句柄的 `stop()` 仅停止自身，均可重复调用；`detail.args` 完整转发。
+DOM 分发仍是同步通知，不承诺等待异步处理函数。
 - 转换标记可确认时先发布 `Mvu` 外观；读写方法内部再等待 layout 与数据库 API，避免大卡前端的短超时检测误判。
 
 ## 初始化与运行时写入
 
 ### 初始化
 
-- 开场快照经 MVU 事件链处理后可能恢复为旧式 `[值, 描述]` 叶子。在构造 `templateData` 时，只根据 layout 中 `col[1] === 'pair'` 的完整路径拆包；不得对所有长度为 2 的数组做启发式处理，否则会破坏真实数组/JSON 字段。
+- 开场快照经 MVU 事件链处理后可能恢复为旧式 `[值, 描述]` 叶子。在构造 `templateData` 时，只根据 layout 中 `pair` / `jsonPairOptional` 的完整路径拆包；不得对所有长度为 2 的数组做启发式处理，否则会破坏真实数组/JSON 字段。
+- VWD 新渲染布局带 `vwd.promptVersion: 1`，候选工厂保留原始 pair，writer 按登记路径编码当前值并保存说明覆盖；不再提前折掉第二项。UI 新转换在 EJS 桥就绪时请求此能力，Node 核心须显式传入 `vwdDescriptions: true`，目标 SP 仍须支持隐藏列。
+- 候选工厂与 writer 在写入前检查 EJS 上下文桥、隐藏元数据列和匹配的固定 note；无法渲染时整笔拒绝值/说明变化。说明更新不会改写 note，`mvu2shujukuVwdDescriptions` 从 SP 当前表格一次读取本表说明，不用 pending overlay，也不重建完整 `stat_data`。原业务规则/宏继续执行；说明数据独立安全编码，见[动态说明验收](validation/2026-09-16-vwd-prompt.md)。
+- 旧静态布局和默认关闭的旧实验入口不自动升级；旧实验说明差量仍拒绝。该能力依赖提示词模板扩展持续启用；宿主跳过 EJS 或捕获模板异常后继续发送的行为不受插件全局拦截。历史批量填表的上下文选择尚未纳入本批保证。
+- 自有脚本写入期间会抑制 SP 回调；成功后用已有最终 `afterMvu` 更新提交读窗口，再发通知，避免上一批 5 秒缓存遮蔽新值。无变化、失败及未落定写入不发布新窗口；沿用现有会话校验。
 
 - 普通进卡由模板和 `initGameSession` 建立聊天数据库。
 - 新聊天先在内存中把标准 `[InitVar]` 模板、当前开场分支的 `<initvar>` 及首楼 `UpdateVariable/JSONPatch` 合成为最终模板。缺表时只调用一次 `initGameSession`；表已存在时通过 `importTableAsJson` 提交一次持久化 `data_replace`，不再二次重载聊天。
@@ -65,24 +112,26 @@ Node 核心惰性 require `table-codec.js`；`assembleExtension` 将同一工厂
 1. `replaceMvuData` / `updateVariablesWith` 进入短防抖合并窗口。
 2. 读取当前表格快照作为 `prev`。
 3. 用 layout 过滤非当前卡组，并合并部分目标对象。
-4. `writeStatDiffToDb` 计算差异，调用插件原生 CRUD；多步数组计划使用一次原子导入，详见下文。
+4. 新回复无法证明 CRUD 可安全追加时，复用候选构造与正式整表提交，将最终修改保存到本楼；已有可靠帧的当前回复先让真实 `writeStatDiffToDb` 在隔离内存表中规划整批：单次 CRUD 保留差量，多次调用合成一次正式导入。多步数组与普通字段同批提交，详见下文。
 5. 批量期间抑制每个 CRUD 的中间广播，整批成功落定后只发一次 MVU 更新事件。删除失败或插入返回失败值时停止后续写入；失败重试耗尽也不能广播成功或提交初始化指纹。
 6. 无实际差异时不写库、不广播，防止前端回声循环。
 
 TavernHelper 变量接口按作用域分流：默认/消息作用域中的 `stat_data` 映射到数据库；同一消息中的其他辅助键与数据库视图合并读写；`chat` / `character` / `global` / `preset` / `script` / `extension` 继续委派给 TavernHelper 原生存储。不得用数据库 `stat_data` 覆盖这些独立作用域。
 
 持久化、checkpoint 和 V2 replay 由 SP·数据库插件管线负责。转换器不应重新引入手工物化、自制 checkpoint 或用旧快照覆盖运行时的逻辑。
-写入批次按 Promise 队列串行执行，同表同行的单元格更新一次分组。核心返回值保留计划操作数量，是否失败须同时检查 `lastStatWriteFailed`，不能用数量当成功证明。CRUD 无事务回滚保证，部分失败后按实际表格重新计算差异重试。
+写入批次按 Promise 队列串行执行，同表同行的单元格更新一次分组。核心返回值保留计划操作数量，是否失败须同时检查 `lastStatWriteFailed`，不能用数量当成功证明。普通当前回复的 `commitCurrentReplyBatch` 通过共用候选工厂的 `planCurrentReplyWrites` 先完成内存规划，宿主最终只接收一次 CRUD 或完整导入；宿主拒绝单次行更新后不拆成逐格写入。规划失败、来源变化或原表并发变化时不提交。原始核心差量无多步 CRUD 整体回滚保证；旧楼业务补写使用同一规划器，但拒绝多步计划，见[后续验收](validation/2026-09-22-compatibility-followup.md)。
 
 消息更新块的任务同时绑定聊天代次、来源消息对象、索引和更新块指纹。事件处理、合并窗口、重试以及 API 调用前后都核验来源；删楼、编辑或切换 swipe 后取消旧任务。已经进入宿主的调用无法撤回，后续操作和成功广播必须停止。
 
 已执行标记按消息对象、swipe 和更新块内容去重，不按楼层索引去重。同内容重生成是新回复，仍须执行；删去前面楼层引起索引移动，不应重复执行现有回复。重新加载聊天时以已有持久化历史重新建立基线。
 
-SP 9.2.5 的手动 CRUD 追加到最近已有表帧的 AI 楼。消息中的 `UpdateVariable/JSONPatch` 使用一次 `importTableAsJson`，将最终快照持久化到最新 AI 回复，避免删除或重生成回复后旧更新仍留在首楼。构造候选期间数据库快照变化时重新规划；导入失败不降级为手动 CRUD，也不反向覆盖可能已经提交的帧。前端普通写入仍使用差量路径。
+SP 9.2.5 的手动 CRUD 追加到最近已有表帧的 AI 楼。消息中的 `UpdateVariable/JSONPatch` 使用一次 `importTableAsJson`，将最终快照持久化到最新 AI 回复，避免删除或重生成回复后旧更新仍留在首楼。构造候选期间数据库快照变化时重新规划；导入失败不降级为手动 CRUD，也不反向覆盖可能已经提交的帧。普通前端写入现在也绑定调用时的最新 AI 回复：新楼首次提交最终快照，能证明本楼 CRUD 归属后，单次修改恢复差量，多步批次仍整体导入；无变化不建帧，导入失败不退回旧楼 CRUD。
+
+`runtime-session.js:bindWriteTarget` 捕获消息对象、索引、正文和 swipe，并保留原来源校验。公开 replace 在等待 API 就绪前绑定；消息更新在等待业务监听前绑定；队列重试沿用原目标。SP 未提供公开当前作用域 getter，差量路径采用保守的充分条件：历史 AI 楼出现的所有作用域在目标楼均有 V2 帧，才允许 CRUD；每次实际 CRUD 前复查。未知/旧格式或作用域不齐时使用正式快照，可能每批都需要构造候选。检查只读历史帧，不创建空锚点或手写日志。目标删除、编辑、换 swipe、新 AI 回复到来或切聊天会取消旧任务。实现、性能和验收见[楼层归属修复](validation/2026-09-16-write-floor.md)。
 
 SP 9.2.5 的 native 模式不暴露 SQL getter。CRUD 写入以实际表格就绪和插件自身 provider/事务校验为准，不等待 `querySql` 或 `executeSqlQuery` 出现。
 
-有序数组按位置规划更新、尾部追加和倒序尾删，保留未变行的标识、其他父级数据及未知列。一个数组操作使用原生 CRUD；多个数组操作合并到一次 `importTableAsJson`，调用前核对参与表的表头和内容仍与规划快照一致。缺少批量导入能力时在数组写入前失败，不降级为逐行破坏性替换。导入失败后不补偿回写旧全库快照：上游可能已经持久化而仅运行时恢复失败，应重新读取实际数据后重试。这个保证仅覆盖合并的数组计划，不代表混合标量 CRUD 的整个写批次具备事务性。
+核心有序数组按位置规划更新、尾部追加和倒序尾删，保留未变行的标识、其他父级数据及未知列。一个数组操作使用原生 CRUD；多个数组操作合并到一次 `importTableAsJson`，调用前核对参与表的表头和内容仍与规划快照一致。缺少批量导入能力时在数组写入前失败，不降级为逐行破坏性替换。普通当前回复外层再将数组与标量等变更合成整个批次；原始核心单独调用时仍只有数组计划的保证。导入失败后不补偿回写旧全库快照：上游可能已经持久化而仅运行时恢复失败，应重新读取实际数据后重试。范围、故障验证和额外内存规划成本见[当前回复批次验收](validation/2026-09-16-atomic-batch.md)。
 
 `node test/benchmark-diff.js` 衡量 100/1000/10000 行变更的 CPU 和 API 次数。规划阶段按表与键列缓存行索引；执行阶段仍以实际表定位，避免删除导致旧行号失效。
 
@@ -103,3 +152,9 @@ SP 9.2.5 的 native 模式不暴露 SQL getter。CRUD 写入以实际表格就�
 - 旧式整页前端仅在用户从魔法棒菜单选择“刷新转换卡前端”时主动重载；数据库每次写入不得触发整页重载。
 
 数组比较按位置进行，不是基于元素身份的最短编辑序列。导入承载完整运行时表快照；减少 API 调用不等于保证端到端耗时同比降低。性能证据集中记录于[差异基准](benchmarks/diff-2026-09-10.md)。
+
+完整 JSON 容器模式仍走既有 singleton/valueCol/jsonObjectOptional 的差量与候选快照路径，
+不另建元数据同步任务。容器内部 pair（包括动态记录、数组和对象值）的说明直接随 JSON 保存，
+实际填表读取当前 JSON；这与普通拆分表的 VWD note 渲染是两条有明确范围的入口。
+SQLite 模型可以局部更新 JSON，脚本侧写整个单元格不等于模型需要输出完整 JSON。
+native 的现有模型写入方式仍需提交完整单元格，故此模式推荐 SQLite。

@@ -1,0 +1,249 @@
+{
+  "template": {
+    "mate": {
+      "type": "chatSheets",
+      "version": 2,
+      "updateConfigUiSentinel": -1,
+      "globalInjectionConfig": {
+        "readableEntryPlacement": {
+          "position": "before_character_definition",
+          "depth": 2,
+          "order": 99981
+        },
+        "wrapperPlacement": {
+          "position": "before_character_definition",
+          "depth": 2,
+          "order": 99980
+        }
+      }
+    },
+    "sheet_zhuangtaibiao": {
+      "uid": "sheet_zhuangtaibiao",
+      "name": "状态表",
+      "sourceData": {
+        "note": "本表唯一记录已由开局模板初始化（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。\n下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。\n更新以正文和规则为依据，不得为凑表而虚构数据。",
+        "initNode": "开局模板已初始化唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。",
+        "deleteNode": "禁止。",
+        "updateNode": "只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；根据正文、设定与本表规则，已有字段的值发生变化时更新。",
+        "insertNode": "禁止。",
+        "ddl": "CREATE TABLE zhuangtaibiao ( -- 状态表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  shengming INTEGER NOT NULL DEFAULT 100, -- 生命\n  jinbi INTEGER NOT NULL DEFAULT 10, -- 金币\n  kuozhanshuju TEXT NOT NULL DEFAULT '{}' -- _扩展数据\n);",
+        "hiddenPhysicalColumns": [
+          "kuozhanshuju"
+        ]
+      },
+      "content": [
+        [
+          "row_id",
+          "生命",
+          "金币",
+          "_扩展数据"
+        ],
+        [
+          1,
+          100,
+          10,
+          "{}"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 0
+    },
+    "sheet_beibaobiao": {
+      "uid": "sheet_beibaobiao",
+      "name": "背包表",
+      "sourceData": {
+        "note": "数组表：每行一个数组元素，行号即数组顺序；按行新增、移除或更新元素。\n【字段说明与规则】\n- 「内容」：单元格保存完整 JSON 值，遵守原字段/数组元素的类型；字符串保留 JSON 双引号（如 \"文字\"），数字、布尔、null 不加 JSON 引号，对象/数组保存完整 JSON。SQL 字符串外围的单引号只是 SQL 写法，不属于单元格内容。\n- 内容：数组元素（JSON 标量编码，读取时保留原始类型）\n更新以正文和规则为依据，不得为凑表而虚构数据。",
+        "initNode": "开局模板已初始化 4 个元素；此后按剧情和规则新增、移除或更新对应元素。",
+        "deleteNode": "根据正文、设定与本表规则，已有数组元素不再属于当前数组时删除对应行。",
+        "updateNode": "根据正文、设定与本表规则，已有数组元素的内容发生变化时更新该行。",
+        "insertNode": "根据正文、设定与本表规则，数组出现本表尚未记录的新元素时添加（行号自动分配，行序即数组顺序）。",
+        "ddl": "CREATE TABLE beibaobiao ( -- 背包表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  neirong TEXT NOT NULL DEFAULT '' -- 内容\n);"
+      },
+      "content": [
+        [
+          "row_id",
+          "内容"
+        ],
+        [
+          1,
+          "\"钥匙\""
+        ],
+        [
+          2,
+          "0"
+        ],
+        [
+          3,
+          "false"
+        ],
+        [
+          4,
+          "null"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 1
+    },
+    "sheet_guanxibiao": {
+      "uid": "sheet_guanxibiao",
+      "name": "关系表",
+      "sourceData": {
+        "note": "行表，以「名称」为唯一标识；同名记录只存在一行，已有记录按需更新，新记录按需新增。\n相关数据保存在「关系_背包表、关系_日志表」；删除本表记录时，一并删除其中对应记录；本表标识值变更时，同步修改其中对应的关联字段。请在本次填表中完成这些操作。\n下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。\n更新以正文和规则为依据，不得为凑表而虚构数据。",
+        "initNode": "开局模板已初始化 2 条记录；出现符合本表定义且尚不存在的新记录时，新增一行完整记录。",
+        "deleteNode": "根据正文、设定与本表规则，已有记录所对应的对象不再属于本表记录范围时删除。",
+        "updateNode": "根据正文、设定与本表规则，已有记录的字段值发生变化时更新。",
+        "insertNode": "根据正文、设定与本表规则，出现本表尚未记录的新名称时添加完整记录。",
+        "ddl": "CREATE TABLE guanxibiao ( -- 关系表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  mingcheng TEXT NOT NULL DEFAULT '' UNIQUE, -- 名称\n  haogan INTEGER NOT NULL DEFAULT 0, -- 好感\n  kuozhanshuju TEXT NOT NULL DEFAULT '{}' -- _扩展数据\n);",
+        "hiddenPhysicalColumns": [
+          "kuozhanshuju"
+        ]
+      },
+      "content": [
+        [
+          "row_id",
+          "名称",
+          "好感",
+          "_扩展数据"
+        ],
+        [
+          1,
+          "甲",
+          1,
+          "{}"
+        ],
+        [
+          2,
+          "乙",
+          1,
+          "{}"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 2
+    },
+    "sheet_guanxi_beibaobiao": {
+      "uid": "sheet_guanxi_beibaobiao",
+      "name": "关系_背包表",
+      "sourceData": {
+        "note": "每行记录一项背包数据。\n关联字段：「关系_名称」对应「关系表.名称」。\n定位记录须同时匹配「关系_名称」、「键名」；不得只匹配其中一个字段。\n关联来源记录删除时，一并删除本表对应记录；来源标识值变更时，同步修改本表对应的关联字段。请在本次填表中完成这些操作。\n下划线开头字段（如 _xxx）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。\n【字段说明与规则】\n- 维护本表时，同时遵循对应关系记录中与「背包」相关的整体规则\n- 效果：对象以 JSON 存储，读取时还原\n更新以正文和规则为依据，不得为凑表而虚构数据。\n「效果」以 JSON 存储。SQL 模式优先用 json_set(列, '$.\"键\"', 新值)、json_replace 或 json_remove 局部更新，仅操作规则允许的路径；对象/数组/布尔/null 新值用 json('...')，字符串用 SQL 字符串。数组从 0 索引，末尾追加用 [#]，中间插入/移动需重建受影响数组。空单元格或 JSON null 容器先按规则初始化，保留未改字段；json_patch 的 null 会删键，不作路径更新替代。 native 模式仍提供完整的新单元格 JSON，保留未改内容。",
+        "initNode": "开局模板已初始化 2 条记录；出现符合本表定义且尚不存在的新记录时，新增一行完整记录。",
+        "deleteNode": "根据正文、设定与本表规则，对应关系记录中已有背包不再属于其「背包」数据时删除；WHERE 必须同时带「关系_名称」、「键名」。",
+        "updateNode": "根据正文、设定与本表规则，对应关系记录中已有背包数据的字段值发生变化时更新；WHERE 必须同时带「关系_名称」、「键名」。",
+        "insertNode": "根据正文、设定与本表规则，对应关系记录中出现本表尚未记录的新背包时添加；必须填写所有定位字段 「关系_名称」、「键名」。",
+        "ddl": "CREATE TABLE guanxi_beibaobiao ( -- 关系_背包表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  guanxi_mingcheng TEXT NOT NULL DEFAULT '', -- 关系_名称\n  jianming TEXT NOT NULL DEFAULT '', -- 键名\n  shuliang INTEGER NOT NULL DEFAULT 0, -- 数量\n  xiaoguo TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(xiaoguo) AND json_type(xiaoguo) = 'object'), -- 效果\n  kuozhanshuju TEXT NOT NULL DEFAULT '{}', -- _扩展数据\n  UNIQUE (guanxi_mingcheng, jianming)\n);",
+        "hiddenPhysicalColumns": [
+          "kuozhanshuju"
+        ]
+      },
+      "content": [
+        [
+          "row_id",
+          "关系_名称",
+          "键名",
+          "数量",
+          "效果",
+          "_扩展数据"
+        ],
+        [
+          1,
+          "甲",
+          "药",
+          2,
+          "{\"疗愈\":{\"描述\":\"甲效果\"}}",
+          "{}"
+        ],
+        [
+          2,
+          "乙",
+          "药",
+          2,
+          "{\"疗愈\":{\"描述\":\"乙效果\"}}",
+          "{}"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 3
+    },
+    "sheet_guanxi_rizhibiao": {
+      "uid": "sheet_guanxi_rizhibiao",
+      "name": "关系_日志表",
+      "sourceData": {
+        "note": "数组表：每行一个数组元素，行号即数组顺序；按行新增、移除或更新元素。\n关联字段：「关系_名称」用于确定所属记录。\n定位记录须同时匹配「关系_名称」、「row_id」；不得只匹配其中一个字段。\n关联来源记录删除时，一并删除本表对应记录；来源标识值变更时，同步修改本表对应的关联字段。请在本次填表中完成这些操作。\n【字段说明与规则】\n- 关系_名称：关联「关系表.名称」\n- 内容：数组元素\n更新以正文和规则为依据，不得为凑表而虚构数据。",
+        "initNode": "开局模板已初始化 6 个元素；此后按剧情和规则新增、移除或更新对应元素。",
+        "deleteNode": "根据正文、设定与本表规则，已有数组元素不再属于当前数组时删除对应行。",
+        "updateNode": "根据正文、设定与本表规则，已有数组元素的内容发生变化时更新该行。",
+        "insertNode": "根据正文、设定与本表规则，数组出现本表尚未记录的新元素时添加（行号自动分配，行序即数组顺序）。 必须填写所有关联字段「关系_名称」，取值对应 note 列出的来源记录。",
+        "ddl": "CREATE TABLE guanxi_rizhibiao ( -- 关系_日志表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  guanxi_mingcheng TEXT NOT NULL DEFAULT '', -- 关系_名称\n  neirong TEXT NOT NULL DEFAULT '' -- 内容\n);"
+      },
+      "content": [
+        [
+          "row_id",
+          "关系_名称",
+          "内容"
+        ],
+        [
+          1,
+          "甲",
+          "甲日志0"
+        ],
+        [
+          2,
+          "甲",
+          "甲日志1"
+        ],
+        [
+          3,
+          "甲",
+          "甲日志2"
+        ],
+        [
+          4,
+          "乙",
+          "乙日志0"
+        ],
+        [
+          5,
+          "乙",
+          "乙日志1"
+        ],
+        [
+          6,
+          "乙",
+          "乙日志2"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 4
+    }
+  }
+}
