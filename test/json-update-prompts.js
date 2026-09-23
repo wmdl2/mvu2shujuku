@@ -30,7 +30,8 @@ test('JSON局部更新：双模式和 SQL 提供路径说明，native 保留整�
     }
     assert.match(stateSheet(results.both).sourceData.note, /native 模式仍提供完整的新单元格 JSON/);
     assert.doesNotMatch(stateSheet(results.native).sourceData.note, /json_set|json_replace|json_remove/);
-    assert.doesNotMatch(stateSheet(results.both).sourceData.updateNode, /SQL示例/);
+    assert.match(stateSheet(results.both).sourceData.updateNode, /SQL示例: UPDATE.*json_replace/);
+    assert.match(stateSheet(results.both).sourceData.note, /native 模式请忽略/);
     assert.match(stateSheet(results.sqlite).sourceData.updateNode, /json_replace/);
 });
 

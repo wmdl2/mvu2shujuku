@@ -1139,7 +1139,10 @@
                 parts.push(...(wr.checks || []).map(rule => sanitizeCheckRule(rule, { group })).filter(Boolean));
                 if (parts.length) L.push(`- ${wr.path}（${parts.join('；')}）`);
             }
-            (group.reminders || []).forEach(r => L.push(`- 每次回复必须维护：${r}`));
+            if ((group.reminders || []).length) {
+                L.push('强制更新提醒（按各项触发条件执行）：');
+                (group.reminders || []).forEach(r => L.push(`- ${r}`));
+            }
             if (L.length === rulesStart + 1) L.pop();
         }
         if (allReadonly && group.kind !== 'json') {
@@ -1729,12 +1732,17 @@
             const uid = 'sheet_' + g.ident;
             const trigger = kind => {
                 const prose = buildNodeProse(g, kind);
-                // 双模式模板也可能交给 native 填表；共享触发说明不混入 SQL 协议。
-                // 只截去本生成器附在末尾的示例，不处理作者规则正文。
-                return mode === 'sqlite' ? prose.replace('\nSQL示例:', '\n以下仅演示 SQL 写法；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。\nSQL示例:') : prose.split('\nSQL示例:')[0];
+                // 双模式保留具体表列、定位和 JSON 写法供 SQL 填表参考；native 仍按宿主协议。
+                // 只控制本生成器附在末尾的示例，不改作者业务规则或已有示例值策略。
+                return mode === 'native' ? prose.split('\nSQL示例:')[0] : prose;
             };
+            const triggerNodes = Object.fromEntries(['delete', 'update', 'insert'].map(kind => [kind, trigger(kind)]));
+            // 使用范围与禁止照抄的说明每表只写一次，各操作仍保留具体 SQL。
+            const sqlScope = mode === 'both' ? '（native 模式请忽略，按宿主要求的原生格式填表）' : '';
+            const sqlNotice = Object.values(triggerNodes).some(text => text.includes('\nSQL示例:'))
+                ? `\nSQL 示例仅演示写法${sqlScope}；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。` : '';
             const vwdSlotPlan = vwdAllowed ? vwdSlotPlanForGroup(g) : null;
-            const noteText = buildNote(g, { mode, vwdSlotPlan });
+            const noteText = buildNote(g, { mode, vwdSlotPlan }) + sqlNotice;
             // 落进 sourceData/卡的是静态说明版：没有运行期覆盖时与旧版逐字节相同，
             // 插槽只存在于内部布局，模型请求不会看到 \u0000VWD·n\u0000。
             if (vwdSlotPlan) applyVwdSlotPlan(g, noteText, vwdSlotPlan);
@@ -1747,9 +1755,9 @@
                 sourceData: {
                     note: displayNote,
                     initNode: buildInitNode(g),
-                    deleteNode: trigger('delete'),
-                    updateNode: trigger('update'),
-                    insertNode: trigger('insert'),
+                    deleteNode: triggerNodes.delete,
+                    updateNode: triggerNodes.update,
+                    insertNode: triggerNodes.insert,
                     ddl: buildDdl(g, { includeCheck }),
                 },
                 content,

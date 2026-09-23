@@ -10,7 +10,7 @@ function card(initial, schema) {
 function execute(sheet, kind) {
     const sql = sheet.sourceData[kind].split('\nSQL示例: ')[1];
     assert.ok(sql, kind + ' 应保留可执行示例');
-    assert.match(sheet.sourceData[kind], /不得直接照抄示例值/);
+    assert.match(sheet.sourceData.note, /不得直接照抄示例值/);
     const result = spawnSync('python3', ['-c', `
 import json,sqlite3,sys
 x=json.load(sys.stdin);s=x['sheet'];db=sqlite3.connect(':memory:')
@@ -25,8 +25,8 @@ print(json.dumps([list(row) for row in db.execute('SELECT * FROM '+t)],ensure_as
     return JSON.parse(result.stdout);
 }
 
-test('SQL示例保真：UPDATE 实际执行遵守枚举、范围、布尔和可空编码', () => {
-    for (const [initial, schema, expected] of [
+test('SQL示例保真：双模式与 SQLite 的 UPDATE 实际执行遵守枚举、范围、布尔和可空编码', () => {
+    for (const mode of ['both', 'sqlite']) for (const [initial, schema, expected] of [
         ['开始', 'z.enum(["开始","结束"])', '结束'],
         ['普通', 'z.enum(["普通","O\'Brien"])', "O'Brien"],
         [10, 'z.number().min(0).max(10)', 9],
@@ -36,7 +36,7 @@ test('SQL示例保真：UPDATE 实际执行遵守枚举、范围、布尔和可�
         [null, 'z.enum(["开始","结束"]).nullable()', '"开始"'],
         [null, 'z.string().nullable()', 'null'],
     ]) {
-        const result = core.convert(card({ 状态: { 值: initial } }, `z.object({状态:z.object({值:${schema}})})`), { mode: 'sqlite' });
+        const result = core.convert(card({ 状态: { 值: initial } }, `z.object({状态:z.object({值:${schema}})})`), { mode });
         const sheet = Object.values(result.template).find(s => s.name === '状态表');
         const rows = execute(sheet, 'updateNode');
         assert.strictEqual(rows[0][sheet.content[0].indexOf('值')], expected, schema);

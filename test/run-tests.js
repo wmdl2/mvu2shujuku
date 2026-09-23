@@ -897,7 +897,7 @@ test('SQL 示例优先用默认值，TEXT 无默认才用“列名示例”', ()
     const dl = Object.values(r.template).find(s => s && s.name === '道侣表');
     assert.ok(dl.sourceData.insertNode.includes("VALUES ('林若悠', 50, 0, '性格示例')"), 'INSERT 应含真实值/默认值/列名示例');
     assert.ok(dl.sourceData.updateNode.includes('SET qinmi = 51'), 'UPDATE 示例保持数值类型，演示不同于初始值的合法数值');
-    assert.ok(dl.sourceData.updateNode.includes('不得直接照抄示例值'), '示例必须与本轮真实操作区分');
+    assert.ok(dl.sourceData.note.includes('不得直接照抄示例值'), '示例必须与本轮真实操作区分');
 });
 
 test('单例 UPDATE 示例：与行表一致的“规则 + SQL示例:”格式，TEXT 用“新值”占位', () => {
@@ -3712,7 +3712,7 @@ test('native / sqlite 单模式', () => {
     // 模板 note 与模式无关（与默认模板一致），模式由插件填表提示词决定
     assert.ok(!rn.template[hero].sourceData.note.includes('原生 DSL'), 'note 不应区分 native 模式');
     assert.ok(!rn.template[hero].sourceData.note.includes('SQLite SQL'), 'note 不应区分 sqlite 模式');
-    assert.strictEqual(rn.template[hero].sourceData.note, rs.template[hero].sourceData.note, '两种模式应生成相同 note');
+    assert.strictEqual(rn.template[hero].sourceData.note, rs.template[hero].sourceData.note.replace(/\nSQL 示例仅演示写法[^\n]*$/, ''), '除 SQL 示例适用说明外，两种模式保留相同业务 note');
     assert.ok(!rn.template[hero].sourceData.note.includes('【列定义】'), '字段映射由宿主权威表头/DDL提供，不在 note 重复');
     assert.ok(rn.template[hero].sourceData.note.includes('【字段说明与规则】'), 'note 应含强制约束');
 });

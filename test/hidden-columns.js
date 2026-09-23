@@ -27,7 +27,7 @@ test('模板内部列：9.2.5 默认隐藏 $ 列与 _扩展数据，_ 业务列�
     const sqlite = sheet(results.sqlite, 'obj表');
     assert.deepStrictEqual(native.sourceData.hiddenPhysicalColumns, both.sourceData.hiddenPhysicalColumns);
     assert.deepStrictEqual(both.sourceData.hiddenPhysicalColumns, sqlite.sourceData.hiddenPhysicalColumns);
-    assert.strictEqual(native.sourceData.note, sqlite.sourceData.note);
+    assert.strictEqual(native.sourceData.note, sqlite.sourceData.note.replace(/\nSQL 示例仅演示写法[^\n]*$/, ''));
     assert.strictEqual(native.sourceData.ddl, sqlite.sourceData.ddl);
 });
 

@@ -136,7 +136,7 @@ test('顶层数字：数值 DDL、默认值和示例保留数字，小数往返�
     assert.match(t.sourceData.ddl, /neirong REAL NOT NULL DEFAULT 0 CHECK\(typeof\(neirong\) IN \('integer', 'real'\)\)/);
     assert.ok(!t.sourceData.ddl.includes('json_valid'));
     assert.match(t.sourceData.updateNode, /SET neirong = 1 WHERE/);
-    assert.match(t.sourceData.updateNode, /不得直接照抄示例值/);
+    assert.match(t.sourceData.note, /不得直接照抄示例值/);
     assert.ok(!t.sourceData.note.includes('可写路径'));
     assert.ok(t.sourceData.note.includes('不可为负数'));
     const layout = JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout);

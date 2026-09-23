@@ -6,6 +6,7 @@
 | --- | --- |
 | 安装、转换与用户操作 | [用户说明](../README.md) |
 | v0.4.0 升级范围与发布检查 | [发布验证](validation/2026-09-22-release-0.4.0.md) |
+| SQL 示例与强制更新提醒 | [提示示例验证](validation/2026-09-23-prompt-examples.md) |
 | 表格反选与兼容报告文案 | [反选与报告验证](validation/2026-09-23-selection.md) |
 | 角色卡保存后脚本复核警告 | [保存复核验证](validation/2026-09-23-save-verification.md) |
 | 转换报告、多选表格设置及世界书注入开关 | [前端验收](validation/2026-09-22-frontend.md) |
