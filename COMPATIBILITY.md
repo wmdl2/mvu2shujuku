@@ -311,7 +311,7 @@ EJS 世界书、`format_message_variable`、状态栏与前端共用实时读取
 - 删除只影响转换副本；不使用 `if (false)` 保存旧 MVU 管线，因为 EJS 仍会编译 false 分支并可能触发语法/重复声明错误
 - `format_message_variable`、`get_message_variable` 与 `getvar(stat_data...)` 属于读取证据，本身不会触发整条删除；即使 comment 带 `[mvu_update]`，业务机制正文仍保留
 - `getvar('stat_data.完整.路径', { defaults: ... })` 迁移为安全路径读取，中间对象缺失时与原函数一样返回 `undefined`/默认值；只读取 `getvar('stat_data')` 根对象的官方教程写法仍返回完整对象
-- 直接保存到 SillyTavern 后，按创建接口返回的头像名和完整卡转换标记复核 `tavern_helper`；兼容 `lazyLoadCharacters` 浅列表，也不会误命中同名旧卡
+- 直接保存到 SillyTavern 后，按创建接口返回的头像名和完整卡转换标记复核 `tavern_helper`；兼容 `lazyLoadCharacters` 浅列表，也不会误命中同名旧卡。新增读回一致性检查：缺少额外字段同步入口不等于保存失败；只有读取失败、标记不符或实际数据不同才提示复核问题，见[保存复核验证](docs/validation/2026-09-23-save-verification.md)
 
 TavernHelper 变量作用域不会被统一改成数据库：仅默认/消息作用域的 `stat_data` 由数据库接管；动态正则使用的 `chat` 变量、脚本/扩展/角色/全局变量均保留原生读写。消息变量中与 `stat_data` 并存的辅助键也会保留。
 

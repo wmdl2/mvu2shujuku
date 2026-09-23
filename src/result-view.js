@@ -93,9 +93,9 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
         const head = el('div', 'mvu2shujuku-result-heading');
         head.appendChild(el('b', '', '转换完成 · ' + result.meta.tableCount + ' 张表'));
         head.appendChild(el('span', 'mvu2shujuku-hint', manual.length || warnings.length
-            ? '请先查看以下待确认事项，再下载或保存。' : '未报告需人工处理的事项；详细转换记录可在下方展开。'));
+            ? '以下为兼容提醒，不代表转换失败；部分行为可能与原卡不同，请按需核对。' : '未报告需额外核对的兼容事项；详细转换记录可在下方展开。'));
         wrap.appendChild(head);
-        details(wrap, '需人工处理', manual, true, 'mvu2shujuku-attention');
+        details(wrap, '兼容性待确认', manual, true, 'mvu2shujuku-attention');
         details(wrap, '注意事项', warnings.map(w => w && w.message != null ? w.message : String(w)), true, 'mvu2shujuku-attention');
         // 配置应用摘要追加在 Markdown 后面，不能因结构化呈现而丢失。
         const base = typeof report.toMarkdown === 'function' ? report.toMarkdown() : '';
@@ -133,6 +133,11 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
         count.setAttribute('aria-live', 'polite');
         tools.appendChild(count);
         wrap.appendChild(tools);
+        const invertButton = button('反选当前列表', 'mvu2shujuku-invert-visible', () => {
+            for (const row of rowEls) if (!row.node.hidden) row.check.checked = !row.check.checked;
+            syncSelection();
+        });
+        tools.appendChild(invertButton);
         const bulk = el('div', 'mvu2shujuku-row mvu2shujuku-param-bulk');
         bulk.appendChild(el('span', 'mvu2shujuku-label', '批量设置'));
         const operation = select('mvu2shujuku-bulk-param', '批量设置项目', [...options, { key: injectionKey, label: '注入到世界书条目' }]);
@@ -146,8 +151,8 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
         });
         bulk.appendChild(operation); bulk.appendChild(value); bulk.appendChild(toggle);
         const rowEls = [];
-        function apply(all) {
-            const targets = rowEls.filter(row => all || row.check.checked);
+        function apply() {
+            const targets = rowEls.filter(row => row.check.checked);
             if (!targets.length) return;
             const key = operation.value;
             for (const row of targets) {
@@ -162,12 +167,10 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
                 }
             }
             onChange();
-            notify('已更新' + (all ? '全部 ' : '所选 ') + targets.length + ' 张表', 'info');
+            notify('已更新所选 ' + targets.length + ' 张表', 'info');
         }
-        const selectedButton = button('应用到所选', 'mvu2shujuku-apply-selected', () => apply(false));
-        const allButton = button('应用到全部', 'mvu2shujuku-apply-all', () => apply(true));
-        allButton.title = '应用到所有表格，包括当前被筛选隐藏的表格';
-        bulk.appendChild(selectedButton); bulk.appendChild(allButton);
+        const selectedButton = button('应用到所选', 'mvu2shujuku-apply-selected', apply);
+        bulk.appendChild(selectedButton);
         wrap.appendChild(bulk);
         const grid = el('div', 'mvu2shujuku-param-grid');
         function syncSelection() {
@@ -179,6 +182,7 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
             checkAll.checked = visible.length > 0 && visible.every(row => row.check.checked);
             checkAll.indeterminate = !checkAll.checked && visible.some(row => row.check.checked);
             checkAll.disabled = visible.length === 0;
+            invertButton.disabled = visible.length === 0;
         }
         checkAll.addEventListener('change', () => {
             for (const row of rowEls) if (!row.node.hidden) row.check.checked = checkAll.checked;

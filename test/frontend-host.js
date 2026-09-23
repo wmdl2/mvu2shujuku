@@ -8,8 +8,21 @@ async function exerciseEditor(page) {
     const uids = await rows.evaluateAll(nodes => nodes.map(node => node.dataset.sheetUid));
     const originalInjection = await rows.locator('.mvu2shujuku-table-injection').evaluateAll(nodes => nodes.map(node => node.checked));
     assert.strictEqual(await page.locator('.mvu2shujuku-apply-selected').isDisabled(), true);
+    assert.strictEqual(await page.locator('.mvu2shujuku-invert-visible').isDisabled(), false);
     await rows.nth(0).locator('.mvu2shujuku-table-select').check();
     await rows.nth(2).locator('.mvu2shujuku-table-select').check();
+    const hiddenSelectionName = await rows.nth(1).locator('.mvu2shujuku-param-name span').textContent();
+    await page.locator('.mvu2shujuku-table-search').fill(hiddenSelectionName);
+    const invert = page.locator('.mvu2shujuku-invert-visible');
+    assert.strictEqual(await rows.nth(0).locator('.mvu2shujuku-table-select').isChecked(), true);
+    assert.strictEqual(await rows.nth(1).locator('.mvu2shujuku-table-select').isChecked(), false);
+    await invert.click();
+    assert.strictEqual(await rows.nth(0).locator('.mvu2shujuku-table-select').isChecked(), true, '反选保留隐藏行选择');
+    assert.strictEqual(await rows.nth(1).locator('.mvu2shujuku-table-select').isChecked(), true, '反选当前可见行');
+    assert.strictEqual(await page.locator('.mvu2shujuku-select-visible').isChecked(), true);
+    await invert.click();
+    assert.strictEqual(await rows.nth(1).locator('.mvu2shujuku-table-select').isChecked(), false);
+    await page.locator('.mvu2shujuku-table-search').fill('');
     await page.locator('.mvu2shujuku-bulk-param').selectOption('contextDepth');
     await page.locator('.mvu2shujuku-bulk-value').fill('8');
     await page.locator('.mvu2shujuku-apply-selected').click();
@@ -19,6 +32,7 @@ async function exerciseEditor(page) {
     await page.locator('.mvu2shujuku-table-search').fill('__没有这个表__');
     assert.strictEqual(await page.locator('.mvu2shujuku-table-row:visible').count(), 0);
     assert.strictEqual(await page.locator('.mvu2shujuku-select-visible').isDisabled(), true);
+    assert.strictEqual(await page.locator('.mvu2shujuku-invert-visible').isDisabled(), true);
     await page.locator('.mvu2shujuku-bulk-param').selectOption('injectIntoWorldbook');
     await page.locator('.mvu2shujuku-bulk-injection').selectOption('false');
     await page.locator('.mvu2shujuku-apply-selected').click();
@@ -28,9 +42,10 @@ async function exerciseEditor(page) {
     assert.strictEqual(await rows.nth(1).locator('.mvu2shujuku-table-injection').isChecked(), originalInjection[1]);
     await rows.nth(0).locator('.mvu2shujuku-table-injection').check();
     await rows.nth(0).locator('.mvu2shujuku-table-injection').uncheck();
+    await page.locator('.mvu2shujuku-select-visible').check();
     await page.locator('.mvu2shujuku-bulk-param').selectOption('skipFloors');
     await page.locator('.mvu2shujuku-bulk-value').fill('2');
-    await page.locator('.mvu2shujuku-apply-all').click();
+    await page.locator('.mvu2shujuku-apply-selected').click();
     // 单项控件随后由原有 UI 场景继续验证更新频率 7。
     await rows.nth(0).locator('.mvu2shujuku-param-select').selectOption('updateFrequency');
     const report = await page.evaluate(() => {
@@ -46,10 +61,12 @@ async function exerciseEditor(page) {
         return { beforeEditor: !!(summary.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING),
             fullClosed: !summary.querySelector('.mvu2shujuku-full-report').open,
             attentionOpen: [...scratch.querySelectorAll('.mvu2shujuku-attention')].every(node => node.open),
+            compatibilityTitle: scratch.querySelector('.mvu2shujuku-attention summary').textContent.startsWith('兼容性待确认'),
+            compatibilityHint: scratch.querySelector('.mvu2shujuku-hint').textContent === '以下为兼容提醒，不代表转换失败；部分行为可能与原卡不同，请按需核对。',
             literalSafe: !scratch.querySelector('img') && scratch.querySelector('li').textContent === literal,
             fullTextPreserved: scratch.querySelector('textarea').value === literal };
     });
-    assert.deepStrictEqual(report, { beforeEditor: true, fullClosed: true, attentionOpen: true, literalSafe: true, fullTextPreserved: true });
+    assert.deepStrictEqual(report, { beforeEditor: true, fullClosed: true, attentionOpen: true, compatibilityTitle: true, compatibilityHint: true, literalSafe: true, fullTextPreserved: true });
     return { uids, originalInjection, report };
 }
 function verifyTemplate(template, edits) {

@@ -91,7 +91,7 @@ UI 层的转换配置只保存用户决策，不保存整份生成模板：同�
 
 - 调用 `Mvu.*`、`getVariables`、`updateVariablesWith` 的用户业务脚本。
 - 用户自己的定时器、开局、倒计时、前端和事件处理脚本。
-- 保存到 SillyTavern 后，酒馆助手可能在角色创建事件后回写旧脚本面板快照。保存流程必须先刷新角色列表，再用 `extensions.mvu2shujuku.convertedAt` 精确确认新卡，通过 ST 官方 `writeExtensionField(characterId, 'tavern_helper', value)` 重申最终脚本。不得只按角色名覆盖，也不直接修改其他角色。
+- 保存到 SillyTavern 后，酒馆助手可能在角色创建事件后回写旧脚本面板快照。保存流程必须先刷新角色列表，再用 `extensions.mvu2shujuku.convertedAt` 精确确认新卡，通过 ST 官方 `writeExtensionField(characterId, 'tavern_helper', value)` 重申最终脚本。不得只按角色名覆盖，也不直接修改其他角色。 字段同步之后还须按创建接口返回的头像读取完整卡，校验转换标记及 `tavern_helper` 数据；接口调用完成本身不证明已落盘。列表暂未同步或缺少字段接口时，可以按唯一头像只读复核，读回一致即确认保存成功。读取失败、标记不符和脚本差异分别报告；没有唯一身份时不猜测目标。
 - 无法离线证明是引擎的未知 import。
 - 仅负责隐藏 `<UpdateVariable>` / `<initvar>` 的空替换正则。
 - 仅名称含“完整变量”等字样、内容没有 MVU 输出证据的普通正则。

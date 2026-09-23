@@ -47,6 +47,60 @@ async function main() {
                 return { width: node.clientWidth, scrollWidth: node.scrollWidth, gridWidth: grid.clientWidth, gridScrollWidth: grid.scrollWidth,
                     numberStyleCount: new Set(numberStyles).size, explanationRemoved: !node.textContent.includes('世界书注入与自动更新有什么区别') };
             });
+            if (width === 314) {
+                const tableRows = page.locator('.mvu2shujuku-table-row');
+                assert.strictEqual(await tableRows.count(), 3);
+                assert.strictEqual(await page.locator('.mvu2shujuku-apply-all').count(), 0);
+                const checks = tableRows.locator('.mvu2shujuku-table-select');
+                await checks.nth(0).check();
+                await checks.nth(2).check();
+                await page.locator('.mvu2shujuku-table-search').fill('背包表');
+                assert.strictEqual(await page.locator('.mvu2shujuku-table-row:visible').count(), 1);
+                await page.locator('.mvu2shujuku-invert-visible').click();
+                assert.deepStrictEqual(await checks.evaluateAll(nodes => nodes.map(node => node.checked)), [true, true, true]);
+                assert.strictEqual(await page.locator('.mvu2shujuku-select-visible').isChecked(), true);
+                assert.ok((await page.locator('.mvu2shujuku-selection-count').textContent()).includes('已选 3 / 3'));
+                await page.locator('.mvu2shujuku-invert-visible').click();
+                assert.deepStrictEqual(await checks.evaluateAll(nodes => nodes.map(node => node.checked)), [true, false, true]);
+                await page.locator('.mvu2shujuku-table-search').fill('');
+                assert.strictEqual(await page.locator('.mvu2shujuku-select-visible').evaluate(node => node.indeterminate), true);
+                await page.locator('.mvu2shujuku-table-search').fill('__没有这个表__');
+                assert.strictEqual(await page.locator('.mvu2shujuku-invert-visible').isDisabled(), true);
+                assert.strictEqual(await page.locator('.mvu2shujuku-select-visible').isDisabled(), true);
+                assert.strictEqual(await page.locator('.mvu2shujuku-apply-selected').isDisabled(), false);
+                await page.locator('.mvu2shujuku-bulk-param').selectOption('contextDepth');
+                await page.locator('.mvu2shujuku-bulk-value').fill('8');
+                await page.locator('.mvu2shujuku-apply-selected').click();
+                await page.locator('.mvu2shujuku-table-search').fill('');
+                assert.deepStrictEqual(await tableRows.locator('.mvu2shujuku-param-select').evaluateAll(nodes => nodes.map(node => node.value)),
+                    ['contextDepth', 'updateFrequency', 'contextDepth']);
+                assert.deepStrictEqual(await tableRows.locator('.mvu2shujuku-param-value').evaluateAll(nodes => nodes.map(node => node.value)),
+                    ['8', '-1', '8']);
+                const reportState = await page.evaluate(viewSource => {
+                    const view = (0, eval)('(' + viewSource + ')')({ document });
+                    const sample = document.createElement('div');
+                    const literal = '<img src=x onerror=bad>';
+                    view.renderReport(sample, { meta: { tableCount: 1 }, reportText: literal,
+                        report: { manualReview: [literal], warnings: [{ message: '警告' }], autoRewrites: ['已转换'], notes: [] } });
+                    const empty = document.createElement('div');
+                    view.renderReport(empty, { meta: { tableCount: 0 }, reportText: '', report: {} });
+                    return {
+                        title: sample.querySelector('.mvu2shujuku-attention summary').textContent,
+                        hint: sample.querySelector('.mvu2shujuku-hint').textContent,
+                        manual: sample.querySelector('.mvu2shujuku-attention li').textContent,
+                        warning: sample.querySelectorAll('.mvu2shujuku-attention li')[1].textContent,
+                        full: sample.querySelector('textarea').value,
+                        injected: !!sample.querySelector('img'),
+                        emptyHint: empty.querySelector('.mvu2shujuku-hint').textContent,
+                    };
+                }, resultView.toString());
+                assert.deepStrictEqual(reportState, {
+                    title: '兼容性待确认（1）',
+                    hint: '以下为兼容提醒，不代表转换失败；部分行为可能与原卡不同，请按需核对。',
+                    manual: '<img src=x onerror=bad>', warning: '警告', full: '<img src=x onerror=bad>', injected: false,
+                    emptyHint: '未报告需额外核对的兼容事项；详细转换记录可在下方展开。',
+                });
+            }
             const filename = 'frontend-' + width + '.png';
             await page.locator('.mvu2shujuku-result').screenshot({ path: path.join(work, filename) });
             results.push({ viewport, container: width, ...dimensions, filename });
