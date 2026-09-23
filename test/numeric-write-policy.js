@@ -25,8 +25,8 @@ test('顶层数值：无规则与对象内数值默认可写，私有数值只�
         assert.doesNotMatch(native[name].sourceData.updateNode, /SQL示例/);
         assert.match(native[name].sourceData.initNode, /脚本\/前端维护，自动填表阶段不修改/);
     }
-    assert.strictEqual(native['counter表'].sourceData.note, sqlite['counter表'].sourceData.note);
-    assert.strictEqual(native['counter表'].sourceData.updateNode, sqlite['counter表'].sourceData.updateNode.split('\n以下仅演示 SQL 写法；')[0]);
+    assert.strictEqual(native['counter表'].sourceData.note, sqlite['counter表'].sourceData.note.replace(/\nSQL 示例仅演示写法[^\n]*$/, ''));
+    assert.strictEqual(native['counter表'].sourceData.updateNode, sqlite['counter表'].sourceData.updateNode.split('\nSQL示例:')[0]);
 });
 
 test('顶层数值：专用规则保留且仍开放 UPDATE', () => {

@@ -536,12 +536,22 @@ test('VWD动态说明：默认关闭时不新增元数据列、vwd 布局或说�
     assert.deepStrictEqual(read.A.str, ['新值', '静态说明'], '读回应恢复值 + 静态说明，说明未被数组文本污染');
 });
 
-test('VWD动态说明：默认关闭的模板与交接前冻结基线逐字节一致', () => {
+test('VWD动态说明：默认关闭模板保留冻结基线，仅允许后续新增的 SQL 示例及说明', () => {
     const baseline = require('./vwd-static-before.json');
     const base = baseline.conversion;
     const now = convertWithFlag(DEFAULT_OFF_STAT, DEFAULT_OFF_SCHEMA, false);
     const baseLayout = base.layout;
-    assert.deepStrictEqual(now.template, base.template, '默认模板（content/DDL/note/sourceData）应与冻结基线一致');
+    // 2026-09-23 双模式恢复 SQL 参考，这是独立的提示改动；保留原冻结数据，
+    // 只排除明确新增的示例及说明，表数据、DDL、原 note 和业务触发原文仍逐字节对照。
+    const comparable = JSON.parse(JSON.stringify(now.template));
+    for (const sheet of Object.values(comparable)) {
+        if (!sheet.sourceData) continue;
+        sheet.sourceData.note = sheet.sourceData.note.replace(/\nSQL 示例仅演示写法[^\n]*$/, '');
+        for (const field of ['insertNode', 'updateNode', 'deleteNode']) {
+            sheet.sourceData[field] = sheet.sourceData[field].split('\nSQL示例:')[0];
+        }
+    }
+    assert.deepStrictEqual(comparable, base.template, '除新增 SQL 示例及说明外，默认模板应与冻结基线一致');
     assert.deepStrictEqual(now.layout, baseLayout, '默认布局应与冻结基线一致');
 });
 
