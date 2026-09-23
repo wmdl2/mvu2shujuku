@@ -28,9 +28,7 @@
 - `node -e "console.log(require('./test/nullable-record-host').preflight())"`：前置条件通过。
 - `node test/real-host.js --only=nullable-record`：本批一次实机运行，runId `2026-09-21T14-56-48-779Z`，固定 SP `5c53f795` / 9.2.5。native 与实际 SQLite 均通过开局、写入/刷新、四态立即读回及逐阶段刷新、不同祖先同名记录隔离、删楼回退。浏览器异常 0。
 - `node build-extension.js`（含语法校验）与 `git diff --check` 通过。构建 **1,481,800 JS 字符 / 1,648,414 字节**，SHA-256 `a245cf1c54203c5c32345a748b30fc20a971ed1ef1f680ed2fd83086dab6de57`；根产物与隔离安装产物逐字节一致，验收期间源码指纹未变。
-- 浏览器关闭；本次测试服务 PID 12100 已退出，18173 端口已核验释放。
-
-本地 `baseline.json`、`frozen.json`、日志和 `verification.json` 位于 `.tools/nullable-record-2026-09-21/`，不作为公开测试依赖。
+- 浏览器关闭；专用测试服务已退出，测试端口已释放。
 
 ## 边界与后续
 
