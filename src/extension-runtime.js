@@ -1537,12 +1537,13 @@ function installExtensionRuntime(window) {
 
     // 酒馆开启 lazyLoadCharacters 时，角色列表对象只有元数据（无世界书）。
     // 通过 /api/characters/get 按头像取完整卡数据。
-    async function fetchFullCharacter(character) {
+    async function fetchFullCharacter(character, force = false, diagnostic = null) {
+        if (diagnostic) diagnostic.reason = '';
         if (!character) return null;
         const cb = charWorldBook(character);
         // 非强制时：角色对象已有世界书即视为完整，避免无谓请求
-        if (!arguments[1] && cb && Array.isArray(cb.entries) && cb.entries.length) return character;
-        dbg('按完整卡校验转换标记' + (arguments[1] ? '（角色列表对象缺 extensions）' : '（缺世界书）') + '，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
+        if (!force && cb && Array.isArray(cb.entries) && cb.entries.length) return character;
+        dbg('按完整卡校验转换标记' + (force ? '（角色列表对象缺 extensions）' : '（缺世界书）') + '，尝试 /api/characters/get 取完整卡。avatar=', character.avatar, 'name=', character && character.name);
         try {
             const context = getContextSafe();
             const headers = typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {};
@@ -1562,13 +1563,17 @@ function installExtensionRuntime(window) {
                     (typeof target.first_mes === 'string' || (target.character_book && Array.isArray(target.character_book.entries) && target.character_book.entries.length))) {
                     return Object.assign({}, target, { avatar: character.avatar || (full && full.avatar) || target.avatar || '' });
                 }
+                if (diagnostic) diagnostic.reason = '完整卡接口返回了不含角色数据的对象';
                 // 接口返回了异常对象（如 {mode,baseHash,nextHash,ops} 哈希差异、空对象等），
                 // 不能当作“完整卡”，否则会把本转换器产物误判为非转换卡而跳过建表。
                 // 返回 null 让调用方区分“获取失败（可重试）”与“确实非转换卡”。
                 dbgWarn('/api/characters/get 响应缺少角色卡结构（keys=' + Object.keys(full || {}).join(',') + '），本次视为获取失败，稍后可重试。');
                 return null;
             }
-        } catch (e) {}
+            if (diagnostic) diagnostic.reason = '完整卡读取失败（HTTP ' + res.status + '）';
+        } catch (e) {
+            if (diagnostic) diagnostic.reason = '完整卡读取异常：' + (e && e.message ? e.message : e);
+        }
         // 请求失败也返回 null：调用方需要明确“没拿到完整卡”，不能把它当非转换卡处理
         return null;
     }
@@ -5199,6 +5204,16 @@ function installExtensionRuntime(window) {
         }
     }
 
+    // 比较 JSON 数据，不受对象键顺序影响；数组顺序和脚本内容必须完全一致。
+    function sameSavedScriptData(a, b) {
+        if (a === b) return true;
+        if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+        if (Array.isArray(a) !== Array.isArray(b)) return false;
+        const keys = Object.keys(a);
+        return keys.length === Object.keys(b).length && keys.every(key =>
+            Object.prototype.hasOwnProperty.call(b, key) && sameSavedScriptData(a[key], b[key]));
+    }
+
     async function saveCardToSillyTavern() {
         if (!lastResult) {
             toast('请先转换', 'error');
@@ -5291,41 +5306,76 @@ function installExtensionRuntime(window) {
             }
             if (!saved) throw new Error('角色卡保存失败（未知原因）');
             log.push('✓ 角色卡已保存：' + displayName);
-            if (typeof context.getCharacters === 'function') {
-                try {
-                    const refreshedCharacters = await context.getCharacters();
-                    // 酒馆助手会在角色创建/切换事件后同步其脚本面板状态。
-                    // 若当前面板仍是原卡，这个延后同步可能把已转换卡的
-                    // tavern_helper.scripts 覆盖回“禁用的旧 mvu”，同时擦掉数据库桥。
-                    // 创建完成并刷新列表后，通过 ST 官方 writeExtensionField
-                    // 对转换标记精确命中的新卡重申最终脚本字段。
-                    const expectedData = cardData && (cardData.data || cardData);
-                    const expectedExt = expectedData && expectedData.extensions;
-                    const expectedMarker = expectedExt && expectedExt.mvu2shujuku;
+            try {
+                const expectedData = cardData && (cardData.data || cardData);
+                const expectedExt = expectedData && expectedData.extensions;
+                const expectedMarker = expectedExt && expectedExt.mvu2shujuku;
+                if (expectedExt && expectedExt.tavern_helper) {
+                    let refreshedCharacters;
+                    let syncReason = '';
+                    try {
+                        if (typeof context.getCharacters === 'function') refreshedCharacters = await context.getCharacters();
+                        else syncReason = '宿主未提供角色列表刷新接口';
+                    } catch (e) {
+                        syncReason = '刷新角色列表失败：' + (e && e.message ? e.message : e);
+                    }
                     const refreshedContext = getContextSafe();
                     const charsNow = Array.isArray(refreshedCharacters)
                         ? refreshedCharacters
                         : (Array.isArray(refreshedContext.characters) ? refreshedContext.characters : (Array.isArray(context.characters) ? context.characters : []));
                     const coreApi = window.MVU2SHUJUKU_CORE;
+                    const lookupDiagnostic = {};
                     const savedIndex = coreApi && typeof coreApi.findConvertedCharacterIndex === 'function'
                         ? await coreApi.findConvertedCharacterIndex(charsNow, {
                             displayName,
                             avatar: savedAvatar,
                             convertedAt: expectedMarker && expectedMarker.convertedAt,
-                        }, ch => fetchFullCharacter(ch, true))
+                        }, ch => fetchFullCharacter(ch, true, lookupDiagnostic))
                         : -1;
                     const writeExtensionField = (refreshedContext && refreshedContext.writeExtensionField) || context.writeExtensionField;
-                    if (savedIndex >= 0 && expectedExt && typeof writeExtensionField === 'function') {
-                        const tavernHelperCopy = JSON.parse(JSON.stringify(expectedExt.tavern_helper || { scripts: [] }));
-                        await writeExtensionField(savedIndex, 'tavern_helper', tavernHelperCopy);
-                        log.push('✓ 已核对并固化转换卡的酒馆助手脚本（旧 MVU 已移除）');
-                    } else if (expectedExt && expectedExt.tavern_helper) {
-                        log.push('⚠ 角色卡已保存，但未能使用 ST 官方字段接口复核酒馆助手脚本；若面板仍显示旧 MVU，请用下载 PNG 导入。');
+                    let synced = false;
+                    if (savedIndex >= 0 && typeof writeExtensionField === 'function') {
+                        // 保留刷新后重申字段，防止助手的旧面板状态延后回写。
+                        // 字段接口可能吞掉 HTTP 错误，调用完成不能代替读回复核。
+                        const tavernHelperCopy = JSON.parse(JSON.stringify(expectedExt.tavern_helper));
+                        try {
+                            await writeExtensionField(savedIndex, 'tavern_helper', tavernHelperCopy);
+                            synced = true;
+                        } catch (e) {
+                            syncReason = '脚本字段同步失败：' + (e && e.message ? e.message : e);
+                        }
+                    } else if (!syncReason) {
+                        syncReason = savedIndex < 0
+                            ? (lookupDiagnostic.reason || '刷新后的角色列表未能精确定位新卡')
+                            : '宿主未提供脚本字段写入接口';
                     }
-                    if (panel) populateCharacterSelect(panel);
-                } catch (e) {
-                    log.push('⚠ 复核酒馆助手脚本失败：' + (e && e.message ? e.message : e));
+                    // 创建接口返回的头像是新卡唯一身份；即使列表未同步或无写入接口，
+                    // 也可以只读复核该卡。绝不靠同名卡进行补写。
+                    const avatar = savedAvatar || (savedIndex >= 0 && charsNow[savedIndex] && charsNow[savedIndex].avatar);
+                    const diagnostic = {};
+                    const persisted = avatar ? await fetchFullCharacter({ avatar }, true, diagnostic) : null;
+                    const actualData = persisted && (persisted.data || persisted);
+                    const actualExt = actualData && actualData.extensions;
+                    const actualMarker = actualExt && actualExt.mvu2shujuku;
+                    let failure = '';
+                    if (!avatar) failure = '创建接口未返回头像，且角色列表未能精确定位新卡';
+                    else if (!persisted) failure = diagnostic.reason || '未能读取已保存角色卡的完整数据';
+                    else if (!expectedMarker || !expectedMarker.convertedAt || !actualMarker ||
+                        actualMarker.converter !== 'mvu2shujuku' || actualMarker.convertedAt !== expectedMarker.convertedAt) {
+                        failure = '读回角色卡的转换标记与本次转换不一致';
+                    } else if (!sameSavedScriptData(actualExt.tavern_helper, expectedExt.tavern_helper)) {
+                        failure = '读回的酒馆助手脚本数据与转换结果不一致';
+                    }
+                    if (!failure) {
+                        log.push(synced ? '✓ 已同步并读回确认酒馆助手脚本与转换结果一致' : '✓ 已读回确认酒馆助手脚本与转换结果一致');
+                    } else {
+                        const detail = syncReason && syncReason !== failure ? failure + '；' + syncReason : failure;
+                        log.push('⚠ 角色卡已保存，但脚本复核未通过：' + detail + '。请保留此提示；若脚本面板仍异常，可用下载 PNG 导入。');
+                    }
                 }
+                if (panel) populateCharacterSelect(panel);
+            } catch (e) {
+                log.push('⚠ 角色卡已保存，但复核酒馆助手脚本异常：' + (e && e.message ? e.message : e));
             }
         } catch (e) {
             const msg = (e && e.message ? e.message : e);

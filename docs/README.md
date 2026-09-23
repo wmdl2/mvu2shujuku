@@ -6,6 +6,8 @@
 | --- | --- |
 | 安装、转换与用户操作 | [用户说明](../README.md) |
 | v0.4.0 升级范围与发布检查 | [发布验证](validation/2026-09-22-release-0.4.0.md) |
+| 表格反选与兼容报告文案 | [反选与报告验证](validation/2026-09-23-selection.md) |
+| 角色卡保存后脚本复核警告 | [保存复核验证](validation/2026-09-23-save-verification.md) |
 | 转换报告、多选表格设置及世界书注入开关 | [前端验收](validation/2026-09-22-frontend.md) |
 | 转换流程、产物刷新、桥、EJS 和脚本保留 | [转换架构](architecture.md) |
 | 对象、数组、关系子表、类型与规则 | [数据映射](data-model.md) |
