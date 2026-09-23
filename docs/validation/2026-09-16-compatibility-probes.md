@@ -68,7 +68,7 @@ EJS 后就开启 VWD；HTML/JSON 转义也不能未经实际管线验证就当�
 格式化导入。事件总线、UI 通知和注册宿主为替身，Schema 和原命令算法是真实实现。
 JSON 克隆与命令值解析替身仅覆盖本探针使用的 JSON 数据，不代表任意 YAML 或对象兼容。
 
-原辅助脚本会逐条执行命令并 `safeParse`。MVU 本地快照中的 JSONPatch `replace` 会先转为
+原辅助脚本会逐条执行命令并 `safeParse`。受核对的 MVU 源码中，JSONPatch `replace` 会先转为
 相应 set 命令，再进入这些事件，因此命令顺序问题也涉及该路径；本探针本身从命令阶段开始，
 没有把全文 JSONPatch 解析或完整浏览器 Schema 注册算作已验证。
 
@@ -121,6 +121,4 @@ node test/probe-schema-reuse.js /path/to/mvu_zod.ts /path/to/zod /path/to/lodash
   `a43a8ad15c0a3704841de5a225a030828d3d87d959c1ea2739587d5f93c4c1ff`；
   普通回归沿用上一批 **433 通过**，本次未重复全量。
 
-原始请求、阶段数据和报告留在本地 `.tools/real-host/compat-<runId>.*` 与
-`results-<runId>.json`；Schema 结果、来源摘要、首次修改前备份及核对清单留在
-`.tools/compat-probes-2026-09-16/`。公开复现依赖上游源码和测试工具，不依赖私有角色卡。
+公开复现依赖上文列出的上游源码和测试工具，不依赖私有角色卡。
