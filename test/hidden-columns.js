@@ -1,6 +1,6 @@
 'use strict';
 const { test } = require('./runner');
-const { core, assert } = require('./helpers');
+const { core, assert, applyingApi } = require('./helpers');
 
 function card() {
     return { name: '内部列隐藏测试', first_mes: '开场', character_book: { entries: [
@@ -14,9 +14,13 @@ test('模板内部列：9.2.5 默认隐藏 $ 列与 _扩展数据，_ 业务列�
     for (const mode of Object.keys(results)) {
         const obj = sheet(results[mode], 'obj表');
         assert.deepStrictEqual(obj.content[0], ['row_id', 'visible', '_state', '$secret', '_扩展数据']);
-        assert.deepStrictEqual(obj.sourceData.hiddenPhysicalColumns, ['secret', 'kuozhanshuju']);
+        assert.deepStrictEqual(obj.sourceData.hiddenPhysicalColumns, ['secret', '_kuozhanshuju']);
         assert.doesNotMatch(obj.sourceData.note, /visible visible/);
+        assert.match(obj.sourceData.ddl, /_state\s+INTEGER/);
+        assert.match(obj.sourceData.ddl, /_kuozhanshuju\s+TEXT/);
         assert.match(obj.sourceData.note, /下划线开头字段.*只读/);
+        assert.doesNotMatch(obj.sourceData.note, /_xxx/);
+        assert.match(obj.sourceData.note, /如 _扩展数据/);
         assert.doesNotMatch(obj.sourceData.note, /\$secret|secret/);
         assert.doesNotMatch(obj.sourceData.updateNode, /secret|kuozhanshuju/);
         assert.doesNotMatch(obj.sourceData.insertNode, /secret|kuozhanshuju/);
@@ -50,4 +54,61 @@ test('模板内部列：混合 JSON 的深层 $ 键报告物理隐藏边界', ()
     const report = { warnings: [], warn(message, tag) { this.warnings.push({ message, tag }); }, note() {} };
     core.generateTemplate(result.schema, { mode: 'sqlite', report });
     assert.ok(report.warnings.some(w => /深层 \$ 私有键/.test(w.message)), 'JSON 深层 $ 键边界应被检测');
+});
+
+
+test('新模板下划线列：中文拼音、普通列和大小写不敏感消歧', () => {
+    const input = { name: '列名测试', first_mes: '开场', character_book: { entries: [
+        { comment: '[InitVar]', content: JSON.stringify({
+            obj: { visible: 1, _状态: 3, _ZHUANGTAI: 4 }, plain: { 状态: 2 },
+        }) },
+    ] } };
+    for (const mode of ['native', 'both', 'sqlite']) {
+        const result = core.convert(input, { mode });
+        const group = result.schema.find(g => g.tableName === 'obj表');
+        const obj = sheet(result, 'obj表');
+        const byName = Object.fromEntries(group.columns.map(c => [c.zh, c.ident]));
+        assert.strictEqual(group.ident, 'objbiao');
+        assert.strictEqual(byName.visible, 'visible');
+        assert.strictEqual(result.schema.find(g => g.tableName === 'plain表').columns.find(c => c.zh === '状态').ident, 'zhuangtai');
+        assert.strictEqual(byName._状态, '_zhuangtai');
+        assert.strictEqual(byName._ZHUANGTAI, '_zhuangtai_2');
+        assert.strictEqual(byName._扩展数据, '_kuozhanshuju');
+        assert.deepStrictEqual(obj.content[0], ['row_id', 'visible', '_状态', '_ZHUANGTAI', '_扩展数据']);
+        assert.match(obj.sourceData.ddl, /_zhuangtai\s+INTEGER/);
+        assert.match(obj.sourceData.ddl, /_zhuangtai_2\s+INTEGER/);
+        assert.deepStrictEqual(obj.sourceData.hiddenPhysicalColumns, ['_kuozhanshuju']);
+        assert.strictEqual(obj.content[1][2], 3);
+        assert.strictEqual(obj.content[1][3], 4);
+        assert.ok(obj.sourceData.note.includes('如 _扩展数据'));
+        assert.doesNotMatch(obj.sourceData.insertNode + obj.sourceData.updateNode, /_zhuangtai|_kuozhanshuju/);
+        const layout = JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout);
+        const original = core.statDataFromTables(layout, result.template).stat_data;
+        assert.strictEqual(original.obj._状态, 3);
+        assert.strictEqual(original.obj._ZHUANGTAI, 4);
+    }
+});
+
+test('旧冻结模板的 kuozhanshuju 继续按原 DDL 与布局读写', async () => {
+    const old = require('./vwd-static-before.json').conversion;
+    const layout = old.layout;
+    const tables = JSON.parse(JSON.stringify(old.template));
+    const obj = sheet({ template: tables }, 'A表');
+    const originalDdl = obj.sourceData.ddl;
+    assert.match(originalDdl, /kuozhanshuju\s+TEXT/);
+    assert.doesNotMatch(originalDdl, /_kuozhanshuju/);
+    assert.deepStrictEqual(obj.sourceData.hiddenPhysicalColumns, ['kuozhanshuju']);
+    const before = core.statDataFromTables(layout, tables).stat_data;
+    assert.strictEqual(before.A.str[0], '初始');
+    const after = JSON.parse(JSON.stringify(before));
+    after.A.newField = '保留';
+    const calls = [];
+    const api = applyingApi(tables);
+    const original = api.updateCell;
+    api.updateCell = async (...args) => { calls.push(args); return original(...args); };
+    assert.ok(await core.writeStatDiffToDb(api, layout, before, after) > 0);
+    assert.deepStrictEqual(calls, [['A表', 1, '_扩展数据', '{"newField":"保留"}']]);
+    assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, after);
+    assert.strictEqual(obj.sourceData.ddl, originalDdl);
+    assert.deepStrictEqual(obj.sourceData.hiddenPhysicalColumns, ['kuozhanshuju']);
 });

@@ -41,12 +41,32 @@ test('开场快照：追平或应用失败时拒绝候选，不能把半成品�
         let calls = 0;
         const failingCore = {
             statDataFromTables: core.statDataFromTables,
-            writeStatDiffToDb: async () => { calls += 1; return 0; },
-            get lastStatWriteFailed() { return calls === failAt; },
+            writeStatDiffToDbResult: async () => { calls += 1; return {
+                ok: calls !== failAt, plannedChanges: 1, failureReason: calls === failAt ? '规划失败' : null,
+            }; },
+            get lastStatWriteFailed() { throw new Error('新调用不得读取共享失败状态'); },
         };
         await assert.rejects(openingTemplateBuilder(failingCore)(layout, {}, {}, result.template), /构建开场模板失败/);
         assert.strictEqual(calls, failAt, '失败后必须立即停止后续构造阶段');
     }
+});
+
+test('写入结果：候选构造和当前回复规划不读取旧失败标记', async () => {
+    const converted = core.convert(require('./synthetic-card')());
+    const layout = JSON.parse(converted.card.data.extensions.mvu2shujuku.layout);
+    const before = core.statDataFromTables(layout, converted.template).stat_data;
+    const after = clone(before); after.状态.金币 = 27;
+    const isolatedCore = { ...core,
+        writeStatDiffToDb() { throw new Error('不得使用旧数字接口'); },
+        get lastStatWriteFailed() { throw new Error('不得读取旧失败标记'); },
+    };
+    const builder = require('../src/extension-runtime').createCandidateBuilder({ core: isolatedCore });
+    const candidate = await builder.buildUpdatedTemplateFromStat(layout, before, after, converted.template);
+    assert.deepStrictEqual(clone(core.statDataFromTables(layout, candidate).stat_data), after);
+    const draft = await builder.planCurrentReplyWrites(applyingApi(converted.template), layout, before, after, converted.template);
+    assert.deepStrictEqual(clone(core.statDataFromTables(layout, draft.tables).stat_data), after);
+    assert.ok(draft.operations.length > 0);
+    assert.deepStrictEqual(core.statDataFromTables(layout, converted.template).stat_data, before);
 });
 
 function messageSnapshotCommitter(layout) {
@@ -148,6 +168,46 @@ async function nativeRuntime(source = require('./synthetic-card')()) {
     return { win, context, tables, api, advance, tableCallbacks };
 }
 
+test('运行内存：完整扩展在 iframe 移除后还原接口并释放登记', async () => {
+    const h = await nativeRuntime();
+    let now = Date.now();
+    h.win.Date = class extends Date { static now() { return now; } };
+    const frames = [];
+    h.win.document.querySelectorAll = selector => selector === 'iframe' ? frames.slice() : [];
+    const register = () => h.win.__mvu2shujukuGlobalState.list;
+    const baseline = register().length;
+    for (let i = 0; i < 12; i++) {
+        const original = () => ({ original: i });
+        let initialized = 0;
+        const child = { document: { querySelectorAll: () => [] }, closed: false,
+            getVariables: original, initializeGlobal() { initialized++; },
+            addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
+        };
+        const frame = { contentWindow: child, addEventListener() {}, removeEventListener() {} };
+        frames.push(frame); now += 2500; await h.advance(2500);
+        assert.ok(register().some(rec => rec.w === child), '必须经过真实运行时接管');
+        assert.notStrictEqual(child.getVariables, original);
+        now += 2500; await h.advance(2500);
+        assert.strictEqual(initialized, 1, '存活窗口的初始化仍按函数去重');
+        frames.pop(); now += 2500; await h.advance(2500);
+        assert.strictEqual(child.getVariables, original);
+        assert.strictEqual(register().length, baseline, '移除后恢复到固定窗口数量');
+    }
+});
+
+test('MVU 命令运行时：parseMessage 注入解析库后修复 JSONPatch，无法修复时保留旧值', async () => {
+    const { win } = await nativeRuntime();
+    win.__MVU2SHUJUKU_YAML_LIBS__ = require('../src/vendor/mvu-yaml-libs');
+    const base = { stat_data: { score: 1 } };
+    const repaired = await win.Mvu.parseMessage(
+        '<UpdateVariable><JSONPatch>[{"op":"replace","path":"/score","value":2},]</JSONPatch></UpdateVariable>', base);
+    assert.strictEqual(repaired.stat_data.score, 2);
+    assert.strictEqual(base.stat_data.score, 1);
+    const ignored = await win.Mvu.parseMessage(
+        '<UpdateVariable><JSONPatch>this is not a patch !!!</JSONPatch></UpdateVariable>', base);
+    assert.strictEqual(ignored.stat_data.score, 1);
+});
+
 test('提交读缓存：脚本成功写入后立即读回新值，不等旧提交快照过期', async () => {
     const h = await nativeRuntime();
     await h.advance(2000);
@@ -202,6 +262,27 @@ test('原生模式：SQL 读取 getter 隐藏时，已就绪的 CRUD 仍能成�
     assert.strictEqual(settled, true, '原生 CRUD 不依赖 SQL 查询能力，应成功结算');
     const status = Object.values(tables).find(sheet => sheet?.name === '状态表');
     assert.strictEqual(Number(status.content[1][status.content[0].indexOf('金币')]), 37);
+});
+
+for (const recover of [true, false]) test('写入结果：真实运行时按本次失败重试且忽略旧状态 ' + (recover ? '恢复' : '持续失败'), async () => {
+    const h = await nativeRuntime();
+    const runtimeCore = h.win.MVU2SHUJUKU_CORE;
+    const write = runtimeCore.writeStatDiffToDbResult;
+    const beforeGold = h.win.Mvu.getMvuData().stat_data.状态.金币;
+    let calls = 0;
+    runtimeCore.writeStatDiffToDbResult = (...args) => {
+        calls++;
+        if (recover && calls > 1) return write(...args);
+        return Promise.resolve({ ok: false, plannedChanges: 1, failureReason: '临时写入失败' });
+    };
+    runtimeCore.writeStatDiffToDb = () => { throw new Error('不得使用旧数字接口'); };
+    Object.defineProperty(runtimeCore, 'lastStatWriteFailed', {
+        get() { throw new Error('不得读取旧失败标记'); },
+    });
+    assert.strictEqual(await settleGold(h, 37), recover);
+    assert.ok(calls > 1 && calls <= 6, '失败须重试且次数有界：' + calls);
+    const status = Object.values(h.tables).find(sheet => sheet?.name === '状态表');
+    assert.strictEqual(Number(status.content[1][status.content[0].indexOf('金币')]), recover ? 37 : Number(beforeGold));
 });
 
 function floorSession(chat) {
@@ -327,10 +408,10 @@ test('写入楼层：真实运行时导入失败不降级旧楼 CRUD', async () 
 test('写入楼层：真实运行时候选规划期间新回复到来，旧提交取消', async () => {
     const h = await nativeRuntime(), calls = observeHostWrites(h);
     h.context.chat.push({ is_user: true }, { is_user: false, mes: 'target reply' });
-    const runtimeCore = h.win.MVU2SHUJUKU_CORE, original = runtimeCore.writeStatDiffToDb;
+    const runtimeCore = h.win.MVU2SHUJUKU_CORE, original = runtimeCore.writeStatDiffToDbResult;
     let release, entered = false;
     const gate = new Promise(resolve => { release = resolve; });
-    runtimeCore.writeStatDiffToDb = async (...args) => { entered = true; await gate; return original(...args); };
+    runtimeCore.writeStatDiffToDbResult = async (...args) => { entered = true; await gate; return original(...args); };
     const next = h.win.Mvu.getMvuData(); next.stat_data.状态.金币 = 23;
     let settled;
     h.win.Mvu.replaceMvuData(next).then(value => { settled = value; });
@@ -399,8 +480,8 @@ test('当前楼批次：缺少整表接口时多步写入在任何 CRUD 前拒�
 test('当前楼批次：草稿规划中途失败不调用宿主、不提交半成品', async () => {
     const h = await nativeRuntime(); addReplyWithFrame(h);
     const calls = observeHostWrites(h), before = JSON.stringify(h.tables);
-    const runtimeCore = h.win.MVU2SHUJUKU_CORE, original = runtimeCore.writeStatDiffToDb;
-    runtimeCore.writeStatDiffToDb = (api, ...rest) => original({ ...api,
+    const runtimeCore = h.win.MVU2SHUJUKU_CORE, original = runtimeCore.writeStatDiffToDbResult;
+    runtimeCore.writeStatDiffToDbResult = (api, ...rest) => original({ ...api,
         updateCell: (...args) => args[2] === '金币' ? false : api.updateCell(...args),
     }, ...rest);
     assert.strictEqual(await settleMutation(h, stat => { stat.状态.金币 = 2; stat.背包.push('药'); }), false);
@@ -447,12 +528,12 @@ test('当前楼批次：规划期间数据库变化或来源失效，不提交�
         after.状态.金币 = 2; after.背包.push('药');
         let invalid = false, calls = 0;
         for (const name of ['updateRow', 'updateCell', 'insertRow', 'deleteRow', 'importTableAsJson']) api[name] = () => { calls++; throw new Error('不可写入'); };
-        const trackedCore = { ...core, writeStatDiffToDb: async (...args) => {
-            const n = await core.writeStatDiffToDb(...args);
+        const trackedCore = { ...core, writeStatDiffToDbResult: async (...args) => {
+            const result = await core.writeStatDiffToDbResult(...args);
             if (invalidation === 'database') tables.concurrentMarker = true;
             else invalid = true;
-            return n;
-        }, get lastStatWriteFailed() { return core.lastStatWriteFailed; } };
+            return result;
+        }, get lastStatWriteFailed() { throw new Error('新调用不得读取共享失败状态'); } };
         const commit = vm.runInNewContext(source.slice(start, end) + '\ncommitCurrentReplyBatch;', {
             activeLayout: layout, dbgWarn() {}, window: { MVU2SHUJUKU_CORE: trackedCore,
                 __MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__: core.getCandidateBuilderFactory() },

@@ -4,7 +4,7 @@ const { test } = require('./runner');
 const { assert, fs, core } = require('./helpers');
 test('MVU 更新视图：每轮 display 完整、delta 仅含本轮嵌套路径，旧数据不受污染', async () => {
     const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
-    const start = source.indexOf('    function parseMvuCmdValue(');
+    const start = source.indexOf('    async function applyMvuCommandsWithEvents(');
     const end = source.indexOf('    // 公共 MVU API 使用 Lodash 路径语义', start);
     assert.ok(start >= 0 && end > start);
     const events = [];
@@ -12,6 +12,8 @@ test('MVU 更新视图：每轮 display 完整、delta 仅含本轮嵌套路径�
         openingBulkClosedChats: new Set(), runtimeScopedChatKey: x => x, autoInitChatId: () => 'chat', pruneOrderedCollection() {},
         emitMvuEvent: async (name, ...args) => { if (name === 'mag_variable_update_ended') events.push(JSON.parse(JSON.stringify(args))); },
     };
+    // 命令规则来自真实模块；这里只提取仍属于运行时的事件协调逻辑。
+    Object.assign(context, require('../src/mvu-commands')());
     vm.createContext(context); vm.runInContext(source.slice(start, end), context);
     const before = { stat_data: { A: { x: 1, y: 2, name: '甲' } }, display_data: { stale: '上轮' }, delta_data: { stale: '上轮变化' } };
     const first = await context.runMvuUpdateCycle('<UpdateVariable>_.set("A.x",3);</UpdateVariable>', before);

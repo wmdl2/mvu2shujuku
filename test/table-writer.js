@@ -130,6 +130,121 @@ test('写入适配模块：失败状态在实例间隔离，计划数量不等�
     assert.strictEqual(first.lastStatWriteFailed, true);
 });
 
+test('写入结果：无操作、成功与宿主 false/throw 保留计划数量和首个原因', async () => {
+    const writer = createTableWriter({ parseJson: codec.parseObject });
+    const data = tables(), api = applyingApi(data);
+    const before = { 状态: { 生命: 100 } };
+    assert.deepStrictEqual(await writer.writeStatDiffToDbResult(api, layout, before, before),
+        { ok: true, plannedChanges: 0, failureReason: null });
+    assert.deepStrictEqual(await writer.writeStatDiffToDbResult(api, layout, before, { 状态: { 生命: 80 } }),
+        { ok: true, plannedChanges: 1, failureReason: null });
+    assert.strictEqual(writer.lastStatWriteFailed, false);
+    for (const failure of [false, new Error('宿主断开')]) {
+        const failedApi = applyingApi(tables());
+        failedApi.updateCell = async () => { if (failure) throw failure; return false; };
+        const result = await writer.writeStatDiffToDbResult(failedApi, layout, before, { 状态: { 生命: 70 } });
+        assert.strictEqual(result.ok, false);
+        assert.strictEqual(result.plannedChanges, 1);
+        assert.match(result.failureReason, /updateCell\(状态表\)/);
+        if (failure) assert.match(result.failureReason, /宿主断开/);
+        assert.strictEqual(writer.lastStatWriteFailed, false, '新接口不改变旧 getter');
+    }
+});
+
+test('写入结果：规划拒绝可以失败且计划数为零', async () => {
+    const writer = createTableWriter({ parseJson: codec.parseObject });
+    const numberLayout = [{ kind: 'json', group: 'counter', table: 'counter表', scalarType: 'number' }];
+    const result = await writer.writeStatDiffToDbResult(applyingApi({}), numberLayout,
+        { counter: 1 }, { counter: '非数字' });
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.plannedChanges, 0);
+    assert.match(result.failureReason, /只接受有限数字/);
+});
+
+test('写入结果：已成功的写入后失败仍报告完整计划，updateRow 降级成功不报失败', async () => {
+    const writer = createTableWriter({ parseJson: codec.parseObject });
+    const before = { 状态: { 生命: 100, 姓名: '甲' } };
+    const after = { 状态: { 生命: 80, 姓名: '乙' } };
+    const data = tables(), api = applyingApi(data);
+    api.updateRow = undefined;
+    const update = api.updateCell;
+    const seen = [];
+    api.updateCell = async (...args) => {
+        seen.push(args[2]);
+        return seen.length === 1 ? update(...args) : false;
+    };
+    const partial = await writer.writeStatDiffToDbResult(api, layout, before, after);
+    assert.strictEqual(partial.ok, false);
+    assert.strictEqual(partial.plannedChanges, 2);
+    assert.ok(partial.failureReason);
+    assert.strictEqual(seen.length, 2);
+    assert.strictEqual(data.sheet_status.content[1][1], '80');
+    assert.strictEqual(data.sheet_status.content[1][2], '甲');
+
+    const fallbackData = tables(), fallbackApi = applyingApi(fallbackData);
+    fallbackApi.updateRow = async () => false;
+    const fallback = await writer.writeStatDiffToDbResult(fallbackApi, layout, before, after);
+    assert.deepStrictEqual(fallback, { ok: true, plannedChanges: 2, failureReason: null });
+    assert.strictEqual(fallbackData.sheet_status.content[1][1], '80');
+    assert.strictEqual(fallbackData.sheet_status.content[1][2], '乙');
+});
+
+test('写入结果：同实例交错调用的失败状态独立，旧数值接口仍更新 getter', async () => {
+    const writer = createTableWriter({ parseJson: codec.parseObject });
+    const before = { 状态: { 生命: 100 } };
+    let release, entered;
+    const held = new Promise(resolve => { release = resolve; });
+    const atWrite = new Promise(resolve => { entered = resolve; });
+    const slowApi = applyingApi(tables());
+    const slowUpdate = slowApi.updateCell;
+    slowApi.updateCell = async (...args) => { entered(); await held; return slowUpdate(...args); };
+    const slow = writer.writeStatDiffToDbResult(slowApi, layout, before, { 状态: { 生命: 80 } });
+    await atWrite;
+    const fastApi = applyingApi(tables());
+    fastApi.updateCell = async () => false;
+    const fast = await writer.writeStatDiffToDbResult(fastApi, layout, before, { 状态: { 生命: 70 } });
+    release();
+    const completed = await slow;
+    assert.strictEqual(fast.ok, false);
+    assert.strictEqual(fast.plannedChanges, 1);
+    assert.ok(fast.failureReason);
+    assert.deepStrictEqual(completed, { ok: true, plannedChanges: 1, failureReason: null });
+    assert.strictEqual(writer.lastStatWriteFailed, false);
+    const oldApi = applyingApi(tables());
+    oldApi.updateCell = async () => false;
+    assert.strictEqual(await writer.writeStatDiffToDb(oldApi, layout, before, { 状态: { 生命: 60 } }), 1);
+    assert.strictEqual(writer.lastStatWriteFailed, true);
+    assert.deepStrictEqual(await writer.writeStatDiffToDbResult(applyingApi(tables()), layout, before, before),
+        { ok: true, plannedChanges: 0, failureReason: null });
+    assert.strictEqual(writer.lastStatWriteFailed, true);
+});
+
+test('写入结果：回放跳过继续后续操作，未捕获规划异常仍抛出', async () => {
+    const writer = createTableWriter({ parseJson: codec.parseObject });
+    const data = tables();
+    data.sheet_status.content = [data.sheet_status.content[0]];
+    const persisted = tables();
+    data.sheet_resource = { name: '资源表', content: [['row_id', '金币'], [1, 10]] };
+    const resourceLayout = { kind: 'singleton', group: '资源', table: '资源表',
+        cols: [['金币', 'number', 10, ['资源', '金币']]] };
+    const api = applyingApi(data);
+    const writes = [];
+    const update = api.updateCell;
+    api.updateCell = async (...args) => { writes.push(args[0]); return update(...args); };
+    const replay = await writer.writeStatDiffToDbResult(api, [...layout, resourceLayout],
+        { 状态: { 生命: 100 }, 资源: { 金币: 10 } },
+        { 状态: { 生命: 80 }, 资源: { 金币: 20 } }, persisted);
+    assert.strictEqual(replay.ok, false);
+    assert.ok(replay.failureReason);
+    assert.strictEqual(replay.plannedChanges, 2);
+    assert.deepStrictEqual(writes, ['资源表'], '回放跳过后继续写其他表');
+    const badLayout = [{ get kind() { throw new Error('规划错误'); } }];
+    await assert.rejects(writer.writeStatDiffToDbResult(applyingApi(tables()), badLayout,
+        { 状态: { 生命: 100 } }, { 状态: { 生命: 80 } }), /规划错误/);
+    await assert.rejects(writer.writeStatDiffToDb(applyingApi(tables()), badLayout,
+        { 状态: { 生命: 100 } }, { 状态: { 生命: 80 } }), /规划错误/);
+});
+
 test('写入适配模块：浏览器构建使用内联工厂且保留核心写入接口', async () => {
     const coreSource = fs.readFileSync(path.join(__dirname, '../src/mvu2shujuku.js'), 'utf8');
     const index = core.assembleExtension({ coreSource })['index.js'];

@@ -4352,14 +4352,10 @@ test('转换 UI：角色列表可刷新，配置零操作保存并以来源限�
     assert.ok(index.includes('currentCharacterListFingerprint'), '应使用最新角色列表指纹自动检测增删');
     assert.ok(index.includes('characterOptionKey(previousCharacter)'), '列表下标变化后应按角色身份保留选择');
     assert.ok(index.includes('id="mvu2shujuku-profile-select"') && index.includes('id="mvu2shujuku-profile-delete"'), '配置应可选择和删除');
-    assert.ok(index.includes("format: 'mvu2shujuku-conversion-profile'"), '自动保存应使用带版本的独立配置格式');
+    // 数据规则由 conversion-profiles.js 行为回归覆盖；拒绝后的状态由 conversion-profile-ui.js 验证。
     assert.ok(index.includes("await autoSaveConversionProfile();"), '下载/保存产物时应自动保存配置');
     assert.ok(index.includes('if (unchanged) {'), '同一次转换先下载再保存时，未变配置应幂等跳过重复写入');
-    assert.ok(index.includes('matchedConfigNames.length / configNames.length < 0.5'), '配置表大部分不匹配时应触发异常确认');
-    assert.ok(index.includes("return { template: baseTemplate, notes: ['用户已取消应用所选配置。'], applied: false"), '用户拒绝后应回到本次新生成的基础模板');
     assert.ok(index.includes('let name = activeProfileAppliedToLastResult ? activeProfileName :'), '只有实际应用/绑定本转换的配置才能在产出时被覆盖');
-    assert.ok(index.includes("x.source.value === ref.source.value && x.name === ref.name"), '外部表记录必须包含来源，不得把单表 UID 当全局身份');
-    assert.ok(index.includes("String(sheet.name || '') !== String(ref.name || '')"), 'UID 命中时仍必须校验表名，防止来源内 UID 被复用');
     assert.ok(!index.includes("opt('default', 'SP·数据库默认模板')"), 'SP 未公开默认模板读取 API，新选择列表不应展示不可靠来源');
     assert.ok(index.includes("return null;\n        }\n        let scope = sourceValue === 'chat'"), '已存旧配置的 default 引用读取失败时不应伪装成全局模板');
     assert.ok(index.includes("await writeExtensionField(savedIndex, 'tavern_helper'"), '保存到 ST 后应用官方字段接口固化转换后脚本，防止旧 MVU 面板状态回写');
@@ -4499,7 +4495,7 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
     ], { sheet_story: { name: '秘闻表', content: [['row_id', '标题', '描述'], [1, '第一条', '秘闻正文']] } });
     assert.deepStrictEqual(scalarProjection.stat_data.秘闻, { 第一条: '秘闻正文' }, '共用投影读回应为 {键: 标量}');
     // 桥写入复用已经覆盖 scalarValueCol 插入/更新行为的同一工厂。
-    assert.ok(index.includes('window.MVU2SHUJUKU_CORE.writeStatDiffToDb(diffApi, activeLayout'), '扩展应委派共用写入实例');
+    assert.ok(index.includes('window.MVU2SHUJUKU_CORE.writeStatDiffToDbResult(diffApi, activeLayout'), '扩展应委派共用写入实例');
     // 扩展侧应覆盖桥先定义的 getAllVariables（核心 statDataFromTables 才含 scalarValueCol + 持久化兜底）
     assert.ok(!index.includes("if (typeof window.getAllVariables === 'function') return;"), '扩展 installWindowGetAllVariables 不应因桥已定义而跳过安装');
     assert.ok(index.includes('function ensureActiveLayoutLazy()'), 'EJS 同步执行时应能惰性恢复当前卡布局');
@@ -10652,6 +10648,8 @@ require('./early-event-fallback');
 require('./mvu-update-views');
 require('./table-order');
 require('./table-prompts');
+require('./table-prompt-output');
+require('./table-prompts-factory');
 require('./json-update-prompts');
 require('./sql-example-safety');
 require('./business-rule-preservation');
@@ -10663,6 +10661,7 @@ require('./container-presence');
 require('./nullable-records');
 require('./full-json-containers');
 require('./result-view');
+require('./conversion-profiles');
 require('./save-verification');
 require('./nested-wildcard-rules');
 require('./vwd-descriptions');
@@ -10673,6 +10672,8 @@ require('./hidden-columns');
 require('./compact-table-prompts');
 require('./sp-business-events');
 require('./runtime-windows');
+require('./runtime-globals');
+require('./runtime-memory');
 require('./bridge-lifecycle');
 require('./input-parser');
 require('./card-bridge');

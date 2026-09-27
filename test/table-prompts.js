@@ -27,6 +27,8 @@ test('表格协议：双模式与 SQLite 保留 SQL 示例，每表说明一次�
     }
     const native = Object.values(converted.native.template).find(s => s.name === 'A表');
     const sql = Object.values(converted.sqlite.template).find(s => s.name === 'A表');
+    assert.match(sql.sourceData.ddl, /_neibu\s+INTEGER/);
+    assert.ok(sql.sourceData.note.includes('如 _扩展数据'));
     assert.strictEqual(native.sourceData.note, withoutNotice(sql.sourceData.note));
     assert.doesNotMatch(native.sourceData.note, /- x x|- y y/, '宿主表头/DDL 已提供字段映射');
     assert.deepStrictEqual(native.content[0].slice(1, 4), ['x', '_内部', 'y']);

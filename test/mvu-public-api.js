@@ -130,3 +130,45 @@ test('公共 MVU API：没有 iframe 发射器时使用宿主上下文总线，�
     await emit('mag_variable_updated', {});
     assert.strictEqual(calls, 2, '已有 TH 发射器时不重复向相同总线发送');
 });
+
+// 命令工厂必须能在浏览器生成包的独立 VM 中运行，且实际使用内联的解析库。
+function bundledMvuCommands() {
+    const core = require('../src/mvu2shujuku');
+    const coreSource = fs.readFileSync(require.resolve('../src/mvu2shujuku'), 'utf8');
+    const yamlLibsData = fs.readFileSync(require.resolve('../src/vendor/mvu-yaml-libs'), 'utf8');
+    const yamlLibsInline = [
+        '(function () {',
+        '  var module = { exports: {} };',
+        '  var exports = module.exports;',
+        yamlLibsData,
+        '  var target = typeof globalThis !== "undefined" ? globalThis : this;',
+        '  target.__MVU2SHUJUKU_YAML_LIBS__ = module.exports;',
+        '})();',
+    ].join('\n');
+    const source = core.assembleExtension({ coreSource, yamlLibsInline })['index.js'];
+    const context = { console };
+    vm.createContext(context);
+    vm.runInContext(source, context);
+    assert.strictEqual(typeof context.__MVU2SHUJUKU_MVU_COMMANDS_FACTORY__, 'function');
+    assert.strictEqual(typeof context.__MVU2SHUJUKU_YAML_LIBS__.jsonrepair, 'function');
+    return context.__MVU2SHUJUKU_MVU_COMMANDS_FACTORY__({
+        getMvuYamlLibs: () => context.__MVU2SHUJUKU_YAML_LIBS__,
+    });
+}
+
+test('MVU 命令工厂：浏览器包使用内联 jsonrepair 修复轻微破损 JSONPatch', () => {
+    const commands = bundledMvuCommands();
+    const parsed = commands.parseMvuCommands('<UpdateVariable><JSONPatch>[{"op":"replace","path":"/score","value":2},]</JSONPatch></UpdateVariable>');
+    assert.strictEqual(parsed.length, 1);
+    assert.strictEqual(parsed[0].type, 'replace');
+    assert.strictEqual(parsed[0].path, 'score');
+    const stat = { score: 1 };
+    commands.applyMvuCommands(stat, parsed);
+    assert.strictEqual(stat.score, 2);
+});
+
+test('MVU 命令工厂：无法修复的 JSONPatch 安全忽略', () => {
+    const commands = bundledMvuCommands();
+    const parsed = commands.parseMvuCommands('<UpdateVariable><JSONPatch>this is not a patch !!!</JSONPatch></UpdateVariable>');
+    assert.strictEqual(parsed.length, 0);
+});

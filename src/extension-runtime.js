@@ -273,6 +273,18 @@ function installExtensionRuntime(window) {
         }
         return openingContinuityByChat[key];
     }
+    // 保留有效的开场保护，不按数量淘汰；过期/已解除状态由现有轮询回收。
+    // 恢复中的异步任务仍使用同一 state，必须等它结束后才能移除。
+    function pruneOpeningContinuityStates() {
+        const now = Date.now();
+        for (const key of Object.keys(openingContinuityByChat)) {
+            const st = openingContinuityByChat[key];
+            if (st.recovering || (st.armed && st.snapshot && now <= st.expiresAt)) continue;
+            st.armed = false;
+            st.snapshot = null;
+            delete openingContinuityByChat[key];
+        }
+    }
     function openingChatIsShort() {
         try {
             const ctx = getContextSafe();
@@ -297,6 +309,7 @@ function installExtensionRuntime(window) {
         st.expiresAt = Date.now() + 30 * 60 * 1000;
         st.attempts = 0;
         st.recoveries = 0;
+        startGreetingInitvarPoll();
         dbg('[开场连续性] 已记录新建 checkpoint 的最新数据快照。');
     }
     function refreshOpeningContinuityAfterWrite(chatKey, stat) {
@@ -394,13 +407,16 @@ function installExtensionRuntime(window) {
         hostWindow.setTimeout(() => { recoverOpeningContinuity(reason); }, 450);
     }
     function disarmOpeningContinuity(chatKey) {
-        const st = openingContinuityState(chatKey);
+        const key = runtimeScopedChatKey(chatKey);
+        const st = openingContinuityByChat[key];
+        if (!st) return;
         if (st.recovering) {
             hostWindow.setTimeout(() => disarmOpeningContinuity(chatKey), 1000);
             return;
         }
         st.armed = false;
         st.snapshot = null;
+        delete openingContinuityByChat[key];
     }
 
     // 对应 MVU 的 init 时机：进入聊天/收到首条消息时，若卡内有模板且表格缺失则自动建表。
@@ -1206,6 +1222,7 @@ function installExtensionRuntime(window) {
         if (greetingPollTimer) return;
         greetingPollTimer = hostWindow.setInterval(() => {
             try {
+                pruneOpeningContinuityStates();
                 if (!activeLayout) return;
                 applyActiveGreetingInitvar();
             } catch (e) {}
@@ -1636,11 +1653,6 @@ function installExtensionRuntime(window) {
         if (del) del.disabled = !activeProfileName;
     }
 
-    function sheetFingerprint(sheet) {
-        const core = window.MVU2SHUJUKU_CORE;
-        return core && typeof core.stableHash === 'function' ? core.stableHash(sheet) : JSON.stringify(sheet || {});
-    }
-
     async function readTemplateSource(source) {
         const sourceValue = typeof source === 'string' ? source : String(source && source.value || '');
         const api = getAcuApi();
@@ -1662,18 +1674,9 @@ function installExtensionRuntime(window) {
     }
 
     function captureConversionProfile(name) {
-        const tableConfigs = {};
-        for (const { sheet } of updateParamSheetRows(lastResult || { template: {} })) {
-            tableConfigs[String(sheet.name || '')] = resultView.captureConfig(sheet);
-        }
-        return {
-            format: 'mvu2shujuku-conversion-profile',
-            version: 1,
-            name,
-            tableConfigs,
-            externalTables: JSON.parse(JSON.stringify(mergeState.appliedRefs || [])),
-            updatedAt: new Date().toISOString(),
-        };
+        return conversionProfileTools.captureProfile({
+            name, result: lastResult, appliedRefs: mergeState.appliedRefs, updatedAt: new Date().toISOString(),
+        });
     }
 
     async function autoSaveConversionProfile() {
@@ -1728,92 +1731,21 @@ function installExtensionRuntime(window) {
         if (!activeProfileName) return { template, notes: [], applied: false, summary: '' };
         const profile = conversionProfiles()[activeProfileName];
         if (!profile) return { template, notes: [], applied: false, summary: '' };
-        const baseTemplate = JSON.parse(JSON.stringify(template || {}));
-        let next = JSON.parse(JSON.stringify(baseTemplate));
-        const notes = [];
-        const configs = profile.tableConfigs || {};
-        const configNames = Object.keys(configs).filter(Boolean);
-        const newTableNames = Object.keys(next).filter(k => k.startsWith('sheet_')).map(k => String(next[k] && next[k].name || '')).filter(Boolean);
-        const matchedConfigNames = configNames.filter(name => newTableNames.indexOf(name) >= 0);
-        const missingConfigNames = configNames.filter(name => newTableNames.indexOf(name) < 0);
-        const addedTableNames = newTableNames.filter(name => configNames.indexOf(name) < 0);
-        for (const key of Object.keys(next).filter(k => k.startsWith('sheet_'))) {
-            const sheet = next[key];
-            const cfg = sheet && configs[String(sheet.name || '')];
-            if (!cfg) continue;
-            resultView.applyConfig(sheet, cfg);
-        }
-        mergeState.appliedRefs = [];
-        const refsBySource = new Map();
-        for (const ref of Array.isArray(profile.externalTables) ? profile.externalTables : []) {
-            const value = String(ref && ref.source && ref.source.value || '');
-            if (!value) continue;
-            if (!refsBySource.has(value)) refsBySource.set(value, []);
-            refsBySource.get(value).push(ref);
-        }
-        const core = window.MVU2SHUJUKU_CORE;
-        let externalRequested = 0;
-        let externalAdded = 0;
-        let externalProblems = 0;
-        for (const [sourceValue, refs] of refsBySource) {
-            externalRequested += refs.length;
-            const sourceTemplate = await readTemplateSource(sourceValue);
-            if (!sourceTemplate) { notes.push('来源不可用：' + sourceValue); externalProblems += refs.length; continue; }
-            const selected = [];
-            const resolvedRefs = [];
-            for (const ref of refs) {
-                let uid = String(ref.uid || '');
-                let sheet = uid && sourceTemplate[uid];
-                if (!sheet || String(sheet.name || '') !== String(ref.name || '')) {
-                    const matches = Object.keys(sourceTemplate).filter(k => k.startsWith('sheet_') && sourceTemplate[k] && String(sourceTemplate[k].name || '') === String(ref.name || ''));
-                    if (matches.length !== 1) { notes.push('未找到外部表：' + ref.name); externalProblems++; continue; }
-                    uid = matches[0];
-                    sheet = sourceTemplate[uid];
-                }
-                selected.push(uid);
-                const latest = { source: { value: sourceValue }, uid, name: String(sheet.name || uid), fingerprint: sheetFingerprint(sheet) };
-                resolvedRefs.push(latest);
-                if (ref.fingerprint && ref.fingerprint !== latest.fingerprint) notes.push('来源已更新：' + latest.name);
-            }
-            if (selected.length) {
-                const merged = core.mergeTemplates(next, sourceTemplate, selected);
-                next = merged.template;
-                for (const ref of resolvedRefs) {
-                    if (merged.added.indexOf(ref.name) >= 0) { mergeState.appliedRefs.push(ref); externalAdded++; }
-                    else { notes.push('同名冲突已跳过：' + ref.name + '（' + sourceValue + '）'); externalProblems++; }
-                }
-            }
-        }
-        // 外部表并入后再应用一次参数，保留用户对已合并表做的自动化调整。
-        for (const key of Object.keys(next).filter(k => k.startsWith('sheet_'))) {
-            const sheet = next[key];
-            const cfg = sheet && configs[String(sheet.name || '')];
-            if (!cfg) continue;
-            resultView.applyConfig(sheet, cfg);
-        }
-        const summaryLines = [
-            '配置：' + activeProfileName,
-            '表格设置匹配：' + matchedConfigNames.length + '/' + configNames.length + ' 张表',
-            '配置中本次不存在：' + (missingConfigNames.length ? missingConfigNames.join('、') : '无'),
-            '本次新表：' + (addedTableNames.length ? addedTableNames.join('、') : '无'),
-            '外部表：成功 ' + externalAdded + '/' + externalRequested + (externalProblems ? '，异常 ' + externalProblems : ''),
-        ];
-        const mostlyMissing = configNames.length > 0 && matchedConfigNames.length / configNames.length < 0.5;
-        const emptyProfile = configNames.length === 0 && externalRequested === 0;
-        const needsConfirm = emptyProfile || mostlyMissing || externalProblems > 0;
-        if (needsConfirm) {
+        const plan = await conversionProfileTools.planProfile({ template, profile, name: activeProfileName });
+        if (plan.needsConfirm) {
             const accepted = hostWindow.confirm(
                 '所选转换配置与本次结果可能不完全匹配：\n\n' +
-                summaryLines.join('\n') +
-                (notes.length ? '\n\n' + notes.join('\n') : '') +
+                plan.summary +
+                (plan.notes.length ? '\n\n' + plan.notes.join('\n') : '') +
                 '\n\n确定：仍应用可匹配部分\n取消：本次不使用该配置'
             );
             if (!accepted) {
                 mergeState.appliedRefs = [];
-                return { template: baseTemplate, notes: ['用户已取消应用所选配置。'], applied: false, summary: summaryLines.join('\n') };
+                return { template: plan.baseTemplate, notes: ['用户已取消应用所选配置。'], applied: false, summary: plan.summary };
             }
         }
-        return { template: next, notes, applied: true, summary: summaryLines.join('\n') };
+        mergeState.appliedRefs = plan.refs;
+        return { template: plan.template, notes: plan.notes, applied: true, summary: plan.summary };
     }
     function acceptBridgeRegistration(payload) {
         try {
@@ -1898,7 +1830,7 @@ function installExtensionRuntime(window) {
     // 每次按当前 core 创建无状态构造器，避免模块替换后仍使用旧 core。
     function buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate) {
         const coreNow = window.MVU2SHUJUKU_CORE;
-        if (!coreNow || typeof coreNow.writeStatDiffToDb !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
+        if (!coreNow || typeof coreNow.writeStatDiffToDbResult !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
         const factory = window.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__;
         if (typeof factory !== 'function') throw new Error('候选快照构造模块未加载，请使用构建后的 index.js');
         return factory({ core: coreNow, warn: dbgWarn })
@@ -2083,7 +2015,7 @@ function installExtensionRuntime(window) {
             if (!explicitInitialization && groups.length < 2) return false;
             const tpl = cachedTemplateForCurrentCard();
             const coreNow = window.MVU2SHUJUKU_CORE;
-            if (!tpl || !coreNow || typeof coreNow.writeStatDiffToDb !== 'function') return false;
+            if (!tpl || !coreNow || typeof coreNow.writeStatDiffToDbResult !== 'function') return false;
             const mergedTemplate = await buildUpdatedTemplateFromStat(activeLayout, prevStat, nextStat, tpl);
             assertRuntimeSession(session);
             if (!mergedTemplate) return false;
@@ -2547,6 +2479,7 @@ function installExtensionRuntime(window) {
                     // 已能证明本楼 CRUD 归属时保留差量；新楼先以最终候选快照正式提交。
                     // checkpoint/落盘始终由 SP 维护，不创建空锚点或手写历史帧。
                     let n = 0;
+                    let diffWriteResult = null;
                     let bulkInit = false;
                     let replySnapshot = !!writeSession.messageUpdate;
                     try {
@@ -2675,7 +2608,8 @@ function installExtensionRuntime(window) {
                                         },
                                     });
                                 }
-                                n = await window.MVU2SHUJUKU_CORE.writeStatDiffToDb(diffApi, activeLayout, prev, effectiveTarget, persistedForWrite);
+                                diffWriteResult = await window.MVU2SHUJUKU_CORE.writeStatDiffToDbResult(diffApi, activeLayout, prev, effectiveTarget, persistedForWrite);
+                                n = diffWriteResult.plannedChanges;
                                 assertRuntimeSession(writeSession);
                             }
                         } finally {
@@ -2687,18 +2621,19 @@ function installExtensionRuntime(window) {
                             openingWriteSettledChats.add(chatKeyNow);
                             pruneOrderedCollection(openingWriteSettledChats, 80);
                             lastDbWriteAt = Date.now();
-                            dbg(replySnapshot ? ' Mvu 写入完成：当前回复批次已提交，由数据库持久化。'
+                            dbg(diffWriteResult && !diffWriteResult.ok ? ' Mvu 差异写入未完成：计划 ' + n + ' 条；' + diffWriteResult.failureReason
+                                : replySnapshot ? ' Mvu 写入完成：当前回复批次已提交，由数据库持久化。'
                                 : bulkInit === true ? ' Mvu 写入完成：一次整表提交，插件自行持久化。' : ' Mvu 写入完成：差异 ' + n + ' 条（原生 CRUD，插件自行持久化）');
                         } else {
-                            dbg(' 差异写入无操作（运行时与目标一致），跳过。');
+                            dbg(diffWriteResult && !diffWriteResult.ok ? ' Mvu 差异写入未完成：' + diffWriteResult.failureReason
+                                : ' 差异写入无操作（运行时与目标一致），跳过。');
                         }
                         // 写入出现失败（首楼替换/插件回放会清空运行时，导致 updateCell 越界等）：
                         // 不能当场补行——原行稍后会被重放恢复，补出来的行会变成重复行。
                         // 改为延迟重跑整次合并：waitRuntimeTablesReady 会等到插件重放完成，
                         // 原行回来就直接写、不重复；行真没了才由 seedNeeded 补。
                         try {
-                            const coreNow = window.MVU2SHUJUKU_CORE;
-                            if (!replySnapshot && bulkInit !== true && coreNow && coreNow.lastStatWriteFailed) {
+                            if (diffWriteResult && !diffWriteResult.ok) {
                                 writeUnsettled = true;
                                 if (overlayFlushRetries < 4) {
                                 overlayFlushRetries += 1;
@@ -3888,279 +3823,9 @@ function installExtensionRuntime(window) {
     // 扩展侧 Mvu 兼容层：按 MVU 官方全局 API（createMvu）完整实现，
     // 覆盖式接管运行环境里残留的真 MVU（避免双轨冲突），桥不在主窗口时也能读写数据库。
     // =================================================================
-    function parseMvuCmdValue(raw) {
-        const t = String(raw == null ? '' : raw).trim();
-        if (t === 'true') return true;
-        if (t === 'false') return false;
-        if (t === 'null') return null;
-        if (t === 'undefined') return undefined;
-        try { return JSON.parse(t); } catch (e) {}
-        if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
-        return t.replace(/^['"]|['"]$/g, '');
-    }
-    function splitMvuCmdArgs(argsStr) {
-        const out = [];
-        let cur = '', depth = 0, inStr = null;
-        for (let i = 0; i < argsStr.length; i++) {
-            const ch = argsStr[i];
-            if (inStr) { cur += ch; if (ch === '\\') { cur += argsStr[i + 1] || ''; i++; continue; } if (ch === inStr) inStr = null; continue; }
-            if (ch === "'" || ch === '"') { inStr = ch; cur += ch; continue; }
-            if (ch === '(' || ch === '[' || ch === '{') depth++;
-            if (ch === ')' || ch === ']' || ch === '}') depth--;
-            if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
-            cur += ch;
-        }
-        if (cur.trim()) out.push(cur.trim());
-        return out;
-    }
-    // 与卡内桥同一套通用命令规则：解析 <UpdateVariable>/<json_patch> 中的 _.set/_.add/_.remove 等指令
-    function parseMvuCommands(text) {
-        const cmds = [];
-        const blockRe = /<(updatevariable|json_?patch)>[\s\S]*?(?:\/\1>)/gi;
-        let m;
-        while ((m = blockRe.exec(String(text || '')))) {
-            let inner = m[0].replace(/<[^>]+>/g, '').replace(/\x60\x60\x60[^\x60]*\x60\x60\x60/g, '').trim();
-            let isJsonBlock = m[1].toLowerCase().indexOf('json') === 0;
-            // 标准写法 <UpdateVariable><Analysis>…</Analysis><JSONPatch>…</JSONPatch></UpdateVariable>：
-            // 外层是 updatevariable 时，若内部含 json_patch 子块，则整块按 JSONPatch 解析
-            const sub = m[0].match(/<(json_?patch)>[\s\S]*?(?:\/\1>)/i);
-            if (sub) { inner = sub[0].replace(/<[^>]+>/g, '').trim(); isJsonBlock = true; }
-            if (isJsonBlock) {
-                try {
-                    let patch = null;
-                    try { patch = JSON.parse(inner); } catch (e) {
-                        try {
-                            const libs = getMvuYamlLibs();
-                            patch = JSON.parse((libs && typeof libs.jsonrepair === 'function') ? libs.jsonrepair(inner) : inner);
-                        } catch (e2) { patch = null; }
-                    }
-                    if (Array.isArray(patch)) {
-                        for (const op of patch) {
-                            if (!op || (!op.path && !op.to)) continue;
-                            const jt = op.op === 'delta' ? 'add' : (op.op === 'remove' ? 'delete' : ((op.op === 'insert' || op.op === 'add') ? 'insert' : op.op || 'set'));
-                            const jp = String(op.path || op.to || '').replace(/^\//, '').replace(/\//g, '.');
-                            const jpParts = jp.split('.');
-                            const jpKey = jpParts.pop();
-                            const jpParent = jpParts.join('.');
-                            const rawArgs = jt === 'move' ? [String(op.from || '').replace(/^\//, '').replace(/\//g, '.'), jp]
-                                : jt === 'delete' ? [jp]
-                                : jt === 'insert' || op.op === 'add' ? [jpParent, jpKey, JSON.stringify(op.value)]
-                                : [jp, JSON.stringify(op.value)];
-                            cmds.push({ type: jt, path: (jt === 'insert' || op.op === 'add') ? jpParent : jp, keyOrIndex: (jt === 'insert' || op.op === 'add') ? parseMvuCmdValue(jpKey) : undefined, value: op.value, from: op.from, rawArgs, full_match: JSON.stringify(op), reason: 'json_patch' });
-                        }
-                    }
-                } catch (e) {}
-                continue;
-            }
-            const cmdRe = /\.(set|assign|insert|remove|unset|delete|add)\(/g;
-            let cm;
-            while ((cm = cmdRe.exec(inner))) {
-                const open = inner.indexOf('(', cm.index + cm[0].length - 1);
-                if (open === -1) continue;
-                let depth = 1, end = -1, inS = null;
-                for (let k = open + 1; k < inner.length; k++) {
-                    const c = inner[k];
-                    if (inS) { if (c === '\\') { k++; continue; } if (c === inS) inS = null; continue; }
-                    if (c === "'" || c === '"') { inS = c; continue; }
-                    if (c === '(') depth++;
-                    else if (c === ')') { depth--; if (depth === 0) { end = k; break; } }
-                }
-                if (end === -1) break;
-                const args = splitMvuCmdArgs(inner.slice(open + 1, end));
-                const after = inner.slice(end + 1).replace(/^\s*;\s*/, '');
-                let reason = '';
-                const rm = after.match(/^\/\/\s*([^\n]*)/);
-                if (rm) reason = rm[1].trim();
-                const type = cm[1];
-                const path = String(args[0] || '').replace(/^['"]|['"]$/g, '').replace(/^\//, '').replace(/\//g, '.');
-                const full_match = inner.slice(cm.index, end + 1);
-                if (type === 'remove' || type === 'unset' || type === 'delete') cmds.push({ type: 'delete', path, keyOrIndex: args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined, rawArgs: args, full_match, reason });
-                else if (type === 'insert' || type === 'assign') cmds.push({ type: 'insert', path, keyOrIndex: args[2] !== undefined ? parseMvuCmdValue(args[1]) : null, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : parseMvuCmdValue(args[1]), rawArgs: args, full_match, reason });
-                else if (type === 'add') cmds.push({ type: 'add', path, value: args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined, rawArgs: args, full_match, reason });
-                else cmds.push({ type: 'set', path, expected: args[2] !== undefined ? parseMvuCmdValue(args[1]) : undefined, value: args[2] !== undefined ? parseMvuCmdValue(args[2]) : (args[1] !== undefined ? parseMvuCmdValue(args[1]) : undefined), rawArgs: args, full_match, reason });
-                cmdRe.lastIndex = end + 1;
-            }
-        }
-        if (!cmds.length && /\.(set|assign|insert|remove|unset|delete|add)\(/.test(String(text || '')) && !/<(updatevariable|json_?patch)>/i.test(String(text || ''))) {
-            return parseMvuCommands('<UpdateVariable>' + String(text || '') + '</UpdateVariable>');
-        }
-        return cmds;
-    }
-    function mvuCommandInfoFromInternal(cmd) {
-        let type = cmd.type;
-        if (type === 'assign') type = 'insert';
-        if (type === 'remove' || type === 'unset') type = 'delete';
-        let args = Array.isArray(cmd.rawArgs) ? cmd.rawArgs.slice() : null;
-        if (!args) {
-            if (type === 'move') args = [String(cmd.from || ''), String(cmd.path || '')];
-            else if (type === 'delete') args = cmd.keyOrIndex === undefined ? [String(cmd.path || '')] : [String(cmd.path || ''), cmd.keyOrIndex];
-            else if (type === 'insert') args = cmd.keyOrIndex === null || cmd.keyOrIndex === undefined ? [String(cmd.path || ''), cmd.value] : [String(cmd.path || ''), cmd.keyOrIndex, cmd.value];
-            else if (type === 'set' && cmd.expected !== undefined) args = [String(cmd.path || ''), cmd.expected, cmd.value];
-            else args = [String(cmd.path || ''), cmd.value];
-        }
-        return { type, full_match: cmd.full_match || '', args, reason: cmd.reason || '' };
-    }
-    function mvuInternalFromCommandInfo(info) {
-        if (!info || !Array.isArray(info.args) || !info.args.length) return null;
-        let type = String(info.type || 'set').toLowerCase();
-        if (type === 'assign') type = 'insert';
-        if (type === 'remove' || type === 'unset') type = 'delete';
-        const args = info.args;
-        const cleanPath = (v) => String(v == null ? '' : v).replace(/^['"]|['"]$/g, '').replace(/^\//, '').replace(/\//g, '.');
-        if (type === 'move') return { type, from: cleanPath(args[0]), path: cleanPath(args[1]), full_match: info.full_match || '', reason: info.reason || '' };
-        const path = cleanPath(args[0]);
-        if (type === 'delete') return { type, path, keyOrIndex: args.length > 1 ? parseMvuCmdValue(args[1]) : undefined, full_match: info.full_match || '', reason: info.reason || '' };
-        if (type === 'insert') return { type, path, keyOrIndex: args.length > 2 ? parseMvuCmdValue(args[1]) : null, value: parseMvuCmdValue(args[args.length - 1]), full_match: info.full_match || '', reason: info.reason || '' };
-        if (type === 'add') return { type, path, value: parseMvuCmdValue(args[1]), full_match: info.full_match || '', reason: info.reason || '' };
-        return { type: 'set', path, expected: args.length > 2 ? parseMvuCmdValue(args[1]) : undefined, value: parseMvuCmdValue(args[args.length - 1]), full_match: info.full_match || '', reason: info.reason || '' };
-    }
-    function applyMvuCommands(stat, cmds, display) {
-        const setPathArr = (obj, parts, value) => {
-            let cur = obj;
-            for (let i = 0; i < parts.length - 1; i++) {
-                if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) cur[parts[i]] = {};
-                cur = cur[parts[i]];
-            }
-            cur[parts[parts.length - 1]] = value;
-        };
-        const note = (path, oldV, newV, reason) => {
-            const r = reason ? ' (' + reason + ')' : '';
-            const parts = String(path).split('.').filter(Boolean);
-            const value = String(oldV) + '->' + String(newV) + r;
-            if (display) setPathArr(display, parts, value);
-            const delta = stat.$internal && stat.$internal.delta_data;
-            if (delta) setPathArr(delta, parts, value);
-        };
-        for (const cmd of cmds) {
-            if (!cmd.path) continue;
-            const parts = String(cmd.path).split('.').filter((p) => p !== '');
-            if (parts.some((p) => p.charAt(0) === '_')) continue;
-            if (cmd.type === 'move') {
-                const mf = String(cmd.from || '').replace(/^\//, '').replace(/\//g, '.').split('.').filter((p) => p !== '');
-                if (mf.some((p) => p.charAt(0) === '_')) continue;
-                let mv;
-                let mc = stat, mok = true;
-                for (let i = 0; i < mf.length - 1; i++) { mc = mc ? mc[mf[i]] : null; if (!mc) { mok = false; break; } }
-                if (mok && mc) {
-                    const mkey = mf[mf.length - 1];
-                    if (Array.isArray(mc) && /^\d+$/.test(String(mkey))) { mv = mc[Number(mkey)]; mc.splice(Number(mkey), 1); }
-                    else { mv = mc[mkey]; try { delete mc[mkey]; } catch (e) {} }
-                }
-                if (mv !== undefined) {
-                    setPathArr(stat, parts, mv);
-                    note(cmd.path, '(移动)', mv, cmd.reason);
-                }
-                continue;
-            }
-            if (cmd.type === 'delete') {
-                let oldDel = null;
-                if (cmd.keyOrIndex !== undefined) {
-                    let collection = stat;
-                    for (const p of parts) collection = collection == null ? undefined : collection[p];
-                    oldDel = collection;
-                    if (Array.isArray(collection)) {
-                        const ri = typeof cmd.keyOrIndex === 'number' ? cmd.keyOrIndex : collection.findIndex(v => JSON.stringify(v) === JSON.stringify(cmd.keyOrIndex));
-                        if (ri >= 0 && ri < collection.length) collection.splice(ri, 1);
-                    } else if (collection && typeof collection === 'object') {
-                        const dk = typeof cmd.keyOrIndex === 'number' ? Object.keys(collection)[cmd.keyOrIndex] : String(cmd.keyOrIndex);
-                        if (dk !== undefined) delete collection[dk];
-                    }
-                } else {
-                    let cur = stat, ok = true;
-                    for (let d = 0; d < parts.length - 1; d++) { cur = cur ? cur[parts[d]] : null; if (!cur) { ok = false; break; } }
-                    if (ok && cur) {
-                        const dk = parts[parts.length - 1];
-                        oldDel = cur[dk];
-                        if (Array.isArray(cur) && /^\d+$/.test(String(dk))) cur.splice(Number(dk), 1); else try { delete cur[dk]; } catch (e) {}
-                    }
-                }
-                if (Array.isArray(oldDel) && oldDel.length === 2) oldDel = oldDel[0];
-                note(cmd.path, oldDel, '(移除)', cmd.reason);
-                continue;
-            }
-            if (cmd.type === 'insert') {
-                let container = stat;
-                for (const p of parts) container = container == null ? undefined : container[p];
-                if (container == null || (typeof container !== 'object' && !Array.isArray(container))) continue;
-                const key = cmd.keyOrIndex;
-                if (key === null || key === undefined) {
-                    if (Array.isArray(container)) container.push(cmd.value);
-                    else if (cmd.value && typeof cmd.value === 'object' && !Array.isArray(cmd.value)) Object.assign(container, cmd.value);
-                } else if (Array.isArray(container) && (key === '-' || /^-?\d+$/.test(String(key)))) {
-                    const idx = key === '-' || Number(key) === -1 ? container.length : Number(key);
-                    container.splice(idx, 0, cmd.value);
-                } else if (container && typeof container === 'object') container[String(key)] = cmd.value;
-                note(cmd.path, '(新增)', cmd.value, cmd.reason);
-                continue;
-            }
-            if (cmd.type === 'assign' && cmd.keyOrIndex !== undefined) {
-                let acont = stat, aok = true;
-                for (let d5 = 0; d5 < parts.length - 1; d5++) { acont = acont ? acont[parts[d5]] : null; if (!acont) { aok = false; break; } }
-                if (aok && acont && typeof acont === 'object') {
-                    const akey = cmd.keyOrIndex;
-                    if (akey === '-' && Array.isArray(acont)) acont.push(cmd.value);
-                    else if (Array.isArray(acont) && /^\d+$/.test(String(akey))) acont.splice(Number(akey), 0, cmd.value);
-                    else if (acont && typeof acont === 'object') acont[akey] = cmd.value;
-                    note(cmd.path, '(变更)', cmd.value, cmd.reason);
-                }
-                continue;
-            }
-            if (cmd.type === 'assign' && cmd.value && typeof cmd.value === 'object' && !Array.isArray(cmd.value)) {
-                let tgt = stat, ok3 = true;
-                for (let d3 = 0; d3 < parts.length - 1; d3++) { tgt = tgt ? tgt[parts[d3]] : null; if (!tgt) { ok3 = false; break; } }
-                if (ok3 && tgt && typeof tgt === 'object') { Object.keys(cmd.value).forEach((kk) => { tgt[kk] = cmd.value[kk]; }); note(cmd.path, '(变更)', cmd.value, cmd.reason); }
-                continue;
-            }
-            if (cmd.type === 'add') {
-                // delta：数值相加 / 日期加毫秒 / 数组追加 / 否则整体替换（与 MVU 语义一致）
-                const oldV = (() => { let c = stat; for (const p of parts) { c = c ? c[p] : undefined; } return c; })();
-                const base = Array.isArray(oldV) && oldV.length ? oldV[0] : oldV;
-                const delta = parseFloat(cmd.value);
-                let dateVal = null;
-                if (typeof base === 'string') { const dtest = new Date(base); if (!isNaN(dtest.getTime()) && isNaN(Number(base))) dateVal = dtest; }
-                if (dateVal && !isNaN(delta)) {
-                    const nd = new Date(dateVal.getTime() + delta);
-                    setPathArr(stat, parts, nd.toISOString());
-                    note(cmd.path, base, nd.toISOString(), cmd.reason);
-                } else {
-                    const num = parseFloat(base);
-                    if (!isNaN(num) && !isNaN(delta)) {
-                        const nv2 = parseFloat((num + delta).toPrecision(12));
-                        setPathArr(stat, parts, nv2);
-                        note(cmd.path, base, nv2, cmd.reason);
-                    } else if (Array.isArray(oldV)) {
-                        const arr = oldV.slice();
-                        if (Array.isArray(cmd.value)) cmd.value.forEach((vv) => arr.push(vv)); else arr.push(cmd.value);
-                        setPathArr(stat, parts, arr);
-                        note(cmd.path, '(数组追加)', cmd.value, cmd.reason);
-                    } else {
-                        setPathArr(stat, parts, cmd.value);
-                        note(cmd.path, base, cmd.value, cmd.reason);
-                    }
-                }
-                continue;
-            }
-            // 官方 set 语义：路径必须已存在（缺失则跳过，不自动创建）；VWD 成对数组更新 [0]；数字强转
-            let cur = stat, okSet = true;
-            for (let i = 0; i < parts.length - 1; i++) {
-                cur = cur ? cur[parts[i]] : undefined;
-                if (cur === undefined || cur === null || typeof cur !== 'object' || Array.isArray(cur)) { okSet = false; break; }
-            }
-            if (!okSet || cur === undefined || cur === null || typeof cur !== 'object' || !Object.prototype.hasOwnProperty.call(cur, parts[parts.length - 1])) continue;
-            const oldV = cur[parts[parts.length - 1]];
-            let newV = cmd.value;
-            if (newV instanceof Date) newV = newV.toISOString();
-            if (Array.isArray(oldV) && oldV.length === 2 && typeof oldV[1] === 'string' && !Array.isArray(oldV[0])) {
-                const oc = JSON.parse(JSON.stringify(oldV[0]));
-                oldV[0] = (typeof oc === 'number' && newV !== null) ? Number(newV) : newV;
-                note(cmd.path, oc, newV, cmd.reason);
-            } else {
-                if (typeof oldV === 'number' && newV !== null && !isNaN(Number(newV))) newV = Number(newV);
-                cur[parts[parts.length - 1]] = newV;
-                note(cmd.path, oldV, newV, cmd.reason);
-            }
-        }
-    }
+    const { parseMvuCommands, mvuCommandInfoFromInternal,
+        mvuInternalFromCommandInfo, applyMvuCommands } =
+        window.__MVU2SHUJUKU_MVU_COMMANDS_FACTORY__({ getMvuYamlLibs: () => window.__MVU2SHUJUKU_YAML_LIBS__ });
 
     async function applyMvuCommandsWithEvents(stat, cmds, display) {
         const at = (path) => {
@@ -4240,7 +3905,7 @@ function installExtensionRuntime(window) {
     let windowMvuFakeSession = null;
     let windowMvuExportedEventStops = [];
     let windowMvuGlobalAnnounced = false;
-    let windowMvuInitializedFunctions = [];
+    let windowMvuInitializedFunctions = new WeakSet();
     // 与卡内桥共用的“真原始值”注册表：先接管者（桥或扩展）记录各窗口的原始函数，
     // 切到其他卡（尤其真 MVU 卡）时都从这里还原——避免把桥/扩展自己的接管函数
     // 当成“原始值”保存/恢复（这是切卡后函数不还原、真 MVU 卡被污染的根因）。
@@ -4252,49 +3917,18 @@ function installExtensionRuntime(window) {
     function isOursShimFn(fn) {
         return !!(fn && typeof fn === 'function' && (fn.__mvu2shujuku || fn.__mvu2shujukuBridge));
     }
-    function noteGlobalOriginals(w) {
-        try {
-            const reg = sharedStateWindow.__mvu2shujukuGlobalState || (sharedStateWindow.__mvu2shujukuGlobalState = { list: [] });
-            let rec = reg.list.find(r => r.w === w);
-            if (!rec) {
-                rec = { w, get: undefined, hasGet: false, upd: undefined, hasUpd: false, rep: undefined, hasRep: false, ins: undefined, hasIns: false, mvu: undefined, hasMvu: false, gav: undefined, hasGav: false, wait: undefined, hasWait: false, msg: undefined, hasMsg: false };
-                reg.list.push(rec);
-            }
-            if (!rec.hasGet && typeof w.getVariables === 'function' && !isOursShimFn(w.getVariables)) { rec.get = w.getVariables; rec.hasGet = true; }
-            if (!rec.hasUpd && typeof w.updateVariablesWith === 'function' && !isOursShimFn(w.updateVariablesWith)) { rec.upd = w.updateVariablesWith; rec.hasUpd = true; }
-            if (!rec.hasRep && typeof w.replaceVariables === 'function' && !isOursShimFn(w.replaceVariables)) { rec.rep = w.replaceVariables; rec.hasRep = true; }
-            if (!rec.hasIns && typeof w.insertOrAssignVariables === 'function' && !isOursShimFn(w.insertOrAssignVariables)) { rec.ins = w.insertOrAssignVariables; rec.hasIns = true; }
-            if (!rec.hasMvu && w.Mvu && !isOursShimFn(w.Mvu) && !w.Mvu.__mvu2shujukuBridgeFake && !w.Mvu.__mvu2shujukuFake) { rec.mvu = w.Mvu; rec.hasMvu = true; }
-            if (!rec.hasGav && typeof w.getAllVariables === 'function' && !isOursShimFn(w.getAllVariables)) { rec.gav = w.getAllVariables; rec.hasGav = true; }
-            if (!rec.hasWait && typeof w.waitGlobalInitialized === 'function' && !isOursShimFn(w.waitGlobalInitialized)) { rec.wait = w.waitGlobalInitialized; rec.hasWait = true; }
-            if (!rec.hasMsg && typeof w.getChatMessages === 'function' && !isOursShimFn(w.getChatMessages)) { rec.msg = w.getChatMessages; rec.hasMsg = true; }
-            return rec;
-        } catch (e) { return null; }
-    }
-    function restoreGlobalOriginals() {
-        try {
-            const reg = sharedStateWindow.__mvu2shujukuGlobalState;
-            if (!reg || !Array.isArray(reg.list)) return;
-            for (const rec of reg.list) {
-                const w = rec.w;
-                if (!w) continue;
-                try {
-                    if (isOursShimFn(w.getVariables)) { if (rec.hasGet) w.getVariables = rec.get; else delete w.getVariables; }
-                    if (isOursShimFn(w.updateVariablesWith)) { if (rec.hasUpd) w.updateVariablesWith = rec.upd; else delete w.updateVariablesWith; }
-                    if (isOursShimFn(w.replaceVariables)) { if (rec.hasRep) w.replaceVariables = rec.rep; else delete w.replaceVariables; }
-                    if (isOursShimFn(w.insertOrAssignVariables)) { if (rec.hasIns) w.insertOrAssignVariables = rec.ins; else delete w.insertOrAssignVariables; }
-                    if (w.getAllVariables && isOursShimFn(w.getAllVariables)) { if (rec.hasGav) w.getAllVariables = rec.gav; else delete w.getAllVariables; }
-                    if (w.Mvu && (w.Mvu === windowMvuFake || w.Mvu.__mvu2shujukuFake || w.Mvu.__mvu2shujukuBridgeFake)) { if (rec.hasMvu) w.Mvu = rec.mvu; else delete w.Mvu; }
-                    if (isOursShimFn(w.waitGlobalInitialized)) { if (rec.hasWait) w.waitGlobalInitialized = rec.wait; else delete w.waitGlobalInitialized; }
-                    if (isOursShimFn(w.getChatMessages)) { if (rec.hasMsg) w.getChatMessages = rec.msg; else delete w.getChatMessages; }
-                } catch (e) {}
-            }
-        } catch (e) {}
-    }
+    const runtimeGlobals = window.__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__({
+        readSharedState: () => sharedStateWindow.__mvu2shujukuGlobalState
+            || (sharedStateWindow.__mvu2shujukuGlobalState = { list: [] }),
+        isOursShimFn,
+        readFake: () => windowMvuFake,
+    });
+    function noteGlobalOriginals(w) { return runtimeGlobals.note(w); }
+    function restoreGlobalOriginals() { runtimeGlobals.restoreAll(); }
     function applyWindowMvuShim() {
         const shimSession = captureRuntimeSession();
         const core = window.MVU2SHUJUKU_CORE;
-        if (!core || typeof core.writeStatDiffToDb !== 'function') return;
+        if (!core || typeof core.writeStatDiffToDbResult !== 'function') return;
         // 只接管本转换器产物的卡。大卡的 TavernHelper 外部 import 可能让
         // 薄桥/layout 注册晚于开场页的 3s MVU 检测，因此只要当前卡有转换标记就先
         // 发布 Mvu 外观；真正读写仍由 replaceMvuData 等待 activeLayout/API 就绪。
@@ -4310,7 +3944,7 @@ function installExtensionRuntime(window) {
             windowMvuFake = {};
             windowMvuFakeSession = shimSession;
             windowMvuGlobalAnnounced = false;
-            windowMvuInitializedFunctions = [];
+            windowMvuInitializedFunctions = new WeakSet();
             const sessionMvu = windowMvuFake;
             windowMvuFake.__mvu2shujukuFake = true;
             windowMvuFake.events = {
@@ -4476,6 +4110,7 @@ function installExtensionRuntime(window) {
             windowMvuFake.isDuringExtraAnalysis = function () { return false; };
         }
         const targets = getRuntimeWindows();
+        runtimeGlobals.retainWindows(targets);
         for (const w of targets) {
             try {
                 // 覆盖前先登记真原始值（Mvu/getAllVariables/三个全局函数），
@@ -4739,8 +4374,8 @@ function installExtensionRuntime(window) {
         for (const w of targets) {
             try {
                 const init = w && w.initializeGlobal;
-                if (typeof init === 'function' && windowMvuInitializedFunctions.indexOf(init) === -1) {
-                    windowMvuInitializedFunctions.push(init);
+                if (typeof init === 'function' && !windowMvuInitializedFunctions.has(init)) {
+                    windowMvuInitializedFunctions.add(init);
                     init.call(w, 'Mvu', windowMvuFake);
                 }
             } catch (e) {}
@@ -4784,7 +4419,7 @@ function installExtensionRuntime(window) {
         // 统一从共享注册表还原“真原始值”（只动我们自己的接管，不碰真 MVU 新挂的函数）。
         restoreGlobalOriginals();
         windowMvuGlobalAnnounced = false;
-        windowMvuInitializedFunctions = [];
+        windowMvuInitializedFunctions = new WeakSet();
     }
     function installMvuExportedEventHandlers() {
         if (windowMvuExportedEventStops.length || !windowMvuFake) return;
@@ -5146,7 +4781,11 @@ function installExtensionRuntime(window) {
             toast('转换核心不可用', 'error');
             return;
         }
-        const merged = core.mergeTemplates(lastResult.template, mergeState.sourceTemplate, checked);
+        const manualPlan = conversionProfileTools.planManualMerge({
+            template: lastResult.template, sourceTemplate: mergeState.sourceTemplate, selected: checked,
+            source: mergeState.source, priorRefs: mergeState.appliedRefs,
+        });
+        const merged = manualPlan.merged;
         dbg(' applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
         if (!merged.added.length) { toast('没有可并入的表（全部重名或无效）', 'error'); return; }
         const settings = getSettings();
@@ -5162,14 +4801,6 @@ function installExtensionRuntime(window) {
         if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
         toast('正在合并表格…');
         try {
-            const priorRefs = Array.isArray(mergeState.appliedRefs) ? mergeState.appliedRefs.slice() : [];
-            for (const uid of checked) {
-                const sheet = mergeState.sourceTemplate[uid];
-                if (!sheet || merged.added.indexOf(String(sheet.name || uid)) === -1) continue;
-                const ref = { source: { value: mergeState.source }, uid, name: String(sheet.name || uid), fingerprint: sheetFingerprint(sheet) };
-                const same = priorRefs.findIndex(x => x && x.source && x.source.value === ref.source.value && x.name === ref.name);
-                if (same >= 0) priorRefs[same] = ref; else priorRefs.push(ref);
-            }
             const result = core.refreshConversion(lastResult, opts);
             result.meta.sourceCharacter = lastResult.meta.sourceCharacter || null;
             if (result.meta.isPngInput) {
@@ -5177,7 +4808,7 @@ function installExtensionRuntime(window) {
                 result.meta.avatarMime = 'image/png';
             }
             lastResult = result;
-            mergeState.appliedRefs = priorRefs;
+            mergeState.appliedRefs = manualPlan.refs;
             renderResult(result);
             dbg(' applyMergeTables 产物更新完成: meta.tableCount=' + result.meta.tableCount + ' | tableNames=' + result.meta.tableNames.join('、'));
             const msg = '合并完成：新增 ' + merged.added.length + ' 张表' + (merged.skipped.length ? '，跳过重名：' + merged.skipped.join('、') : '');
@@ -5442,6 +5073,9 @@ function installExtensionRuntime(window) {
     const resultView = window.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__({
         document: hostDocument, paramState: updateParamState, createColumnsToggle,
         onChange: () => { updateParamsDirty = true; }, notify: toast,
+    });
+    const conversionProfileTools = window.__MVU2SHUJUKU_CONVERSION_PROFILES_FACTORY__({
+        core: window.MVU2SHUJUKU_CORE, resultView, readTemplateSource, listSheets: updateParamSheetRows,
     });
 
     function refreshConvertedResult() {
@@ -6236,13 +5870,13 @@ function createCandidateBuilderFactory(deps) {
         const before = api.exportTableAsJson() || {};
         const beforeJson = JSON.stringify(before);
         const draft = createTableDraft(before, api);
-        await coreNow.writeStatDiffToDb(draft.fakeApi, layoutEntries, prevStat, nextStat, persistedTables);
-        if (coreNow.lastStatWriteFailed) throw new Error('当前回复批次规划失败，未调用宿主写入');
+        const result = await coreNow.writeStatDiffToDbResult(draft.fakeApi, layoutEntries, prevStat, nextStat, persistedTables);
+        if (!result.ok) throw new Error('当前回复批次规划失败，未调用宿主写入：' + result.failureReason);
         return { tables: draft.tables, operations: draft.operations, beforeJson };
     }
 
     function buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate) {
-        if (!coreNow || typeof coreNow.writeStatDiffToDb !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
+        if (!coreNow || typeof coreNow.writeStatDiffToDbResult !== 'function' || typeof coreNow.statDataFromTables !== 'function') return null;
         const rejection = vwdDescriptionRejection(coreNow, layoutEntries, prevStat, nextStat, baseTemplate);
         if (rejection) {
             dbgWarn(' VWD 说明变化无法与提示词同步，候选构造已在任何写入前拒绝：' + rejection);
@@ -6258,13 +5892,13 @@ function createCandidateBuilderFactory(deps) {
         const baseStat = baseWrap && baseWrap.stat_data && typeof baseWrap.stat_data === 'object'
             ? baseWrap.stat_data
             : {};
-        return Promise.resolve(coreNow.writeStatDiffToDb(fakeApi, layoutEntries, baseStat, normalizedPrevStat, tables))
-            .then(() => {
-                if (coreNow.lastStatWriteFailed) throw new Error('构建开场模板失败：无法追平当前数据库快照');
-                return coreNow.writeStatDiffToDb(fakeApi, layoutEntries, normalizedPrevStat, normalizedNextStat, tables);
+        return Promise.resolve(coreNow.writeStatDiffToDbResult(fakeApi, layoutEntries, baseStat, normalizedPrevStat, tables))
+            .then(result => {
+                if (!result.ok) throw new Error('构建开场模板失败：无法追平当前数据库快照：' + result.failureReason);
+                return coreNow.writeStatDiffToDbResult(fakeApi, layoutEntries, normalizedPrevStat, normalizedNextStat, tables);
             })
-            .then(() => {
-                if (coreNow.lastStatWriteFailed) throw new Error('构建开场模板失败：无法应用当前开场快照');
+            .then(result => {
+                if (!result.ok) throw new Error('构建开场模板失败：无法应用当前开场快照：' + result.failureReason);
                 return tables;
             });
     }
