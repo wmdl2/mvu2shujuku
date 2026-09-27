@@ -12,7 +12,7 @@
 
 下载装配现对没有 `data` 的旧式输入增加 `spec: chara_card_v3`、`spec_version: 3.0` 和 `data` 外壳。JSON/PNG 共享这份文件数据，保留内嵌书、`extensions.world`、`extensions.tavern_helper` 和转换元数据。内部 `result.card` 及直接保存路径保持原结构；已有 v3 输入不重复包装。
 
-插件的直接创建路径会把 `world` 字段交给宿主。TauriTavern 的 `materialize_create_lorebook` 在指向的本地世界书不存在时记录 `without embedding lorebook`，但继续创建角色。这解释了用户先前看到的提示；它本身既不证明书已导入，也不证明角色创建失败。文件导入调用另一条 `try_auto_import_embedded_world_info` 路径。
+插件的直接创建路径会把 `world` 字段交给宿主。TauriTavern 的 `materialize_create_lorebook` 在指向的本地世界书不存在时记录 `without embedding lorebook`，但继续创建角色。用户实测真实转换卡在该错误后仍可打开角色卡，收到卡内世界书导入提示，并成功导入。TT 的 `checkEmbeddedWorld` 在卡内有 `character_book` 且本地引用不可用时提示；`importEmbeddedWorldInfo` 将卡内书保存为本地文件并更新角色绑定。因此这条错误只说明创建阶段没有同名本地世界书，不能推断直接保存最终不可用。文件导入则调用另一条 `try_auto_import_embedded_world_info` 自动导入路径。用户尚未就这张真实卡反馈手动导入后新聊天的完整建表和脚本读写。
 
 ## 验证与当前边界
 
