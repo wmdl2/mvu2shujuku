@@ -5,8 +5,16 @@
 | 当前问题 | 入口 |
 | --- | --- |
 | 安装、转换与用户操作 | [用户说明](../README.md) |
+| v0.4.1 更新范围与提交前检查 | [发布验收](validation/2026-09-27-release-0.4.1.md)、[更新日志](../CHANGELOG.md) |
 | v0.4.0 升级范围与发布检查 | [发布验证](validation/2026-09-22-release-0.4.0.md) |
 | SQL 示例与强制更新提醒 | [提示示例验证](validation/2026-09-23-prompt-examples.md) |
+| iframe 引用释放与过期开场快照清理 | [内存生命周期验证](validation/2026-09-27-memory-lifecycle.md) |
+| TauriTavern 2.3.0 文件导入与世界书冲突 | [二创宿主兼容记录](validation/2026-09-27-tauritavern-card.md) |
+| 每次调用的写入结果、重试与旧接口兼容 | [写入结果验证](validation/2026-09-26-write-results.md) |
+| 表格说明、更新提醒与 SQL 示例模块 | [提示模块验证](validation/2026-09-26-table-prompts-module.md) |
+| 转换配置、外部表合并与确认流程 | [配置模块验证](validation/2026-09-26-conversion-profiles.md) |
+| 内部模块职责、命令处理与修复库注入 | [模块验证](validation/2026-09-26-internal-modules.md) |
+| 下划线列物理名与旧模板边界 | [列名验证](validation/2026-09-23-underscore-columns.md) |
 | 表格反选与兼容报告文案 | [反选与报告验证](validation/2026-09-23-selection.md) |
 | 角色卡保存后脚本复核警告 | [保存复核验证](validation/2026-09-23-save-verification.md) |
 | 转换报告、多选表格设置及世界书注入开关 | [前端验收](validation/2026-09-22-frontend.md) |
@@ -54,7 +62,11 @@
 | 前端字段读取、别名与作用域 | `src/status-usage.js` |
 | 转换协调、产物刷新 | `src/mvu2shujuku.js` |
 | EJS、卡内登记桥 | `src/ejs-transform.js`、`src/card-bridge.js` |
+| 表格说明、规则措辞与增删改示例 | `src/table-prompts.js` |
+| 转换配置匹配、外部表来源与合表规划 | `src/conversion-profiles.js` |
+| MVU 兼容命令解析与内存计算 | `src/mvu-commands.js` |
 | 表格读取、类型与差量写入 | `src/table-codec.js`、`src/table-writer.js` |
+| 窗口发现、原始接口登记与释放 | `src/runtime-windows.js`、`src/runtime-globals.js` |
 | 异步会话、初始化、消息与写队列 | `src/runtime-session.js`、`src/extension-runtime.js` |
 | 宿主 API、界面 | `src/sp-adapter.js`、`src/st-adapter.js`、`src/settings-view.js`、`src/result-view.js`；宿主操作绑定在 `src/extension-runtime.js` |
 

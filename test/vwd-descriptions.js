@@ -536,13 +536,13 @@ test('VWD动态说明：默认关闭时不新增元数据列、vwd 布局或说�
     assert.deepStrictEqual(read.A.str, ['新值', '静态说明'], '读回应恢复值 + 静态说明，说明未被数组文本污染');
 });
 
-test('VWD动态说明：默认关闭模板保留冻结基线，仅允许后续新增的 SQL 示例及说明', () => {
+test('VWD动态说明：默认关闭模板保留冻结基线，逐项对照新增 SQL 示例和列名前缀', () => {
     const baseline = require('./vwd-static-before.json');
     const base = baseline.conversion;
     const now = convertWithFlag(DEFAULT_OFF_STAT, DEFAULT_OFF_SCHEMA, false);
     const baseLayout = base.layout;
-    // 2026-09-23 双模式恢复 SQL 参考，这是独立的提示改动；保留原冻结数据，
-    // 只排除明确新增的示例及说明，表数据、DDL、原 note 和业务触发原文仍逐字节对照。
+    // 保留原冻结数据；剔除后续新增的 SQL 示例，再逐项调整本次列名前缀与只读例子。
+    // 表数据、DDL 其余部分、原 note 和业务触发原文仍逐字节对照。
     const comparable = JSON.parse(JSON.stringify(now.template));
     for (const sheet of Object.values(comparable)) {
         if (!sheet.sourceData) continue;
@@ -551,7 +551,18 @@ test('VWD动态说明：默认关闭模板保留冻结基线，仅允许后续�
             sheet.sourceData[field] = sheet.sourceData[field].split('\nSQL示例:')[0];
         }
     }
-    assert.deepStrictEqual(comparable, base.template, '除新增 SQL 示例及说明外，默认模板应与冻结基线一致');
+    const expected = JSON.parse(JSON.stringify(base.template));
+    for (const sheet of Object.values(expected)) {
+        if (!sheet.sourceData) continue;
+        // 只更新本次明确变化的 _扩展数据物理名与只读例子；其余 DDL/数据继续完整对照。
+        sheet.sourceData.ddl = sheet.sourceData.ddl.replaceAll('kuozhanshuju', '_kuozhanshuju');
+        if (sheet.sourceData.hiddenPhysicalColumns) {
+            sheet.sourceData.hiddenPhysicalColumns = sheet.sourceData.hiddenPhysicalColumns
+                .map(ident => ident === 'kuozhanshuju' ? '_kuozhanshuju' : ident);
+        }
+        sheet.sourceData.note = sheet.sourceData.note.replace('如 _xxx', '如 _扩展数据');
+    }
+    assert.deepStrictEqual(comparable, expected, '除 SQL 示例、下划线物理列名和只读例子外，默认模板应与冻结基线一致');
     assert.deepStrictEqual(now.layout, baseLayout, '默认布局应与冻结基线一致');
 });
 

@@ -20,6 +20,33 @@ variables_update_rules:
       - 领取奖励后删除
 `;
 
+test('下载卡：旧式源卡的 JSON/PNG 均保留 v3 世界书、绑定和脚本', () => {
+    const legacy = {
+        name: '下载卡兼容样本', first_mes: '开场', extensions: { world: '原世界书' },
+        character_book: { name: '原世界书', entries: [
+            { comment: '[InitVar]', content: JSON.stringify({ 状态: { 生命: 10 } }), enabled: true },
+        ] },
+    };
+    for (const asPng of [false, true]) {
+        const result = core.convert(legacy, { asPng });
+        const file = result.files.find(item => item.kind === 'card');
+        const downloaded = asPng ? core.parseCardPng(file.data).card : JSON.parse(file.data);
+        assert.strictEqual(downloaded.spec, 'chara_card_v3');
+        assert.strictEqual(downloaded.spec_version, '3.0');
+        assert.strictEqual(downloaded.data.name, '下载卡兼容样本_数据库');
+        assert.strictEqual(downloaded.data.character_book.name, downloaded.data.extensions.world);
+        assert.ok(downloaded.data.character_book.entries.length > 0);
+        assert.ok(downloaded.data.extensions.mvu2shujuku.layout);
+        assert.ok(downloaded.data.extensions.tavern_helper.scripts.some(script => /数据桥/.test(script.name)));
+        assert.strictEqual(result.card.data, undefined, '内部转换结果保持旧式卡形状');
+    }
+    const wrapped = core.convert({ spec: 'chara_card_v3', spec_version: '3.0', data: legacy });
+    const exported = JSON.parse(wrapped.files.find(item => item.kind === 'card').data);
+    assert.strictEqual(exported.spec, 'chara_card_v3');
+    assert.strictEqual(exported.data.name, '下载卡兼容样本_数据库');
+    assert.strictEqual(exported.data.data, undefined, '已有 v3 卡不得再次包装');
+});
+
 test('规则迁移：英文外壳和 TS 字面量联合进入提示词与 CHECK', () => {
     const result = core.convert(input(rule));
     const table = Object.values(result.template).find(t => t.name === '任务表');

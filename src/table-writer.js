@@ -3,7 +3,8 @@
 /**
  * 将 stat_data 差异适配为插件原生 CRUD。
  * 宿主 API、布局、快照均显式传入；模块不安装事件、不选择聊天、不保存宿主。
- * 保留计划操作数量与 lastStatWriteFailed 契约；调用方负责会话校验和串行调度。
+ * 主接口返回本次写入结果；数字返回和 lastStatWriteFailed 仅供旧调用兼容。
+ * plannedChanges 是计划数而非成功数；宿主写库仍由调用方串行调度。
  */
 function createTableWriter(dependencies) {
     const { parseJson: safeParseJson, readCachedTemplate = () => null,
@@ -13,11 +14,14 @@ function createTableWriter(dependencies) {
         debug: dbg = () => {}, warn: dbgWarn = () => {} } = dependencies;
     if (typeof safeParseJson !== 'function') throw new Error('写入模块需要 JSON 解析函数');
     let statWriteHadFailure = false;
-    async function writeStatDiffToDb(api, layoutEntries, prevStat, nextStat, persistedTables) {
-        statWriteHadFailure = false;
+    async function runStatDiffWrite(api, layoutEntries, prevStat, nextStat, persistedTables, writeState) {
         let abortWrites = false;
+        const noteWriteFailure = (reason) => {
+            writeState.failed = true;
+            if (writeState.failureReason === null) writeState.failureReason = reason;
+        };
         const markWriteFailure = (label, error) => {
-            statWriteHadFailure = true;
+            noteWriteFailure(error ? label + ': ' + (error.message || String(error)) : label);
             abortWrites = true;
             if (error) dbgWarn(' ' + label + ' 失败:', error);
             else dbgWarn(' ' + label + ' 返回失败结果。');
@@ -1447,7 +1451,7 @@ function createTableWriter(dependencies) {
                                 : findRowByColumn(pSheet2, L.keyCol, r.newRowObj[L.keyCol]) >= 1;
                             if (dupKey) {
                                 dbg(' 行表「' + L.table + '」持久化已有键「' + r.newRowObj[L.keyCol] + '」而运行时空（回放中），跳过 INSERT 稍后重试。');
-                                statWriteHadFailure = true;
+                                noteWriteFailure('回放窗口，跳过写入稍后重试');
                                 continue;
                             }
                         }
@@ -1467,7 +1471,7 @@ function createTableWriter(dependencies) {
                             const pSheet3 = Object.values(persistedTables).find(s => s && s.name === L.table);
                             if (pSheet3 && Array.isArray(pSheet3.content) && pSheet3.content.length > 1) {
                                 dbg(' 表「' + L.table + '」运行时仅表头而持久化已有数据行（回放窗口），跳过 updateCell 稍后重试。');
-                                statWriteHadFailure = true;
+                                noteWriteFailure('回放窗口，跳过写入稍后重试');
                                 continue;
                             }
                         }
@@ -1539,7 +1543,7 @@ function createTableWriter(dependencies) {
                             if (pSheetJ && Array.isArray(pSheetJ.content) && pSheetJ.content.length > 1 &&
                                 (!d.sheet || !Array.isArray(d.sheet.content) || d.sheet.content.length <= 1)) {
                                 dbg(' JSON表「' + d.layout.table + '」运行时仅表头而持久化已有数据行（回放窗口），跳过写入稍后重试。');
-                                statWriteHadFailure = true;
+                                noteWriteFailure('回放窗口，跳过写入稍后重试');
                                 continue;
                             }
                         }
@@ -1571,7 +1575,21 @@ function createTableWriter(dependencies) {
             }
         }
     }
-    return { writeStatDiffToDb, get lastStatWriteFailed() { return statWriteHadFailure; } };
+    async function writeStatDiffToDbResult(api, layoutEntries, prevStat, nextStat, persistedTables) {
+        const state = { failed: false, failureReason: null };
+        const plannedChanges = await runStatDiffWrite(api, layoutEntries, prevStat, nextStat, persistedTables, state);
+        return { ok: !state.failed, plannedChanges, failureReason: state.failureReason };
+    }
+    async function writeStatDiffToDb(api, layoutEntries, prevStat, nextStat, persistedTables) {
+        const state = { failed: false, failureReason: null };
+        statWriteHadFailure = false;
+        try {
+            return await runStatDiffWrite(api, layoutEntries, prevStat, nextStat, persistedTables, state);
+        } finally {
+            statWriteHadFailure = state.failed;
+        }
+    }
+    return { writeStatDiffToDb, writeStatDiffToDbResult, get lastStatWriteFailed() { return statWriteHadFailure; } };
 }
 
 if (typeof module !== 'undefined' && module.exports) module.exports = createTableWriter;

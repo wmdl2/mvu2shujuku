@@ -66,13 +66,17 @@ test('产物刷新：切换 PNG 导出只重建文件，PNG 输入仍保留原�
     assert.strictEqual(pngResult.meta.isPngInput, false);
     assert.strictEqual(pngResult.meta.asPng, true);
     const bytes = pngResult.files.find(f => f.kind === 'card').data;
-    assert.deepStrictEqual(core.parseCard(bytes), pngResult.card);
+    const downloaded = core.parseCard(bytes);
+    assert.strictEqual(downloaded.spec, 'chara_card_v3');
+    assert.deepStrictEqual(downloaded.data, pngResult.card);
     const fromPng = core.convert(core.writeCardPng(bytes, input()));
     firstSheet(fromPng.template).updateConfig.updateFrequency = 9;
     const refreshed = core.refreshConversion(fromPng);
     assert.strictEqual(refreshed.meta.isPngInput, true);
     assert.strictEqual(refreshed.files.find(f => f.kind === 'card').mime, 'image/png');
-    assert.deepStrictEqual(core.parseCard(refreshed.files.find(f => f.kind === 'card').data), refreshed.card);
+    const refreshedDownload = core.parseCard(refreshed.files.find(f => f.kind === 'card').data);
+    assert.strictEqual(refreshedDownload.spec, 'chara_card_v3');
+    assert.deepStrictEqual(refreshedDownload.data, refreshed.card);
 });
 
 test('产物刷新：保留配置摘要，重复刷新不增加报告内容', () => {

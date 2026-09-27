@@ -143,3 +143,64 @@ JSON 路径更新及固定附属字段的填表、重载和删楼场景使用 `n
 公开三表夹具在 `test/frontend-card.js`，两张选中表和一张对照表用于检查选择隔离；
 `test/frontend-host.js` 覆盖筛选后选择、批量数值、主注入开关、下载/配置复用、报告文本安全与窄屏截图。
 独立组件布局检查用 `node test/frontend-layout.js`，覆盖宽屏窄侧栏和手机；同时检查外层编辑器与内部列表的溢出。`MVU_TEST_FONT` 可指定本地中文字体，不把字体资源打包进项目。
+
+
+### 转换配置与合表验证
+
+配置数据规则直接调用 `src/conversion-profiles.js`，用真实的模板合并和结果视图配置方法：
+
+```sh
+node test/run-tests.js --grep '转换配置|手动合表'
+node build-extension.js
+node test/conversion-profile-ui.js
+```
+
+独立浏览器检查复用布局测试的 Playwright/Chromium 安装及 `MVU_REFERENCE_ROOT` 配置。
+它加载完整扩展包，通过真实按钮完成转换、配置确认、下载与合表；SP/ST 接口由替身提供，
+不启动 SillyTavern 服务，也不证明宿主持久化行为。覆盖拒绝配置不覆盖旧配置、手动合表刷新失败
+不提交来源引用，以及成功后保存引用。输入来自公开合成卡，无需私人夹具。
+
+可选第一个参数指定受测 `index.js`；`MVU_PROFILE_UI_TEST_DIR` 指定产物目录，默认
+`.tools/conversion-profile-ui`。浏览器退出由 `finally` 清理，错误导致命令失败。
+
+
+### 表格提示输出对照
+
+`test/table-prompt-cases.js` 提供公开输入，`test/table-prompt-baseline.json` 保存重构前的输出摘要。
+`test/table-prompt-output.js` 同时经过 Node 转换核心与无 `require` 的浏览器装配 VM，比较完整模板、
+layout 和逐表 sourceData。模板摘要包含实际字符串，因此说明、空白、SQL 示例及字段内容变化都会被发现。
+
+```sh
+node test/run-tests.js --grep '提示输出冻结|表格提示工厂'
+```
+
+摘要按 33 种模式/容器/说明配置组合登记。有意修改提示或结构时，先核对失败用例所指向的表，
+确认实际文本与结构差异，再更新相应期望；不为让重构通过而整体重新生成基线。
+日常措辞修改按相关用例验证，不因存在冻结样本而增加整套宿主或成本基准验收。
+
+
+### 写入结果与旧接口
+
+新调用使用 `writeStatDiffToDbResult` 的 `ok`，不要用计划数量判断成功，也不要读取旧失败标记。
+`test/table-writer.js` 覆盖同一实例的交错结果、降级、回放跳过和部分写入；
+`test/runtime-native.js` 经过实际装配的运行时检查候选拒绝与有界重试。
+
+```sh
+node test/run-tests.js --grep '写入结果|写入适配模块|开场快照|当前楼批次|写入楼层|数组差量'
+```
+
+纯接口调整优先复用这些调用载荷和 VM 行为检查；涉及宿主保存能力或读回语义时再补对应实机场景。
+
+
+### 内存生命周期验证
+
+```sh
+node test/run-tests.js --grep '运行内存|runtime globals|runtime windows|旧桥|切卡'
+node test/runtime-memory-browser.js
+```
+
+第二条使用与独立界面验证相同的 Playwright 安装（可用 `MVU_REFERENCE_ROOT` 指定资料目录），
+执行真实窗口登记工厂，循环创建/移除 100 个 iframe，然后通过 CDP 回收并检查弱引用。
+覆盖还原失败的弱键记录，不启动酒馆；结果可用 `MVU_MEMORY_TEST_RESULT` 指定 JSON 输出路径。
+这证明受测组件的引用能够释放，不代表完整宿主长时内存曲线。新增缓存时应检查所有顶层持有者，
+不能仅凭局部 observer 已 disconnect 判断窗口已释放。
