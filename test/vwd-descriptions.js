@@ -348,9 +348,9 @@ test('VWD动态说明：元数据列名与业务字段碰撞时统一消歧，�
 });
 
 test('VWD动态说明：目标 SP 未通过隐藏列兼容确认时不新增可见内部列并给出降级警告', () => {
-    for (const targetSpVersion of ['9.2.4', 'unknown']) {
+    for (const targetSpVersion of ['8.4', '8.4.9', 'unknown']) {
         const { layout, template, result } = convert(DEFAULT_STAT, DEFAULT_SCHEMA, 'both', targetSpVersion);
-        assert.match(result.reportText, targetSpVersion === 'unknown' ? /无法识别目标 SP·数据库版本/ : /低于本转换器已验证的隐藏列兼容基线/);
+        assert.match(result.reportText, targetSpVersion === 'unknown' ? /无法识别目标 SP·数据库版本/ : /低于官方标准版本的隐藏列支持门槛/);
         assert.match(result.reportText, /动态说明（VWD）实验路径本次不登记/, '降级提示不得暗示“升级即可启用”');
         const sheet = sheetOf(template, 'A表');
         assert.strictEqual(sheet.sourceData.hiddenPhysicalColumns, undefined);

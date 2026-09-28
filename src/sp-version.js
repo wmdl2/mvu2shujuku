@@ -5,12 +5,12 @@ function createSpVersionReader(dependencies) {
     'use strict';
     const { readExtensions, readWindows, readApi } = dependencies;
     const normalize = value => {
-        const match = String(value || '').trim().match(/^v?(\d+\.\d+\.\d+(?:\.\d+)?)$/i);
+        const match = String(value || '').trim().match(/^v?(\d+\.\d+(?:\.\d+){0,2})$/i);
         return match ? match[1] : null;
     };
     const pinnedVersion = name => {
         // 只认官方仓库的固定发布标签；main、任意数字文件名及其他二创仓库均不能证明版本。
-        const match = String(name || '').match(/^https:\/\/(?:[a-z0-9-]+\.)?jsdelivr\.net\/gh\/AlbusKen\/shujuku@spv(\d+\.\d+\.\d+(?:\.\d+)?)\/index\.js(?:\?[^#]*)?(?:#.*)?$/i);
+        const match = String(name || '').match(/^https:\/\/(?:[a-z0-9-]+\.)?jsdelivr\.net\/gh\/AlbusKen\/shujuku@spv(\d+\.\d+(?:\.\d+){0,2})\/index\.js(?:\?[^#]*)?(?:#.*)?$/i);
         return match ? normalize(match[1]) : null;
     };
     return async function readTargetSpVersion() {

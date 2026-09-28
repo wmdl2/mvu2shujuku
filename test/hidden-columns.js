@@ -35,12 +35,20 @@ test('模板内部列：9.2.5 默认隐藏 $ 列与 _扩展数据，_ 业务列�
     assert.strictEqual(native.sourceData.ddl, sqlite.sourceData.ddl);
 });
 
+test('模板内部列：8.5 起生成隐藏字段，接受两至四段版本', () => {
+    for (const targetSpVersion of ['8.5', '8.5.0', 'v8.5.1', '8.6', '9.0', '9.2.4', '9.2.5.1']) {
+        const result = core.convert(card(), { targetSpVersion });
+        assert.deepStrictEqual(sheet(result, 'obj表').sourceData.hiddenPhysicalColumns, ['secret', '_kuozhanshuju']);
+        assert.doesNotMatch(result.reportText, /停用.*隐藏/);
+    }
+});
+
 test('模板内部列：旧版或未知 SP 版本不生成隐藏字段并给出降级警告', () => {
-    for (const targetSpVersion of ['9.2.4', 'unknown']) {
+    for (const targetSpVersion of ['8.4', '8.4.9', 'unknown']) {
         const result = core.convert(card(), { mode: 'both', targetSpVersion });
         const obj = sheet(result, 'obj表');
         assert.strictEqual(obj.sourceData.hiddenPhysicalColumns, undefined);
-        assert.match(result.reportText, targetSpVersion === 'unknown' ? /无法识别目标 SP·数据库版本/ : /低于本转换器已验证的隐藏列兼容基线/);
+        assert.match(result.reportText, targetSpVersion === 'unknown' ? /无法识别目标 SP·数据库版本/ : /低于官方标准版本的隐藏列支持门槛/);
         assert.doesNotMatch(result.reportText, /不支持可靠隐藏内部物理列/);
         assert.deepStrictEqual(obj.content[0], ['row_id', 'visible', '_state', '$secret', '_扩展数据']);
     }
