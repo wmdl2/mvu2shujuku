@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.4.1';
+    const VERSION = '0.4.2';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -51,6 +51,11 @@
         if (typeof root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__ === 'function') return root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__;
         if (typeof require === 'function') return require('./runtime-windows.js');
         throw new Error('运行窗口模块未加载，请使用构建后的 index.js');
+    }
+    function getSpVersionFactory() {
+        if (typeof root.__MVU2SHUJUKU_SP_VERSION_FACTORY__ === 'function') return root.__MVU2SHUJUKU_SP_VERSION_FACTORY__;
+        if (typeof require === 'function') return require('./sp-version.js');
+        throw new Error('SP 版本识别模块未加载，请使用构建后的 index.js');
     }
     function getRuntimeGlobalsFactory() {
         if (typeof root.__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__ === 'function') return root.__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__;
@@ -1088,7 +1093,7 @@
         }
     }
 
-    // VWD 依赖隐藏内部物理列的能力（SP 9.2.5+）。与 generateTemplate 内的门槛同源。
+    // VWD 依赖隐藏内部物理列。9.2.5 是本转换器的已验证基线，不是上游功能引入版本。
     function vwdHostSupportsHiddenColumns(targetSpVersion) {
         const parts = String(targetSpVersion === undefined ? '9.2.5' : targetSpVersion).trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:\.\d+)?$/);
         if (!parts) return false;
@@ -1155,7 +1160,10 @@
             g.extraAllowed = extraAllowed;
             const hiddenColumns = g.columns.filter(c => c.zh === '_扩展数据' || isDollarPrivateColumn(g, c));
             if (hiddenColumns.length && !canHidePhysicalColumns && !warnedHiddenColumnGate) {
-                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）不支持可靠隐藏内部物理列，内部列仍可能对 AI 可见，请升级至 9.2.5 或更高版本。`, 'template');
+                const knownVersion = /^v?\d+\.\d+\.\d+(?:\.\d+)?$/.test(String(targetVersion || '').trim());
+                report.warn(knownVersion
+                    ? `目标 SP·数据库 版本（${String(targetVersion)}）低于本转换器已验证的隐藏列兼容基线 9.2.5，本次保守停用内部列隐藏，内部列仍可能对 AI 可见。这不代表该版本没有隐藏列功能；建议使用已验证的 9.2.5 或更高版本。`
+                    : '无法识别目标 SP·数据库版本，尚不能确认内部列隐藏兼容性，本次保守停用隐藏，内部列仍可能对 AI 可见。这不代表已安装的数据库不支持隐藏列；请确认数据库已加载，使用可识别的扩展版本或官方固定版本脚本后重新转换。', 'template');
                 warnedHiddenColumnGate = true;
             }
             // VWD 动态说明依赖一个内部元数据列。没有可靠隐藏能力时不登记该能力：
@@ -1163,7 +1171,7 @@
             const vwdAllowed = canHidePhysicalColumns && g.kind === 'singleton' && !!g.vwdMetaZh;
             if (g.vwdMetaZh && !canHidePhysicalColumns && !warnedVwdGate) {
                 warnedVwdGate = true;
-                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）无法可靠隐藏内部物理列，动态说明（VWD）实验路径本次不登记；说明仍按静态文本写入提示词。该能力处于实验阶段，即使版本满足也默认关闭。`, 'template');
+                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）未通过本转换器的隐藏列兼容性确认，动态说明（VWD）实验路径本次不登记；说明仍按静态文本写入提示词。该能力处于实验阶段，即使版本满足也默认关闭。`, 'template');
             }
             // 目标 SP 无法隐藏内部物理列时，VWD 元数据列整列不进模板：宁可不提供动态
             // 说明，也不能让内部覆盖集合出现在模型可见的表头、DDL 与更新示例里。
@@ -2919,6 +2927,7 @@
             ['__MVU2SHUJUKU_RUNTIME_SESSION_FACTORY__', getRuntimeSessionFactory],
             ['__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__', getRuntimeWindowsFactory],
             ['__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__', getRuntimeGlobalsFactory],
+            ['__MVU2SHUJUKU_SP_VERSION_FACTORY__', getSpVersionFactory],
             ['__MVU2SHUJUKU_MVU_COMMANDS_FACTORY__', getMvuCommandsFactory],
             ['__MVU2SHUJUKU_SP_ADAPTER_FACTORY__', getSpAdapterFactory],
             ['__MVU2SHUJUKU_ST_ADAPTER_FACTORY__', getStAdapterFactory],

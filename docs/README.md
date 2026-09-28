@@ -8,6 +8,7 @@
 | v0.4.1 更新范围与提交前检查 | [发布验收](validation/2026-09-27-release-0.4.1.md)、[更新日志](../CHANGELOG.md) |
 | v0.4.0 升级范围与发布检查 | [发布验证](validation/2026-09-22-release-0.4.0.md) |
 | SQL 示例与强制更新提醒 | [提示示例验证](validation/2026-09-23-prompt-examples.md) |
+| SP 扩展/脚本版本识别与隐藏列兼容基线 | [版本识别验证](validation/2026-09-28-sp-version.md) |
 | iframe 引用释放与过期开场快照清理 | [内存生命周期验证](validation/2026-09-27-memory-lifecycle.md) |
 | TauriTavern 2.3.0 文件导入与世界书冲突 | [二创宿主兼容记录](validation/2026-09-27-tauritavern-card.md) |
 | 每次调用的写入结果、重试与旧接口兼容 | [写入结果验证](validation/2026-09-26-write-results.md) |

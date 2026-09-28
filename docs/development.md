@@ -204,3 +204,15 @@ node test/runtime-memory-browser.js
 覆盖还原失败的弱键记录，不启动酒馆；结果可用 `MVU_MEMORY_TEST_RESULT` 指定 JSON 输出路径。
 这证明受测组件的引用能够释放，不代表完整宿主长时内存曲线。新增缓存时应检查所有顶层持有者，
 不能仅凭局部 observer 已 disconnect 判断窗口已释放。
+
+
+### SP 安装形态与版本识别
+
+```sh
+node test/run-tests.js --grep 'SP版本识别|模板内部列|VWD动态说明：目标 SP'
+node test/sp-version-browser.js
+```
+
+浏览器组件沿用 Playwright 测试环境，以固定响应模拟官方模块 URL，验证 iframe 的真实 import
+和 ResourceTiming。只模拟 SP 公开 API，不运行完整 SP，不将此结果写成新版宿主兼容验收。
+官方标签历史用于确认功能存在，最低受测版本与功能引入版本须分别记录。
