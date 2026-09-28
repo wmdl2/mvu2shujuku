@@ -1093,12 +1093,12 @@
         }
     }
 
-    // VWD 依赖隐藏内部物理列。9.2.5 是本转换器的已验证基线，不是上游功能引入版本。
+    // VWD 依赖隐藏内部物理列。官方标准版本从 8.5 起支持；9.2.5 是完整宿主验证基线。
     function vwdHostSupportsHiddenColumns(targetSpVersion) {
-        const parts = String(targetSpVersion === undefined ? '9.2.5' : targetSpVersion).trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:\.\d+)?$/);
+        const parts = String(targetSpVersion === undefined ? '9.2.5' : targetSpVersion).trim().match(/^v?(\d+)\.(\d+)(?:\.\d+){0,2}$/);
         if (!parts) return false;
-        return Number(parts[1]) > 9
-            || (Number(parts[1]) === 9 && (Number(parts[2]) > 2 || (Number(parts[2]) === 2 && Number(parts[3]) >= 5)));
+        return Number(parts[1]) > 8
+            || (Number(parts[1]) === 8 && Number(parts[2]) >= 5);
     }
 
     function generateTemplate(schema, opts = {}) {
@@ -1160,9 +1160,9 @@
             g.extraAllowed = extraAllowed;
             const hiddenColumns = g.columns.filter(c => c.zh === '_扩展数据' || isDollarPrivateColumn(g, c));
             if (hiddenColumns.length && !canHidePhysicalColumns && !warnedHiddenColumnGate) {
-                const knownVersion = /^v?\d+\.\d+\.\d+(?:\.\d+)?$/.test(String(targetVersion || '').trim());
+                const knownVersion = /^v?\d+\.\d+(?:\.\d+){0,2}$/.test(String(targetVersion || '').trim());
                 report.warn(knownVersion
-                    ? `目标 SP·数据库 版本（${String(targetVersion)}）低于本转换器已验证的隐藏列兼容基线 9.2.5，本次保守停用内部列隐藏，内部列仍可能对 AI 可见。这不代表该版本没有隐藏列功能；建议使用已验证的 9.2.5 或更高版本。`
+                    ? `目标 SP·数据库 版本（${String(targetVersion)}）低于官方标准版本的隐藏列支持门槛 8.5，本次停用内部列隐藏，内部列仍可能对 AI 可见；建议使用 8.5 或更高版本（完整宿主验证基线为 9.2.5）。`
                     : '无法识别目标 SP·数据库版本，尚不能确认内部列隐藏兼容性，本次保守停用隐藏，内部列仍可能对 AI 可见。这不代表已安装的数据库不支持隐藏列；请确认数据库已加载，使用可识别的扩展版本或官方固定版本脚本后重新转换。', 'template');
                 warnedHiddenColumnGate = true;
             }

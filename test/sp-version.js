@@ -14,6 +14,8 @@ function extension(version, disabled = false) {
         getExtensionManifest: () => ({ display_name: 'SP·数据库 9.2.5', version }) };
 }
 test('SP版本识别：扩展清单优先，四段版本有效，禁用扩展不掩盖脚本', async () => {
+    assert.strictEqual(await reader({ extensions: extension('8.5') })(), '8.5');
+    assert.strictEqual(await reader({ windows: [windowWith([resource('8.5')])] })(), '8.5');
     assert.strictEqual(await reader({ extensions: extension('9.2.5') })(), '9.2.5');
     assert.strictEqual(await reader({ extensions: extension('v9.2.5.1') })(), '9.2.5.1');
     assert.strictEqual(await reader({ extensions: extension('9.2.3'), windows: [windowWith([resource('9.2.5.1')])] })(), '9.2.3');
@@ -48,7 +50,7 @@ test('SP版本识别：脚本识别结果进入实际转换后保留隐藏列与
     const converted = core.convert(card, { targetSpVersion });
     const sheet = Object.values(converted.template).find(s => s.name === '状态表');
     assert.ok(sheet.sourceData.hiddenPhysicalColumns.length > 0);
-    assert.doesNotMatch(converted.reportText, /无法识别目标|低于本转换器已验证/);
+    assert.doesNotMatch(converted.reportText, /无法识别目标|低于官方标准版本/);
     const unknown = core.convert(card, { targetSpVersion: 'unknown' });
     assert.match(unknown.reportText, /无法识别目标 SP·数据库版本/);
     assert.doesNotMatch(unknown.reportText, /请升级至/);
