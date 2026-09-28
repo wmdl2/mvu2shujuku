@@ -4562,15 +4562,11 @@ function installExtensionRuntime(window) {
         }
     }
 
-    async function readTargetSpVersion() {
-        try {
-            const extensions = await import('/scripts/extensions.js');
-            const matches = (extensions.extensionNames || []).map(name => extensions.getExtensionManifest(name))
-                .filter(manifest => manifest && /^SP[·・\s]*数据库(?:\s|$)/i.test(String(manifest.display_name || '')));
-            if (matches.length === 1 && typeof matches[0].version === 'string') return matches[0].version;
-        } catch (_) {}
-        return 'unknown';
-    }
+    const readTargetSpVersion = window.__MVU2SHUJUKU_SP_VERSION_FACTORY__({
+        readExtensions: () => import('/scripts/extensions.js'),
+        readWindows: getRuntimeWindows,
+        readApi: getAcuApi,
+    });
     async function doConvert(inputBytes, sourceIsPng, sourceCharacter) {
         const settings = getSettings();
         const core = window.MVU2SHUJUKU_CORE;

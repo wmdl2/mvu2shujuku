@@ -40,7 +40,8 @@ test('模板内部列：旧版或未知 SP 版本不生成隐藏字段并给出�
         const result = core.convert(card(), { mode: 'both', targetSpVersion });
         const obj = sheet(result, 'obj表');
         assert.strictEqual(obj.sourceData.hiddenPhysicalColumns, undefined);
-        assert.match(result.reportText, /不支持可靠隐藏内部物理列/);
+        assert.match(result.reportText, targetSpVersion === 'unknown' ? /无法识别目标 SP·数据库版本/ : /低于本转换器已验证的隐藏列兼容基线/);
+        assert.doesNotMatch(result.reportText, /不支持可靠隐藏内部物理列/);
         assert.deepStrictEqual(obj.content[0], ['row_id', 'visible', '_state', '$secret', '_扩展数据']);
     }
 });

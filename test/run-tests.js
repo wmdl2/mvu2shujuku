@@ -10669,6 +10669,7 @@ require('./vwd-prompt');
 require('./relationship-lifecycle');
 require('./numeric-write-policy');
 require('./hidden-columns');
+require('./sp-version');
 require('./compact-table-prompts');
 require('./sp-business-events');
 require('./runtime-windows');

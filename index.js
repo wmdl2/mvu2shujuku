@@ -1,5 +1,5 @@
 // MVU转数据库 · SillyTavern 原生扩展
-// 生成自 src/mvu2shujuku.js 与表格共用模块（0.4.1），源码内联如下
+// 生成自 src/mvu2shujuku.js 与表格共用模块（0.4.2），源码内联如下
 // @ts-nocheck
 (function (root) {
 root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson) {
@@ -6604,6 +6604,53 @@ root.__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__ = function createRuntimeGlobals(opt
     function restoreAll() { releaseMissing(null); }
     return { note, retainWindows, restoreAll };
 };
+root.__MVU2SHUJUKU_SP_VERSION_FACTORY__ = function createSpVersionReader(dependencies) {
+    'use strict';
+    const { readExtensions, readWindows, readApi } = dependencies;
+    const normalize = value => {
+        const match = String(value || '').trim().match(/^v?(\d+\.\d+\.\d+(?:\.\d+)?)$/i);
+        return match ? match[1] : null;
+    };
+    const pinnedVersion = name => {
+        // 只认官方仓库的固定发布标签；main、任意数字文件名及其他二创仓库均不能证明版本。
+        const match = String(name || '').match(/^https:\/\/(?:[a-z0-9-]+\.)?jsdelivr\.net\/gh\/AlbusKen\/shujuku@spv(\d+\.\d+\.\d+(?:\.\d+)?)\/index\.js(?:\?[^#]*)?(?:#.*)?$/i);
+        return match ? normalize(match[1]) : null;
+    };
+    return async function readTargetSpVersion() {
+        try {
+            const extensions = await readExtensions();
+            const disabled = new Set(extensions?.extension_settings?.disabledExtensions || []);
+            const matches = [];
+            for (const name of extensions?.extensionNames || []) {
+                if (disabled.has(name)) continue;
+                const manifest = await extensions.getExtensionManifest(name);
+                if (manifest && /^SP[·・\s]*数据库(?:\s|$)/i.test(String(manifest.display_name || ''))) matches.push(manifest);
+            }
+            // 已安装的扩展存在多个候选或坏版本时不拿另一个脚本掩盖歧义。
+            if (matches.length) {
+                const versions = new Set(matches.map(manifest => normalize(manifest.version)));
+                return versions.size === 1 && !versions.has(null) ? [...versions][0] : 'unknown';
+            }
+        } catch (_) {}
+        // 脚本版没有 ST manifest。只查活跃窗口实际加载过的模块，并要求 SP API 已发布。
+        try {
+            const api = readApi();
+            if (!api || typeof api.importTemplateFromData !== 'function') return 'unknown';
+            const versions = new Set();
+            for (const w of readWindows() || []) {
+                try {
+                    const entries = w.performance?.getEntriesByType('resource') || [];
+                    for (const entry of entries) {
+                        if (entry.initiatorType !== 'script') continue;
+                        const version = pinnedVersion(entry.name);
+                        if (version) versions.add(version);
+                    }
+                } catch (_) { /* 跨源窗口不能阻断其他同源脚本窗口。 */ }
+            }
+            return versions.size === 1 ? [...versions][0] : 'unknown';
+        } catch (_) { return 'unknown'; }
+    };
+};
 root.__MVU2SHUJUKU_MVU_COMMANDS_FACTORY__ = function createMvuCommands(deps) {
     'use strict';
     const { getMvuYamlLibs } = deps || {};
@@ -12569,15 +12616,11 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         }
     }
 
-    async function readTargetSpVersion() {
-        try {
-            const extensions = await import('/scripts/extensions.js');
-            const matches = (extensions.extensionNames || []).map(name => extensions.getExtensionManifest(name))
-                .filter(manifest => manifest && /^SP[·・\s]*数据库(?:\s|$)/i.test(String(manifest.display_name || '')));
-            if (matches.length === 1 && typeof matches[0].version === 'string') return matches[0].version;
-        } catch (_) {}
-        return 'unknown';
-    }
+    const readTargetSpVersion = window.__MVU2SHUJUKU_SP_VERSION_FACTORY__({
+        readExtensions: () => import('/scripts/extensions.js'),
+        readWindows: getRuntimeWindows,
+        readApi: getAcuApi,
+    });
     async function doConvert(inputBytes, sourceIsPng, sourceCharacter) {
         const settings = getSettings();
         const core = window.MVU2SHUJUKU_CORE;
@@ -15668,7 +15711,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
 (function (root) {
     'use strict';
 
-    const VERSION = '0.4.1';
+    const VERSION = '0.4.2';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -15706,6 +15749,11 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         if (typeof root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__ === 'function') return root.__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__;
         if (typeof require === 'function') return require('./runtime-windows.js');
         throw new Error('运行窗口模块未加载，请使用构建后的 index.js');
+    }
+    function getSpVersionFactory() {
+        if (typeof root.__MVU2SHUJUKU_SP_VERSION_FACTORY__ === 'function') return root.__MVU2SHUJUKU_SP_VERSION_FACTORY__;
+        if (typeof require === 'function') return require('./sp-version.js');
+        throw new Error('SP 版本识别模块未加载，请使用构建后的 index.js');
     }
     function getRuntimeGlobalsFactory() {
         if (typeof root.__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__ === 'function') return root.__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__;
@@ -16743,7 +16791,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         }
     }
 
-    // VWD 依赖隐藏内部物理列的能力（SP 9.2.5+）。与 generateTemplate 内的门槛同源。
+    // VWD 依赖隐藏内部物理列。9.2.5 是本转换器的已验证基线，不是上游功能引入版本。
     function vwdHostSupportsHiddenColumns(targetSpVersion) {
         const parts = String(targetSpVersion === undefined ? '9.2.5' : targetSpVersion).trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:\.\d+)?$/);
         if (!parts) return false;
@@ -16810,7 +16858,10 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             g.extraAllowed = extraAllowed;
             const hiddenColumns = g.columns.filter(c => c.zh === '_扩展数据' || isDollarPrivateColumn(g, c));
             if (hiddenColumns.length && !canHidePhysicalColumns && !warnedHiddenColumnGate) {
-                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）不支持可靠隐藏内部物理列，内部列仍可能对 AI 可见，请升级至 9.2.5 或更高版本。`, 'template');
+                const knownVersion = /^v?\d+\.\d+\.\d+(?:\.\d+)?$/.test(String(targetVersion || '').trim());
+                report.warn(knownVersion
+                    ? `目标 SP·数据库 版本（${String(targetVersion)}）低于本转换器已验证的隐藏列兼容基线 9.2.5，本次保守停用内部列隐藏，内部列仍可能对 AI 可见。这不代表该版本没有隐藏列功能；建议使用已验证的 9.2.5 或更高版本。`
+                    : '无法识别目标 SP·数据库版本，尚不能确认内部列隐藏兼容性，本次保守停用隐藏，内部列仍可能对 AI 可见。这不代表已安装的数据库不支持隐藏列；请确认数据库已加载，使用可识别的扩展版本或官方固定版本脚本后重新转换。', 'template');
                 warnedHiddenColumnGate = true;
             }
             // VWD 动态说明依赖一个内部元数据列。没有可靠隐藏能力时不登记该能力：
@@ -16818,7 +16869,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             const vwdAllowed = canHidePhysicalColumns && g.kind === 'singleton' && !!g.vwdMetaZh;
             if (g.vwdMetaZh && !canHidePhysicalColumns && !warnedVwdGate) {
                 warnedVwdGate = true;
-                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）无法可靠隐藏内部物理列，动态说明（VWD）实验路径本次不登记；说明仍按静态文本写入提示词。该能力处于实验阶段，即使版本满足也默认关闭。`, 'template');
+                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）未通过本转换器的隐藏列兼容性确认，动态说明（VWD）实验路径本次不登记；说明仍按静态文本写入提示词。该能力处于实验阶段，即使版本满足也默认关闭。`, 'template');
             }
             // 目标 SP 无法隐藏内部物理列时，VWD 元数据列整列不进模板：宁可不提供动态
             // 说明，也不能让内部覆盖集合出现在模型可见的表头、DDL 与更新示例里。
@@ -18574,6 +18625,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             ['__MVU2SHUJUKU_RUNTIME_SESSION_FACTORY__', getRuntimeSessionFactory],
             ['__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__', getRuntimeWindowsFactory],
             ['__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__', getRuntimeGlobalsFactory],
+            ['__MVU2SHUJUKU_SP_VERSION_FACTORY__', getSpVersionFactory],
             ['__MVU2SHUJUKU_MVU_COMMANDS_FACTORY__', getMvuCommandsFactory],
             ['__MVU2SHUJUKU_SP_ADAPTER_FACTORY__', getSpAdapterFactory],
             ['__MVU2SHUJUKU_ST_ADAPTER_FACTORY__', getStAdapterFactory],
