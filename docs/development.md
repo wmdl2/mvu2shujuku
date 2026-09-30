@@ -51,8 +51,8 @@ node test/run-tests.js --verbose
 
 连续调试时可在隔离环境使用 `--keep-server`，后续用 `--reuse-server --only=...` 复用专用服务器。浏览器仍由测试脚本管理；结束后关闭保留的服务器。不要连接日常使用的酒馆实例。
 
-使用 Node 22，开始前执行 `node --version`。核心回归使用内置模块、仓库源码和 vendored 解析库；
-SQL 示例执行用例另需 Python 3 标准库 `sqlite3`。实机另需宿主与浏览器依赖。
+使用 Node 22，开始前执行 `node --version`。核心回归使用内置模块、仓库源码和 vendored 解析库。
+SQLite 执行检查另需 Python 3 标准库 `sqlite3`：Windows 默认 `python`，其他平台默认 `python3`，可用 `PYTHON` 指定解释器；测试进程固定 Python UTF-8 输入，与 Node 传入的 JSON 编码一致。实机另需宿主与浏览器依赖。
 JSON 路径更新及固定附属字段的填表、重载和删楼场景使用 `node test/real-host.js --only=json-path`，
 范围见 [JSON 与合表验收](validation/2026-09-14-json-path.md)。
 

@@ -147,7 +147,7 @@ test('nullable 列：SQLite 默认值与初始行有效，JSON 编码仍执行�
     const sheet = Object.values(core.generateTemplate(result.schema, { mode: 'sqlite' })).find(s => s.name === 'A表');
     assert.match(sheet.sourceData.updateNode, /SET x = '1'/, '可空数值的 SQL 示例使用符合范围的 JSON 数字编码');
     assert.strictEqual((sheet.sourceData.note.match(/按 JSON 标量填值/g) || []).length, 1, '编码提示按表合并');
-    const output = require('child_process').spawnSync('python3', ['-c', `
+    const output = require('child_process').spawnSync(require('./helpers').pythonExecutable, ['-c', `
 import json, sqlite3, sys
 s = json.load(sys.stdin)
 db = sqlite3.connect(':memory:')

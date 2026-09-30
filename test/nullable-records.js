@@ -121,7 +121,7 @@ test('可空动态记录：浏览器序列化候选工厂支持 null 与新增�
 test('可空动态记录：SQLite 初值哨兵、类型约束和 JSON 局部更新', () => {
     const stat = initial(); stat.记录.哨兵甲 = { 数量: -1 }; stat.记录.哨兵乙 = { 数量: '未获得' };
     const { template } = fixture(stat), sheets = Object.values(template).filter(s => s && s.content);
-    const output = require('child_process').spawnSync('python3', ['-c', `
+    const output = require('child_process').spawnSync(require('./helpers').pythonExecutable, ['-c', `
 import json, sqlite3, sys
 sheets=json.load(sys.stdin); db=sqlite3.connect(':memory:')
 for s in sheets:

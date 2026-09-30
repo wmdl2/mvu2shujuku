@@ -159,7 +159,7 @@ test('VWD动态提示：业务 EJS 迁移后模板仍匹配，旧宿主不生成
     assert.strictEqual(core.canWriteVwdDescriptions(entry, result.template), true);
     assert.match(entry.vwd.noteTemplate, /mvu2shujukuResolveMacro\("user"\)/);
     assert.match(entry.vwd.noteTemplate, /原规则 <%= getvar\("stat_data\.状态\.称呼"\) %>/);
-    const old = core.convert(source, { vwdDescriptions: true, targetSpVersion: '9.2.4' });
+    const old = core.convert(source, { vwdDescriptions: true, targetSpVersion: '8.4' });
     const oldLayout = JSON.parse((old.card.data || old.card).extensions.mvu2shujuku.layout);
     assert.ok(oldLayout.every(e => !e.vwd));
     assert.doesNotMatch(Object.values(old.template).find(t => t.name === '状态表').sourceData.note, /mvu2shujukuVwdDescriptions/);

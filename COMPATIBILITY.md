@@ -82,6 +82,7 @@ v0.3.18 新桥仅登记卡元数据，不携带第二套运行时。扩展未加
 - 嵌套 `z.object({...})` 中的组名和字段路径
 - 酒馆助手脚本中传给 `registerMvuSchema(...)` 的静态 Zod Schema；支持中英文变量复用、`...Schema.shape`、`extend`、`merge` 和常见压缩格式
 - `z.record(keySchema, valueSchema)` 动态字典；初始值为空时也会按 value Schema 建动态行表/关系子表，键 Schema 的 `.describe('角色名')` 等业务名称用于行表键列名
+- 顶层固定 Zod 对象优先于初值同形对象的行表猜测；深层空字典沿完整声明路径生成字段与值类型，显式 MVU 对象元数据仍优先，见[声明路径验证](docs/validation/2026-10-01-declared-container-paths.md)
 - `z.array(elementSchema)` 数组结构；沿用转换器的有序数组表/关系子表规则
 - `z.string()` / `z.number()` / `z.boolean()` / `z.coerce.number()` 等基础字段类型
 - `z.number().min(...).max(...)` 数值范围
@@ -92,6 +93,7 @@ v0.3.18 新桥仅登记卡元数据，不携带第二套运行时。扩展未加
 - Zod/TS 替代写法中 `/** check: ... */` 的规则注释
 - 组级规则
 - 固定容器的表级规则按完整逻辑路径传播到其实际动态子表
+- 固定容器展平后的整体规则、固定候选路径下字典的集合规则、中英文混合 YAML 标识符；无法定位的业务 check/note 保留原世界书条目，不因 YAML 可解析而删除
 - 组级 `note` 及其中可安全惰性求值的 `{{getvar::...}}` / EJS 宏；引用原 EJS 局部变量的动态输出值不用于静态 Schema/枚举推导
 - 通配路径结构提示
 

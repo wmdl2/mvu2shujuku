@@ -4,6 +4,7 @@
 
 | 当前问题 | 入口 |
 | --- | --- |
+| 顶层固定对象误判、深层空字典类型与规则保留 | [声明路径验证](validation/2026-10-01-declared-container-paths.md) |
 | 安装、转换与用户操作 | [用户说明](../README.md) |
 | v0.4.1 更新范围与提交前检查 | [发布验收](validation/2026-09-27-release-0.4.1.md)、[更新日志](../CHANGELOG.md) |
 | v0.4.0 升级范围与发布检查 | [发布验证](validation/2026-09-22-release-0.4.0.md) |

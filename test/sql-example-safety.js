@@ -11,7 +11,7 @@ function execute(sheet, kind) {
     const sql = sheet.sourceData[kind].split('\nSQL示例: ')[1];
     assert.ok(sql, kind + ' 应保留可执行示例');
     assert.match(sheet.sourceData.note, /不得直接照抄示例值/);
-    const result = spawnSync('python3', ['-c', `
+    const result = spawnSync(require('./helpers').pythonExecutable, ['-c', `
 import json,sqlite3,sys
 x=json.load(sys.stdin);s=x['sheet'];db=sqlite3.connect(':memory:')
 db.execute(s['sourceData']['ddl']);t=s['sourceData']['ddl'].split()[2]

@@ -125,7 +125,7 @@ test('可空 JSON 容器：SQLite CHECK 仅允许空、null 与声明容器种�
     const initial = { A: { obj: { x: 1 }, arr: ['a'] }, Rows: {} };
     const result = core.convert({ name: '可空 JSON', first_mes: '', extensions: { tavern_helper: { scripts: [{ name: '变量结构', content: DEFAULT_SCHEMA }] } }, character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify(initial) }] } }, { mode: 'sqlite' });
     const sheet = Object.values(core.generateTemplate(result.schema, { mode: 'sqlite' })).find(s => s.name === 'A表');
-    const output = require('child_process').spawnSync('python3', ['-c', `
+    const output = require('child_process').spawnSync(require('./helpers').pythonExecutable, ['-c', `
 import json, sqlite3, sys
 s=json.load(sys.stdin); db=sqlite3.connect(':memory:'); db.execute(s['sourceData']['ddl'])
 t=s['sourceData']['ddl'].split()[2]; h=s['content'][0]; db.execute('INSERT INTO '+t+' VALUES ('+','.join('?' for _ in h)+')', s['content'][1])

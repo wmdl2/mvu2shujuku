@@ -39,7 +39,7 @@ test('JSON局部更新：生成的 SQL 示例正确转义路径，只替换目�
     const result = core.convert(card(), { mode: 'sqlite' }), sheet = stateSheet(result);
     const sql = sheet.sourceData.updateNode.split('\nSQL示例: ')[1];
     assert.match(sql, /O''Brien/);
-    const output = spawnSync('python3', ['-c', `
+    const output = spawnSync(require('./helpers').pythonExecutable, ['-c', `
 import json, sqlite3, sys
 data=json.load(sys.stdin); s=data['sheet']; db=sqlite3.connect(':memory:'); db.execute(s['sourceData']['ddl'])
 t=s['sourceData']['ddl'].split()[2]
