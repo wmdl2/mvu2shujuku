@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.4.2';
+    const VERSION = '0.4.3';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -1497,7 +1497,7 @@
         return /^(?:\{\{format_message_variable(?:::[^{}]*)?\}\}|<status_current_variables?>\s*\{\{(?:format_message_variable|get_message_variable)::[^{}]+\}\}\s*<\/status_current_variables?>)$/i.test(replacement);
     }
 
-    function isPureMvuRuleDocument(content) {
+    function isPureMvuRuleDocument(content, migratedRules) {
         if (/<%|&lt;%/i.test(content)) return false;
         try {
             const clean = String(content).replace(/<!--[\s\S]*?-->/g, '');
@@ -1505,6 +1505,21 @@
             if (doc.errors && doc.errors.length) return false;
             const value = doc.toJS();
             if (!isPlainObject(value)) return false;
+            // 可解析不等于已迁移。无法定位的业务 check/note 必须保留在原条目，不能静默删除。
+            if (migratedRules !== undefined) {
+                const seen = new Set();
+                const covered = node => {
+                    if (!node || typeof node !== 'object' || seen.has(node)) return true;
+                    seen.add(node);
+                    for (const [key, child] of Object.entries(node)) {
+                        if (key === 'check' || key === 'note') {
+                            if (getSchemaLayout().yamlCheckItems(child).some(text => !migratedRules.has(text))) return false;
+                        } else if (!covered(child)) return false;
+                    }
+                    return true;
+                };
+                if (!covered(value)) return false;
+            }
             const keys = Object.keys(value);
             const wrapper = keys.find(k => k === '变量更新规则' || k === 'variables_update_rules');
             if (wrapper) return keys.length === 1 && isPlainObject(value[wrapper]);
@@ -2151,6 +2166,7 @@
         // 继承的“开放取并集”处理：任一分支显式开放/template 就必须保留动态表；
         // 只有所有声明都属于固定对象时，才撤销启发式误判。
         const metadataByPath = new Map();
+        shapeInfo.objectDynamicOverrides = new Map();
         for (const analyzed of [initMetadata, ...branchMetadataAnalyses]) {
             for (const [path, meta] of analyzed.metadata) {
                 if (!metadataByPath.has(path)) metadataByPath.set(path, []);
@@ -2160,6 +2176,7 @@
         for (const [path, metas] of metadataByPath) {
             if (!path || !metas.length || metas.some(meta => !meta || meta.kind !== 'object')) continue;
             const anyDynamic = metas.some(meta => meta.template !== undefined || (meta.extensible === true && (!Array.isArray(meta.required) || meta.required.length === 0)));
+            shapeInfo.objectDynamicOverrides.set(path, anyDynamic);
             if (!anyDynamic) {
                 shapeInfo.dynamicPaths.delete(path);
                 if (path.indexOf('.') === -1) shapeInfo.dynamicGroups.delete(path);
@@ -2266,6 +2283,11 @@
                 return rest ? `（数据库表「${table}」的「${rest}」）` : `（数据库表「${table}」）`;
             });
         }
+        const migratedRuleTexts = new Set(schema.flatMap(g => [
+            ...(g.groupChecks || []), ...(g.reminders || []),
+            ...(g.wildcardRules || []).flatMap(rule => rule.checks || []),
+            ...(g.columns || []).flatMap(column => column.check || []),
+        ]));
         for (const e of entries) {
             const comment = String(e.comment || '');
             const content = String(e.content || '');
@@ -2296,7 +2318,7 @@
                 /^\s*[🔻🔺▼▲↓↑⬇⬆⏬⏫─━—_=*#.:;\-]+\s*$/u.test(content);
             const isMvuUpdate = !isPlot && (
                 (explicitUpdateEntry && (!String(content).trim() || purePipelineMarker)) ||
-                ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent && isPureMvuRuleDocument(content)) ||
+                ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent && isPureMvuRuleDocument(content, migratedRuleTexts)) ||
                 // 输出文档必须是完整专名；有 EJS 的混合业务不能凭名称删除。
                 (dedicatedOutputEntry && outputProtocolContent && !/<%|&lt;%/i.test(content)) ||
                 // 教程中 comment 可任意命名；整个正文只有变量快照标签时仍是纯输出管线。

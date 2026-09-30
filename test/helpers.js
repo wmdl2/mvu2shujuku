@@ -8,6 +8,9 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const pythonExecutable = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+// Node 通过 UTF-8 传入 JSON；Windows Python 的本地代码页不能作为 stdin 解码。
+process.env.PYTHONUTF8 = '1';
 const assert = require('assert');
 
 const core = require('../src/mvu2shujuku.js');
@@ -214,6 +217,7 @@ async function waitBridgeFlush(ms = 300) {
 }
 
 module.exports = {
+    pythonExecutable,
     legacyBridgeScript,
     fs,
     path,

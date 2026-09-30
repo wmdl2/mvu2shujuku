@@ -245,7 +245,7 @@ function createSchemaLayout(dependencies) {
                             registerYamlWildcard([...(pathArr || [group]), key].join('.'), val, acc, group);
                             continue;
                         }
-                        if (!/^[\u4e00-\u9fff$]{1,12}$/.test(key)) continue; // rule/format 等 ASCII 键跳过
+                        if (!isSchemaFieldName(key)) continue;
                         if (typeof val === 'string') {
                             // 叶子字段的行内值：枚举 a/b/c。块标量/长文本（如 [mvu_plot]
                             // 战斗系统.说明: |- 一整段战斗判定）不是行内枚举——按 /| 切开会
@@ -281,7 +281,7 @@ function createSchemaLayout(dependencies) {
                         registerYamlWildcard(group, rules[group], acc);
                         continue;
                     }
-                    if (!/^[\u4e00-\u9fff$]{1,12}$/.test(group)) continue;
+                    if (!isSchemaFieldName(group)) continue;
                     walkGroup(group, rules[group], [group]);
                 }
                 return true;
@@ -1951,7 +1951,7 @@ function createSchemaLayout(dependencies) {
                 const hasDynamicDescendant = opts.hasDynamicDescendant ? opts.hasDynamicDescendant(path) : false;
                 // 明确的固定对象声明优先于“子值字段相似”的条目字典猜测。
                 // 把固定附属字段并回父表，数组/动态后代仍由递归各自提取子表。
-                if (hasDynamicDescendant || (fixedObjectSchema(fixedSchema) && !/^[_$]/.test(key))) {
+                if (hasDynamicDescendant || (opts.isFixedPath && opts.isFixedPath(path)) || (fixedObjectSchema(fixedSchema) && !/^[_$]/.test(key))) {
                     const nested = collectColumns(v, path, report, opts);
                     // 容器内若还混有静态叶子，仍展平成父表列并保留完整 path；动态子表本身
                     // 已经由共享 childTables 收集，不会出现在 nested 中。
@@ -2219,6 +2219,7 @@ function createSchemaLayout(dependencies) {
             const dynamicKeyNames = (shapeInfo && shapeInfo.dynamicKeyNames) || {};
             const dynamicPathSamples = (shapeInfo && shapeInfo.dynamicPathSamples) || new Map();
             const zodSchemaRoot = shapeInfo && shapeInfo.zodSchemaRoot;
+            const objectDynamicOverrides = shapeInfo && shapeInfo.objectDynamicOverrides;
             const nullableNodeAt = path => {
                 let node = zodSchemaRoot;
                 for (const part of path || []) {
@@ -2229,9 +2230,13 @@ function createSchemaLayout(dependencies) {
             };
             const isDynamicPath = (pathArr) => {
                 if (!Array.isArray(pathArr) || !pathArr.length) return false;
+                if (objectDynamicOverrides && objectDynamicOverrides.has(pathArr.join('.'))) return objectDynamicOverrides.get(pathArr.join('.'));
+                const node = nullableNodeAt(pathArr);
+                if (node && node.kind === 'object') return !!node.dynamic;
                 if (dynamicPaths.has(pathArr.join('.'))) return true;
-                if (pathArr.length >= 2 && dynamicDicts[pathArr[0]] && dynamicDicts[pathArr[0]][pathArr[1]]) return true;
-                if (pathArr.length >= 2) {
+                // 简称元数据只描述直接字段，不能把它的每个后代都判成字典。
+                if (pathArr.length === 2 && dynamicDicts[pathArr[0]] && dynamicDicts[pathArr[0]][pathArr[1]]) return true;
+                if (pathArr.length === 2) {
                     const declared = (shapeObjectSchemas[pathArr[0]] || {})[pathArr[1]];
                     if (declared && declared.kind === 'object' && declared.dynamic) return true;
                 }
@@ -2260,6 +2265,10 @@ function createSchemaLayout(dependencies) {
             //  - 动态键字典（声明的 { [键]: value } 或跨分支键集不同）→ 行表：条目键是
             //    运行期内容，固定列会丢数据（如 修仙秘闻 每分支键完全不同）。
             function deriveKind(groupName, raw) {
+                // 已注册的固定对象拥有明确字段身份，不能再按初值的共享字段猜成条目行。
+                const declared = nullableNodeAt([groupName]);
+                if (objectDynamicOverrides && objectDynamicOverrides.get(groupName) === false) return 'singleton';
+                if (!(objectDynamicOverrides && objectDynamicOverrides.has(groupName)) && fixedObjectSchema(declared)) return 'singleton';
                 if (dynamicGroups.has(groupName) || isDynamicPath([groupName])) {
                     report.note(`顶层组「${groupName}」为动态键字典（键是运行期条目），按条目行表转换。`);
                     return 'rows';
@@ -2574,7 +2583,8 @@ function createSchemaLayout(dependencies) {
                 // 不从顶层收集子表，避免“每角色一张字段相同的重复表”。
                 const columns = kind === 'rows'
                     ? []
-                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, isArrayPath, objectSchemaAt: nullableNodeAt });
+                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, isArrayPath, objectSchemaAt: nullableNodeAt,
+                        isFixedPath: path => objectDynamicOverrides && objectDynamicOverrides.get(path.join('.')) === false });
                 if (kind !== 'rows') {
                     const expanded = [];
                     for (const c of columns) {
@@ -3104,6 +3114,7 @@ function createSchemaLayout(dependencies) {
                 const declaredDyn = (shapeInfo && shapeInfo.dynamicDicts && shapeInfo.dynamicDicts[g.name]) || {};
                 for (const f of Object.keys(declaredDyn)) {
                     if (!declaredDyn[f]) continue;
+                    if (objectDynamicOverrides && objectDynamicOverrides.get([g.name, f].join('.')) === false) continue;
                     const alreadyChild = g.childTables.some(ct => ct.key === f);
                     const alreadyColumn = Array.isArray(g.columns) && g.columns.some(c => c.zh === f);
                     if (!alreadyChild && !alreadyColumn) {
@@ -3164,7 +3175,10 @@ function createSchemaLayout(dependencies) {
                         continue;
                     }
                     const dynamicKeyPath = (ct.path || []).join('.');
-                    let rowsKeyCol = dynamicKeyNames[dynamicKeyPath] || '键名';
+                    const childSchema = nullableNodeAt(ct.path);
+                    const keyDescription = childSchema && childSchema.keySchema && childSchema.keySchema.desc;
+                    let rowsKeyCol = keyDescription && isSchemaFieldName(keyDescription)
+                        ? keyDescription : (dynamicKeyNames[dynamicKeyPath] || '键名');
                     const childSamples = [];
                     if (isPlainObject(ct.value)) {
                         for (const v of Object.values(ct.value)) {
@@ -3205,7 +3219,7 @@ function createSchemaLayout(dependencies) {
                         continue;
                     }
                     const usageFields = (usage[ct.key] || []).filter(f => f !== rowsKeyCol);
-                    const relationSchema = ct.parentRows ? ((shapeObjectSchemas[g.name] || {})[ct.key] || null) : null;
+                    const relationSchema = childSchema || (ct.parentRows ? ((shapeObjectSchemas[g.name] || {})[ct.key] || null) : null);
                     const relationValueSchema = relationSchema && relationSchema.dynamic ? relationSchema.value : null;
                     const relationShapeFields = relationValueSchema && relationValueSchema.kind === 'object' && relationValueSchema.fields
                         ? Object.keys(relationValueSchema.fields) : [];
@@ -3374,6 +3388,15 @@ function createSchemaLayout(dependencies) {
                             ) : undefined,
                         };
                         const applied = applyDeclaredShape(column, ct.key, f);
+                        if (relationFieldSchema) {
+                            if (relationFieldSchema.desc) applied.desc = relationFieldSchema.desc;
+                            if (relationFieldSchema.hasDefault) {
+                                const value = relationFieldSchema.defaultValue;
+                                applied.value = value && typeof value === 'object' ? JSON.stringify(value) : value;
+                            }
+                            if (Number.isFinite(relationFieldSchema.min) && Number.isFinite(relationFieldSchema.max)) applied.range = [relationFieldSchema.min, relationFieldSchema.max];
+                            if (relationFieldSchema.enum) applied.enum = relationFieldSchema.enum.slice();
+                        }
                         if (relationFieldSchema && (relationFieldSchema.kind === 'object' || relationFieldSchema.kind === 'array') &&
                             (relationFieldSchema.nullable || relationFieldSchema.optional)) {
                             applied.logicalType = 'jsonObjectOptional';
@@ -3401,10 +3424,11 @@ function createSchemaLayout(dependencies) {
                                 path: [...ct.path, scalarZh],
                                 itemPath: [scalarZh],
                                 value: '',
-                                desc: scalarKind === 'number' ? '条目数值' : scalarKind === 'boolean' ? '条目布尔值（1=true，0=false）' : scalarKind === 'mixed' ? '条目值（JSON 标量，保留字符串/数字/布尔/null 类型）' : '条目描述',
+                                desc: relationValueSchema && relationValueSchema.desc || (scalarKind === 'number' ? '条目数值' : scalarKind === 'boolean' ? '条目布尔值（1=true，0=false）' : scalarKind === 'mixed' ? '条目值（JSON 标量，保留字符串/数字/布尔/null 类型）' : '条目描述'),
                                 type: (scalarKind === 'number' || scalarKind === 'boolean') ? 'INTEGER' : 'TEXT',
                                 logicalType: scalarKind === 'boolean' ? 'boolean' : (scalarKind === 'mixed' ? 'jsonScalar' : ''),
-                                range: null,
+                                range: relationValueSchema && Number.isFinite(relationValueSchema.min) && Number.isFinite(relationValueSchema.max)
+                                    ? [relationValueSchema.min, relationValueSchema.max] : null,
                                 ident: toIdent(scalarZh, used, 'column'),
                             });
                         }
@@ -3847,6 +3871,16 @@ function createSchemaLayout(dependencies) {
                 } else {
                     g.groupChecks = [...new Set([...parentList, ...(ruleGroupChecks[g.name] || []), ...ancestorTableChecks])];
                 }
+                // 集合/固定容器规则按逻辑路径归属，不能因容器被展平或子表不带父行键而丢失。
+                const containerPaths = [
+                    ...groupWritePaths,
+                    ...(g.columns || []).filter(c => c.zh !== '_扩展数据').map(c => (c.path || []).slice(0, -1)),
+                ];
+                const containerChecks = ruleCheckPaths.filter(e => e.tableLevel &&
+                    containerPaths.some(path => rulePathMatch(e.path, path))).flatMap(e => e.list || []);
+                const collectionChecks = allWildcardRules.filter(e =>
+                    groupWritePaths.some(path => rulePathMatch(e.path, path))).flatMap(e => e.checks || []);
+                g.groupChecks = [...new Set([...g.groupChecks, ...containerChecks, ...collectionChecks])];
                 if (g.containerSchema && (g.valueCol || g.scalarValueCol)) {
                     // 容器没有拆列，字段的说明和约束仍需出现在 note 中。
                     // 直接保留来源路径，不能把内部字段规则误挂成对「内容」整列的数值约束。

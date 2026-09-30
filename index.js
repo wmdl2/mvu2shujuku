@@ -1,5 +1,5 @@
 // MVU转数据库 · SillyTavern 原生扩展
-// 生成自 src/mvu2shujuku.js 与表格共用模块（0.4.2），源码内联如下
+// 生成自 src/mvu2shujuku.js 与表格共用模块（0.4.3），源码内联如下
 // @ts-nocheck
 (function (root) {
 root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson) {
@@ -1390,7 +1390,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                             registerYamlWildcard([...(pathArr || [group]), key].join('.'), val, acc, group);
                             continue;
                         }
-                        if (!/^[\u4e00-\u9fff$]{1,12}$/.test(key)) continue; // rule/format 等 ASCII 键跳过
+                        if (!isSchemaFieldName(key)) continue;
                         if (typeof val === 'string') {
                             // 叶子字段的行内值：枚举 a/b/c。块标量/长文本（如 [mvu_plot]
                             // 战斗系统.说明: |- 一整段战斗判定）不是行内枚举——按 /| 切开会
@@ -1426,7 +1426,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         registerYamlWildcard(group, rules[group], acc);
                         continue;
                     }
-                    if (!/^[\u4e00-\u9fff$]{1,12}$/.test(group)) continue;
+                    if (!isSchemaFieldName(group)) continue;
                     walkGroup(group, rules[group], [group]);
                 }
                 return true;
@@ -3096,7 +3096,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 const hasDynamicDescendant = opts.hasDynamicDescendant ? opts.hasDynamicDescendant(path) : false;
                 // 明确的固定对象声明优先于“子值字段相似”的条目字典猜测。
                 // 把固定附属字段并回父表，数组/动态后代仍由递归各自提取子表。
-                if (hasDynamicDescendant || (fixedObjectSchema(fixedSchema) && !/^[_$]/.test(key))) {
+                if (hasDynamicDescendant || (opts.isFixedPath && opts.isFixedPath(path)) || (fixedObjectSchema(fixedSchema) && !/^[_$]/.test(key))) {
                     const nested = collectColumns(v, path, report, opts);
                     // 容器内若还混有静态叶子，仍展平成父表列并保留完整 path；动态子表本身
                     // 已经由共享 childTables 收集，不会出现在 nested 中。
@@ -3364,6 +3364,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             const dynamicKeyNames = (shapeInfo && shapeInfo.dynamicKeyNames) || {};
             const dynamicPathSamples = (shapeInfo && shapeInfo.dynamicPathSamples) || new Map();
             const zodSchemaRoot = shapeInfo && shapeInfo.zodSchemaRoot;
+            const objectDynamicOverrides = shapeInfo && shapeInfo.objectDynamicOverrides;
             const nullableNodeAt = path => {
                 let node = zodSchemaRoot;
                 for (const part of path || []) {
@@ -3374,9 +3375,13 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             };
             const isDynamicPath = (pathArr) => {
                 if (!Array.isArray(pathArr) || !pathArr.length) return false;
+                if (objectDynamicOverrides && objectDynamicOverrides.has(pathArr.join('.'))) return objectDynamicOverrides.get(pathArr.join('.'));
+                const node = nullableNodeAt(pathArr);
+                if (node && node.kind === 'object') return !!node.dynamic;
                 if (dynamicPaths.has(pathArr.join('.'))) return true;
-                if (pathArr.length >= 2 && dynamicDicts[pathArr[0]] && dynamicDicts[pathArr[0]][pathArr[1]]) return true;
-                if (pathArr.length >= 2) {
+                // 简称元数据只描述直接字段，不能把它的每个后代都判成字典。
+                if (pathArr.length === 2 && dynamicDicts[pathArr[0]] && dynamicDicts[pathArr[0]][pathArr[1]]) return true;
+                if (pathArr.length === 2) {
                     const declared = (shapeObjectSchemas[pathArr[0]] || {})[pathArr[1]];
                     if (declared && declared.kind === 'object' && declared.dynamic) return true;
                 }
@@ -3405,6 +3410,10 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             //  - 动态键字典（声明的 { [键]: value } 或跨分支键集不同）→ 行表：条目键是
             //    运行期内容，固定列会丢数据（如 修仙秘闻 每分支键完全不同）。
             function deriveKind(groupName, raw) {
+                // 已注册的固定对象拥有明确字段身份，不能再按初值的共享字段猜成条目行。
+                const declared = nullableNodeAt([groupName]);
+                if (objectDynamicOverrides && objectDynamicOverrides.get(groupName) === false) return 'singleton';
+                if (!(objectDynamicOverrides && objectDynamicOverrides.has(groupName)) && fixedObjectSchema(declared)) return 'singleton';
                 if (dynamicGroups.has(groupName) || isDynamicPath([groupName])) {
                     report.note(`顶层组「${groupName}」为动态键字典（键是运行期条目），按条目行表转换。`);
                     return 'rows';
@@ -3719,7 +3728,8 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 // 不从顶层收集子表，避免“每角色一张字段相同的重复表”。
                 const columns = kind === 'rows'
                     ? []
-                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, isArrayPath, objectSchemaAt: nullableNodeAt });
+                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, isArrayPath, objectSchemaAt: nullableNodeAt,
+                        isFixedPath: path => objectDynamicOverrides && objectDynamicOverrides.get(path.join('.')) === false });
                 if (kind !== 'rows') {
                     const expanded = [];
                     for (const c of columns) {
@@ -4249,6 +4259,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 const declaredDyn = (shapeInfo && shapeInfo.dynamicDicts && shapeInfo.dynamicDicts[g.name]) || {};
                 for (const f of Object.keys(declaredDyn)) {
                     if (!declaredDyn[f]) continue;
+                    if (objectDynamicOverrides && objectDynamicOverrides.get([g.name, f].join('.')) === false) continue;
                     const alreadyChild = g.childTables.some(ct => ct.key === f);
                     const alreadyColumn = Array.isArray(g.columns) && g.columns.some(c => c.zh === f);
                     if (!alreadyChild && !alreadyColumn) {
@@ -4309,7 +4320,10 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         continue;
                     }
                     const dynamicKeyPath = (ct.path || []).join('.');
-                    let rowsKeyCol = dynamicKeyNames[dynamicKeyPath] || '键名';
+                    const childSchema = nullableNodeAt(ct.path);
+                    const keyDescription = childSchema && childSchema.keySchema && childSchema.keySchema.desc;
+                    let rowsKeyCol = keyDescription && isSchemaFieldName(keyDescription)
+                        ? keyDescription : (dynamicKeyNames[dynamicKeyPath] || '键名');
                     const childSamples = [];
                     if (isPlainObject(ct.value)) {
                         for (const v of Object.values(ct.value)) {
@@ -4350,7 +4364,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         continue;
                     }
                     const usageFields = (usage[ct.key] || []).filter(f => f !== rowsKeyCol);
-                    const relationSchema = ct.parentRows ? ((shapeObjectSchemas[g.name] || {})[ct.key] || null) : null;
+                    const relationSchema = childSchema || (ct.parentRows ? ((shapeObjectSchemas[g.name] || {})[ct.key] || null) : null);
                     const relationValueSchema = relationSchema && relationSchema.dynamic ? relationSchema.value : null;
                     const relationShapeFields = relationValueSchema && relationValueSchema.kind === 'object' && relationValueSchema.fields
                         ? Object.keys(relationValueSchema.fields) : [];
@@ -4519,6 +4533,15 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                             ) : undefined,
                         };
                         const applied = applyDeclaredShape(column, ct.key, f);
+                        if (relationFieldSchema) {
+                            if (relationFieldSchema.desc) applied.desc = relationFieldSchema.desc;
+                            if (relationFieldSchema.hasDefault) {
+                                const value = relationFieldSchema.defaultValue;
+                                applied.value = value && typeof value === 'object' ? JSON.stringify(value) : value;
+                            }
+                            if (Number.isFinite(relationFieldSchema.min) && Number.isFinite(relationFieldSchema.max)) applied.range = [relationFieldSchema.min, relationFieldSchema.max];
+                            if (relationFieldSchema.enum) applied.enum = relationFieldSchema.enum.slice();
+                        }
                         if (relationFieldSchema && (relationFieldSchema.kind === 'object' || relationFieldSchema.kind === 'array') &&
                             (relationFieldSchema.nullable || relationFieldSchema.optional)) {
                             applied.logicalType = 'jsonObjectOptional';
@@ -4546,10 +4569,11 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                                 path: [...ct.path, scalarZh],
                                 itemPath: [scalarZh],
                                 value: '',
-                                desc: scalarKind === 'number' ? '条目数值' : scalarKind === 'boolean' ? '条目布尔值（1=true，0=false）' : scalarKind === 'mixed' ? '条目值（JSON 标量，保留字符串/数字/布尔/null 类型）' : '条目描述',
+                                desc: relationValueSchema && relationValueSchema.desc || (scalarKind === 'number' ? '条目数值' : scalarKind === 'boolean' ? '条目布尔值（1=true，0=false）' : scalarKind === 'mixed' ? '条目值（JSON 标量，保留字符串/数字/布尔/null 类型）' : '条目描述'),
                                 type: (scalarKind === 'number' || scalarKind === 'boolean') ? 'INTEGER' : 'TEXT',
                                 logicalType: scalarKind === 'boolean' ? 'boolean' : (scalarKind === 'mixed' ? 'jsonScalar' : ''),
-                                range: null,
+                                range: relationValueSchema && Number.isFinite(relationValueSchema.min) && Number.isFinite(relationValueSchema.max)
+                                    ? [relationValueSchema.min, relationValueSchema.max] : null,
                                 ident: toIdent(scalarZh, used, 'column'),
                             });
                         }
@@ -4992,6 +5016,16 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 } else {
                     g.groupChecks = [...new Set([...parentList, ...(ruleGroupChecks[g.name] || []), ...ancestorTableChecks])];
                 }
+                // 集合/固定容器规则按逻辑路径归属，不能因容器被展平或子表不带父行键而丢失。
+                const containerPaths = [
+                    ...groupWritePaths,
+                    ...(g.columns || []).filter(c => c.zh !== '_扩展数据').map(c => (c.path || []).slice(0, -1)),
+                ];
+                const containerChecks = ruleCheckPaths.filter(e => e.tableLevel &&
+                    containerPaths.some(path => rulePathMatch(e.path, path))).flatMap(e => e.list || []);
+                const collectionChecks = allWildcardRules.filter(e =>
+                    groupWritePaths.some(path => rulePathMatch(e.path, path))).flatMap(e => e.checks || []);
+                g.groupChecks = [...new Set([...g.groupChecks, ...containerChecks, ...collectionChecks])];
                 if (g.containerSchema && (g.valueCol || g.scalarValueCol)) {
                     // 容器没有拆列，字段的说明和约束仍需出现在 note 中。
                     // 直接保留来源路径，不能把内部字段规则误挂成对「内容」整列的数值约束。
@@ -15711,7 +15745,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
 (function (root) {
     'use strict';
 
-    const VERSION = '0.4.2';
+    const VERSION = '0.4.3';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -17195,7 +17229,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         return /^(?:\{\{format_message_variable(?:::[^{}]*)?\}\}|<status_current_variables?>\s*\{\{(?:format_message_variable|get_message_variable)::[^{}]+\}\}\s*<\/status_current_variables?>)$/i.test(replacement);
     }
 
-    function isPureMvuRuleDocument(content) {
+    function isPureMvuRuleDocument(content, migratedRules) {
         if (/<%|&lt;%/i.test(content)) return false;
         try {
             const clean = String(content).replace(/<!--[\s\S]*?-->/g, '');
@@ -17203,6 +17237,21 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             if (doc.errors && doc.errors.length) return false;
             const value = doc.toJS();
             if (!isPlainObject(value)) return false;
+            // 可解析不等于已迁移。无法定位的业务 check/note 必须保留在原条目，不能静默删除。
+            if (migratedRules !== undefined) {
+                const seen = new Set();
+                const covered = node => {
+                    if (!node || typeof node !== 'object' || seen.has(node)) return true;
+                    seen.add(node);
+                    for (const [key, child] of Object.entries(node)) {
+                        if (key === 'check' || key === 'note') {
+                            if (getSchemaLayout().yamlCheckItems(child).some(text => !migratedRules.has(text))) return false;
+                        } else if (!covered(child)) return false;
+                    }
+                    return true;
+                };
+                if (!covered(value)) return false;
+            }
             const keys = Object.keys(value);
             const wrapper = keys.find(k => k === '变量更新规则' || k === 'variables_update_rules');
             if (wrapper) return keys.length === 1 && isPlainObject(value[wrapper]);
@@ -17849,6 +17898,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         // 继承的“开放取并集”处理：任一分支显式开放/template 就必须保留动态表；
         // 只有所有声明都属于固定对象时，才撤销启发式误判。
         const metadataByPath = new Map();
+        shapeInfo.objectDynamicOverrides = new Map();
         for (const analyzed of [initMetadata, ...branchMetadataAnalyses]) {
             for (const [path, meta] of analyzed.metadata) {
                 if (!metadataByPath.has(path)) metadataByPath.set(path, []);
@@ -17858,6 +17908,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         for (const [path, metas] of metadataByPath) {
             if (!path || !metas.length || metas.some(meta => !meta || meta.kind !== 'object')) continue;
             const anyDynamic = metas.some(meta => meta.template !== undefined || (meta.extensible === true && (!Array.isArray(meta.required) || meta.required.length === 0)));
+            shapeInfo.objectDynamicOverrides.set(path, anyDynamic);
             if (!anyDynamic) {
                 shapeInfo.dynamicPaths.delete(path);
                 if (path.indexOf('.') === -1) shapeInfo.dynamicGroups.delete(path);
@@ -17964,6 +18015,11 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 return rest ? `（数据库表「${table}」的「${rest}」）` : `（数据库表「${table}」）`;
             });
         }
+        const migratedRuleTexts = new Set(schema.flatMap(g => [
+            ...(g.groupChecks || []), ...(g.reminders || []),
+            ...(g.wildcardRules || []).flatMap(rule => rule.checks || []),
+            ...(g.columns || []).flatMap(column => column.check || []),
+        ]));
         for (const e of entries) {
             const comment = String(e.comment || '');
             const content = String(e.content || '');
@@ -17994,7 +18050,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 /^\s*[🔻🔺▼▲↓↑⬇⬆⏬⏫─━—_=*#.:;\-]+\s*$/u.test(content);
             const isMvuUpdate = !isPlot && (
                 (explicitUpdateEntry && (!String(content).trim() || purePipelineMarker)) ||
-                ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent && isPureMvuRuleDocument(content)) ||
+                ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent && isPureMvuRuleDocument(content, migratedRuleTexts)) ||
                 // 输出文档必须是完整专名；有 EJS 的混合业务不能凭名称删除。
                 (dedicatedOutputEntry && outputProtocolContent && !/<%|&lt;%/i.test(content)) ||
                 // 教程中 comment 可任意命名；整个正文只有变量快照标签时仍是纯输出管线。

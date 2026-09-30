@@ -4946,12 +4946,12 @@ test('非 MVU 卡（无 [InitVar]）应明确中止，不产出废卡', () => {
     assert.throws(() => core.convert(plain, { mode: 'both' }), /\[InitVar\]/);
 });
 
-test('全部表格 DDL + 初始行 通过真实 SQLite 建表/插入校验（python3）', () => {
+test('全部表格 DDL + 初始行 通过真实 SQLite 建表/插入校验（Python）', () => {
     const cp = require('child_process');
     let hasPython = true;
-    try { cp.execFileSync('python3', ['--version'], { stdio: 'ignore' }); } catch (e) { hasPython = false; }
+    try { cp.execFileSync(require('./helpers').pythonExecutable, ['--version'], { stdio: 'ignore' }); } catch (e) { hasPython = false; }
     if (!hasPython) {
-        console.log('    （跳过：无 python3）');
+        console.log('    （跳过：无可用 Python）');
         return;
     }
     const card = requireFixture();
@@ -4987,9 +4987,9 @@ print('OK')
     fs.writeFileSync(tmpFile, JSON.stringify(r.template));
     let out;
     try {
-        out = cp.execFileSync('python3', ['-c', script, tmpFile], { encoding: 'utf8', timeout: 30000 });
+        out = cp.execFileSync(require('./helpers').pythonExecutable, ['-c', script, tmpFile], { encoding: 'utf8', timeout: 30000 });
     } catch (e) {
-        console.log('    （跳过：本环境禁止从 Node 派生进程，无法运行 python3 校验）');
+        console.log('    （跳过：本环境禁止从 Node 派生进程，无法运行 Python 校验）');
         return;
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -10654,6 +10654,7 @@ require('./json-update-prompts');
 require('./sql-example-safety');
 require('./business-rule-preservation');
 require('./fixed-child-tables');
+require('./declared-container-paths');
 require('./scoped-status-usage');
 require('./nullable-columns');
 require('./nullable-json-columns');

@@ -87,7 +87,7 @@ test('整组空值：SQLite 实际执行三态切换与 JSON 路径更新', () =
     const { template } = fixture({ 状态: { 存量: 1 }, List: [], Dict: {}, Stable: { text: '原值' } }, { mode: 'sqlite' });
     const sheet = Object.values(template).find(s => s.name === '状态表');
     const sentinelSheets = ['', '未获得', -1, '5'].map(value => Object.values(fixture({ 状态: { 存量: value, 模式: '尚未选择' }, Stable: { text: '原值' } }, { mode: 'sqlite' }).template).find(s => s.name === '状态表'));
-    const output = require('child_process').spawnSync('python3', ['-c', `
+    const output = require('child_process').spawnSync(require('./helpers').pythonExecutable, ['-c', `
 import json, sqlite3, sys
 data=json.load(sys.stdin); s=data['sheet']; db=sqlite3.connect(':memory:'); ddl=s['sourceData']['ddl']; db.execute(ddl)
 t=ddl.split()[2]; col=ddl.splitlines()[2].strip().split()[0]

@@ -116,7 +116,7 @@ test('完整JSON容器：大 JSON 初值只在数据行保存，DDL 默认不复
 });
 test('完整JSON容器：SQLite 数字 pair 约束针对数组第零项，局部更新与空状态均可执行', () => {
     const { template } = fixture({ mode: 'sqlite' }), sheet = Object.values(template).find(s => s.name === '档案表');
-    const cp = require('child_process').spawnSync('python3', ['-c', `
+    const cp = require('child_process').spawnSync(require('./helpers').pythonExecutable, ['-c', `
 import json,sqlite3,sys
 s=json.load(sys.stdin); db=sqlite3.connect(':memory:'); ddl=s['sourceData']['ddl']; db.execute(ddl)
 t=ddl.split()[2]; col=ddl.splitlines()[2].strip().split()[0]
