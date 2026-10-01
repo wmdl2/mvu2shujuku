@@ -6647,8 +6647,12 @@ root.__MVU2SHUJUKU_SP_VERSION_FACTORY__ = function createSpVersionReader(depende
     };
     const pinnedVersion = name => {
         // 只认官方仓库的固定发布标签；main、任意数字文件名及其他二创仓库均不能证明版本。
-        const match = String(name || '').match(/^https:\/\/(?:[a-z0-9-]+\.)?jsdelivr\.net\/gh\/AlbusKen\/shujuku@spv(\d+\.\d+(?:\.\d+){0,2})\/index\.js(?:\?[^#]*)?(?:#.*)?$/i);
-        return match ? normalize(match[1]) : null;
+        const match = String(name || '').match(/^https:\/\/(?:[a-z0-9-]+\.)?jsdelivr\.net\/gh\/AlbusKen\/shujuku@(spv\d+\.\d+(?:\.\d+){0,2}|naiv\d+(?:\.\d+){0,3})\/index\.js(?:\?[^#]*)?(?:#.*)?$/i);
+        if (!match) return null;
+        if (/^spv/i.test(match[1])) return normalize(match[1].slice(3));
+        const release = match[1].slice(4);
+        const version = normalize(release.includes('.') ? release : release + '.0.0');
+        return version ? 'naiv' + version : null;
     };
     return async function readTargetSpVersion() {
         try {
@@ -6658,11 +6662,15 @@ root.__MVU2SHUJUKU_SP_VERSION_FACTORY__ = function createSpVersionReader(depende
             for (const name of extensions?.extensionNames || []) {
                 if (disabled.has(name)) continue;
                 const manifest = await extensions.getExtensionManifest(name);
-                if (manifest && /^SP[·・\s]*数据库(?:\s|$)/i.test(String(manifest.display_name || ''))) matches.push(manifest);
+                const displayName = String(manifest?.display_name || '');
+                if (/^(?:SP|龙血玄黄)[·・\s]*数据库(?:\s|$)/i.test(displayName)) matches.push(manifest);
             }
             // 已安装的扩展存在多个候选或坏版本时不拿另一个脚本掩盖歧义。
             if (matches.length) {
-                const versions = new Set(matches.map(manifest => normalize(manifest.version)));
+                const versions = new Set(matches.map(manifest => {
+                    const version = normalize(manifest.version);
+                    return version && /^龙血玄黄/.test(String(manifest.display_name)) ? 'naiv' + version : version;
+                }));
                 return versions.size === 1 && !versions.has(null) ? [...versions][0] : 'unknown';
             }
         } catch (_) {}
@@ -7653,7 +7661,7 @@ root.__MVU2SHUJUKU_SETTINGS_VIEW__ = function settingsView(settings) {
             '        </div>',
             '      </div>',
             '      <div class="mvu2shujuku-row mvu2shujuku-mode-group">',
-            '        <span class="mvu2shujuku-label" title="模板保留列名、DDL、字段说明及更新规则；SQL 或原生填表格式由 SP·数据库 当前模式提供，转换器无需选择">填表模式</span>',
+            '        <span class="mvu2shujuku-label" title="模板保留列名、DDL、字段说明及更新规则；SQL 或原生填表格式由 龙血玄黄·数据库 当前模式提供，转换器无需选择">填表模式</span>',
             '        <span class="mvu2shujuku-hint">双模式（跟随插件当前设置）</span>',
             '      </div>',
             '      <div class="mvu2shujuku-row">',
@@ -7717,7 +7725,7 @@ root.__MVU2SHUJUKU_SETTINGS_VIEW__ = function settingsView(settings) {
             '        <button id="mvu2shujuku-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
             '      </div>',
             '      <div class="mvu2shujuku-hint">',
-            '        前提：已安装 SP·数据库插件（不自动安装，也不迁移旧聊天）。数据桥已写入转换后的角色卡，不需要手动导入；单独下载的 .js 只是供开发者查看和调试的源码备份，不是酒馆助手 .json 导入包。',
+            '        前提：已安装 龙血玄黄·数据库插件（不自动安装，也不迁移旧聊天）。数据桥已写入转换后的角色卡，不需要手动导入；单独下载的 .js 只是供开发者查看和调试的源码备份，不是酒馆助手 .json 导入包。',
             '      </div>',
             '    </div>',
             '  </div>',
@@ -8519,7 +8527,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         }
         const api = runtimeApiForSession(getAcuApi(), session);
         if (!api) {
-            dbg(' 开局自动建表跳过：未找到 SP·数据库 API（chat=' + key0 + '）');
+            dbg(' 开局自动建表跳过：未找到 龙血玄黄·数据库 API（chat=' + key0 + '）');
             // 插件可能晚于聊天加载就绪：API 缺失时轮询重试，确保锚点在用户操作前建立
             if (autoInitState.apiRetries < 12) {
                 autoInitState.apiRetries += 1;
@@ -11476,7 +11484,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     assertUnchanged();
                     if (!candidate) throw new Error('业务修正快照构造失败');
                     const result = await api.importTableAsJson(JSON.stringify(candidate));
-                    if (result !== true && !(result && result.success === true)) throw new Error('SP 未接受业务修正快照');
+                    if (result !== true && !(result && result.success === true)) throw new Error('龙血玄黄·数据库未接受业务修正快照');
                 } else {
                     // 公共导入不能指定旧楼。复用真实 writer 在内存规划，只有一次
                     // CRUD 才提交；多步整笔拒绝，不留下先完成的步骤或移写最新楼。
@@ -11490,7 +11498,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         }
         const committed = api.exportTableAsJson();
         tableBusinessSnapshot = mvuDataFromCompleteTableSnapshot(committed);
-        publishCommittedTableSnapshot(committed, 'SP 业务修正', true, true);
+        publishCommittedTableSnapshot(committed, '龙血玄黄·数据库业务修正', true, true);
         return true;
     }
     function tableSnapshotHasSheets(data) {        if (!data || typeof data !== 'object') return false;
@@ -11649,7 +11657,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 const alreadyDelivered = variableUpdateDispatchSeq > state.dispatchSeqAtStart &&
                     reentryNotifyFingerprint === current.fingerprint;
                 if (!alreadyDelivered) publishCommittedTableSnapshot(current.data, '聊天回放兜底/' + state.reason, true);
-                else dbg('[聊天回放兜底/' + state.reason + '] SP 回调已同步同一快照。');
+                else dbg('[聊天回放兜底/' + state.reason + '] 龙血玄黄·数据库回调已同步同一快照。');
                 finish();
             }, delay);
             state.timers.push(timer);
@@ -11789,11 +11797,11 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             try {
                 if (await applySpBusinessCorrection(data, task, session)) return;
             } catch (e) {
-                dbgWarn(' SP 业务修正未应用：', e && e.message ? e.message : e);
+                dbgWarn(' 龙血玄黄·数据库业务修正未应用：', e && e.message ? e.message : e);
                 // 不自动重跑监听器；重试奖励/扣费会产生二次业务效果。
                 if (!isRuntimeSessionCurrent(session)) return;
                 try { data = getAcuApi().exportTableAsJson(); } catch (_) {}
-                publishCommittedTableSnapshot(data, 'SP 业务修正取消', true, true);
+                publishCommittedTableSnapshot(data, '龙血玄黄·数据库业务修正取消', true, true);
                 return;
             } finally { tableBusinessRunning = false; }
         }
@@ -12801,13 +12809,13 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         const api = getAcuApi();
         dbg(' loadMergeTables: 来源=' + v + ' | api=' + !!api + ' | 有 getTableTemplate=' + !!(api && typeof api.getTableTemplate === 'function'));
         if (!api || typeof api.getTableTemplate !== 'function') {
-            toast('未找到 SP·数据库 插件 API', 'error');
+            toast('未找到 龙血玄黄·数据库 插件 API', 'error');
             return;
         }
         const tpl = await readTemplateSource(v);
         dbg(' loadMergeTables: source=' + v + ' | 读到的模板=' + !!tpl + ' | sheet 数=' + (tpl ? Object.keys(tpl).filter(k => k.indexOf('sheet_') === 0).length : 0));
         if (!tpl || typeof tpl !== 'object') {
-            toast(v === 'default' ? 'SP·数据库默认模板不可用（不会回退为全局模板）' : '未读取到模板（该来源为空或插件未就绪）', 'error');
+            toast(v === 'default' ? '龙血玄黄·数据库默认模板不可用（不会回退为全局模板）' : '未读取到模板（该来源为空或插件未就绪）', 'error');
             return;
         }
         mergeState.sourceTemplate = tpl;
@@ -13119,7 +13127,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 log.push('✗ 表格模板导入插件异常：' + (e && e.message ? e.message : e));
             }
         } else {
-            log.push('⚠ 未找到 SP·数据库 插件 API，模板未导入（可下载“表格模板 JSON”手动导入插件）。');
+            log.push('⚠ 未找到 龙血玄黄·数据库 插件 API，模板未导入（可下载“表格模板 JSON”手动导入插件）。');
         }
 
         // 第三步：弹窗汇总
@@ -16827,7 +16835,11 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
 
     // VWD 依赖隐藏内部物理列。官方标准版本从 8.5 起支持；9.2.5 是完整宿主验证基线。
     function vwdHostSupportsHiddenColumns(targetSpVersion) {
-        const parts = String(targetSpVersion === undefined ? '9.2.5' : targetSpVersion).trim().match(/^v?(\d+)\.(\d+)(?:\.\d+){0,2}$/);
+        const version = String(targetSpVersion === undefined ? '9.2.5' : targetSpVersion).trim();
+        // 改名后的 1.x 重新编号，用官方 naiv 标签命名空间与旧 SP 版本区分。
+        const nailong = version.match(/^naiv(\d+)\.(\d+)(?:\.\d+){0,2}$/i);
+        if (nailong) return Number(nailong[1]) >= 1;
+        const parts = version.match(/^v?(\d+)\.(\d+)(?:\.\d+){0,2}$/);
         if (!parts) return false;
         return Number(parts[1]) > 8
             || (Number(parts[1]) === 8 && Number(parts[2]) >= 5);
@@ -16894,8 +16906,8 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             if (hiddenColumns.length && !canHidePhysicalColumns && !warnedHiddenColumnGate) {
                 const knownVersion = /^v?\d+\.\d+(?:\.\d+){0,2}$/.test(String(targetVersion || '').trim());
                 report.warn(knownVersion
-                    ? `目标 SP·数据库 版本（${String(targetVersion)}）低于官方标准版本的隐藏列支持门槛 8.5，本次停用内部列隐藏，内部列仍可能对 AI 可见；建议使用 8.5 或更高版本（完整宿主验证基线为 9.2.5）。`
-                    : '无法识别目标 SP·数据库版本，尚不能确认内部列隐藏兼容性，本次保守停用隐藏，内部列仍可能对 AI 可见。这不代表已安装的数据库不支持隐藏列；请确认数据库已加载，使用可识别的扩展版本或官方固定版本脚本后重新转换。', 'template');
+                    ? `目标旧 SP·数据库版本（${String(targetVersion)}）低于官方标准版本的隐藏列支持门槛 8.5，本次停用内部列隐藏，内部列仍可能对 AI 可见；建议使用龙血玄黄·数据库 1.0 或旧 SP·数据库 8.5 及以上版本。`
+                    : '无法识别目标龙血玄黄·数据库（原 SP·数据库）版本，尚不能确认内部列隐藏兼容性，本次保守停用隐藏，内部列仍可能对 AI 可见。这不代表已安装的数据库不支持隐藏列；请确认数据库已加载，使用可识别的扩展版本或官方固定版本脚本后重新转换。', 'template');
                 warnedHiddenColumnGate = true;
             }
             // VWD 动态说明依赖一个内部元数据列。没有可靠隐藏能力时不登记该能力：
@@ -16903,7 +16915,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             const vwdAllowed = canHidePhysicalColumns && g.kind === 'singleton' && !!g.vwdMetaZh;
             if (g.vwdMetaZh && !canHidePhysicalColumns && !warnedVwdGate) {
                 warnedVwdGate = true;
-                report.warn(`目标 SP·数据库 版本（${String(targetVersion || '未知')}）未通过本转换器的隐藏列兼容性确认，动态说明（VWD）实验路径本次不登记；说明仍按静态文本写入提示词。该能力处于实验阶段，即使版本满足也默认关闭。`, 'template');
+                report.warn(`目标龙血玄黄·数据库（原 SP·数据库）版本（${String(targetVersion || '未知')}）未通过本转换器的隐藏列兼容性确认，动态说明（VWD）实验路径本次不登记；说明仍按静态文本写入提示词。该能力处于实验阶段，即使版本满足也默认关闭。`, 'template');
             }
             // 目标 SP 无法隐藏内部物理列时，VWD 元数据列整列不进模板：宁可不提供动态
             // 说明，也不能让内部覆盖集合出现在模型可见的表头、DDL 与更新示例里。
@@ -18719,12 +18731,12 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             'README.md': [
                 '# MVU转数据库（SillyTavern 原生扩展）',
                 '',
-                '把 MVU 变量角色卡转换为 SP·数据库 角色卡。',
+                '把 MVU 变量角色卡转换为 龙血玄黄·数据库（原 SP·数据库）角色卡。',
                 '',
                 '## 安装',
                 '1. 在 SillyTavern 的 Extensions 面板粘贴本仓库 GitHub 链接，或把本目录放入 `data/<user>/extensions/`。',
                 '2. 刷新页面，扩展设置面板出现「MVU转数据库」。',
-                '3. 前提：已安装 SP·数据库 插件。',
+                '3. 前提：已安装 龙血玄黄·数据库 插件。',
                 '',
                 '## 使用',
                 '1. 打开扩展设置面板。',
@@ -18733,7 +18745,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 '',
                 '## 说明',
                 '- 转换不自动安装数据库插件；不迁移旧聊天；只转换角色卡本身。',
-                '- 开局自动建表对应 MVU 的 init 时机：模板以 base64 写入卡内世界书条目（__ACU_TEMPLATE_DATA__），扩展在进入聊天/首条消息时按需调用 SP·数据库 的 initGameSession 建表，开场白保持原样。',
+                '- 开局自动建表对应 MVU 的 init 时机：模板以 base64 写入卡内世界书条目（__ACU_TEMPLATE_DATA__），扩展在进入聊天/首条消息时按需调用 龙血玄黄·数据库 的 initGameSession 建表，开场白保持原样。',
                 '- 卡内桥只向扩展注册当前卡的模板/layout；状态栏、世界书 EJS、Mvu API、事件和写库均由扩展统一运行时处理。',
                 '- 卡内 MVU 相关正则/脚本/更新规则会被移除；依赖 MVU API 的脚本通过 MVU 兼容层尽力适配。',
             ].join('\n'),

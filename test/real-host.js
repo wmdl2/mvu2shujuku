@@ -14,7 +14,7 @@ const work = process.env.MVU_HOST_TEST_DIR || path.join(root, '.tools/real-host'
 const data = path.join(work, 'data');
 const port = Number(process.env.MVU_HOST_TEST_PORT || 18173);
 const url = 'http://127.0.0.1:' + port;
-const spCommit = process.env.MVU_SP_TEST_COMMIT || '5c53f795832b194ec4baa74135e8ebd950122438';
+const spCommit = process.env.MVU_SP_TEST_COMMIT || 'fd91407f84d7968473e82b90d93f22822cb3b259';
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= path.join(refs, '测试工具/browsers');
 const { chromium } = require(path.join(refs, '测试工具/node_modules/playwright'));
 const core = require('../src/mvu2shujuku');
@@ -460,7 +460,14 @@ async function setStorageMode(page, mode) {
     const advancedMode = page.getByRole('button', { name: '切换到高手模式', exact: true });
     if (await advancedMode.count()) await advancedMode.click();
     await page.getByRole('button', { name: '仪表盘', exact: true }).click();
-    await page.getByRole('radio', { name: '高级设置', exact: true }).click();
+    const advancedSettings = page.getByRole('radio', { name: '高级设置', exact: true });
+    // naiv1 默认回到轻量档位；存储切换在进阶档位才显示。旧版高手入口继续保留。
+    if (!await advancedSettings.count()) {
+        const tierButton = page.getByRole('button', { name: /连续点击五次打开功能档位设置/ });
+        for (let i = 0; i < 5; i++) await tierButton.click();
+        await page.getByRole('button', { name: '进阶模式', exact: true }).click();
+    }
+    await advancedSettings.click();
     await page.getByRole('radiogroup', { name: '存储模式', exact: true }).getByRole('radio', { name: mode === 'sqlite' ? 'SQL' : '原生', exact: true }).click();
     // SQL getter 还依赖聊天 runtime 发布；欢迎页没有聊天，不能在此等待 getter。
     await page.waitForTimeout(1500);
@@ -907,6 +914,16 @@ async function main() {
         await page.locator('.popup-input:visible').waitFor({ state: 'hidden', timeout: 30000 });
         await page.waitForFunction(() => window.SillyTavern.getContext().characters.length > 0, {}, { timeout: 60000 });
         console.log('HOST_READY', await page.evaluate(() => document.body.innerText.slice(0, 90)));
+        const recognizedVersion = await page.evaluate(async () => {
+            const read = window.__MVU2SHUJUKU_SP_VERSION_FACTORY__({
+                readExtensions: () => import('/scripts/extensions.js'),
+                readWindows: () => [window], readApi: () => window.AutoCardUpdaterAPI,
+            });
+            return read();
+        });
+        const spManifest = JSON.parse(fs.readFileSync(path.join(data, 'default-user/extensions/sp-database/manifest.json')));
+        assert.strictEqual(recognizedVersion, (/^龙血玄黄/.test(spManifest.display_name) ? 'naiv' : '') + spManifest.version);
+        record('host-version-recognition', { displayName: spManifest.display_name, version: recognizedVersion });
         try {
             const only = process.argv.find(arg => arg.startsWith('--only='))?.slice(7);
             const saved = path.join(work, 'state.json');
