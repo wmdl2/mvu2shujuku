@@ -10,8 +10,12 @@ function createSpVersionReader(dependencies) {
     };
     const pinnedVersion = name => {
         // 只认官方仓库的固定发布标签；main、任意数字文件名及其他二创仓库均不能证明版本。
-        const match = String(name || '').match(/^https:\/\/(?:[a-z0-9-]+\.)?jsdelivr\.net\/gh\/AlbusKen\/shujuku@spv(\d+\.\d+(?:\.\d+){0,2})\/index\.js(?:\?[^#]*)?(?:#.*)?$/i);
-        return match ? normalize(match[1]) : null;
+        const match = String(name || '').match(/^https:\/\/(?:[a-z0-9-]+\.)?jsdelivr\.net\/gh\/AlbusKen\/shujuku@(spv\d+\.\d+(?:\.\d+){0,2}|naiv\d+(?:\.\d+){0,3})\/index\.js(?:\?[^#]*)?(?:#.*)?$/i);
+        if (!match) return null;
+        if (/^spv/i.test(match[1])) return normalize(match[1].slice(3));
+        const release = match[1].slice(4);
+        const version = normalize(release.includes('.') ? release : release + '.0.0');
+        return version ? 'naiv' + version : null;
     };
     return async function readTargetSpVersion() {
         try {
@@ -21,11 +25,15 @@ function createSpVersionReader(dependencies) {
             for (const name of extensions?.extensionNames || []) {
                 if (disabled.has(name)) continue;
                 const manifest = await extensions.getExtensionManifest(name);
-                if (manifest && /^SP[·・\s]*数据库(?:\s|$)/i.test(String(manifest.display_name || ''))) matches.push(manifest);
+                const displayName = String(manifest?.display_name || '');
+                if (/^(?:SP|龙血玄黄)[·・\s]*数据库(?:\s|$)/i.test(displayName)) matches.push(manifest);
             }
             // 已安装的扩展存在多个候选或坏版本时不拿另一个脚本掩盖歧义。
             if (matches.length) {
-                const versions = new Set(matches.map(manifest => normalize(manifest.version)));
+                const versions = new Set(matches.map(manifest => {
+                    const version = normalize(manifest.version);
+                    return version && /^龙血玄黄/.test(String(manifest.display_name)) ? 'naiv' + version : version;
+                }));
                 return versions.size === 1 && !versions.has(null) ? [...versions][0] : 'unknown';
             }
         } catch (_) {}

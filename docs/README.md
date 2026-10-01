@@ -4,6 +4,7 @@
 
 | 当前问题 | 入口 |
 | --- | --- |
+| 龙血玄黄·数据库改名、版本重新编号与新版宿主兼容 | [新版兼容验证](validation/2026-10-01-nailong-database.md) |
 | 顶层固定对象误判、深层空字典类型与规则保留 | [声明路径验证](validation/2026-10-01-declared-container-paths.md) |
 | 安装、转换与用户操作 | [用户说明](../README.md) |
 | v0.4.1 更新范围与提交前检查 | [发布验收](validation/2026-09-27-release-0.4.1.md)、[更新日志](../CHANGELOG.md) |

@@ -9,10 +9,35 @@ const windowWith = entries => ({ performance: { getEntriesByType(type) { assert.
 function reader({ extensions = {}, windows = [], runtimeApi = api, factory = createReader } = {}) {
     return factory({ readExtensions: async () => extensions, readWindows: () => windows, readApi: () => runtimeApi });
 }
-function extension(version, disabled = false) {
+function extension(version, disabled = false, displayName = 'SP·数据库 9.2.5') {
     return { extensionNames: ['third-party/sp'], extension_settings: { disabledExtensions: disabled ? ['third-party/sp'] : [] },
-        getExtensionManifest: () => ({ display_name: 'SP·数据库 9.2.5', version }) };
+        getExtensionManifest: () => ({ display_name: displayName, version }) };
 }
+test('SP版本识别：龙血玄黄重新编号与旧版本分开，真实转换保留隐藏列', async () => {
+    const targetSpVersion = await reader({ extensions: extension('1.0.0', false, '龙血玄黄·数据库 1.0.0') })();
+    assert.strictEqual(targetSpVersion, 'naiv1.0.0');
+    const card = { name: '新版数据库', character_book: { entries: [
+        { comment: '[InitVar]', content: JSON.stringify({ 状态: { 可见: 1, '$私有': 2 } }) },
+    ] } };
+    const converted = core.convert(card, { targetSpVersion });
+    const sheet = Object.values(converted.template).find(s => s.name === '状态表');
+    assert.ok(sheet.sourceData.hiddenPhysicalColumns.length > 0);
+    assert.doesNotMatch(converted.reportText, /无法识别目标|低于官方标准版本/);
+    assert.match(core.convert(card, { targetSpVersion: '1.0.0' }).reportText, /低于官方标准版本/);
+    const mixed = { extensionNames: ['old', 'new'], getExtensionManifest: name => ({
+        display_name: name === 'old' ? 'SP·数据库' : '龙血玄黄·数据库', version: '1.0.0',
+    }) };
+    assert.strictEqual(await reader({ extensions: mixed })(), 'unknown');
+    assert.strictEqual(await reader({ extensions: extension('bad', false, '龙血玄黄·数据库'), windows: [windowWith([resource('9.2.5.1')])] })(), 'unknown');
+});
+test('SP版本识别：官方 naiv1 脚本标签进入同一版本线，禁用扩展回退脚本', async () => {
+    const entry = resource('', { name: 'https://gcore.jsdelivr.net/gh/AlbusKen/shujuku@naiv1/index.js' });
+    const factory = vm.runInNewContext('(' + createReader.toString() + ')');
+    assert.strictEqual(await reader({ factory, windows: [windowWith([entry])] })(), 'naiv1.0.0');
+    assert.strictEqual(await reader({ extensions: extension('1.0.0', true, '龙血玄黄·数据库'), windows: [windowWith([entry])] })(), 'naiv1.0.0');
+    assert.strictEqual(await reader({ windows: [windowWith([entry, resource('9.2.5.1')])] })(), 'unknown');
+    assert.strictEqual(await reader({ windows: [windowWith([entry])], runtimeApi: null })(), 'unknown');
+});
 test('SP版本识别：扩展清单优先，四段版本有效，禁用扩展不掩盖脚本', async () => {
     assert.strictEqual(await reader({ extensions: extension('8.5') })(), '8.5');
     assert.strictEqual(await reader({ windows: [windowWith([resource('8.5')])] })(), '8.5');
@@ -52,6 +77,6 @@ test('SP版本识别：脚本识别结果进入实际转换后保留隐藏列与
     assert.ok(sheet.sourceData.hiddenPhysicalColumns.length > 0);
     assert.doesNotMatch(converted.reportText, /无法识别目标|低于官方标准版本/);
     const unknown = core.convert(card, { targetSpVersion: 'unknown' });
-    assert.match(unknown.reportText, /无法识别目标 SP·数据库版本/);
+    assert.match(unknown.reportText, /无法识别目标龙血玄黄·数据库/);
     assert.doesNotMatch(unknown.reportText, /请升级至/);
 });

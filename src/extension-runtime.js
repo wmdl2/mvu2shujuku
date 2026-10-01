@@ -431,7 +431,7 @@ function installExtensionRuntime(window) {
         }
         const api = runtimeApiForSession(getAcuApi(), session);
         if (!api) {
-            dbg(' 开局自动建表跳过：未找到 SP·数据库 API（chat=' + key0 + '）');
+            dbg(' 开局自动建表跳过：未找到 龙血玄黄·数据库 API（chat=' + key0 + '）');
             // 插件可能晚于聊天加载就绪：API 缺失时轮询重试，确保锚点在用户操作前建立
             if (autoInitState.apiRetries < 12) {
                 autoInitState.apiRetries += 1;
@@ -3388,7 +3388,7 @@ function installExtensionRuntime(window) {
                     assertUnchanged();
                     if (!candidate) throw new Error('业务修正快照构造失败');
                     const result = await api.importTableAsJson(JSON.stringify(candidate));
-                    if (result !== true && !(result && result.success === true)) throw new Error('SP 未接受业务修正快照');
+                    if (result !== true && !(result && result.success === true)) throw new Error('龙血玄黄·数据库未接受业务修正快照');
                 } else {
                     // 公共导入不能指定旧楼。复用真实 writer 在内存规划，只有一次
                     // CRUD 才提交；多步整笔拒绝，不留下先完成的步骤或移写最新楼。
@@ -3402,7 +3402,7 @@ function installExtensionRuntime(window) {
         }
         const committed = api.exportTableAsJson();
         tableBusinessSnapshot = mvuDataFromCompleteTableSnapshot(committed);
-        publishCommittedTableSnapshot(committed, 'SP 业务修正', true, true);
+        publishCommittedTableSnapshot(committed, '龙血玄黄·数据库业务修正', true, true);
         return true;
     }
     function tableSnapshotHasSheets(data) {        if (!data || typeof data !== 'object') return false;
@@ -3561,7 +3561,7 @@ function installExtensionRuntime(window) {
                 const alreadyDelivered = variableUpdateDispatchSeq > state.dispatchSeqAtStart &&
                     reentryNotifyFingerprint === current.fingerprint;
                 if (!alreadyDelivered) publishCommittedTableSnapshot(current.data, '聊天回放兜底/' + state.reason, true);
-                else dbg('[聊天回放兜底/' + state.reason + '] SP 回调已同步同一快照。');
+                else dbg('[聊天回放兜底/' + state.reason + '] 龙血玄黄·数据库回调已同步同一快照。');
                 finish();
             }, delay);
             state.timers.push(timer);
@@ -3701,11 +3701,11 @@ function installExtensionRuntime(window) {
             try {
                 if (await applySpBusinessCorrection(data, task, session)) return;
             } catch (e) {
-                dbgWarn(' SP 业务修正未应用：', e && e.message ? e.message : e);
+                dbgWarn(' 龙血玄黄·数据库业务修正未应用：', e && e.message ? e.message : e);
                 // 不自动重跑监听器；重试奖励/扣费会产生二次业务效果。
                 if (!isRuntimeSessionCurrent(session)) return;
                 try { data = getAcuApi().exportTableAsJson(); } catch (_) {}
-                publishCommittedTableSnapshot(data, 'SP 业务修正取消', true, true);
+                publishCommittedTableSnapshot(data, '龙血玄黄·数据库业务修正取消', true, true);
                 return;
             } finally { tableBusinessRunning = false; }
         }
@@ -4713,13 +4713,13 @@ function installExtensionRuntime(window) {
         const api = getAcuApi();
         dbg(' loadMergeTables: 来源=' + v + ' | api=' + !!api + ' | 有 getTableTemplate=' + !!(api && typeof api.getTableTemplate === 'function'));
         if (!api || typeof api.getTableTemplate !== 'function') {
-            toast('未找到 SP·数据库 插件 API', 'error');
+            toast('未找到 龙血玄黄·数据库 插件 API', 'error');
             return;
         }
         const tpl = await readTemplateSource(v);
         dbg(' loadMergeTables: source=' + v + ' | 读到的模板=' + !!tpl + ' | sheet 数=' + (tpl ? Object.keys(tpl).filter(k => k.indexOf('sheet_') === 0).length : 0));
         if (!tpl || typeof tpl !== 'object') {
-            toast(v === 'default' ? 'SP·数据库默认模板不可用（不会回退为全局模板）' : '未读取到模板（该来源为空或插件未就绪）', 'error');
+            toast(v === 'default' ? '龙血玄黄·数据库默认模板不可用（不会回退为全局模板）' : '未读取到模板（该来源为空或插件未就绪）', 'error');
             return;
         }
         mergeState.sourceTemplate = tpl;
@@ -5031,7 +5031,7 @@ function installExtensionRuntime(window) {
                 log.push('✗ 表格模板导入插件异常：' + (e && e.message ? e.message : e));
             }
         } else {
-            log.push('⚠ 未找到 SP·数据库 插件 API，模板未导入（可下载“表格模板 JSON”手动导入插件）。');
+            log.push('⚠ 未找到 龙血玄黄·数据库 插件 API，模板未导入（可下载“表格模板 JSON”手动导入插件）。');
         }
 
         // 第三步：弹窗汇总
