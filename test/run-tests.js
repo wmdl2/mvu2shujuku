@@ -628,7 +628,7 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     assert.ok(![...si.wildcardFields].some(k => k.includes('0.8mm')), '描述文本中的小数点不得误判为 MVU 路径');
     assert.ok(Array.isArray(si.wildcardRules['人物']) && si.wildcardRules['人物'][0].range[0] === 0, '通配规则应按路径首段归组并提取范围');
     const r = core.convert(card, { mode: 'sqlite' });
-    assert.ok(r.report.toMarkdown().includes('通配路径规则'), '转换报告应显式警告通配路径规则');
+    assert.ok(r.report.toMarkdown().includes('动态键规则'), '转换报告应说明实际含动态键的规则');
     const hub = Object.values(r.template).find(s => s && s.name === '户表');
     assert.ok(hub.sourceData.note.includes('【可写路径与约束】'), 'JSON 表有可写规则时不应一刀切只读');
     assert.ok(hub.sourceData.note.includes('户.<门牌>.妻.好感值（数值范围 0~100；仅本人在场时更新）'), 'JSON 表 note 应列出可写路径与约束');
@@ -873,7 +873,7 @@ test('自动化更新参数：模板每表带 updateConfig，改 JSON 后重转�
     assert.strictEqual(worldEmbed.updateConfig.updateFrequency, 2, '卡内模板 base64 应同步新参数');
 });
 
-test('SQL 示例优先用默认值，TEXT 无默认才用“列名示例”', () => {
+test('SQL INSERT 示例按类型生成短值，不复制已有记录和默认载荷', () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -895,7 +895,7 @@ test('SQL 示例优先用默认值，TEXT 无默认才用“列名示例”', ()
     };
     const r = core.convert(card, { mode: 'sqlite' });
     const dl = Object.values(r.template).find(s => s && s.name === '道侣表');
-    assert.ok(dl.sourceData.insertNode.includes("VALUES ('林若悠', 50, 0, '性格示例')"), 'INSERT 应含真实值/默认值/列名示例');
+    assert.ok(dl.sourceData.insertNode.includes("VALUES ('键名', 0, 0, '性格示例')"), 'INSERT 使用新键占位、数值和文本短示例');
     assert.ok(dl.sourceData.updateNode.includes('SET qinmi = 51'), 'UPDATE 示例保持数值类型，演示不同于初始值的合法数值');
     assert.ok(dl.sourceData.note.includes('不得直接照抄示例值'), '示例必须与本轮真实操作区分');
 });
@@ -3379,7 +3379,10 @@ test('转换产物齐全', () => {
     assert.ok(c.extensions.mvu2shujuku, '应有转换标记');
     assert.ok(typeof c.extensions.mvu2shujuku.layout === 'string' && Array.isArray(JSON.parse(c.extensions.mvu2shujuku.layout)), '转换标记应包含布局（供扩展重建 stat_data）');
     assert.ok(!c.character_book.entries.some(e => /\[initvar\]|变量输出格式强调|变量列表/i.test(String(e.comment || ''))), '初始化和明确的旧输出协议应被删除');
-    assert.ok(!c.character_book.entries.some(e => e.comment === '[mvu_update]'), '完整规则经行内操作说明容错解析并迁移后，应移除旧条目');
+    const remainingRules = c.character_book.entries.find(e => e.comment === '[mvu_update]');
+    assert.ok(remainingRules, '未进入填表说明的私有字段规则应保留');
+    assert.match(remainingRules.content, /\$器灵台词/);
+    assert.doesNotMatch(remainingRules.content, /每推进一次剧情\/回合就减1|道侣 —|灵宠 —|人物 —|玉简 —/, '已承接的字段约束和明确归属的提醒应移除');
     assert.doesNotMatch(r.reportText, /YAML 解析失败|无法确认为完整静态规则文档/);
     const worldNote = Object.values(r.template).find(t => t.name === '世界表').sourceData.note;
     assert.match(worldNote, /遭遇冷却/);
@@ -10682,4 +10685,5 @@ require('./bridge-lifecycle');
 require('./input-parser');
 require('./card-bridge');
 require('./card-conversion-fixes');
+require('./converter-contracts');
 runTests(parseArgs());

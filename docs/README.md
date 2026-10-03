@@ -4,6 +4,7 @@
 
 | 当前问题 | 入口 |
 | --- | --- |
+| 字面键、根层标量、规则迁移凭证与禁用结构声明 | [通用转换契约修复](validation/2026-10-03-converter-contracts.md) |
 | 变量输出格式整条移除与更新规则按迁移拆分 | [输出格式与规则拆分验证](validation/2026-10-03-output-format-ownership.md) |
 | 双模式业务说明与宿主输出协议的职责分工 | [表格协议说明验证](validation/2026-10-03-table-protocol-notes.md) |
 | 有限字段绑定、完整 YAML 路径、数组/关联及输出约束保留 | [复杂声明验证](validation/2026-10-03-finite-field-bindings.md) |
