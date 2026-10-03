@@ -61,6 +61,8 @@ node test/run-tests.js --verbose
 通用路径、标量类型和规则迁移边界使用公开 `test/converter-contracts.js`；双模式实际保存/重载使用 `--only=converter-contracts`。宿主夹具必须满足共用入口的前置条件；特殊原型键在 Playwright 参数和返回值边界使用 JSON 文本传输，再解析为 own-key，不能把测试工具的键丢失算成产品失败。
 
 使用 Node 22，开始前执行 `node --version`。核心回归使用内置模块、仓库源码和 vendored 解析库。
+
+TauriTavern 的 iframe/global/滚动组件取证使用 `node test/tauritavern-audit.js`，需要参考源码树、参考 SillyTavern 的 jquery/lodash 和 Playwright 浏览器。占位符组件另需参考 SillyTavern 的 TypeScript，脚本从助手源码提取实际函数并去除类型。可用 `MVU_REFERENCE_ROOT`、`MVU_HELPER_ROOT` 选择参考区和助手源码版本，`MVU_TAURI_AUDIT_OUTPUT` 指定结果目录。脚本只用公开合成卡、当前插件构建和实际参考模块，数据库 API 为替代实现；原 MVU 对照运行真实 initGlobals 发布函数，engine/store/watch 为替代实现。默认输出观察记录，退出成功不等于正式 WebView/native/SQLite 验收通过；`MVU_TAURI_ASSERT_FIXED=1` 额外断言 v0.4.9 修复的接口行为、原发布协议冷恢复读值和无浏览器异常；占位符分支由 `test/tauritavern-placeholder.js` 执行实际助手消息更新/刷新函数与 TT updateMessageBlock/渲染事务，格式化、前端挂载、装饰器和数据库为替代实现。覆盖边界见[运行兼容性审查](validation/2026-10-03-tauritavern-runtime-audit.md)。
 SQLite 执行检查另需 Python 3 标准库 `sqlite3`：Windows 默认 `python`，其他平台默认 `python3`，可用 `PYTHON` 指定解释器；测试进程固定 Python UTF-8 输入，与 Node 传入的 JSON 编码一致。实机另需宿主与浏览器依赖。
 JSON 路径更新及固定附属字段的填表、重载和删楼场景使用 `node test/real-host.js --only=json-path`，
 范围见 [JSON 与合表验收](validation/2026-09-14-json-path.md)。

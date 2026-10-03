@@ -114,7 +114,7 @@ test('消息持久化：缺少导入、提交失败或规划期间快照变化�
     assert.strictEqual(writes, 0);
 });
 
-async function nativeRuntime(source = require('./synthetic-card')()) {
+async function nativeRuntime(source = require('./synthetic-card')(), configure) {
     const result = core.convert(source, { installMvuShim: true });
     result.card.data.avatar = 'public-native.png';
     const tables = clone(result.template), api = applyingApi(tables);
@@ -148,7 +148,7 @@ async function nativeRuntime(source = require('./synthetic-card')()) {
             test: { storageFrame: { version: 2, checkpoint: { kind: 'full', data: clone(tables) }, logEntries: [] } },
         } }],
         extensionSettings: { mvu2shujuku: {} },
-        eventSource: { on(name, fn) { handlers.set(name, fn); }, emit() {} }, event_types: {},
+        eventSource: { on(name, fn) { handlers.set(name, fn); }, async emit(name, ...args) { const fn = handlers.get(name); if (fn) await fn(...args); } }, event_types: {},
         saveSettingsDebounced() {}, saveChat: async () => {}, saveChatConditional: async () => {},
     };
     const document = { querySelector: () => null, querySelectorAll: () => [], getElementById: () => null,
@@ -161,12 +161,91 @@ async function nativeRuntime(source = require('./synthetic-card')()) {
         SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: api,
     };
     win.window = win; win.parent = win; win.top = win; win.globalThis = win;
+    if (configure) configure({ win, context, tables, api });
     vm.createContext(win);
     vm.runInContext(core.assembleExtension({ coreSource: fs.readFileSync(require.resolve('../src/mvu2shujuku'), 'utf8') })['index.js'], win);
     await advance(100);
     assert.strictEqual(typeof win.Mvu?.replaceMvuData, 'function');
     return { win, context, tables, api, advance, tableCallbacks };
 }
+
+function placeholderCard() {
+    const source = require('./synthetic-card')();
+    source.data.extensions.regex_scripts.push({ scriptName: '占位符', findRegex: '<StatusPlaceHolderImpl/>', replaceString: '', disabled: false });
+    return source;
+}
+
+test('占位符维护：原版 ST 和 TT 虚拟化保留助手刷新，TT 静态使用宿主且不重画相同内容', async () => {
+    for (const mode of ['st', 'managed', 'static', 'static-identical']) {
+        const calls = [], rendered = [];
+        const h = await nativeRuntime(placeholderCard(), ({ win, context }) => {
+            context.event_types = { CHAT_CHANGED: 'chat_changed', CHARACTER_MESSAGE_RENDERED: 'rendered' };
+            context.setChatMessages = async (messages, options) => { calls.push(options.refresh); context.chat[0].mes = messages[0].message; };
+            context.updateMessageBlock = (id, msg) => { rendered.push(id); assert.strictEqual(msg, context.chat[0]); };
+            context.messageFormatting = text => mode === 'static-identical' ? text.replace(/\s*<StatusPlaceHolderImpl\/>$/, '') : text;
+            if (mode !== 'st') win.__TAURITAVERN__ = { api: { chatSurface: { isManagedOwnershipRequired: () => mode === 'managed' } } };
+        });
+        const before = JSON.stringify(h.tables);
+        await h.context.eventSource.emit('chat_changed'); await h.advance(1300);
+        assert.deepStrictEqual(calls, [mode.startsWith('static') ? 'none' : 'affected'], mode);
+        assert.deepStrictEqual(rendered, mode === 'static' ? [0] : [], mode);
+        assert.ok(h.context.chat[0].mes.includes('<StatusPlaceHolderImpl/>'));
+        assert.strictEqual(JSON.stringify(h.tables), before, '补占位符不修改业务表');
+        await h.context.eventSource.emit('chat_changed'); await h.advance(1300);
+        assert.strictEqual(calls.length, 1, '已有占位符不重复保存或刷新');
+    }
+});
+
+test('占位符维护：等待保存时切聊天不刷新新聊天，保存拒绝可由下一事件重试', async () => {
+    let release, renders = 0, attempts = 0;
+    const h = await nativeRuntime(placeholderCard(), ({ win, context }) => {
+        context.event_types = { CHAT_CHANGED: 'chat_changed', CHARACTER_MESSAGE_RENDERED: 'rendered' };
+        win.__TAURITAVERN__ = { api: { chatSurface: { isManagedOwnershipRequired: () => false } } };
+        context.updateMessageBlock = () => { renders++; };
+        context.setChatMessages = async () => { attempts++; await new Promise(resolve => { release = resolve; }); };
+    });
+    await h.context.eventSource.emit('chat_changed'); await h.advance(1300);
+    assert.strictEqual(attempts, 1);
+    h.context.chatId = 'native-B'; h.context.chat = [{ is_user: false, mes: '新聊天' }];
+    release(); await h.advance(0);
+    assert.strictEqual(renders, 0);
+    assert.strictEqual(h.context.chat[0].mes, '新聊天');
+    let rejected = false;
+    h.context.setChatMessages = async (messages, options) => {
+        attempts++;
+        if (!rejected) { rejected = true; throw new Error('夹具保存拒绝'); }
+        h.context.chat[0].mes = messages[0].message;
+        assert.strictEqual(options.refresh, 'none');
+    };
+    await h.context.eventSource.emit('chat_changed'); await h.advance(1300);
+    assert.ok(rejected); assert.strictEqual(renders, 0);
+    await h.context.eventSource.emit('chat_changed'); await h.advance(1300);
+    assert.ok(h.context.chat[0].mes.includes('<StatusPlaceHolderImpl/>'));
+    assert.strictEqual(renders, 1);
+});
+
+test('前端就绪：完整零值和 false 状态也广播初始化，未物化空壳不广播', async () => {
+    const source = require('./synthetic-card')();
+    source.data.first_mes = '零值开场';
+    source.data.character_book.entries = [{ comment: '[InitVar]', content: JSON.stringify({ 状态: { 积分: 0, 开关: false } }), enabled: true }];
+    for (const provenance of ['runtime', 'persisted', 'empty']) {
+        const ready = provenance !== 'empty';
+        const events = [];
+        const h = await nativeRuntime(source, ({ win, context }) => {
+            context.event_types = { CHAT_CHANGED: 'chat_changed' };
+            win.eventEmit = (name, ...args) => { events.push({ name, args }); return context.eventSource.emit(name, ...args); };
+        });
+        if (provenance !== 'runtime') {
+            h.api.exportTableAsJson = () => ({});
+            h.api.isReady = () => false;
+            if (!ready) h.context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame.checkpoint.data = {};
+        }
+        await h.context.eventSource.emit('chat_changed'); await h.advance(6500);
+        const initialized = events.filter(e => e.name === 'mag_variable_initialized');
+        assert.strictEqual(initialized.length, ready ? 1 : 0);
+        if (ready) assert.deepStrictEqual(JSON.parse(JSON.stringify(initialized[0].args[0].stat_data)), { 状态: { 积分: 0, 开关: false } });
+    }
+});
 
 test('运行内存：完整扩展在 iframe 移除后还原接口并释放登记', async () => {
     const h = await nativeRuntime();

@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.4.8';
+    const VERSION = '0.4.10';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
