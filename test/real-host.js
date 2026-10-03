@@ -939,6 +939,7 @@ async function main() {
             else if (only === 'vwd-prompt') await require('./vwd-prompt-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'nullable-record') await require('./nullable-record-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
             else if (only === 'bound-fields') await require('./bound-fields-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
+            else if (only === 'converter-contracts') await require('./converter-contract-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
             else if (only === 'container-presence') await require('./container-presence-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'full-json') await require('./full-json-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'vwd') await vwdTest(page);

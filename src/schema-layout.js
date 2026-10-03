@@ -2,7 +2,7 @@
 
 // 结构推导与布局生成；解析库、命名及词法服务由调用方注入。
 function createSchemaLayout(dependencies) {
-    const { getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, maskJsStringsAndComments, createStatusUsage, isPromptVisibleColumn, vwdExperimental = () => false } = dependencies;
+    const { getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, maskJsStringsAndComments, createStatusUsage, isPromptVisibleColumn, isMvuOutputDocument = () => false, vwdExperimental = () => false } = dependencies;
     function leafInfo(v) {
             if (Array.isArray(v)) {
                 return { value: v.length > 0 ? v[0] : '', desc: v.length > 1 ? String(v[1]) : '' };
@@ -178,6 +178,15 @@ function createSchemaLayout(dependencies) {
             }
         }
     
+    // 解析时记录原节点和展开后的实际目标；清理阶段不再重新猜测模板绑定。
+    function recordYamlRuleSource(acc, property, value, path, kind = 'check') {
+        if (!acc.ruleSources || !acc.ruleSourcePath) return;
+        acc.ruleSources.push({ source: acc.ruleContent, sourcePath: property === null ? acc.ruleSourcePath.slice() : [...acc.ruleSourcePath, property],
+            path: Array.isArray(path) ? path : String(path).split('.'), kind,
+            texts: yamlCheckItems(kind === 'reminder' && typeof value === 'string' ? value.split('\n') : value)
+                .map(text => kind === 'reminder' ? yamlExpandTemplateKeys(text) : text) });
+    }
+
     function collectRulesFromYaml(content, acc) {
             try {
                 const libs = getMvuYamlLibs();
@@ -200,8 +209,10 @@ function createSchemaLayout(dependencies) {
                 // pathArr：从顶层组名往下拼的变量树路径（组.容器…字段）。规则分组与
                 // initvar 结构不一致（如规则把 修为 写在根目录、initvar 在 主角.修为）
                 // 时，靠完整路径才能在转换时把 check/range/format 附着到正确的列/表。
-                const walkGroup = (group, node, pathArr) => {
+                acc.ruleContent = content;
+                const walkGroup = (group, node, pathArr, sourcePath) => {
                     if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+                    acc.ruleSourcePath = sourcePath;
                     // 组级 type 声明（道渊式：道侣: type: "{ [角色名]: {...} }"）：
                     // 顶层组按条目行表转换（dynamicGroups），字段进 shapes/objects。
                     if (node.type !== undefined) {
@@ -225,6 +236,7 @@ function createSchemaLayout(dependencies) {
                     }
                     // 组级 check（整表规则）：组节点直接带 check（YAML 里等价于 4 空格 check:）
                     if (node.check !== undefined) {
+                        recordYamlRuleSource(acc, 'check', node.check, pathArr);
                         const items = yamlCheckItems(node.check);
                         acc.allCheckItems.push(...items);
                         if (items.length) acc.groupChecks[group] = [...new Set([...(acc.groupChecks[group] || []), ...items])];
@@ -232,13 +244,16 @@ function createSchemaLayout(dependencies) {
                     // MVU 规则卡也会用 note 表达整个组的补充规则（常内嵌
                     // {{getvar::...}}）。它与组级 check 同属表级约束，不应当成字段。
                     if (node.note !== undefined) {
+                        recordYamlRuleSource(acc, 'note', node.note, pathArr);
                         const items = yamlCheckItems(node.note);
                         acc.allCheckItems.push(...items);
                         if (items.length) acc.groupChecks[group] = [...new Set([...(acc.groupChecks[group] || []), ...items])];
                     }
                     for (const rawKey of Object.keys(node)) {
+                        acc.ruleSourcePath = [...sourcePath, rawKey];
                         const rawVal = node[rawKey];
                         const binding = bindYamlTemplateKey(rawKey, rawVal);
+                        if (binding.bindings.size && acc.ruleBindings) acc.ruleBindings.push({ source: content, sourcePath: acc.ruleSourcePath.slice(), keys: [...binding.bindings.keys()] });
                         const val = binding.bindings.size && rawVal && typeof rawVal === 'object' && !Array.isArray(rawVal)
                             ? Object.fromEntries(Object.entries(rawVal).filter(([name]) => !binding.bindings.has(name))) : rawVal;
                         const key = binding.key;
@@ -246,6 +261,7 @@ function createSchemaLayout(dependencies) {
                         if (key === 'check' || key === 'note' || key === 'type' || key === 'format' || key === 'range' || key === 'enum') continue;
                         // _强制更新提醒
                         if (/^_?强制更新/.test(key)) {
+                            recordYamlRuleSource(acc, null, val, [group], 'reminder');
                             const items = yamlCheckItems(Array.isArray(val) ? val : (typeof val === 'string' ? val.split('\n') : [val])).map(yamlExpandTemplateKeys);
                             if (items.length) {
                                 acc.reminders[group] = acc.reminders[group] || [];
@@ -273,7 +289,7 @@ function createSchemaLayout(dependencies) {
                                 } else if (val && typeof val === 'object' && !Array.isArray(val)) {
                                     const isDef = ['type', 'check', 'format', 'range', 'enum'].some(k => Object.prototype.hasOwnProperty.call(val, k));
                                     if (isDef) registerYamlField(group, actualKey, val, acc, [...(pathArr || [group]), actualKey]);
-                                    else walkGroup(group, val, [...(pathArr || [group]), actualKey]);
+                                    else walkGroup(group, val, [...(pathArr || [group]), actualKey], [...sourcePath, rawKey]);
                                 }
                             }
                             continue;
@@ -296,20 +312,22 @@ function createSchemaLayout(dependencies) {
                             if (isDef) {
                                 registerYamlField(group, key, val, acc, [...(pathArr || [group]), key]);
                             } else {
-                                walkGroup(group, val, [...(pathArr || [group]), key]); // 容器（修为:{进度百分比:{…}}）→ 拍平递归
+                                walkGroup(group, val, [...(pathArr || [group]), key], [...sourcePath, rawKey]); // 容器（修为:{进度百分比:{…}}）→ 拍平递归
                             }
                         }
                     }
                 };
                 for (const group of Object.keys(rules)) {
+                    acc.ruleSourcePath = [group];
                     // 顶层 _强制更新提醒：按 “组.字段” 前缀归属组（正则同款语义）
                     if (/^_?强制更新/.test(group)) {
                         const items = yamlCheckItems(Array.isArray(rules[group]) ? rules[group] : [rules[group]]).map(yamlExpandTemplateKeys);
                         for (const it of items) {
-                            const m = String(it).match(/^([\u4e00-\u9fff$]{1,12})\./);
+                            const m = String(it).match(/^([\u4e00-\u9fff$]{1,12})(?:\.|\s+[—–]\s+)/);
                             const g0 = m ? m[1] : group.replace(/^_?/, '');
                             acc.reminders[g0] = acc.reminders[g0] || [];
                             acc.reminders[g0].push(it);
+                            recordYamlRuleSource(acc, null, [it], [g0], 'reminder');
                         }
                         continue;
                     }
@@ -319,7 +337,7 @@ function createSchemaLayout(dependencies) {
                         continue;
                     }
                     if (!isSchemaFieldName(group)) continue;
-                    walkGroup(group, rules[group], [group]);
+                    walkGroup(group, rules[group], [group], [group]);
                 }
                 return true;
             } catch (e) {
@@ -353,9 +371,11 @@ function createSchemaLayout(dependencies) {
             });
         }
     
-    function registerYamlWildcard(key, val, acc, enclosingGroup, ancestors = new Set()) {
+    function registerYamlWildcard(key, val, acc, enclosingGroup, ancestors = new Set(), sourcePath = acc.ruleSourcePath) {
+            acc.ruleSourcePath = sourcePath;
             if (val && typeof val === 'object' && ancestors.has(val)) return;
             const bound = bindYamlTemplateKey(key, val);
+            if (bound.bindings.size && acc.ruleBindings) acc.ruleBindings.push({ source: acc.ruleContent, sourcePath: acc.ruleSourcePath.slice(), keys: [...bound.bindings.keys()] });
             key = bound.key;
             const alternatives = String(key).split('.').map(part => expandYamlTemplateFieldKey(part));
             if (alternatives[alternatives.length - 1]) {
@@ -372,7 +392,7 @@ function createSchemaLayout(dependencies) {
                     const definition = val && typeof val === 'object' && !Array.isArray(val)
                         ? Object.fromEntries(Object.entries(val).filter(([name]) => !bound.bindings.has(name))) : val;
                     if (val && typeof val === 'object') ancestors.add(val);
-                    for (const path of paths) registerYamlWildcard(path, definition, acc, enclosingGroup, ancestors);
+                    for (const path of paths) registerYamlWildcard(path, definition, acc, enclosingGroup, ancestors, sourcePath);
                     if (val && typeof val === 'object') ancestors.delete(val);
                     return;
                 }
@@ -391,6 +411,8 @@ function createSchemaLayout(dependencies) {
                 }
                 if (val.check !== undefined || val.note !== undefined) {
                     rec.checks = [...new Set([...yamlCheckItems(val.check), ...yamlCheckItems(val.note)])];
+                    if (val.check !== undefined) recordYamlRuleSource(acc, 'check', val.check, key);
+                    if (val.note !== undefined) recordYamlRuleSource(acc, 'note', val.note, key);
                 }
                 if (val.enum !== undefined) {
                     const values = Array.isArray(val.enum) ? val.enum : parseInlineEnumValues(String(val.enum));
@@ -424,7 +446,7 @@ function createSchemaLayout(dependencies) {
                     const names = alternatives || [child];
                     for (const name of names) {
                         const path = key + '.' + name;
-                        if (isMvuRulePathKey(path)) registerYamlWildcard(path, value, acc, enclosingGroup, ancestors);
+                        if (isMvuRulePathKey(path)) registerYamlWildcard(path, value, acc, enclosingGroup, ancestors, sourcePath && [...sourcePath, child]);
                     }
                 }
                 ancestors.delete(val);
@@ -523,6 +545,7 @@ function createSchemaLayout(dependencies) {
                 acc.formats[group][field] = formatVal;
             }
             if (def.check !== undefined) {
+                recordYamlRuleSource(acc, 'check', def.check, fieldPath || [group, field]);
                 const items = yamlCheckItems(def.check);
                 if (items.length) {
                     acc.checks[group] = acc.checks[group] || {};
@@ -563,6 +586,8 @@ function createSchemaLayout(dependencies) {
             const groupChecks = {};
             const zodDescs = {};
             let zodSchemaRoot = null;
+            let zodDefaultsRoot = null;
+            let zodDisabledRoot = null;
             const wildcardFields = new Set();
             const wildcardRules = {};
             const numericFields = new Set();
@@ -584,9 +609,11 @@ function createSchemaLayout(dependencies) {
             // 记录每条字段级 check 的完整规则路径（组.容器…字段），供“initvar 优先”的
             // 路径化附着：规则分组与 initvar 结构不一致、但路径能对上时也能挂到对应列/表。
             const checkPaths = [];
+            const ruleSources = [], ruleBindings = [];
             for (const e of entries) {
                 const comment = String(e.comment || '');
                 const content = String(e.content || '');
+                if (isMvuOutputDocument(content)) continue;
                 // 只解析规则条目：明确 [mvu_update]/变量更新规则/变量输出格式，或注释含 mvu 的
                 // 兜底写法；[mvu_plot] 是剧情条目（AI 提示词，保留给角色），绝不能当规则解析——
                 // 否则其正文 YAML（如 战斗系统.说明: |- 一整段战斗判定）会被误当行内枚举/规则。
@@ -599,7 +626,7 @@ function createSchemaLayout(dependencies) {
                 if (collectRulesFromYaml(content, {
                     shapes, objects, fieldTypes, objectSchemas, ranges, enums, formats, checks, reminders, groupChecks, zodDescs,
                     wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, fixedFieldParents, yamlTypePaths,
-                    allCheckItems, checkPaths, enumPaths,
+                    allCheckItems, checkPaths, enumPaths, ruleSources, ruleBindings,
                 })) continue;
                 // YAML 失败回退正则：注明原因，便于发现“回退后个别声明丢失”（如大荒组级 type）。
                 if (report && (/\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment) || /变量更新规则|变量输出格式/.test(comment))) {
@@ -1011,16 +1038,33 @@ function createSchemaLayout(dependencies) {
                 }
                 const parsedSchema = parseRegisteredZodSchema(source);
                 if (parsedSchema && parsedSchema.root && parsedSchema.root.kind === 'object') {
-                    zodSchemaRoot = mergeZodSchemaNodes(zodSchemaRoot, parsedSchema.root);
-                    mergeRegisteredZodIntoShapeInfo(parsedSchema.root, {
+                    if (script.enabled !== false) zodDefaultsRoot = mergeZodSchemaNodes(zodDefaultsRoot, parsedSchema.root);
+                    else {
+                        const reference = JSON.parse(JSON.stringify(parsedSchema.root));
+                        const stripDefaults = node => {
+                            if (!node) return;
+                            delete node.hasDefault; delete node.defaultValue; delete node.defaultKind;
+                            // 关闭的声明不能强制创建原数据中不存在的字段/容器。
+                            node.optional = true;
+                            Object.values(node.fields || {}).forEach(stripDefaults);
+                            stripDefaults(node.value); stripDefaults(node.element);
+                        };
+                        stripDefaults(reference);
+                        zodDisabledRoot = mergeZodSchemaNodes(zodDisabledRoot, reference);
+                        if (report) report.note(`禁用的变量结构脚本「${String(script.name || '未命名 Schema')}」仅作结构参考，不补默认初值；其自动处理逻辑不执行。`);
+                    }
+                    zodSchemaRoot = mergeSchemaReference(zodDisabledRoot, zodDefaultsRoot);
+                    mergeRegisteredZodIntoShapeInfo(zodSchemaRoot, {
                         shapes, fieldTypes, objectSchemas, ranges, enums, zodDescs,
                         numericFields, dynamicDicts, dynamicPaths, dynamicGroups, dynamicKeyNames,
                     });
                     if (report) report.note(`已从酒馆助手脚本「${String(script.name || '未命名 Schema')}」提取 Zod 结构与声明式约束。`);
                     const clampCount = countZodSchemaFlag(parsedSchema.root, 'clampTransform');
                     if (clampCount && report) {
-                        report.note(`Zod Schema 中 ${clampCount} 处 _.clamp 已迁移为范围提示与可选数据库 CHECK；数据库越界时由 SP 原有失败/重填流程处理，不模拟 Zod 自动钳制。`);
+                        report.manual(`变量结构脚本中 ${clampCount} 处 _.clamp 自动钳制未执行；范围提示与可选数据库 CHECK 已迁移，越界值由数据库原有失败/重填流程处理，不能保证与原自动修正行为相同。`);
                     }
+                    const coerceCount = countZodSchemaFlag(parsedSchema.root, 'coerce');
+                    if (coerceCount && report) report.manual(`变量结构脚本中 ${coerceCount} 处 coerce 类型自动纠正未执行；表格按声明类型保存，不能保证与原脚本的任意输入转换行为相同。`);
                 } else if (/registerMvuSchema/.test(source) && report) {
                     report.manual(`酒馆助手脚本「${String(script.name || '未命名 Schema')}」调用了 registerMvuSchema，但未能静态解析注册对象；转换会继续，InitVar 数据仍可建表，但该脚本中的结构与约束可能降级。`);
                 }
@@ -1037,7 +1081,7 @@ function createSchemaLayout(dependencies) {
                     const detailed = uniqueUnsupported.filter(item => item.kind !== 'catch');
                     if (catchItems.length) {
                         const samples = catchItems.slice(0, 6).map(item => item.path || '未知路径').join('、');
-                        report.manual(`Zod Schema 有 ${catchItems.length} 处 .catch(fallback) 非法输入回退未模拟（如 ${samples}${catchItems.length > 6 ? ' 等' : ''}）；字段结构、prefault/default 与可声明约束仍已迁移，非法数据库值由 CHECK/填表重试处理。`);
+                        report.manual(`Zod Schema 有 ${catchItems.length} 处 .catch(fallback) 非法输入回退未模拟（如 ${samples}${catchItems.length > 6 ? ' 等' : ''}）；字段结构与可声明约束仍已迁移，默认初值仅从启用脚本补齐，非法数据库值由 CHECK/填表重试处理。`);
                     }
                     for (const item of detailed.slice(0, 20)) {
                         report.manual(`Zod 字段「${item.path || '未知路径'}」含无法静态等价迁移的 ${item.kind}：${item.expression}。数据库结构与读写仍保留，但该自定义校验/转换不会执行。`);
@@ -1051,7 +1095,7 @@ function createSchemaLayout(dependencies) {
             for (const [field, kinds] of Object.entries(globalFieldKindSets)) {
                 if (kinds.size === 1) globalFieldTypes[field] = [...kinds][0];
             }
-            return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, yamlTypePaths, ranges, enums, enumPaths, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, fixedFieldParents, dynamicKeyNames, checkPaths };
+            return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, yamlTypePaths, ranges, enums, enumPaths, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, zodDefaultsRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, fixedFieldParents, dynamicKeyNames, checkPaths, ruleSources, ruleBindings };
         }
     
     function parseRegisteredZodSchema(source) {
@@ -1286,6 +1330,20 @@ function createSchemaLayout(dependencies) {
             }
             return out;
         }
+
+    function mergeSchemaReference(reference, active) {
+        if (!active) return reference;
+        if (!reference || reference.kind !== active.kind) return JSON.parse(JSON.stringify(active));
+        const out = JSON.parse(JSON.stringify(active));
+        if (out.kind === 'object' && !out.dynamic) {
+            out.fields = out.fields || {};
+            for (const [key, node] of Object.entries(reference.fields || {})) {
+                const value = mergeSchemaReference(node, active.fields && active.fields[key]);
+                Object.defineProperty(out.fields, key, { value, enumerable: true, writable: true, configurable: true });
+            }
+        }
+        return out;
+    }
     
     function countZodSchemaFlag(root, flag) {
             let count = 0;
@@ -2515,6 +2573,26 @@ function createSchemaLayout(dependencies) {
                 && ['object', 'array'].includes(node.value.kind) && (node.value.nullable || node.value.optional || node.value.kind === 'array'
                     || node.value.dynamic || !Object.keys(node.value.fields || {}).length)
                 ? node.value : null;
+            // 根层与关系表共用声明/样本类型契约；空记录不能抹去声明，混合/null 使用 JSON 标量。
+            const recordScalarKind = (node, values) => {
+                if (node && !['object', 'array'].includes(node.kind)) {
+                    if (node.nullable || node.optional || !['number', 'boolean', 'string', 'text'].includes(node.kind)) return 'mixed';
+                    return ['string', 'text'].includes(node.kind) ? 'text' : node.kind;
+                }
+                if (!values.length) return '';
+                return values.every(v => typeof v === 'number') ? 'number'
+                    : values.every(v => typeof v === 'boolean') ? 'boolean'
+                    : values.every(v => typeof v === 'string') ? 'text' : 'mixed';
+            };
+            function recordScalarColumn(name, path, node, kind, used) {
+                return { zh: name, path, value: '',
+                    desc: node && node.desc || (kind === 'number' ? '条目数值' : kind === 'boolean' ? '条目布尔值（1=true，0=false）'
+                        : kind === 'mixed' ? '条目值（JSON 标量，保留字符串/数字/布尔/null 类型）' : '条目描述'),
+                    type: kind === 'number' || kind === 'boolean' ? 'INTEGER' : 'TEXT',
+                    logicalType: kind === 'boolean' ? 'boolean' : kind === 'mixed' ? 'jsonScalar' : '',
+                    range: node && Number.isFinite(node.min) && Number.isFinite(node.max) ? [node.min, node.max] : null,
+                    ident: toIdent(name, used, 'column') };
+            }
             // 完整记录复用 scalarValueCol 的读写协议，身份列仍用于定位与关联。
             function addNullableRecordGroup(meta, node, entries) {
                 const used = new Set(['row_id']);
@@ -2721,13 +2799,14 @@ function createSchemaLayout(dependencies) {
                     // 关系表不能退化成 JSON 单元格。使用「具体实体_键名 + 键名」
                     // 唯一定位记录，以后新增任意所属实体记录也不需要改 schema。
                     const rowChildByKey = new Map();
-                    let sawScalarEntries = false;
-                    let scalarIsNumber = false;
+                    const rowSchema = nullableNodeAt([groupName]);
+                    const scalarSchema = rowSchema && rowSchema.dynamic ? rowSchema.value : null;
+                    const scalarKind = recordScalarKind(scalarSchema, Object.values(raw).filter(v => !isPlainObject(v)));
+                    let sawScalarEntries = !!scalarKind;
                     for (const entryName of Object.keys(raw)) {
                         const entry = raw[entryName];
                         if (!isPlainObject(entry)) {
                             sawScalarEntries = true;
-                            scalarIsNumber = scalarIsNumber || typeof entry === 'number';
                             entryRows.push({ [rowsKeyCol]: entryName, value: entry, __scalar: true });
                             continue;
                         }
@@ -2926,25 +3005,17 @@ function createSchemaLayout(dependencies) {
                         columns.push(applyDeclaredShape(column, groupName, f));
                     }
                     if (sawScalarEntries) {
-                        const scalarZh = scalarIsNumber ? '数值' : '描述';
+                        const scalarZh = scalarKind === 'mixed' ? '内容' : scalarKind === 'number' || scalarKind === 'boolean' ? '数值' : '描述';
                         rowsScalarValueCol = scalarZh;
                         // 标量条目的值补进「描述/数值」列（此前 r.value 只挂在内存里，
                         // 建行时取 r[列名] 取不到，值会静默丢失）。
                         for (const r of entryRows) {
-                            if (r.__scalar) r[scalarZh] = r.value;
+                            if (r.__scalar) r[scalarZh] = scalarKind === 'mixed' ? JSON.stringify(r.value) : r.value;
                         }
                         if (!columns.some(c => c.zh === scalarZh)) {
-                            columns.push({
-                                zh: scalarZh,
-                                path: [groupName, scalarZh],
-                                value: '',
-                                desc: scalarIsNumber ? '条目数值' : '条目描述',
-                                type: scalarIsNumber ? 'INTEGER' : 'TEXT',
-                                range: null,
-                                ident: toIdent(scalarZh, used, 'column'),
-                            });
+                            columns.push(recordScalarColumn(scalarZh, [groupName, scalarZh], scalarSchema, scalarKind, used));
                         }
-                        report.warn(`组「${groupName}」存在非对象条目（标量），已归入「${scalarZh}」列，请人工核对`, 'schema');
+                        report.note(`组「${groupName}」按标量字典保存，条目值位于「${scalarZh}」列。`);
                     }
                     // 保守通配列展开：动态行表 `${角色}.静态字段` 这类规则可以安全提升为真实列，
                     // 避免大量字段全部塞进 _扩展数据；含动态段（${部位} 等）的路径不展开。
@@ -3343,9 +3414,9 @@ function createSchemaLayout(dependencies) {
                     // （INTEGER，logicalType=boolean，读回 true/false）；string/mixed -> 描述列
                     // （TEXT）。mixed 时数值会按文本读回，形状保持 {键: 值} 且不丢“装备名”这类文本。
                     let scalarKind = '';
-                    if (relationValueSchema && relationValueSchema.kind !== 'object') {
+                    if (relationValueSchema && !['object', 'array'].includes(relationValueSchema.kind)) {
                         sawScalarEntries = true;
-                        scalarKind = relationValueSchema.kind === 'number' || relationValueSchema.kind === 'boolean' ? relationValueSchema.kind : 'text';
+                        scalarKind = recordScalarKind(relationValueSchema, []);
                     }
                     // 标量条目（如 世界系统.修仙秘闻: { 标题: 内容 }）的行表标记：
                     // 读回时还原为 {键: 标量}，写入时标量落在「描述/数值」列。
@@ -3518,20 +3589,9 @@ function createSchemaLayout(dependencies) {
                             if (r.__scalar) r[scalarZh] = scalarKind === 'mixed' ? JSON.stringify(r.value) : r.value;
                         }
                         if (!columns.some(c => c.zh === scalarZh)) {
-                            columns.push({
-                                zh: scalarZh,
-                                path: [...ct.path, scalarZh],
-                                itemPath: [scalarZh],
-                                value: '',
-                                desc: relationValueSchema && relationValueSchema.desc || (scalarKind === 'number' ? '条目数值' : scalarKind === 'boolean' ? '条目布尔值（1=true，0=false）' : scalarKind === 'mixed' ? '条目值（JSON 标量，保留字符串/数字/布尔/null 类型）' : '条目描述'),
-                                type: (scalarKind === 'number' || scalarKind === 'boolean') ? 'INTEGER' : 'TEXT',
-                                logicalType: scalarKind === 'boolean' ? 'boolean' : (scalarKind === 'mixed' ? 'jsonScalar' : ''),
-                                range: relationValueSchema && Number.isFinite(relationValueSchema.min) && Number.isFinite(relationValueSchema.max)
-                                    ? [relationValueSchema.min, relationValueSchema.max] : null,
-                                ident: toIdent(scalarZh, used, 'column'),
-                            });
+                            columns.push({ ...recordScalarColumn(scalarZh, [...ct.path, scalarZh], relationValueSchema, scalarKind, used), itemPath: [scalarZh] });
                         }
-                        report.warn(`子表「${ct.key}」存在非对象条目（标量），已归入「${scalarZh}」列，请人工核对`, 'schema');
+                        report.note(`子表「${ct.key}」按标量字典保存，条目值位于「${scalarZh}」列。`);
                     }
                     if (!columns.some(c => c.zh === '_扩展数据')) {
                         columns.push({

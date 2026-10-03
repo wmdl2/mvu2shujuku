@@ -81,7 +81,7 @@ test('SQL示例保真：多层关联数组示例填写全部关联字段并完�
     }
 });
 
-test('SQL示例保真：空行表 INSERT 的默认值符合枚举和数值范围', () => {
+test('SQL示例保真：空行表 INSERT 的短示例符合枚举和数值范围', () => {
     const group = { name: '记录', tableName: '记录表', ident: 'records', kind: 'rows', keyCol: '名称', rows: [],
         columns: [
             { zh: '名称', ident: 'name', type: 'TEXT', value: '', path: [] },
@@ -92,4 +92,16 @@ test('SQL示例保真：空行表 INSERT 的默认值符合枚举和数值范围
     };
     const sheet = Object.values(core.generateTemplate([group], { mode: 'sqlite' })).find(s => s.sourceData);
     assert.deepStrictEqual(execute(sheet, 'insertNode')[0].slice(2), ['开始', 2, 0]);
+});
+
+test('SQL示例保真：长初值只存在数据行，新增示例按类型生成且可执行', () => {
+    const marker = 'PUBLIC_PAYLOAD_MARKER_' + 'x'.repeat(200);
+    for (const mode of ['both', 'sqlite']) {
+        const result = core.convert(card({ 记录: { 甲: marker } },
+            'z.object({记录:z.record(z.string(),z.string().nullable())})'), { mode });
+        const sheet = Object.values(result.template).find(s => s.name === '记录表');
+        assert.ok(sheet.content.some(row => row.some(value => String(value).includes(marker))), '真实初值保存在数据行');
+        assert.ok(!Object.values(sheet.sourceData).some(value => String(value).includes(marker)), 'DDL、说明和示例均不重复初值');
+        assert.strictEqual(execute(sheet, 'insertNode').at(-1).at(-2), 'null', '可空 JSON 标量示例保存合法 JSON null');
+    }
 });

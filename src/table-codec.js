@@ -6,6 +6,8 @@
  * 工厂保持自包含，构建时把同一函数内联进扩展与旧卡桥。
  */
 function createTableCodec(repairJson) {
+    const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+    const assignOwn = (obj, key, value) => Object.defineProperty(obj, key, { value, enumerable: true, configurable: true, writable: true });
     function parseObject(v) {
         try {
             if (!v) return {};
@@ -63,10 +65,10 @@ function createTableCodec(repairJson) {
     const setPath = (obj, path, value) => {
         let cur = obj;
         for (let i = 0; i < path.length - 1; i++) {
-            if (!cur[path[i]] || typeof cur[path[i]] !== 'object' || Array.isArray(cur[path[i]])) cur[path[i]] = {};
+            if (!own(cur, path[i]) || !cur[path[i]] || typeof cur[path[i]] !== 'object' || Array.isArray(cur[path[i]])) assignOwn(cur, path[i], {});
             cur = cur[path[i]];
         }
-        if (value !== undefined) cur[path[path.length - 1]] = value;
+        if (value !== undefined) assignOwn(cur, path[path.length - 1], value);
     };
 
     /* ---------------- VWD 动态说明（第一版：单例表 pair / jsonPairOptional） ----------------
@@ -158,8 +160,8 @@ function createTableCodec(repairJson) {
         if (!target || typeof target !== 'object' || Array.isArray(target) || !extra || typeof extra !== 'object' || Array.isArray(extra)) return target;
         for (const k of Object.keys(extra)) {
             const ev = extra[k];
-            if (!(k in target)) {
-                target[k] = ev;
+            if (!own(target, k)) {
+                assignOwn(target, k, ev);
             } else if (target[k] && typeof target[k] === 'object' && !Array.isArray(target[k]) && ev && typeof ev === 'object' && !Array.isArray(ev)) {
                 mergeMissing(target[k], ev);
             }
@@ -323,7 +325,7 @@ function createTableCodec(repairJson) {
                     if (!rw2) continue;
                     const ancestorValues = ancestorIdxs.map(i => i >= 0 ? rw2[i] : undefined);
                     const kv = keyIdx >= 0 ? rw2[keyIdx] : undefined;
-                    if (ancestorValues.some(v => v === undefined || v === null || v === '') || kv === undefined || kv === null || kv === '') continue;
+                    if (ancestorValues.some(v => v === undefined || v === null) || kv === undefined || kv === null) continue;
                     let container = sd;
                     let ancestorPos = 0;
                     for (let pi = 0; pi < relationPattern.length - 1; pi++) {
@@ -356,7 +358,7 @@ function createTableCodec(repairJson) {
                     }
                     const ovIdx = header.indexOf('_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) mergeMissing(item, parseObject(rw2[ovIdx]) || {});
-                    childDict[text(kv)] = item;
+                    assignOwn(childDict, text(kv), item);
                 }
             } else {
                 const dict = {};
@@ -365,7 +367,7 @@ function createTableCodec(repairJson) {
                     const rw2 = sRows[r2];
                     if (!rw2) continue;
                     const kv = keyIdx >= 0 ? rw2[keyIdx] : undefined;
-                    if (kv === undefined || kv === null || kv === '') continue;
+                    if (kv === undefined || kv === null) continue;
                     // 标量条目行表（如 修仙秘闻: { 标题: 内容 }）：读回 {键: 标量}，
                     // 保持与 MVU 原 shape 一致（前端 zod 声明 z.record(z.string(), z.string())）。
                     if (L.scalarValueCol) {
@@ -391,7 +393,7 @@ function createTableCodec(repairJson) {
                         const ov = parseObject(rw2[ovIdx]);
                         mergeMissing(item, ov);
                     }
-                    dict[text(kv)] = item;
+                    assignOwn(dict, text(kv), item);
                 }
                 const rowValue = Object.keys(dict).length === 0 && L.emptyValue === null ? null : dict;
                 for (const wp2 of L.writePaths || []) setPath(sd, wp2, rowValue);

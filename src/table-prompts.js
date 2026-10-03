@@ -29,12 +29,17 @@ function createTablePrompts(deps) {
     function buildNote(group, opts = {}) {
         const mode = opts.mode || 'both';
         const L = [];
+        const emitRule = (rule, context, scope = {}) => {
+            const rendered = sanitizeCheckRule(rule, context);
+            if (rendered && typeof opts.onRule === 'function') opts.onRule({ text: rule, rendered, ...scope });
+            return rendered;
+        };
         if (group.scalarType === 'number') {
             const scriptReadonly = /^[_$]/.test(String(group.name || ''));
             const rules = [...(group.groupChecks || []), ...(group.wildcardRules || []).flatMap(r => r.checks || [])];
             L.push('数值表（全表固定一行）：「内容」直接保存一个数字，可含小数；禁止写入对象、数组、布尔值或带引号的 JSON 字符串。禁止新增/删除行。');
             if (rules.length) {
-                L.push('【更新规则】', ...rules.map(rule => '- ' + sanitizeCheckRule(rule, { group })).filter(s => s !== '- '));
+                L.push('【更新规则】', ...rules.map(rule => '- ' + emitRule(rule, { group })).filter(s => s !== '- '));
                 if (!scriptReadonly) L.push('只在本轮发生相应变化时更新数值；未发生变化则保持原值。');
             } else if (scriptReadonly) L.push('本数值由脚本/前端维护，AI 不应直接修改本表。');
             else L.push('根据正文、设定与本表规则，数值发生明确变化时按需更新；未发生变化则保持原值。');
@@ -64,10 +69,10 @@ function createTablePrompts(deps) {
                 for (const r of wr) {
                     const parts = [];
                     if (r.range) parts.push(`数值范围 ${r.range[0]}~${r.range[1]}`);
-                    parts.push(...(r.checks || []).map(rule => sanitizeCheckRule(rule, { group, jsonContainer: true })).filter(Boolean));
+                    parts.push(...(r.checks || []).map(rule => emitRule(rule, { group, jsonContainer: true }, { rulePath: r.path })).filter(Boolean));
                     if (parts.length) L.push(`- ${r.path}（${parts.join('；')}）`);
                 }
-                for (const rule of gc.map(rule => sanitizeCheckRule(rule, { group, jsonContainer: true })).filter(Boolean)) L.push(`- ${rule}`);
+                for (const rule of gc.map(rule => emitRule(rule, { group, jsonContainer: true })).filter(Boolean)) L.push(`- ${rule}`);
                 L.push('【更新守卫】');
                 // 不给 AI 加“<> 是什么”的说明：MVU 原版就是把规则原文交给 AI 理解，
                 // 且不是所有卡都用 <>（也有纯点分路径）。规则原文已在上方【可写路径与约束】保留。
@@ -157,7 +162,7 @@ function createTablePrompts(deps) {
                 if (c.enum) parts.push(`可选值：${c.enum.join(' / ')}`);
                 if (c.format) parts.push(`格式要求：${String(c.format).replace(/\n/g, ' ')}`);
                 if (c.isObject) parts.push('对象以 JSON 存储，读取时还原');
-                const checks = (c.check || []).map(rule => sanitizeCheckRule(rule, { group, column: c })).filter(Boolean);
+                const checks = (c.check || []).map(rule => emitRule(rule, { group, column: c }, { columnPath: c.path })).filter(Boolean);
                 return { parts, checks };
             };
             const emitColumnRules = (label, items) => {
@@ -203,7 +208,7 @@ function createTablePrompts(deps) {
             }
             // 子表/动态字典的组级规则（如 世界.动向 的“最多维持2个大事件”）：以表级约束列出
             // 注意：这些行已位于本表自己的 note 内，不再重复表名前缀（避免“道侣表：性别：…”式噪音）
-            for (const rule of (group.groupChecks || []).map(rule => sanitizeCheckRule(rule, { group })).filter(Boolean)) L.push(`- ${rule}`);
+            for (const rule of (group.groupChecks || []).map(rule => emitRule(rule, { group })).filter(Boolean)) L.push(`- ${rule}`);
             // 通配路径规则（如 人物.角色名.亲密）：动态键无法静态展开，作为表格级提示保留，
             // AI 对照快照中的具体键套用（范围/条件仍可见）
             for (const wr of (group.wildcardRules || [])) {
@@ -219,12 +224,15 @@ function createTablePrompts(deps) {
                 const parts = [];
                 if (wr.range) parts.push(`数值范围 ${wr.range[0]}~${wr.range[1]}`);
                 if (wr.format) parts.push(`格式：${wr.format}`);
-                parts.push(...(wr.checks || []).map(rule => sanitizeCheckRule(rule, { group })).filter(Boolean));
+                parts.push(...(wr.checks || []).map(rule => emitRule(rule, { group }, { rulePath: wr.path })).filter(Boolean));
                 if (parts.length) L.push(`- ${wr.path}（${parts.join('；')}）`);
             }
             if ((group.reminders || []).length) {
                 L.push('强制更新提醒（按各项触发条件执行）：');
-                (group.reminders || []).forEach(r => L.push(`- ${r}`));
+                (group.reminders || []).forEach(r => {
+                    L.push(`- ${r}`);
+                    if (typeof opts.onRule === 'function') opts.onRule({ text: r, rendered: r, kind: 'reminder' });
+                });
             }
             if (L.length === rulesStart + 1) L.pop();
         }
@@ -270,32 +278,19 @@ function createTablePrompts(deps) {
         return '开局为空表；出现符合本表定义的新记录时，新增一行完整记录。';
     }
 
-    // INSERT 延续初始行值 → 默认值的策略；没有值时按列约束选择有效的
-    // 类型示例，不把字段名占位符写进枚举/数值/JSON。标识和业务值均需按本轮替换。
-    function exampleCellValue(col, rowValue) {
-        const value = rowValue === undefined ? col.value : rowValue;
+    // INSERT 只按声明类型和约束生成短示例，不复制初值或默认载荷。
+    // 标识和业务值均需按本轮替换。
+    function exampleCellValue(col) {
         const quote = v => `'${sqlQuote(v)}'`;
-        if (['jsonScalarOptional', 'jsonPairOptional'].includes(col.logicalType)) {
-            return quote(value === undefined ? '' : JSON.stringify(value));
-        }
-        if (col.logicalType === 'jsonObjectOptional') {
-            return quote(value === undefined ? '' : typeof value === 'string' ? value : JSON.stringify(value));
-        }
-        if (col.logicalType === 'jsonScalar') {
-            try { JSON.parse(value); return quote(value); } catch (_) { return quote('null'); }
-        }
+        if (['jsonScalarOptional', 'jsonPairOptional', 'jsonObjectOptional', 'jsonScalar'].includes(col.logicalType)) return quote('null');
         if (col.isObject) {
-            if (value !== undefined && value !== null && value !== '') return quote(typeof value === 'string' ? value : JSON.stringify(value));
             return quote(JSON.stringify(col.objectSchema ? schemaExample(col.objectSchema) : col.jsonKind === 'array' ? [] : {}));
-        }
-        if (col.logicalType === 'boolean' || typeof value === 'boolean') return value === true || value === 1 || value === 'true' || value === '1' ? '1' : '0';
-        if (value !== undefined && value !== null && value !== '') {
-            return typeof value === 'number' ? String(value) : quote(value);
         }
         if (col.enum && col.enum.length) {
             const selected = col.enum[0];
-            return typeof selected === 'number' ? String(selected) : quote(selected);
+            return typeof selected === 'number' ? String(selected) : typeof selected === 'boolean' ? selected ? '1' : '0' : quote(selected);
         }
+        if (col.logicalType === 'boolean') return '0';
         if (col.type === 'INTEGER' || col.type === 'REAL') return String(col.range ? col.range[0] : 0);
         return quote(`${col.zh || '字段'}示例`);
     }
@@ -514,21 +509,15 @@ function createTablePrompts(deps) {
                 const cols = [...parents, key, ...valueCols];
                 const vals = [
                     ...parents.map((p, i) => `'${ancestorDefs[i].entity || String(ancestorDefs[i].col).replace(/_键名$/, '')}键名'`),
-                    "'键名'", ...valueCols.map(c => exampleCellValue(c, c.value) || "'值'"),
+                    "'键名'", ...valueCols.map(c => exampleCellValue(c) || "'值'"),
                 ];
                 return `根据正文、设定与本表规则，对应${entity}记录中出现本表尚未记录的新${group.childKey || group.name}时添加；必须填写所有定位字段 ${keyNames}。\nSQL示例: INSERT INTO ${group.ident} (${cols.map(c => c.ident).join(', ')}) VALUES (${vals.join(', ')});`;
             }
             return `根据正文、设定与本表规则，对应${entity}记录中已有${group.childKey || group.name}不再属于其「${group.childKey || group.name}」数据时删除；WHERE 必须同时带${keyNames}。\nSQL示例: DELETE FROM ${group.ident} WHERE ${where};`;
         }
         const keyIdent = group.columns[0] ? group.columns[0].ident : 'key';
-        // 示例优先取卡内真实初始数据；没有初始值则用 DDL 默认值；TEXT 无默认值才退回“列名示例”
+        // UPDATE/DELETE 定位示例沿用已有记录；INSERT 使用新键占位和声明类型短示例。
         const sampleRow = group.rows && group.rows[0] ? group.rows[0] : null;
-        const sampleValue = (idx, fallback) => {
-            const col = group.columns[idx - 1];
-            const rowV = sampleRow ? sampleRow[idx] : undefined;
-            const v = exampleCellValue(col, rowV);
-            return v !== '' ? v : fallback;
-        };
         const keyValue = (sampleRow && sampleRow[1] !== undefined && String(sampleRow[1]) !== '')
             ? `'${sqlQuote(sampleRow[1])}'`
             : "'键名'";
@@ -547,9 +536,8 @@ function createTablePrompts(deps) {
             // 不写 row_id——新版数据库（SQLite 模式）内置自增，省略即可，AI 无需手算。
             const cols = allIdents;
             const vals = exampleCols.map((c, i) => {
-                if (i === 0) return keyValue;
-                const colIdx = group.columns.indexOf(c);
-                return sampleValue(colIdx + 1, `'值${i}'`);
+                if (i === 0) return "'键名'";
+                return exampleCellValue(c);
             });
             return `根据正文、设定与本表规则，出现本表尚未记录的新${group.keyCol}时添加完整记录。\nSQL示例: INSERT INTO ${group.ident} (${cols.join(', ')}) VALUES (${vals.join(', ')});`;
         }

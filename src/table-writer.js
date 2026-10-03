@@ -34,18 +34,20 @@ function createTableWriter(dependencies) {
             return ['pair', 'jsonPairOptional'].includes(type)
                 || (col[4] === true && ['number', 'boolean'].includes(type)) ? type : '';
         };
-        const pathParts = (s) => String(s || '').split('.');
+        // 操作路径始终保留字面段；记录键中的点号和空字符串不是路径语法。
+        const pathParts = path => Array.isArray(path) ? path : String(path || '').split('.');
+        const pathKey = path => JSON.stringify(pathParts(path));
         const tableEntryByPath = (pathStr) => {
             let best = null;
             const pp = pathParts(pathStr);
             for (const L of entries) {
                 if (L.kind === 'array') {
-                    if (pathStr === L.group) return { layout: L, kind: 'array' };
+                    if (pp.length === 1 && pp[0] === L.group) return { layout: L, kind: 'array' };
                     continue;
                 }
                 if (L.kind === 'pathArray') {
                     const prefix = L.path || [];
-                    if (pathStr === prefix.join('.')) return { layout: L, kind: L.kind, prefix };
+                    if (pp.length === prefix.length && prefix.every((part, i) => pp[i] === part)) return { layout: L, kind: L.kind, prefix };
                     continue;
                 }
                 if (L.kind === 'nestedArray') {
@@ -68,8 +70,7 @@ function createTableWriter(dependencies) {
                     continue;
                 }
                 const prefix = L.kind === 'singleton' ? [L.group] : ((L.writePaths || [])[0] || [L.group]);
-                const pre = prefix.join('.');
-                if (pathStr === pre || pathStr.indexOf(pre + '.') === 0) {
+                if (pp.length >= prefix.length && prefix.every((part, i) => pp[i] === part)) {
                     // 最长前缀优先：避免单例组遮蔽其子表路径（如 主角.储物袋.* 应路由到子表）
                     if (!best || prefix.length > best.prefix.length) best = { layout: L, kind: L.kind, prefix };
                 }
@@ -266,14 +267,14 @@ function createTableWriter(dependencies) {
                 const cp = Array.isArray(c[3]) && c[3].length ? c[3] : null;
                 if (!cp) continue;
                 if (L.kind === 'singleton') {
-                    pairPathTypes.set(cp.map(String).join('.'), c[1]);
+                    pairPathTypes.set(pathKey(cp.map(String)), c[1]);
                     continue;
                 }
                 // 行表：相对段接到每个 writePath 上，与 writer 解析出的单元格路径一致
                 // （如 关系.*.背包.*.效果.描述）。
                 const rel = cp[0] === entryPrefix[0] && cp.length >= entryPrefix.length ? cp.slice(entryPrefix.length) : cp;
                 for (const wp of (L.writePaths && L.writePaths.length ? L.writePaths : [entryPrefix])) {
-                    pairPathTypes.set([...wp.map(String), '*', ...rel.map(String)].join('.'), c[1]);
+                    pairPathTypes.set(pathKey([...wp.map(String), '*', ...rel.map(String)]), c[1]);
                 }
             }
         }
@@ -295,11 +296,11 @@ function createTableWriter(dependencies) {
         const declaredPairTypeOf = (entry, logicalPath) => {
             if (!entry || !entry.layout || !Array.isArray(logicalPath)) return '';
             if (entry.layout.kind === 'singleton') {
-                return pairPathTypes.get([entry.layout.group, ...logicalPath.map(String)].join('.')) || '';
+                return pairPathTypes.get(pathKey([entry.layout.group, ...logicalPath.map(String)])) || '';
             }
             // 行表/关系行表：登记键里带行键通配段（R.*.好感），与读取端同一套路径。
             const wp = (entry.layout.writePaths && entry.layout.writePaths[0]) || [entry.layout.group];
-            return pairPathTypes.get([...wp.map(String), '*', ...logicalPath.map(String)].join('.')) || '';
+            return pairPathTypes.get(pathKey([...wp.map(String), '*', ...logicalPath.map(String)])) || '';
         };
 
         const collapsePairLeaves = (stat) => {
@@ -323,20 +324,20 @@ function createTableWriter(dependencies) {
                 }
                 walkPath(node[token], parts, pos + 1);
             };
-            for (const pathStr of pairPathTypes.keys()) walkPath(out, pathStr.split('.'), 0);
+            for (const pathStr of pairPathTypes.keys()) walkPath(out, JSON.parse(pathStr), 0);
             return out;
         };
         let prevValueStat = null;
         let nextValueStat = null;
         const prevForValues = () => (prevValueStat || (prevValueStat = collapsePairLeaves(prevStat) || {}));
         const nextForValues = () => (nextValueStat || (nextValueStat = collapsePairLeaves(nextStat) || {}));
-        // 值单元格路径（"." 拼接，与 op.np 同一写法）→ 元数据写入内容。值路由会先把
+        // 字面路径段的序列化键 → 元数据写入内容。值路由会先把
         // [值, 说明] 折叠成值，因此按路径匹配而不是按叶子形状识别，任何一条 push 分支
         // 产生的单元格操作都能被正确附带说明。
         const vwdMetaByPath = new Map();
         const vwdPathOf = (layout, logicalPath) => {
             const wp = (layout.writePaths && layout.writePaths[0]) || [layout.group];
-            return [...wp, ...logicalPath].join('.');
+            return pathKey([...wp, ...logicalPath]);
         };
         for (const slot of vwdSlots) {
             if (!vwdMetaAfter.has(slot)) continue;
@@ -386,7 +387,7 @@ function createTableWriter(dependencies) {
             // 继续交给原有流程，不能因遍历 prevStat 就把整张行表当成空值更新。
             for (const k of Object.keys(prevObj || {})) {
                 if (Object.prototype.hasOwnProperty.call(nextObj || {}, k)) continue;
-                const np = pathStr ? pathStr + '.' + k : k;
+                const np = pathStr.concat(k);
                 const entry = tableEntryByPath(np);
                 if (!entry || !entry.prefix) continue;
                 let rel = pathParts(np).slice(entry.prefix.length);
@@ -400,9 +401,9 @@ function createTableWriter(dependencies) {
                 if (col) keys.push(k);
             }
             for (const k of keys) {
-                const np = pathStr ? pathStr + '.' + k : k;
+                const np = pathStr.concat(k);
                 const nv = nextObj[k];
-                const pv = prevObj ? prevObj[k] : undefined;
+                const pv = prevObj && Object.prototype.hasOwnProperty.call(prevObj, k) ? prevObj[k] : undefined;
                 const entry = tableEntryByPath(np);
                 if (entry && (entry.kind === 'array' || entry.kind === 'pathArray' || entry.kind === 'nestedArray')) {
                     ops.push({ np, entry, value: nv, replace: true });
@@ -419,8 +420,7 @@ function createTableWriter(dependencies) {
                     continue;
                 }
                 if (entry && (entry.kind === 'singleton' || entry.kind === 'rows' || entry.kind === 'nestedRows')) {
-                    const pre = entry.prefix.join('.');
-                    const rel = np === pre ? [] : np.slice(pre.length + 1).split('.');
+                    const rel = np.slice(entry.prefix.length);
                     const fIdx = (entry.kind === 'rows' || entry.kind === 'nestedRows') ? 1 : 0;
                     if (fIdx === 1 && rel.length === 1 && entry.layout.scalarValueCol) {
                         const col = (entry.layout.cols || []).find(c => c[0] === entry.layout.scalarValueCol && c[1] === 'jsonObjectOptional');
@@ -565,12 +565,12 @@ function createTableWriter(dependencies) {
                 }
             }
         };
-        collect(prevForValues(), nextForValues(), '');
+        collect(prevForValues(), nextForValues(), []);
         // 说明差量按完整路径贴到对应单元格操作上：说明变了而值没变时也返回真，
         // 阻止“值未变化 → 跳过写入”。
         for (const op of ops) {
             if (!op || op.kind || op.overflow || op.overflowRemove || op.replace || op.json) continue;
-            const hit = op.np && vwdMetaByPath.get(op.np);
+            const hit = op.np && vwdMetaByPath.get(pathKey(op.np));
             if (!hit) continue;
             op.vwdMetaCol = hit.col;
             op.vwdMetaValue = hit.value;
@@ -598,7 +598,7 @@ function createTableWriter(dependencies) {
             if (nextDict === undefined && Object.keys(prevDict).length > 0 && nextKeys.size === 0) continue;
             for (const k of Object.keys(prevDict)) {
                 if (!nextKeys.has(k)) {
-                    ops.push({ np: wp.concat([k]).join('.'), entry: { layout: L, kind: 'rows', prefix: wp }, kind: 'row-delete', rowKey: k });
+                    ops.push({ np: wp.concat([k]), entry: { layout: L, kind: 'rows', prefix: wp }, kind: 'row-delete', rowKey: k });
                 }
             }
         }
@@ -618,7 +618,7 @@ function createTableWriter(dependencies) {
                     const prefix = [...concrete, childName];
                     for (const rowKey of Object.keys(prevChild)) {
                         if (!nextKeys.has(rowKey)) ops.push({
-                            np: prefix.concat([rowKey]).join('.'),
+                            np: prefix.concat([rowKey]),
                             entry: { layout: L, kind: 'nestedRows', prefix, ancestorValues: ancestors.slice() },
                             kind: 'row-delete', rowKey, parentKey: ancestors[ancestors.length - 1], ancestorValues: ancestors.slice(),
                         });
@@ -640,8 +640,8 @@ function createTableWriter(dependencies) {
         const detectOverflowRemovals = (prevObj, nextObj, pathStr) => {
             if (!prevObj || typeof prevObj !== 'object' || Array.isArray(prevObj)) return;
             for (const k of Object.keys(prevObj)) {
-                const nextHas = nextObj && typeof nextObj === 'object' && !Array.isArray(nextObj) && k in nextObj;
-                const np = pathStr ? pathStr + '.' + k : k;
+                const nextHas = nextObj && typeof nextObj === 'object' && !Array.isArray(nextObj) && Object.prototype.hasOwnProperty.call(nextObj, k);
+                const np = pathStr.concat(k);
                 if (nextHas) {
                     const pv = prevObj[k];
                     const nv = nextObj[k];
@@ -652,8 +652,7 @@ function createTableWriter(dependencies) {
                 }
                 const entry = tableEntryByPath(np);
                 if (!entry || (entry.kind !== 'singleton' && entry.kind !== 'rows')) continue;
-                const pre = entry.prefix.join('.');
-                const rel = np === pre ? [] : np.slice(pre.length + 1).split('.');
+                const rel = np.slice(entry.prefix.length);
                 const fIdx = entry.kind === 'rows' ? 1 : 0;
                 // 仅“第一层未声明字段”整个消失时处理；整行删除由 row-delete 检测负责，
                 // 更深层子键消失由整对象写回覆盖。
@@ -684,7 +683,7 @@ function createTableWriter(dependencies) {
                 });
             }
         };
-        detectOverflowRemovals(prevForValues(), nextForValues(), '');
+        detectOverflowRemovals(prevForValues(), nextForValues(), []);
 
         // 说明变化但没有对应值单元格的 VWD 字段（例如该 pair 说明在此次写入里完全没有
         // 出现其它变化）：补一条只写内部元数据列的单元格操作。值列一并带上当前值，
@@ -699,7 +698,7 @@ function createTableWriter(dependencies) {
                 if (raw !== undefined) { current = raw; break; }
             }
             ops.push({
-                np: prefix.join('.'),
+                np: prefix.slice(),
                 entry: { layout: slot.layout, kind: 'singleton', prefix },
                 value: current,
                 prev: current,
@@ -840,10 +839,12 @@ function createTableWriter(dependencies) {
             if (!parts.length) return obj;
             let cur = obj;
             for (let i = 0; i < parts.length - 1; i++) {
-                if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) cur[parts[i]] = {};
+                if (!Object.prototype.hasOwnProperty.call(cur, parts[i]) || !cur[parts[i]] || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) {
+                    Object.defineProperty(cur, parts[i], { value: {}, enumerable: true, writable: true, configurable: true });
+                }
                 cur = cur[parts[i]];
             }
-            cur[parts[parts.length - 1]] = value;
+            Object.defineProperty(cur, parts[parts.length - 1], { value, enumerable: true, writable: true, configurable: true });
             return obj;
         };
         for (const op of ops) {
