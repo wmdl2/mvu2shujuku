@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.4.6';
+    const VERSION = '0.4.7';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -1500,47 +1500,22 @@
         return /^(?:\{\{format_message_variable(?:::[^{}]*)?\}\}|<status_current_variables?>\s*\{\{(?:format_message_variable|get_message_variable)::[^{}]+\}\}\s*<\/status_current_variables?>)$/i.test(replacement);
     }
 
-    function splitMvuOutputDocument(content) {
-        if (/<%|&lt;%/i.test(content)) return null;
+    function isMvuOutputDocument(content) {
+        if (/<%|&lt;%/i.test(content)) return false;
         try {
             const doc = getMvuYamlLibs().YAML.parseDocument(prepareMvuRuleYaml(String(content)), { merge: true });
-            if (doc.errors.length) return null;
+            if (doc.errors.length) return false;
             const value = doc.toJS();
-            if (!isPlainObject(value)) return null;
+            if (!isPlainObject(value)) return false;
             const keys = Object.keys(value);
-            if (keys.length === 1 && /^(?:format|格式)$/i.test(keys[0]) && typeof value[keys[0]] === 'string' && /^_\.set\s*\([^\n]+\)\s*;?\s*(?:\/\/[^\n]*)?$/.test(value[keys[0]].trim())) return { business: '' };
-            if (keys.length !== 1 || !/^(?:variables?_update_format|output_format|变量(?:输出(?:规则|格式)|更新格式)(?:强调)?)$/i.test(keys[0])) return null;
+            if (keys.length === 1 && /^(?:format|格式)$/i.test(keys[0]) && typeof value[keys[0]] === 'string' && /^_\.set\s*\([^\n]+\)\s*;?\s*(?:\/\/[^\n]*)?$/.test(value[keys[0]].trim())) return true;
+            if (keys.length !== 1 || !/^(?:variables?_update_format|output_format|变量(?:输出(?:规则|格式)|更新格式)(?:强调)?)$/i.test(keys[0])) return false;
             const node = value[keys[0]];
-            if (!isPlainObject(node)) return null;
+            if (!isPlainObject(node)) return false;
             const formatKeys = Object.keys(node).filter(k => /^(?:format|output_format|格式)$/i.test(k));
-            if (!formatKeys.length || formatKeys.some(k => typeof node[k] !== 'string' || !/^\s*(?:<(?:UpdateVariable|status_current_variables?)\b|_\.set\s*\()/i.test(node[k]))) return null;
-            // 仅移除完整、已知的协议定义。关键词命中不能证明业务规则可删。
-            const protocolRule = rule => {
-                if (typeof rule === 'string') return /^(?:You MUST output the update analysis and the actual update commands at once in the end of the next reply|The following must be inserted to the end of reply, and cannot be omitted)[.!]?$/i.test(rule.trim());
-                if (!isPlainObject(rule) || Object.keys(rule).length !== 1) return false;
-                const [title, operations] = Object.entries(rule)[0];
-                if (!/^The update commands? works? like the \*\*JSON Patch \(RFC 6902\)\*\* standard, must be a valid JSON array containing operation objects, but supports the following operations instead$/i.test(title) || !Array.isArray(operations)) return false;
-                return operations.every(op => {
-                    if (typeof op === 'string') return /^(?:remove|move)$/.test(op);
-                    if (!isPlainObject(op) || Object.keys(op).length !== 1) return false;
-                    const [name, text] = Object.entries(op)[0];
-                    const definitions = {
-                        replace: /^replace the value of existing paths$/i,
-                        delta: /^update the value of existing number paths by a delta value \(the delta value MUST be a number without quotes\)$/i,
-                        insert: /^insert new items into an object or array \(using `-` as array index intends appending to the end\)$/i,
-                    };
-                    return typeof text === 'string' && !!definitions[name]?.test(text.trim());
-                });
-            };
-            const remaining = {};
-            for (const [key, child] of Object.entries(node)) {
-                if (formatKeys.includes(key)) continue;
-                if (/^(?:rules?|check|note|规则)$/i.test(key) && protocolRule(child)) continue;
-                const rules = /^(?:rules?|check|note|规则)$/i.test(key) && Array.isArray(child) ? child.filter(rule => !protocolRule(rule)) : child;
-                if (!Array.isArray(rules) || rules.length) remaining[key] = rules;
-            }
-            return { business: Object.keys(remaining).length ? getMvuYamlLibs().YAML.stringify(remaining).trim() : '' };
-        } catch (_) { return null; }
+            // 完整输出文档由填表宿主接管；不拆出普通世界书条目重新注入正文。
+            return formatKeys.length > 0 && formatKeys.every(k => typeof node[k] === 'string' && /^\s*(?:<(?:UpdateVariable|status_current_variables?)\b|_\.set\s*\()/i.test(node[k]));
+        } catch (_) { return false; }
     }
 
     function isPureMvuOutputMarkup(content) {
@@ -1549,7 +1524,7 @@
         return text !== content && text.split('\n').every(line => !line.trim() || /^(?:---|每轮必须输出变量更新[。.!]?)$/u.test(line.trim()));
     }
 
-    function isPureMvuRuleDocument(content, migratedRules) {
+    function isPureMvuRuleDocument(content) {
         if (/<%|&lt;%/i.test(content)) return false;
         try {
             const clean = String(content).replace(/<!--[\s\S]*?-->/g, '');
@@ -1558,26 +1533,99 @@
             const value = doc.toJS();
             if (!isPlainObject(value)) return false;
             if (Object.keys(value).some(k => /^(?:variables?_update_format|output_format|变量(?:输出(?:规则|格式)|更新格式)(?:强调)?)$/i.test(k))) return false;
-            // 可解析不等于已迁移。无法定位的业务 check/note 必须保留在原条目，不能静默删除。
-            if (migratedRules !== undefined) {
-                const seen = new Set();
-                const covered = node => {
-                    if (!node || typeof node !== 'object' || seen.has(node)) return true;
-                    seen.add(node);
-                    for (const [key, child] of Object.entries(node)) {
-                        if (key === 'check' || key === 'note') {
-                            if (getSchemaLayout().yamlCheckItems(child).some(text => !migratedRules.has(text))) return false;
-                        } else if (!covered(child)) return false;
-                    }
-                    return true;
-                };
-                if (!covered(value)) return false;
-            }
             const keys = Object.keys(value);
             const wrapper = keys.find(k => k === '变量更新规则' || k === 'variables_update_rules');
             if (wrapper) return keys.length === 1 && isPlainObject(value[wrapper]);
             return keys.length > 0 && keys.every(k => isPlainObject(value[k])) && /(?:^|\n)[ \t]+(?:type|range|check|format)\s*:/m.test(clean);
         } catch (e) { return false; }
+    }
+
+    function splitMigratedMvuRules(content, schema) {
+        if (!isPureMvuRuleDocument(content)) return null;
+        try {
+            const YAML = getMvuYamlLibs().YAML;
+            const doc = YAML.parseDocument(prepareMvuRuleYaml(content), { merge: true });
+            if (doc.errors.length) return null;
+            const value = doc.toJS();
+            const wrapper = Object.keys(value).find(k => k === '变量更新规则' || k === 'variables_update_rules');
+            const rules = wrapper ? value[wrapper] : value;
+            const metadata = new Set(['type', 'range', 'format', 'enum']);
+            const normalize = path => (Array.isArray(path) ? path : String(path || '').split('.'))
+                .flatMap(seg => String(seg).split('.')).filter(seg => seg && !/^<[^>]+>$|^\$\{[^|}]+\}$|^\[[^\]]+\]$/.test(seg));
+            const matches = (source, target) => {
+                const a = normalize(source), b = normalize(target);
+                return a.length > 0 && a.length <= b.length && a.every((seg, i) => {
+                    const choices = /^\$\{.*\}$/.test(seg) ? seg.slice(2, -1).split('|').map(s => s.trim()) : [seg];
+                    return choices.includes(b[b.length - a.length + i]);
+                });
+            };
+            const coverage = path => {
+                const texts = new Set();
+                for (const group of schema) {
+                    for (const column of group.columns || []) {
+                        if (matches(path, column.path || [])) (column.check || []).forEach(text => texts.add(text));
+                    }
+                    const paths = group.writePaths && group.writePaths.length ? group.writePaths : [[group.parentGroup || group.name]];
+                    const tablePaths = [...paths, ...(group.columns || []).map(c => (c.path || []).slice(0, -1))];
+                    if (tablePaths.some(target => matches(path, target))) {
+                        (group.groupChecks || []).forEach(text => texts.add(text));
+                    }
+                    for (const rule of group.wildcardRules || []) {
+                        // wildcardRules 的相对路径由所属组提供根；不能跨组只按文本确认。
+                        const rootedPath = [group.parentGroup || group.name, ...normalize(rule.path)];
+                        if (matches(path, rule.path) || matches(path, rootedPath)) (rule.checks || []).forEach(text => texts.add(text));
+                    }
+                }
+                return texts;
+            };
+            const seen = new Set();
+            let removed = 0;
+            function prune(node, path) {
+                if (!isPlainObject(node)) return node;
+                // YAML 别名共享/循环节点不能按单一路径拆分，整条保守保留。
+                if (seen.has(node)) throw new Error('shared rule node');
+                seen.add(node);
+                const out = {}, covered = coverage(path);
+                const before = removed;
+                for (const [key, child] of Object.entries(node)) {
+                    if (key === 'check' || key === 'note') {
+                        const list = Array.isArray(child) ? child : [child];
+                        const kept = list.filter(item => {
+                            const texts = getSchemaLayout().yamlCheckItems(item);
+                            const migrated = texts.length > 0 && texts.every(text => covered.has(text));
+                            if (migrated) removed += texts.length;
+                            return !migrated;
+                        });
+                        if (kept.length) out[key] = Array.isArray(child) ? kept : kept[0];
+                    } else if (metadata.has(key)) out[key] = child;
+                    else {
+                        const remaining = prune(child, [...path, key]);
+                        if (remaining !== undefined) out[key] = remaining;
+                    }
+                }
+                // 只有实际移除了已承接规则，才收起其附属声明；未知字段/说明仍保留。
+                if (removed > before && Object.keys(out).every(key => metadata.has(key))) return undefined;
+                return out;
+            }
+            const remaining = {};
+            for (const [key, node] of Object.entries(rules)) {
+                const rest = prune(node, [key]);
+                if (rest !== undefined) remaining[key] = rest;
+            }
+            if (!removed) return { removed: 0, content };
+            const empty = Object.keys(remaining).length === 0;
+            function updateDocument(original, rest, path) {
+                for (const key of Object.keys(original)) {
+                    const nextPath = [...path, key];
+                    if (!Object.prototype.hasOwnProperty.call(rest, key)) doc.deleteIn(nextPath);
+                    else if (isPlainObject(original[key]) && key !== 'check' && key !== 'note' && !metadata.has(key)) {
+                        updateDocument(original[key], rest[key], nextPath);
+                    } else if (JSON.stringify(original[key]) !== JSON.stringify(rest[key])) doc.setIn(nextPath, rest[key]);
+                }
+            }
+            if (!empty) updateDocument(rules, remaining, wrapper ? [wrapper] : []);
+            return { removed, content: empty ? '' : doc.toString({ lineWidth: 0 }) };
+        } catch (e) { return null; }
     }
 
     // 这类正则不负责运行 MVU，只在显示/提示词阶段把原始更新块隐藏或折叠起来。
@@ -2336,11 +2384,6 @@
                 return rest ? `（数据库表「${table}」的「${rest}」）` : `（数据库表「${table}」）`;
             });
         }
-        const migratedRuleTexts = new Set(schema.flatMap(g => [
-            ...(g.groupChecks || []), ...(g.reminders || []),
-            ...(g.wildcardRules || []).flatMap(rule => rule.checks || []),
-            ...(g.columns || []).flatMap(column => column.check || []),
-        ]));
         for (const e of entries) {
             const comment = String(e.comment || '');
             const content = String(e.content || '');
@@ -2369,35 +2412,32 @@
             // 纯符号 marker；不再用“少于 60 字”猜测，避免删掉 lastUserMessage 等短上下文。
             const purePipelineMarker = explicitUpdateEntry && /变量|更新|输出/i.test(comment) &&
                 /^\s*[🔻🔺▼▲↓↑⬇⬆⏬⏫─━—_=*#.:;\-]+\s*$/u.test(content);
-            const outputParts = !isPlot && (explicitUpdateEntry || dedicatedOutputEntry) && outputProtocolContent ? splitMvuOutputDocument(content) : null;
-            if (!isInit && outputParts && outputParts.business) {
-                const copy = deepClone(e);
-                copy.comment = comment + '（保留数据约束）';
-                copy.content = rewritePlotMacros('数据更新约束（更新格式遵循数据库模板）：\n' + outputParts.business);
-                newEntries.push(copy);
-                report.note(`条目「${comment}」的旧输出格式已移除，数据约束保留为独立说明。`);
-                continue;
-            }
+            const outputDocument = !isPlot && (explicitUpdateEntry || dedicatedOutputEntry) && outputProtocolContent && isMvuOutputDocument(content);
+            const splitRules = !isPlot && (dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent
+                ? splitMigratedMvuRules(content, schema) : null;
             const isMvuUpdate = !isPlot && (
                 (explicitUpdateEntry && (!String(content).trim() || purePipelineMarker)) ||
-                ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent && isPureMvuRuleDocument(content, migratedRuleTexts)) ||
+                (splitRules && !splitRules.content) ||
                 // 输出文档必须是完整专名；有 EJS 的混合业务不能凭名称删除。
-                (!!outputParts && !outputParts.business) ||
+                outputDocument ||
                 (dedicatedOutputEntry && isPureMvuOutputMarkup(content)) ||
                 // 教程中 comment 可任意命名；整个正文只有变量快照标签时仍是纯输出管线。
                 pureStatusOutput);
             if (isInit || isMvuUpdate) {
-                report.note(`已删除 MVU 世界书条目「${comment}」（${isInit ? '初始变量' : '更新规则'}已迁移为数据库模板/规则）。`);
+                report.note(`已删除 MVU 世界书条目「${comment}」（${isInit ? '初始变量已迁移为数据库模板' : outputDocument ? '输出格式由数据库宿主填表协议接管，不再注入正文' : '更新规则已迁移为数据库模板/规则'}）。`);
                 continue;
             }
-            if ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent) {
+            if (splitRules) {
+                if (splitRules.removed) report.note(`规则条目「${comment}」已移除 ${splitRules.removed} 项迁入表格说明的规则，仅保留未承接内容。`);
+                report.warn(`规则条目「${comment}」剩余内容未迁入填表侧，保留原条目中的未承接部分，仍按原世界书设置注入；请核对是否保留。`, 'schema');
+            } else if ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent) {
                 report.warn(`规则条目「${comment}」无法确认为完整静态规则文档，已保留原条目；已提取的规则可能不完整，请核对后决定是否停用原条目。`, 'schema');
             }
             if (!isPlot && /<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]/i.test(content)) {
                 report.note(`世界书条目「${comment}」同时含剧情/EJS 与 MVU 更新块，已完整保留；更新块由数据桥在运行时解析。`);
             }
             // EJS 重写
-            const rw = rewriteEjsConditions(content, layout, report, {
+            const rw = rewriteEjsConditions(splitRules ? splitRules.content : content, layout, report, {
                 translateSimpleEjs: !!opts.translateSimpleEjs,
             });
             if (rw.items.length) {
