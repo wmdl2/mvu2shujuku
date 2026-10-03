@@ -13,6 +13,61 @@ function setup(factory = createRuntimeGlobals, existing = { list: [] }) {
     return { shared, globals };
 }
 
+test('runtime globals：旧版本事件兜底没有清理句柄也能撤销，不阻断还原', () => {
+    const eventOn = () => {}, eventOff = () => {};
+    eventOn.__mvu2shujukuFallback = eventOff.__mvu2shujukuFallback = true;
+    const w = { eventOn, eventOff }, record = { w };
+    const { shared, globals } = setup(createRuntimeGlobals, { list: [record] });
+    globals.restoreAll();
+    assert.strictEqual(w.eventOn, undefined);
+    assert.strictEqual(w.eventOff, undefined);
+    assert.strictEqual(shared.originalsByWindow.has(w), false);
+});
+
+test('runtime globals：同一 WindowProxy 导航按文档重新记录，离线还原不污染新文档', () => {
+    const { globals, shared } = setup(vm.runInNewContext('(' + createRuntimeGlobals.toString() + ')'));
+    const first = () => 1, second = () => 2;
+    const w = { document: {}, getVariables: first };
+    globals.note(w); w.getVariables = shim();
+    w.document = {}; w.getVariables = second;
+    const next = globals.note(w);
+    assert.strictEqual(next.get, second);
+    assert.strictEqual(shared.list.length, 1);
+    w.getVariables = shim(); globals.restoreAll();
+    assert.strictEqual(w.getVariables, second);
+    globals.note(w); w.getVariables = shim();
+    w.document = {}; w.getVariables = first;
+    globals.restoreAll();
+    assert.strictEqual(w.getVariables, first);
+});
+
+test('runtime globals：安全发布 Mvu，保留助手只读 getter 并恢复被替换的属性描述符', () => {
+    const { globals } = setup(vm.runInNewContext('(' + createRuntimeGlobals.toString() + ')'));
+    const fake = { __mvu2shujukuFake: true }, real = { owner: 'native' };
+    const w = { document: {} }, getter = () => fake;
+    Object.defineProperty(w, 'Mvu', { configurable: true, get: getter });
+    assert.strictEqual(globals.publishMvu(w, fake), true);
+    globals.restoreAll();
+    assert.strictEqual(Object.getOwnPropertyDescriptor(w, 'Mvu').get, getter);
+    const original = { configurable: true, enumerable: false, get: () => real };
+    Object.defineProperty(w, 'Mvu', original);
+    assert.strictEqual(globals.publishMvu(w, fake), true);
+    assert.strictEqual(w.Mvu, fake);
+    globals.restoreAll();
+    assert.strictEqual(Object.getOwnPropertyDescriptor(w, 'Mvu').get, original.get);
+    assert.strictEqual(w.Mvu, real);
+    globals.publishMvu(w, fake);
+    const later = () => real;
+    Object.defineProperty(w, 'Mvu', { configurable: true, get: later });
+    globals.restoreAll();
+    assert.strictEqual(Object.getOwnPropertyDescriptor(w, 'Mvu').get, later);
+    const fixed = {};
+    Object.defineProperty(fixed, 'Mvu', { get: () => real });
+    assert.strictEqual(globals.publishMvu(fixed, fake), false);
+    globals.restoreAll();
+    assert.strictEqual(fixed.Mvu, real);
+});
+
 test('runtime globals：内联工厂隔离，窗口反复重建时共享 list 只保留当前窗口', () => {
     const factory = vm.runInNewContext('(' + createRuntimeGlobals.toString() + ')');
     const { shared, globals } = setup(factory);

@@ -3736,7 +3736,7 @@ test('SQL 示例 VALUES 数量与列数一致', () => {
     assert.ok(checked >= 3, `应至少检查 3 张表的 INSERT 示例（实际 ${checked}）`);
 });
 
-test('INSERT 示例优先用卡内真实初始值，空表退回列名占位', () => {
+test('INSERT 示例使用短值而不复制真实初始记录，空表保留键名示例', () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3758,7 +3758,8 @@ test('INSERT 示例优先用卡内真实初始值，空表退回列名占位', (
     };
     const r = core.convert(card, { mode: 'sqlite' });
     const ins = Object.values(r.template).find(s => s && s.name === '道侣表').sourceData.insertNode;
-    assert.ok(ins.includes("VALUES ('林若悠', 88"), ins);
+    assert.ok(ins.includes("VALUES ('键名', 0, '{}')"), ins);
+    assert.ok(!ins.includes('林若悠') && !ins.includes('周三'), ins);
     // 空表（无初始条目）的示例应使用“列中文名示例”占位，而不是凭空的值
     const card2 = {
         spec: 'chara_card_v3',
@@ -4005,7 +4006,7 @@ test('无 MVU 前缀的专用变量规则/处理指令条目被迁移删除，�
     assert.ok(worldSheet && worldSheet.sourceData.note.includes('时间流逝后更新'), '删除世界书规则前必须先把约束迁移进数据库表备注');
 });
 
-test('实际 Zod 卡：保留解析不完整的规则与系统主控 EJS，移除专用输出协议', () => {
+test('实际 Zod 卡：保留解析不完整的规则、混合业务指令与系统主控 EJS', () => {
     const actualPath = '/mnt/e/Download/MVU_Zod-.png';
     if (!fs.existsSync(actualPath)) {
         console.log('    （跳过：缺少实际 Zod 卡）');
@@ -4015,7 +4016,9 @@ test('实际 Zod 卡：保留解析不完整的规则与系统主控 EJS，移�
     const data = result.card.data || result.card;
     const comments = data.character_book.entries.map(entry => String(entry.comment || ''));
     assert.ok(comments.includes('变量更新规则'), '实际卡规则含非法 YAML，不能因回退提取了部分规则就删除原文');
-    assert.ok(!comments.includes('变量处理指令集'), '实际卡的旧 JSONPatch 输出协议应移除');
+    const mixed = data.character_book.entries.find(entry => entry.comment === '变量处理指令集');
+    assert.ok(mixed, '该条同时含每日限额与日期重置规则，不能当作纯输出协议整条删除');
+    assert.ok(mixed.content.includes('基础更新规则') && mixed.content.includes('强制限制'), '混合条目中的业务规则须保留');
     assert.ok(comments.includes('系统主控脚本[EJS]'), '实际卡的剧情/校验主控脚本应保留');
     assert.ok(result.meta.tableNames.includes('李慕雪表') && result.meta.tableNames.includes('沈煜表'), '实际卡规则迁移后仍应生成角色表');
 });

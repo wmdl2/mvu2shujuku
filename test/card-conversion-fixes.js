@@ -230,3 +230,20 @@ test('删除边界：显式更新标记不能删除混合业务，无法完整�
     const entries = (result.card.data || result.card).character_book.entries;
     for (const e of card.character_book.entries.filter(e => e.comment !== '[InitVar]')) assert.ok(entries.some(x => x.comment === e.comment), e.comment);
 });
+
+test('删除边界：专名变量处理指令集含限额业务时保留，纯输出标签仍删除', () => {
+    const business = '积分每次最多增加 2 点；日期变化时先清零今日增量。';
+    const output = '<UpdateVariable><JSONPatch>[]</JSONPatch></UpdateVariable>';
+    const card = input('', { 状态: { 积分: 0, 今日增量: 0 } });
+    card.character_book.entries.push(
+        { comment: '变量处理指令集', enabled: true, content: '**业务规则：**\n' + business + '\n\n' + output },
+        { comment: '变量输出格式', enabled: true, content: output });
+    for (const mode of ['native', 'sqlite', 'both']) {
+        const result = core.convert(card, { mode });
+        const entries = (result.card.data || result.card).character_book.entries;
+        const mixed = entries.find(e => e.comment === '变量处理指令集');
+        assert.ok(mixed && mixed.content.includes(business), mode + ' 保留未承接的业务限额');
+        assert.strictEqual(mixed.enabled, true);
+        assert.ok(!entries.some(e => e.comment === '变量输出格式'), mode + ' 删除纯输出标签');
+    }
+});
