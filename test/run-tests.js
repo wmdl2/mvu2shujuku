@@ -643,7 +643,7 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     assert.ok(hub.sourceData.updateNode.includes('未列出字段一律只读'), 'JSON 表 updateNode 应包含只读守卫');
     assert.ok(hub.sourceData.note.includes('json_set'), 'JSON 表有可写规则时应提供 SQL 路径更新说明');
     assert.ok(!hub.sourceData.updateNode.includes('可写键名'), '不能用虚构键名的残缺 JSON 覆盖整组');
-    assert.ok(hub.sourceData.updateNode.includes('row_id=1'), 'JSON 表更新守卫应明确固定 row_id=1');
+    assert.ok(hub.sourceData.updateNode.includes('只允许更新现有记录，禁止新增或删除行'), 'JSON 表更新守卫限制业务操作，不固定协议行号');
     assert.ok(hub.sourceData.ddl.includes('CHECK(json_valid(neirong))'), 'JSON 表内容列应有 json_valid CHECK（SQLite 模式生效）');
     const cash = Object.values(r.template).find(s => s && s.name === '现金表');
     assert.ok(cash.sourceData.note.includes('数值发生明确变化时按需更新'), '公开顶层数值缺少专用规则时仍可按剧情更新');

@@ -4,6 +4,7 @@
 
 | 当前问题 | 入口 |
 | --- | --- |
+| 双模式业务说明与宿主输出协议的职责分工 | [表格协议说明验证](validation/2026-10-03-table-protocol-notes.md) |
 | 有限字段绑定、完整 YAML 路径、数组/关联及输出约束保留 | [复杂声明验证](validation/2026-10-03-finite-field-bindings.md) |
 | 龙血玄黄·数据库改名、版本重新编号与新版宿主兼容 | [新版兼容验证](validation/2026-10-01-nailong-database.md) |
 | 顶层固定对象误判、深层空字典类型与规则保留 | [声明路径验证](validation/2026-10-01-declared-container-paths.md) |

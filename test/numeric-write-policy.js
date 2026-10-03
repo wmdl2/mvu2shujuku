@@ -17,7 +17,7 @@ test('顶层数值：无规则与对象内数值默认可写，私有数值只�
     const sqlite = sheets('sqlite').byName;
     for (const name of ['counter表', 'obj表']) {
         assert.match(native[name].sourceData.updateNode, /根据正文、设定与本表规则/);
-        assert.match(native[name].sourceData.updateNode, /只允许 UPDATE/);
+        assert.match(native[name].sourceData.updateNode, /禁止新增或删除记录/);
     }
     assert.match(native['counter表'].sourceData.initNode, /根据正文、设定与 note 按需更新/);
     for (const name of ['_counter表', '$counter表']) {
@@ -25,7 +25,7 @@ test('顶层数值：无规则与对象内数值默认可写，私有数值只�
         assert.doesNotMatch(native[name].sourceData.updateNode, /SQL示例/);
         assert.match(native[name].sourceData.initNode, /脚本\/前端维护，自动填表阶段不修改/);
     }
-    assert.strictEqual(native['counter表'].sourceData.note, sqlite['counter表'].sourceData.note.replace(/\nSQL 示例仅演示写法[^\n]*$/, ''));
+    assert.strictEqual(native['counter表'].sourceData.note, sqlite['counter表'].sourceData.note.replace(/\nSQL 示例[^\n]*$/, ''));
     assert.strictEqual(native['counter表'].sourceData.updateNode, sqlite['counter表'].sourceData.updateNode.split('\nSQL示例:')[0]);
 });
 
