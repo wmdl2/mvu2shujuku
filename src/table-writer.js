@@ -495,7 +495,7 @@ function createTableWriter(dependencies) {
                             let isFlattened = false;
                             for (const L2 of entries) {
                                 if (L2 === entry.layout) continue;
-                                const wp = (L2.writePaths || [])[0];
+                                const wp = (L2.writePaths || [])[0] || L2.path;
                                 if (Array.isArray(wp) && wp.length >= 2 && wp[0] === groupName0 && wp[1] === fld) { isChildGroup = true; break; }
                             }
                             if (!isChildGroup) {
@@ -666,7 +666,7 @@ function createTableWriter(dependencies) {
                 const childGroupKeys = new Set();
                 for (const L2 of entries) {
                     if (L2 === entry.layout) continue;
-                    const wp = (L2.writePaths || [])[0];
+                    const wp = (L2.writePaths || [])[0] || L2.path;
                     if (Array.isArray(wp) && wp.length >= 2 && wp[0] === groupName) childGroupKeys.add(wp[1]);
                 }
                 const flattenedContainers = new Set();

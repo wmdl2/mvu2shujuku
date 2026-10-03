@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.4.4';
+    const VERSION = '0.4.5';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -1501,6 +1501,55 @@
         return /^(?:\{\{format_message_variable(?:::[^{}]*)?\}\}|<status_current_variables?>\s*\{\{(?:format_message_variable|get_message_variable)::[^{}]+\}\}\s*<\/status_current_variables?>)$/i.test(replacement);
     }
 
+    function splitMvuOutputDocument(content) {
+        if (/<%|&lt;%/i.test(content)) return null;
+        try {
+            const doc = getMvuYamlLibs().YAML.parseDocument(prepareMvuRuleYaml(String(content)), { merge: true });
+            if (doc.errors.length) return null;
+            const value = doc.toJS();
+            if (!isPlainObject(value)) return null;
+            const keys = Object.keys(value);
+            if (keys.length === 1 && /^(?:format|格式)$/i.test(keys[0]) && typeof value[keys[0]] === 'string' && /^_\.set\s*\([^\n]+\)\s*;?\s*(?:\/\/[^\n]*)?$/.test(value[keys[0]].trim())) return { business: '' };
+            if (keys.length !== 1 || !/^(?:variables?_update_format|output_format|变量(?:输出(?:规则|格式)|更新格式)(?:强调)?)$/i.test(keys[0])) return null;
+            const node = value[keys[0]];
+            if (!isPlainObject(node)) return null;
+            const formatKeys = Object.keys(node).filter(k => /^(?:format|output_format|格式)$/i.test(k));
+            if (!formatKeys.length || formatKeys.some(k => typeof node[k] !== 'string' || !/^\s*(?:<(?:UpdateVariable|status_current_variables?)\b|_\.set\s*\()/i.test(node[k]))) return null;
+            // 仅移除完整、已知的协议定义。关键词命中不能证明业务规则可删。
+            const protocolRule = rule => {
+                if (typeof rule === 'string') return /^(?:You MUST output the update analysis and the actual update commands at once in the end of the next reply|The following must be inserted to the end of reply, and cannot be omitted)[.!]?$/i.test(rule.trim());
+                if (!isPlainObject(rule) || Object.keys(rule).length !== 1) return false;
+                const [title, operations] = Object.entries(rule)[0];
+                if (!/^The update commands? works? like the \*\*JSON Patch \(RFC 6902\)\*\* standard, must be a valid JSON array containing operation objects, but supports the following operations instead$/i.test(title) || !Array.isArray(operations)) return false;
+                return operations.every(op => {
+                    if (typeof op === 'string') return /^(?:remove|move)$/.test(op);
+                    if (!isPlainObject(op) || Object.keys(op).length !== 1) return false;
+                    const [name, text] = Object.entries(op)[0];
+                    const definitions = {
+                        replace: /^replace the value of existing paths$/i,
+                        delta: /^update the value of existing number paths by a delta value \(the delta value MUST be a number without quotes\)$/i,
+                        insert: /^insert new items into an object or array \(using `-` as array index intends appending to the end\)$/i,
+                    };
+                    return typeof text === 'string' && !!definitions[name]?.test(text.trim());
+                });
+            };
+            const remaining = {};
+            for (const [key, child] of Object.entries(node)) {
+                if (formatKeys.includes(key)) continue;
+                if (/^(?:rules?|check|note|规则)$/i.test(key) && protocolRule(child)) continue;
+                const rules = /^(?:rules?|check|note|规则)$/i.test(key) && Array.isArray(child) ? child.filter(rule => !protocolRule(rule)) : child;
+                if (!Array.isArray(rules) || rules.length) remaining[key] = rules;
+            }
+            return { business: Object.keys(remaining).length ? getMvuYamlLibs().YAML.stringify(remaining).trim() : '' };
+        } catch (_) { return null; }
+    }
+
+    function isPureMvuOutputMarkup(content) {
+        if (/<%|&lt;%/i.test(content)) return false;
+        const text = String(content).replace(/<status_current_variables?>[\s\S]*?<\/status_current_variables?>|<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gi, '');
+        return text !== content && text.split('\n').every(line => !line.trim() || /^(?:---|每轮必须输出变量更新[。.!]?)$/u.test(line.trim()));
+    }
+
     function isPureMvuRuleDocument(content, migratedRules) {
         if (/<%|&lt;%/i.test(content)) return false;
         try {
@@ -1509,6 +1558,7 @@
             if (doc.errors && doc.errors.length) return false;
             const value = doc.toJS();
             if (!isPlainObject(value)) return false;
+            if (Object.keys(value).some(k => /^(?:variables?_update_format|output_format|变量(?:输出(?:规则|格式)|更新格式)(?:强调)?)$/i.test(k))) return false;
             // 可解析不等于已迁移。无法定位的业务 check/note 必须保留在原条目，不能静默删除。
             if (migratedRules !== undefined) {
                 const seen = new Set();
@@ -2320,11 +2370,21 @@
             // 纯符号 marker；不再用“少于 60 字”猜测，避免删掉 lastUserMessage 等短上下文。
             const purePipelineMarker = explicitUpdateEntry && /变量|更新|输出/i.test(comment) &&
                 /^\s*[🔻🔺▼▲↓↑⬇⬆⏬⏫─━—_=*#.:;\-]+\s*$/u.test(content);
+            const outputParts = !isPlot && (explicitUpdateEntry || dedicatedOutputEntry) && outputProtocolContent ? splitMvuOutputDocument(content) : null;
+            if (!isInit && outputParts && outputParts.business) {
+                const copy = deepClone(e);
+                copy.comment = comment + '（保留数据约束）';
+                copy.content = rewritePlotMacros('数据更新约束（更新格式遵循数据库模板）：\n' + outputParts.business);
+                newEntries.push(copy);
+                report.note(`条目「${comment}」的旧输出格式已移除，数据约束保留为独立说明。`);
+                continue;
+            }
             const isMvuUpdate = !isPlot && (
                 (explicitUpdateEntry && (!String(content).trim() || purePipelineMarker)) ||
                 ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent && isPureMvuRuleDocument(content, migratedRuleTexts)) ||
                 // 输出文档必须是完整专名；有 EJS 的混合业务不能凭名称删除。
-                (dedicatedOutputEntry && outputProtocolContent && !/<%|&lt;%/i.test(content)) ||
+                (!!outputParts && !outputParts.business) ||
+                (dedicatedOutputEntry && isPureMvuOutputMarkup(content)) ||
                 // 教程中 comment 可任意命名；整个正文只有变量快照标签时仍是纯输出管线。
                 pureStatusOutput);
             if (isInit || isMvuUpdate) {

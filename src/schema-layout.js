@@ -104,6 +104,36 @@ function createSchemaLayout(dependencies) {
             }
             return [...new Set(out.filter(x => /^[\u4e00-\u9fffA-Za-z_$][\u4e00-\u9fffA-Za-z0-9_$-]{0,63}$/.test(x)))];
         }
+
+    // 同节点显式绑定只表达有限的字段名；未绑定的占位符仍表达运行期条目键。
+    function bindYamlTemplateKey(key, val) {
+            const bindings = new Set();
+            const source = String(key).replace(/\$\{([^{}]+)\}/g, (token, name) => {
+                if (!val || typeof val !== 'object' || !Object.prototype.hasOwnProperty.call(val, name)) return token;
+                const binding = val[name];
+                const choices = Array.isArray(binding) ? binding : typeof binding === 'string' ? binding.split(/[|/]/) : [];
+                if (choices.some(x => typeof x !== 'string')) return token;
+                const names = [...new Set(choices.map(x => x.trim()))];
+                if (!names.length || names.length > 64 || names.some(x => !isSchemaFieldName(x))) return token;
+                bindings.add(name);
+                return names.length === 1 ? names[0] : '${' + names.join('|') + '}';
+            });
+            return { key: source, bindings };
+        }
+
+    function registerYamlTypePath(acc, path, node) {
+            if (!node || !Array.isArray(path) || !path.length) return;
+            acc.yamlTypePaths.push({ path: path.filter(part => part !== '*' && !/^<[^>]+>$|^\$\{[^|/}]+\}$/.test(part)), node });
+            const walk = (schema, parts) => {
+                if (!schema || schema.kind !== 'object') return;
+                if (schema.dynamic) {
+                    acc.dynamicPaths.add(parts.join('.'));
+                    walk(schema.value, [...parts, '*']);
+                }
+                for (const [field, child] of Object.entries(schema.fields || {})) walk(child, [...parts, field]);
+            };
+            walk(node, path);
+        }
     
     function protectYamlTemplateScalarValues(content) {
             return String(content || '').replace(
@@ -179,6 +209,7 @@ function createSchemaLayout(dependencies) {
                         if (/[\[{]/.test(gts)) {
                             const gparsed = parseShapeString(gts);
                             if (gparsed) {
+                                registerYamlTypePath(acc, pathArr, gparsed.schema);
                                 acc.shapes[group] = acc.shapes[group] || [];
                                 const gFields = (gparsed.topFields && gparsed.topFields.length) ? gparsed.topFields : gparsed.fields;
                                 for (const f2 of gFields) if (!acc.shapes[group].includes(f2)) acc.shapes[group].push(f2);
@@ -205,9 +236,14 @@ function createSchemaLayout(dependencies) {
                         acc.allCheckItems.push(...items);
                         if (items.length) acc.groupChecks[group] = [...new Set([...(acc.groupChecks[group] || []), ...items])];
                     }
-                    for (const key of Object.keys(node)) {
+                    for (const rawKey of Object.keys(node)) {
+                        const rawVal = node[rawKey];
+                        const binding = bindYamlTemplateKey(rawKey, rawVal);
+                        const val = binding.bindings.size && rawVal && typeof rawVal === 'object' && !Array.isArray(rawVal)
+                            ? Object.fromEntries(Object.entries(rawVal).filter(([name]) => !binding.bindings.has(name))) : rawVal;
+                        const key = binding.key;
+                        if (binding.bindings.size && pathArr && pathArr.every(isSchemaFieldName)) acc.fixedFieldParents.add(pathArr.join('.'));
                         if (key === 'check' || key === 'note' || key === 'type' || key === 'format' || key === 'range' || key === 'enum') continue;
-                        const val = node[key];
                         // _强制更新提醒
                         if (/^_?强制更新/.test(key)) {
                             const items = yamlCheckItems(Array.isArray(val) ? val : (typeof val === 'string' ? val.split('\n') : [val])).map(yamlExpandTemplateKeys);
@@ -228,6 +264,7 @@ function createSchemaLayout(dependencies) {
                         // 路径，后续仍由 initvar/完整路径决定落在哪张表，不按业务词猜测。
                         const expandedTemplateKeys = expandYamlTemplateFieldKey(key);
                         if (expandedTemplateKeys && expandedTemplateKeys.length) {
+                            if (pathArr && pathArr.every(isSchemaFieldName)) acc.fixedFieldParents.add(pathArr.join('.'));
                             const expandedKeys = expandedTemplateKeys;
                             for (const actualKey of [...new Set(expandedKeys)]) {
                                 if (typeof val === 'string') {
@@ -318,6 +355,28 @@ function createSchemaLayout(dependencies) {
     
     function registerYamlWildcard(key, val, acc, enclosingGroup, ancestors = new Set()) {
             if (val && typeof val === 'object' && ancestors.has(val)) return;
+            const bound = bindYamlTemplateKey(key, val);
+            key = bound.key;
+            const alternatives = String(key).split('.').map(part => expandYamlTemplateFieldKey(part));
+            if (alternatives[alternatives.length - 1]) {
+                let paths = [''];
+                for (let i = 0; i < alternatives.length; i++) {
+                    const names = alternatives[i] || [String(key).split('.')[i]];
+                    if (paths.length * names.length > 64) { paths = []; break; }
+                    paths = paths.flatMap(prefix => names.map(name => prefix ? prefix + '.' + name : name));
+                }
+                if (paths.length) {
+                    const parent = String(key).split('.').slice(0, -1);
+                    if (alternatives[alternatives.length - 1] && parent.every(isSchemaFieldName)) acc.fixedFieldParents.add(parent.join('.'));
+                    // 绑定元数据不是实际子字段，也不能在展开后被重新遍历。
+                    const definition = val && typeof val === 'object' && !Array.isArray(val)
+                        ? Object.fromEntries(Object.entries(val).filter(([name]) => !bound.bindings.has(name))) : val;
+                    if (val && typeof val === 'object') ancestors.add(val);
+                    for (const path of paths) registerYamlWildcard(path, definition, acc, enclosingGroup, ancestors);
+                    if (val && typeof val === 'object') ancestors.delete(val);
+                    return;
+                }
+            }
             acc.wildcardFields.add(key);
             const group0 = String(key).split('.')[0].trim();
             const rec = { path: key };
@@ -360,7 +419,7 @@ function createSchemaLayout(dependencies) {
             if (val && typeof val === 'object' && !Array.isArray(val)) {
                 ancestors.add(val);
                 for (const [child, value] of Object.entries(val)) {
-                    if (['type', 'check', 'note', 'format', 'range', 'enum'].includes(child)) continue;
+                    if (bound.bindings.has(child) || ['type', 'check', 'note', 'format', 'range', 'enum'].includes(child)) continue;
                     const alternatives = expandYamlTemplateFieldKey(child);
                     const names = alternatives || [child];
                     for (const name of names) {
@@ -388,8 +447,9 @@ function createSchemaLayout(dependencies) {
             const fullParts = effectiveGroup && tableParts[0] !== effectiveGroup
                 ? [effectiveGroup, ...tableParts]
                 : tableParts;
+            registerYamlTypePath(acc, fullParts, lastIsTemplateKey ? { kind: 'object', dynamic: true, value: parsed.schema } : parsed.schema);
             const tableKey = tableParts[tableParts.length - 1];
-            if (!/^[\u4e00-\u9fff$]{1,12}$/.test(tableKey)) return;
+            if (!isSchemaFieldName(tableKey)) return;
             acc.shapes[tableKey] = acc.shapes[tableKey] || [];
             for (const f of parsed.fields || []) if (!acc.shapes[tableKey].includes(f)) acc.shapes[tableKey].push(f);
             if (parsed.objects && parsed.objects.length) {
@@ -409,6 +469,7 @@ function createSchemaLayout(dependencies) {
             const tableLevel = def.type !== undefined && /[\[{]/.test(String(def.type).trim());
             if (def.type !== undefined) {
                 const ts = String(def.type).trim();
+                registerYamlTypePath(acc, fieldPath || [group, field], parseTypeSchema(ts, true));
                 // 只有字段自身声明为 number 才能标成数值。对象 type 内部通常包含若干
                 // `子字段: number`；按 substring 判断会把整个对象列误标成 INTEGER，JSON
                 // 读回随即退化成字符串（收益明细/粮秣流水等均会中招）。
@@ -416,22 +477,28 @@ function createSchemaLayout(dependencies) {
                 if (/[\[{]/.test(ts)) {
                     const parsed = parseShapeString(ts);
                     if (parsed) {
-                        const t0 = String(ts).trim();
-                        const isDyn = /^\[.*?\]\s*:/.test(t0) || /^\{[^}]*:\s*\{/.test(t0);
-                        const target = isDyn ? field : group;
+                        const target = field;
+                        // 类型描述的是该字段的内容，不是所属组的直属列。
+                        if ((!fieldPath || fieldPath.length === 2) && parsed.schema && ['object', 'array'].includes(parsed.schema.kind)) {
+                            acc.fieldTypes[group] = acc.fieldTypes[group] || {};
+                            acc.fieldTypes[group][field] = parsed.schema.kind;
+                            acc.objectSchemas[group] = acc.objectSchemas[group] || {};
+                            acc.objectSchemas[group][field] = parsed.schema;
+                            acc.objects[group] = acc.objects[group] || {};
+                            acc.objects[group][field] = true;
+                        }
                         acc.shapes[target] = acc.shapes[target] || [];
-                        const targetFields = (target === group && parsed.topFields && parsed.topFields.length) ? parsed.topFields : parsed.fields;
+                        const targetFields = parsed.topFields || parsed.fields;
                         for (const f2 of targetFields) if (!acc.shapes[target].includes(f2)) acc.shapes[target].push(f2);
-                        const targetObjects = (target === group && parsed.topObjects && parsed.topObjects.length) ? parsed.topObjects : parsed.objects;
+                        const targetObjects = parsed.topObjects || parsed.objects;
                         if (targetObjects.length) {
                             acc.objects[target] = acc.objects[target] || {};
                             for (const obj of targetObjects) acc.objects[target][obj] = true;
                         }
                         mergeShapeMetadata(target, parsed, acc.fieldTypes, acc.objectSchemas, acc.enumPaths, fieldPath);
-                        if (parsed.dynamicTop || (parsed.dynamic && parsed.dynamic.length)) {
+                        if (parsed.dynamicTop && (!fieldPath || fieldPath.length === 2)) {
                             acc.dynamicDicts[group] = acc.dynamicDicts[group] || {};
-                            if (parsed.dynamicTop) acc.dynamicDicts[group][field] = true;
-                            for (const df of parsed.dynamic || []) acc.dynamicDicts[group][df] = true;
+                            acc.dynamicDicts[group][field] = true;
                         }
                     }
                 }
@@ -505,6 +572,8 @@ function createSchemaLayout(dependencies) {
             const dynamicDicts = {};
             const dynamicPaths = new Set();
             const dynamicGroups = new Set();
+            const fixedFieldParents = new Set();
+            const yamlTypePaths = [];
             const dynamicKeyNames = {};
             // registerMvuSchema 常放在酒馆助手脚本里，且可能被压缩并通过对象 spread 复用。
             // 当同名字段在整份 Zod schema 中始终只有一种基础类型时，可作为规则 YAML
@@ -529,7 +598,7 @@ function createSchemaLayout(dependencies) {
                 // （flow 写法、引号键、深层嵌套）；失败或结构是字符串（zod/散文）回退正则。
                 if (collectRulesFromYaml(content, {
                     shapes, objects, fieldTypes, objectSchemas, ranges, enums, formats, checks, reminders, groupChecks, zodDescs,
-                    wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups,
+                    wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, fixedFieldParents, yamlTypePaths,
                     allCheckItems, checkPaths, enumPaths,
                 })) continue;
                 // YAML 失败回退正则：注明原因，便于发现“回退后个别声明丢失”（如大荒组级 type）。
@@ -620,7 +689,7 @@ function createSchemaLayout(dependencies) {
                         const wildType = wildTypeBlock !== null ? wildTypeBlock : (wildTypeQuoted ? wildTypeQuoted[1] : '');
                         if (wildType) {
                             registerWildcardTypeShape(wk0.key, wildType, {
-                                shapes, objects, fieldTypes, objectSchemas, dynamicPaths,
+                                shapes, objects, fieldTypes, objectSchemas, dynamicPaths, yamlTypePaths,
                             }, wk0.indent <= 2 ? undefined : group);
                         }
                         if (rangeValue) rec.range = rangeValue;
@@ -982,7 +1051,7 @@ function createSchemaLayout(dependencies) {
             for (const [field, kinds] of Object.entries(globalFieldKindSets)) {
                 if (kinds.size === 1) globalFieldTypes[field] = [...kinds][0];
             }
-            return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, ranges, enums, enumPaths, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, dynamicKeyNames, checkPaths };
+            return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, yamlTypePaths, ranges, enums, enumPaths, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, fixedFieldParents, dynamicKeyNames, checkPaths };
         }
     
     function parseRegisteredZodSchema(source) {
@@ -1577,7 +1646,7 @@ function createSchemaLayout(dependencies) {
             }
         }
     
-    function parseTypeSchema(shapeStr) {
+    function parseTypeSchema(shapeStr, allowScalar = false) {
             const s = String(shapeStr || '')
                 .replace(/\/\*[\s\S]*?\*\//g, ' ')
                 .replace(/\/\/[^\n]*/g, ' ')
@@ -1672,7 +1741,7 @@ function createSchemaLayout(dependencies) {
                 return node;
             };
             skip();
-            try { return s[i] === '{' ? parseObject() : null; } catch (e) { return null; }
+            try { return s[i] === '{' ? parseObject() : allowScalar ? scalarNode(s) : null; } catch (e) { return null; }
         }
     
     function parseShapeString(shapeStr) {
@@ -1951,7 +2020,7 @@ function createSchemaLayout(dependencies) {
                 const hasDynamicDescendant = opts.hasDynamicDescendant ? opts.hasDynamicDescendant(path) : false;
                 // 明确的固定对象声明优先于“子值字段相似”的条目字典猜测。
                 // 把固定附属字段并回父表，数组/动态后代仍由递归各自提取子表。
-                if (hasDynamicDescendant || (opts.isFixedPath && opts.isFixedPath(path)) || (fixedObjectSchema(fixedSchema) && !/^[_$]/.test(key))) {
+                if (hasDynamicDescendant || (opts.hasDeclaredDescendant && opts.hasDeclaredDescendant(path)) || (opts.isFixedPath && opts.isFixedPath(path)) || (fixedObjectSchema(fixedSchema) && !/^[_$]/.test(key))) {
                     const nested = collectColumns(v, path, report, opts);
                     // 容器内若还混有静态叶子，仍展平成父表列并保留完整 path；动态子表本身
                     // 已经由共享 childTables 收集，不会出现在 nested 中。
@@ -2216,17 +2285,36 @@ function createSchemaLayout(dependencies) {
             const dynamicDicts = (shapeInfo && shapeInfo.dynamicDicts) || {};
             const dynamicPaths = (shapeInfo && shapeInfo.dynamicPaths) || new Set();
             const dynamicGroups = (shapeInfo && shapeInfo.dynamicGroups) || new Set();
+            const fixedFieldParents = (shapeInfo && shapeInfo.fixedFieldParents) || new Set();
             const dynamicKeyNames = (shapeInfo && shapeInfo.dynamicKeyNames) || {};
             const dynamicPathSamples = (shapeInfo && shapeInfo.dynamicPathSamples) || new Map();
             const zodSchemaRoot = shapeInfo && shapeInfo.zodSchemaRoot;
             const objectDynamicOverrides = shapeInfo && shapeInfo.objectDynamicOverrides;
+            const yamlTypePaths = (shapeInfo && shapeInfo.yamlTypePaths || []).slice().sort((a, b) => b.path.length - a.path.length);
             const nullableNodeAt = path => {
                 let node = zodSchemaRoot;
                 for (const part of path || []) {
                     if (node && node.dynamic) node = node.value;
                     node = node && node.fields && node.fields[part];
                 }
-                return node;
+                if (node) return node;
+                // YAML 声明也按完整路径查找；不能按字段简称把同名后代提升到父表。
+                const declarations = yamlTypePaths.filter(rec => rec.path.length <= path.length && rec.path.every((part, i) => {
+                    if (part === '*' || /^<[^>]+>$/.test(part)) return true;
+                    const token = /^\$\{([^}]+)\}$/.exec(part);
+                    if (!token) return part === path[i];
+                    const choices = token[1].split(/[|/]/).map(x => x.trim());
+                    return choices.length === 1 || choices.includes(path[i]);
+                }));
+                for (const rec of declarations) {
+                    node = rec.node;
+                    for (const part of path.slice(rec.path.length)) {
+                        if (node && node.dynamic) node = node.value;
+                        node = node && node.fields && node.fields[part];
+                    }
+                    if (node) return node;
+                }
+                return undefined;
             };
             const isDynamicPath = (pathArr) => {
                 if (!Array.isArray(pathArr) || !pathArr.length) return false;
@@ -2248,8 +2336,11 @@ function createSchemaLayout(dependencies) {
                 for (const p of dynamicPaths) if (String(p).startsWith(prefix)) return true;
                 return false;
             };
+            const hasDeclaredDescendant = path => yamlTypePaths.some(rec => rec.path.length > path.length && path.every((part, i) => rec.path[i] === part));
             const isArrayPath = (pathArr) => {
                 if (!Array.isArray(pathArr) || pathArr.length < 2) return false;
+                const node = nullableNodeAt(pathArr);
+                if (node) return node.kind === 'array';
                 return ((shapeFieldTypes[pathArr[0]] || {})[pathArr[1]] === 'array');
             };
             const groupNameSet = new Set(Object.keys(initvar));
@@ -2273,6 +2364,7 @@ function createSchemaLayout(dependencies) {
                     report.note(`顶层组「${groupName}」为动态键字典（键是运行期条目），按条目行表转换。`);
                     return 'rows';
                 }
+                if (fixedFieldParents.has(groupName)) return 'singleton';
                 const values = Object.values(raw);
                 if (values.length === 0) {
                     // 状态栏/规则扫描到字段 → 仍可按字段建行表；完全无字段信息 → 整组 JSON（任意形状还原）
@@ -2419,8 +2511,9 @@ function createSchemaLayout(dependencies) {
                 return makeGroupTableName(parts.length ? parts.join('_') : fallback);
             }
     
-            const nullableRecordValue = node => node && node.dynamic && node.value
-                && ['object', 'array'].includes(node.value.kind) && (node.value.nullable || node.value.optional)
+            const completeRecordValue = node => node && node.dynamic && node.value
+                && ['object', 'array'].includes(node.value.kind) && (node.value.nullable || node.value.optional || node.value.kind === 'array'
+                    || node.value.dynamic || !Object.keys(node.value.fields || {}).length)
                 ? node.value : null;
             // 完整记录复用 scalarValueCol 的读写协议，身份列仍用于定位与关联。
             function addNullableRecordGroup(meta, node, entries) {
@@ -2538,7 +2631,7 @@ function createSchemaLayout(dependencies) {
                 if (Object.values(raw).some(v => isPlainObject(v) && Object.prototype.hasOwnProperty.call(v, rowsKeyCol))) {
                     rowsKeyCol += '_键名';
                 }
-                const recordValue = nullableRecordValue(containerNode);
+                const recordValue = completeRecordValue(containerNode);
                 if (recordValue) {
                     addNullableRecordGroup({ name: groupName, tableName, kind: 'rows', keyCol: rowsKeyCol,
                         keyValue: '', source: 'optional-record', writePaths: [[groupName]] }, recordValue,
@@ -2583,8 +2676,9 @@ function createSchemaLayout(dependencies) {
                 // 不从顶层收集子表，避免“每角色一张字段相同的重复表”。
                 const columns = kind === 'rows'
                     ? []
-                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, isArrayPath, objectSchemaAt: nullableNodeAt,
-                        isFixedPath: path => objectDynamicOverrides && objectDynamicOverrides.get(path.join('.')) === false });
+                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, hasDeclaredDescendant, isArrayPath, objectSchemaAt: nullableNodeAt,
+                        isFixedPath: path => (objectDynamicOverrides && objectDynamicOverrides.get(path.join('.')) === false) ||
+                            (!isDynamicPath(path) && fixedFieldParents.has(path.join('.'))) });
                 if (kind !== 'rows') {
                     const expanded = [];
                     for (const c of columns) {
@@ -2789,7 +2883,10 @@ function createSchemaLayout(dependencies) {
                         }
                     }
                     // 字段顺序：先 usage 里出现的，再条目里出现的
-                    const usageFields = (usage[groupName] || []).filter(f => f !== rowsKeyCol && !rowChildByKey.has(f));
+                    const declaredRow = nullableNodeAt([groupName]);
+                    const declaredFields = declaredRow && declaredRow.dynamic && fixedObjectSchema(declaredRow.value) ? declaredRow.value.fields : null;
+                    const usageFields = (usage[groupName] || []).filter(f => f !== rowsKeyCol && !rowChildByKey.has(f) &&
+                        (!declaredFields || Object.prototype.hasOwnProperty.call(declaredFields, f) || fieldOrder.includes(f) || !usage.__fallbackReads?.[groupName]?.has(f)));
                     const shapeFields = (shapes[groupName] || []).filter(f => f !== rowsKeyCol && !flattenedRoots.has(f) && !rowChildByKey.has(f));
                     const allFields = [...new Set([...shapeFields, ...usageFields, ...fieldOrder])].filter(f => !rowChildByKey.has(f));
                     columns.length = 0;
@@ -2966,8 +3063,8 @@ function createSchemaLayout(dependencies) {
                             jsonKind: 'object',
                         });
                     }
-                    rows = entryRows.map(r => {
-                        const rowArr = [r.__rowId || (columns.length + 1), r[rowsKeyCol]];
+                    rows = entryRows.map((r, index) => {
+                        const rowArr = [index + 1, r[rowsKeyCol]];
                         for (const c of columns.slice(1)) {
                             let v = r[c.zh];
                             if (c.isObject && v && typeof v === 'object') {
@@ -3010,6 +3107,7 @@ function createSchemaLayout(dependencies) {
                     }
                     const usageFields = (usage[groupName] || []).filter(f => (
                         f !== keyCol &&
+                        (!fixedObjectSchema(nullableNodeAt([groupName])) || Object.prototype.hasOwnProperty.call(nullableNodeAt([groupName]).fields, f) || Object.prototype.hasOwnProperty.call(raw, f) || !usage.__fallbackReads?.[groupName]?.has(f)) &&
                         !groupNameSet.has(f) &&
                         !childTables.some(ct => ct.key === f) &&
                         !representedContainerFields.has(f) &&
@@ -3196,7 +3294,7 @@ function createSchemaLayout(dependencies) {
                             ? ct.ancestorKeyCols.map(x => ({ ...x }))
                             : [{ col: parentKeyCol, entity: relationEntity, parentTable: g.tableName, parentKeyCol: g.keyCol }])
                         : [];
-                    const recordValue = nullableRecordValue(nullableNodeAt(ct.path));
+                    const recordValue = completeRecordValue(nullableNodeAt(ct.path));
                     if (recordValue) {
                         const parentBasePath = Array.isArray(g.writePaths) && g.writePaths.length
                             ? g.writePaths[0].slice() : [g.name];
@@ -3287,7 +3385,7 @@ function createSchemaLayout(dependencies) {
                         }
                         for (const sourceEntry of sourceEntries) {
                             const { parentKey, entryName, entry } = sourceEntry;
-                            const parentValues = Array.isArray(sourceEntry.parents) && sourceEntry.parents.length ? sourceEntry.parents : [parentKey];
+                            const parentValues = ct.parentRows ? (Array.isArray(sourceEntry.parents) && sourceEntry.parents.length ? sourceEntry.parents : [parentKey]) : [];
                             if (!isPlainObject(entry)) {
                                 sawScalarEntries = true;
                                 const scalarRow = { [rowsKeyCol]: entryName, value: entry, __scalar: true };
@@ -3297,7 +3395,7 @@ function createSchemaLayout(dependencies) {
                             }
                             sawObjectEntries = true;
                             for (const subKey of Object.keys(entry)) {
-                                const nestedSchema = (shapeObjectSchemas[ct.key] || {})[subKey];
+                                const nestedSchema = nullableNodeAt([...ct.path, subKey]) || (shapeObjectSchemas[ct.key] || {})[subKey];
                                 const nestedDynamic = !!((dynamicDicts[ct.key] || {})[subKey] || (nestedSchema && nestedSchema.kind === 'object' && nestedSchema.dynamic));
                                 if (nestedDynamic) {
                                     let nct = relationChildByKey.get(subKey);
@@ -3322,13 +3420,14 @@ function createSchemaLayout(dependencies) {
                             for (const subKey of Object.keys(entry)) {
                                 if (relationChildByKey.has(subKey)) continue;
                                 const sv = entry[subKey];
-                                if (isPairLeaf(sv)) {
+                                const arrayValue = Array.isArray(sv) && (nullableNodeAt([...ct.path, subKey])?.kind === 'array' || declaredFieldKind(ct.key, subKey) === 'array');
+                                if (isPairLeaf(sv) && !arrayValue) {
                                     pairFields.add(subKey);
                                     const pairInfo = leafInfo(sv);
                                     if (pairInfo.desc && !fieldDescs[subKey]) fieldDescs[subKey] = pairInfo.desc;
                                 }
-                                row[subKey] = isLeaf(sv) ? leafInfo(sv).value : JSON.stringify(sv);
-                                if (!isLeaf(sv) && !columns.some(c => c.zh === subKey)) {
+                                row[subKey] = isLeaf(sv) && !arrayValue ? leafInfo(sv).value : JSON.stringify(sv);
+                                if ((!isLeaf(sv) || arrayValue) && !columns.some(c => c.zh === subKey)) {
                                     objectFields.add(subKey);
                                     fieldOrder.push(subKey);
                                 }
@@ -3449,8 +3548,8 @@ function createSchemaLayout(dependencies) {
                         });
                     }
                     if (inferOnly) entryRows.length = 0;
-                    const rows = entryRows.map(r => {
-                        const rowArr = [r.__rowId || (columns.length + 1)];
+                    const rows = entryRows.map((r, index) => {
+                        const rowArr = [index + 1];
                         for (const c of columns) {
                             let v = r[c.zh];
                             if (c.isObject && v && typeof v === 'object') {
@@ -4023,12 +4122,18 @@ function createSchemaLayout(dependencies) {
                     .replace(/^_+|_+$/g, '')
                     .replace(/_+$/g, '');
             };
+            // 宿主把这些显示名视为系统行号，业务列也必须避开，不能只防 SQL 标识符重名。
+            const identitySlugs = new Set(['row_id', 'id', 'rowid', pluginSlug('行号')]);
+            const renamedByTable = new Map();
             for (const g of groups) {
-                const used = new Set(['row_id']);
+                const renamed = new Map();
+                renamedByTable.set(g.tableName, renamed);
+                const used = new Set(identitySlugs);
                 for (const c of g.columns || []) {
+                    const original = c.zh;
                     let zh = sanitizeMacroColumnZh(c.zh);
                     if (!zh) { c.zh = '列'; zh = '列'; }
-                    if (zh !== String(c.zh == null ? '' : c.zh)) c.zh = zh;
+                    if (zh !== String(c.zh == null ? '' : c.zh)) { c.zh = zh; renamed.set(original, zh); }
                     const slug = pluginSlug(zh);
                     if (!used.has(slug)) {
                         used.add(slug);
@@ -4038,14 +4143,25 @@ function createSchemaLayout(dependencies) {
                     let next = `${zh}${n}`;
                     while (used.has(pluginSlug(next))) { n += 1; next = `${zh}${n}`; }
                     report.warn(
-                        `表「${g.tableName || g.name}」列「${zh}」与同表其他列映射为相同物理列名候选「${slug}」` +
+                        `表「${g.tableName || g.name}」列「${zh}」${identitySlugs.has(slug) ? '与数据库系统行号别名冲突' : `与同表其他列映射为相同物理列名候选「${slug}」`}` +
                         `（如 山西/陕西 拼音相同），已把该列名改为「${next}」；` +
                         `读取路径与 stat_data 形状不变，AI 填表与桥按新列名流转。`,
                         'schema'
                     );
                     c.zh = next;
+                    renamed.set(original, next);
                     used.add(pluginSlug(next));
                 }
+            }
+            for (const g of groups) {
+                const own = renamedByTable.get(g.tableName);
+                for (const key of ['keyCol', 'valueCol', 'scalarValueCol', 'parentKeyCol']) if (own.has(g[key])) g[key] = own.get(g[key]);
+                for (const ancestor of g.ancestorKeyCols || []) {
+                    if (own.has(ancestor.col)) ancestor.col = own.get(ancestor.col);
+                    const parent = renamedByTable.get(ancestor.parentTable);
+                    if (parent && parent.has(ancestor.parentKeyCol)) ancestor.parentKeyCol = parent.get(ancestor.parentKeyCol);
+                }
+                for (const child of g.childTables || []) if (own.has(child.parentKeyCol)) child.parentKeyCol = own.get(child.parentKeyCol);
             }
         }
     

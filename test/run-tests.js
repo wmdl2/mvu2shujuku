@@ -10655,6 +10655,8 @@ require('./sql-example-safety');
 require('./business-rule-preservation');
 require('./fixed-child-tables');
 require('./declared-container-paths');
+require('./bound-template-fields');
+require('./output-business-rules');
 require('./scoped-status-usage');
 require('./nullable-columns');
 require('./nullable-json-columns');
