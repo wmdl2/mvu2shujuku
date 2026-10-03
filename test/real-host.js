@@ -104,7 +104,7 @@ async function runtimeTest(page, source = syntheticCard(), convertCore = core, m
     const avatar = imported.file_name + '.png';
     await page.waitForFunction(avatar => window.SillyTavern?.getContext().characters.some(ch => ch.avatar === avatar), avatar, { timeout: 90000 });
     await page.evaluate(avatar => { const ctx = window.SillyTavern.getContext(); return ctx.selectCharacterById(ctx.characters.findIndex(ch => ch.avatar === avatar)); }, avatar);
-    await page.waitForFunction(() => window.Mvu?.getMvuData?.()?.stat_data?.背包?.length === 4 && window.SillyTavern.getContext().chat.some(m => m.TavernDB_ACU_IsolatedData), {}, { timeout: 90000 });
+    await page.waitForFunction(() => window.Mvu?.getMvuData?.()?.stat_data?.背包?.length === 4 && window.SillyTavern.getContext().chat.some(m => m.TavernDB_ACU_IsolatedData), {}, { timeout: Number(process.env.MVU_INIT_TEST_TIMEOUT || 90000) });
     await waitCommittedGold(page, 10);
     const state = { avatar, chat: await page.evaluate(() => window.SillyTavern.getContext().chatId) };
     record('new-chat' + (modeLabel ? '-' + modeLabel : ''), await page.evaluate(() => window.Mvu.getMvuData().stat_data));
@@ -885,10 +885,17 @@ async function main() {
             if (Date.now() - lastNotice > 30000) { console.log('等待隔离酒馆启动…'); lastNotice = Date.now(); }
             await sleep(1000);
         }
-        browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+        browser = await chromium.launch({ headless: true, args: ['--no-sandbox'], ...(process.env.MVU_TEST_BROWSER ? { executablePath: process.env.MVU_TEST_BROWSER } : {}) });
         const page = await browser.newPage(), errors = [];
+        if (process.argv.includes('--sp-warnings')) await page.addInitScript(() => {
+            let state;
+            try { state = JSON.parse(localStorage.getItem('acu_v2_ui_state') || '{}'); } catch (_) { state = {}; }
+            if (!state || typeof state !== 'object') state = {};
+            state.devOptions = { ...state.devOptions, warnLogEnabled: true };
+            localStorage.setItem('acu_v2_ui_state', JSON.stringify(state));
+        });
         page.on('pageerror', error => { errors.push(error.message); console.log('PAGEERROR', error.message); });
-        page.on('console', message => { if (message.type() === 'error') console.log('BROWSER_ERROR', message.text().slice(0, 700)); });
+        page.on('console', message => { if (message.type() === 'error' || (process.argv.includes('--sp-warnings') && message.type() === 'warning')) console.log('BROWSER_' + message.type().toUpperCase(), message.text().slice(0, 700)); });
         page.on('response', response => { if (response.status() >= 400) console.log('HTTP_ERROR', response.status(), response.url()); });
         page.on('dialog', dialog => dialog.accept(dialog.type() === 'prompt' ? dialog.defaultValue() : undefined));
         await page.route('**/api/settings/get', async route => { const response = await route.fetch(); const settings = await response.json(); settings.enable_extensions_auto_update = false; await route.fulfill({ response, json: settings }); });
@@ -931,6 +938,7 @@ async function main() {
             else if (only === 'compat-probe') await require('./compatibility-probe')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'vwd-prompt') await require('./vwd-prompt-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'nullable-record') await require('./nullable-record-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
+            else if (only === 'bound-fields') await require('./bound-fields-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
             else if (only === 'container-presence') await require('./container-presence-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'full-json') await require('./full-json-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'vwd') await vwdTest(page);

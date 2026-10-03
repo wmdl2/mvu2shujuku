@@ -122,11 +122,17 @@ function createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSc
     function scanStatusUsage(card, groupNames) {
             const usage = {};
             const usageTypes = {};
+            const fallbackReads = {}, requiredReads = {};
             Object.defineProperty(usage, '__types', { value: usageTypes, enumerable: false });
-            const addField = (group, field, kind) => {
+            Object.defineProperty(usage, '__fallbackReads', { value: fallbackReads, enumerable: false });
+            const addField = (group, field, kind, fallback = false) => {
                 if (!field || !isSchemaFieldName(field)) return;
                 if (!usage[group]) usage[group] = [];
                 if (!usage[group].includes(field)) usage[group].push(field);
+                fallbackReads[group] = fallbackReads[group] || new Set();
+                requiredReads[group] = requiredReads[group] || new Set();
+                if (fallback && !requiredReads[group].has(field)) fallbackReads[group].add(field);
+                else if (!fallback) { requiredReads[group].add(field); fallbackReads[group].delete(field); }
                 if (kind) {
                     usageTypes[group] = usageTypes[group] || {};
                     usageTypes[group][field] = kind;
@@ -149,7 +155,7 @@ function createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSc
                     if (!knownGroups.has(group)) continue;
                     // 三段式 组.条目.字段 → 条目行表的列；两段式 组.字段 → 单例列（若 initvar 已含则跳过重复）
                     const field = gm[3] || gm[2];
-                    if (field) addField(group, field);
+                    if (field) addField(group, field, '', /^\s*\)\s*\?\?/.test(text.slice(reGetvar.lastIndex)));
                 }
                 // const X = ...stat_data.组[键].字段...  → 嵌套对象；只到组 → 组变量
                 const re1 = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:all_variables|getAllVariables\(\))?[^;\n]*?\bstat_data\s*\.\s*([\u4e00-\u9fff]+)((?:\[[^\]]*\])*)((?:\s*\.\s*[\u4e00-\u9fff]+)*)/g;
@@ -271,7 +277,7 @@ function createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSc
                 while ((m = re2.exec(bindings.code))) {
                     const v = m[1], field = m[2];
                     const source = bindings.get(v, m.index);
-                    if (source && !source.nested) addField(source.group, field);
+                    if (source && !source.nested) addField(source.group, field, '', /^\s*\?\?/.test(bindings.code.slice(re2.lastIndex)));
                 }
             }
 

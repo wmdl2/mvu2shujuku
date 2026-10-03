@@ -129,6 +129,8 @@ JSON 路径更新及固定附属字段的填表、重载和删楼场景使用 `n
 
 实机脚本默认将运行数据、截图和日志写入仓库内被忽略的 `.tools/real-host/`。报告受测版本、命令、结果和未覆盖项时，保留可核对的摘要，避免提交原始数据或长日志。
 
+有限字段、完整声明路径与业务 ID 列使用 `node test/real-host.js --only=bound-fields`，覆盖 SQLite/原生模式的初始化、写入、重载和删除。启动前核对浏览器安装的操作系统；可用 `MVU_TEST_BROWSER` 指定本机可执行文件。模板作用域拒绝等初始化问题可加 `--sp-warnings`：在加载前启用隔离宿主的警告选项，避免只凭最终超时推断根因；诊断可用 `MVU_INIT_TEST_TIMEOUT` 缩短等待。
+
 完整 JSON 容器回归：`node test/run-tests.js --grep '完整JSON容器'`；
 夹具预检查：`node -e "console.log(require('./test/full-json-host').preflight())"`；
 实机入口：`node test/real-host.js --only=full-json`。若只改变 DDL 默认值，
