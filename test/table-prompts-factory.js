@@ -25,7 +25,7 @@ test('表格提示工厂：浏览器内联后无 Node 外部作用域，数值�
         columns: [{ zh: '内容', ident: 'value', type: 'INTEGER', logicalType: 'number', value: 10 }],
         rows: [[1, 10]], groupChecks: [], wildcardRules: [],
     };
-    assert.ok(prompts.buildNote(group).includes('数值表（row_id=1，全表固定一行）'));
+    assert.ok(prompts.buildNote(group).includes('数值表（全表固定一行）'));
     assert.ok(prompts.buildInitNode(group).includes('开局已初始化唯一数值记录'));
     assert.ok(prompts.buildNodeProse(group, 'update').includes('SQL示例: UPDATE gold SET value = '));
 });

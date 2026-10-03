@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.4.5';
+    const VERSION = '0.4.6';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -901,13 +901,13 @@
 
     function describeGroup(group) {
         if (group.kind === 'singleton') {
-            return `单例表，全表固定一条记录（row_id=1），只做增量更新，不新增、不删除。`;
+            return `单例表，全表固定一条记录，只做增量更新，不新增、不删除。`;
         }
         if (group.kind === 'json') {
             return `整组 JSON 存储表：本组数据以 JSON 整体保存、读取时还原任意形状（对象/字典/标量）；内部数据，AI 不应直接修改。`;
         }
         if (group.kind === 'array' || group.kind === 'pathArray' || group.kind === 'nestedArray') {
-            return '数组表：每行一个数组元素，行号即数组顺序；按行新增、移除或更新元素。';
+            return '数组表：每行一个数组元素，按当前表格中的元素顺序维护；按行新增、移除或更新元素。';
         }
         if (group.kind === 'nestedRows') {
             return `每行记录一项${group.childKey || group.name}数据。`;
@@ -1230,9 +1230,8 @@
             };
             const triggerNodes = Object.fromEntries(['delete', 'update', 'insert'].map(kind => [kind, trigger(kind)]));
             // 使用范围与禁止照抄的说明每表只写一次，各操作仍保留具体 SQL。
-            const sqlScope = mode === 'both' ? '（native 模式请忽略，按宿主要求的原生格式填表）' : '';
             const sqlNotice = Object.values(triggerNodes).some(text => text.includes('\nSQL示例:'))
-                ? `\nSQL 示例仅演示写法${sqlScope}；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。` : '';
+                ? `\nSQL 示例仅在本次输出要求 SQL 脚本时适用；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。` : '';
             const vwdSlotPlan = vwdAllowed ? vwdSlotPlanForGroup(g) : null;
             const noteText = buildNote(g, { mode, vwdSlotPlan }) + sqlNotice;
             // 落进 sourceData/卡的是静态说明版：没有运行期覆盖时与旧版逐字节相同，

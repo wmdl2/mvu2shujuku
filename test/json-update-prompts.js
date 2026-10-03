@@ -18,7 +18,7 @@ test('JSON局部更新：双模式和 SQL 提供路径说明，native 保留整�
     const results = Object.fromEntries(['native', 'both', 'sqlite'].map(mode => [mode, core.convert(card(), { mode })]));
     for (const mode of ['both', 'sqlite']) {
         const sheet = stateSheet(results[mode]);
-        assert.match(sheet.sourceData.note, /SQL 模式优先用 json_set/);
+        assert.match(sheet.sourceData.note, /本次要求 SQL 脚本时，优先用 json_set/);
         assert.match(sheet.sourceData.note, /json_remove/);
         assert.match(sheet.sourceData.note, /json_patch 的 null 会删键/);
         assert.match(sheet.sourceData.note, /空单元格或 JSON null 容器先按规则初始化/);
@@ -28,10 +28,10 @@ test('JSON局部更新：双模式和 SQL 提供路径说明，native 保留整�
         assert.strictEqual((results[mode].card.data || results[mode].card).extensions.mvu2shujuku.layout,
             (results.native.card.data || results.native.card).extensions.mvu2shujuku.layout);
     }
-    assert.match(stateSheet(results.both).sourceData.note, /native 模式仍提供完整的新单元格 JSON/);
+    assert.match(stateSheet(results.both).sourceData.note, /本次要求原生行操作时，提供完整的新单元格 JSON/);
     assert.doesNotMatch(stateSheet(results.native).sourceData.note, /json_set|json_replace|json_remove/);
     assert.match(stateSheet(results.both).sourceData.updateNode, /SQL示例: UPDATE.*json_replace/);
-    assert.match(stateSheet(results.both).sourceData.note, /native 模式请忽略/);
+    assert.match(stateSheet(results.both).sourceData.note, /SQL 示例仅在本次输出要求 SQL 脚本时适用/);
     assert.match(stateSheet(results.sqlite).sourceData.updateNode, /json_replace/);
 });
 

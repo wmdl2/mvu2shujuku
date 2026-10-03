@@ -8,16 +8,19 @@ test('表格协议：双模式与 SQLite 保留 SQL 示例，每表说明一次�
         comment: '[InitVar]', content: JSON.stringify({A: {x: 1, _内部: 2, y: 3, bag: [1,2,3]}}),
     }]}};
     const converted = Object.fromEntries(['native','both','sqlite'].map(mode => [mode, core.convert(card, {mode})]));
-    const withoutNotice = text => text.replace(/\nSQL 示例仅演示写法[^\n]*$/, '');
+    const withoutNotice = text => text.replace(/\nSQL 示例[^\n]*$/, '');
     for (const mode of ['native','both','sqlite']) {
         for (const sheet of Object.values(converted[mode].template).filter(s => s.content)) {
             assert.doesNotMatch(sheet.sourceData.note, /列\d+:/, '编号仅由宿主的列投影决定');
             const nodes = ['insertNode','updateNode','deleteNode'].map(kind => sheet.sourceData[kind]);
             const hasSql = nodes.some(text => text.includes('SQL示例:'));
-            assert.strictEqual(sheet.sourceData.note.split('SQL 示例仅演示写法').length - 1, hasSql ? 1 : 0);
+            assert.strictEqual(sheet.sourceData.note.split('SQL 示例仅在本次输出要求 SQL 脚本时适用').length - 1, hasSql ? 1 : 0);
+            assert.doesNotMatch(sheet.sourceData.note, /native|sqlite|row_id=1|结构化 where/);
+            assert.doesNotMatch(sheet.sourceData.initNode, /row_id=1|只允许 UPDATE/);
+            assert.doesNotMatch(sheet.sourceData.updateNode.split('\nSQL示例:')[0], /row_id=1|只允许 UPDATE|禁止 INSERT/);
             if (hasSql) {
                 assert.match(sheet.sourceData.note, /不得直接照抄示例值/);
-                if (mode === 'both') assert.match(sheet.sourceData.note, /native 模式请忽略，按宿主要求的原生格式填表/);
+                assert.match(sheet.sourceData.note, /仅在本次输出要求 SQL 脚本时适用/);
             }
             for (const node of nodes) {
                 if (mode === 'native') assert.doesNotMatch(node, /SQL示例:|INSERT INTO|DELETE FROM| SET /);
@@ -67,10 +70,7 @@ test('特殊操作提示：完整关联组合与数组定位示例按两种模�
             }
             if (['array', 'pathArray', 'nestedArray'].includes(group.kind)) {
                 const note = sheet.sourceData.note;
-                if (mode !== 'sqlite') assert.match(note, /native 使用本表提示中方括号里的行号（从 0 开始）/);
-                if (mode !== 'native') assert.match(note, /SQL 使用当前数据中的 row_id，不按显示顺序推算/);
-                if (mode === 'native') assert.doesNotMatch(note, /SQL 使用当前数据/);
-                if (mode === 'sqlite') assert.doesNotMatch(note, /native 使用/);
+                assert.doesNotMatch(note, /native 使用|SQL 使用当前数据|row_id=1|结构化 where/);
                 if (group.kind === 'nestedArray') {
                     assert.match(note, /不能把来源内的序号 1 直接当成本表行号/);
                     assert.doesNotMatch(note, /定位记录须同时匹配.*「row_id」/);

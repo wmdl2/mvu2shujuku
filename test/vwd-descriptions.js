@@ -264,7 +264,7 @@ test('VWD动态说明：多行/引号/Unicode 与空说明在 note 中正确渲�
     // 显式空说明：说明行保留字段名（结构一致），其余字段与表级规则不丢。
     const emptyNote = rebuild(JSON.stringify({ v: 1, o: { [JSON.stringify(['A', 'str'])]: '' } }));
     assert.deepStrictEqual(lines(emptyNote), ['- str：', '- other：相同说明']);
-    assert.match(emptyNote, /禁止 INSERT \/ DELETE/, '表级规则必须保留');
+    assert.match(emptyNote, /禁止新增或删除记录/, '表级规则必须保留');
     // 元数据非法时 note 退回静态版，且与 sourceData.note 一致。
     assert.strictEqual(rebuild('{ bad'), sheetOf(template, 'A表').sourceData.note);
 });
@@ -536,7 +536,7 @@ test('VWD动态说明：默认关闭时不新增元数据列、vwd 布局或说�
     assert.deepStrictEqual(read.A.str, ['新值', '静态说明'], '读回应恢复值 + 静态说明，说明未被数组文本污染');
 });
 
-test('VWD动态说明：默认关闭模板保留冻结基线，逐项对照新增 SQL 示例和列名前缀', () => {
+test('VWD动态说明：默认关闭模板保留冻结基线，逐项对照协议说明、SQL 示例和列名前缀', () => {
     const baseline = require('./vwd-static-before.json');
     const base = baseline.conversion;
     const now = convertWithFlag(DEFAULT_OFF_STAT, DEFAULT_OFF_SCHEMA, false);
@@ -546,7 +546,7 @@ test('VWD动态说明：默认关闭模板保留冻结基线，逐项对照新�
     const comparable = JSON.parse(JSON.stringify(now.template));
     for (const sheet of Object.values(comparable)) {
         if (!sheet.sourceData) continue;
-        sheet.sourceData.note = sheet.sourceData.note.replace(/\nSQL 示例仅演示写法[^\n]*$/, '');
+        sheet.sourceData.note = sheet.sourceData.note.replace(/\nSQL 示例[^\n]*$/, '');
         for (const field of ['insertNode', 'updateNode', 'deleteNode']) {
             sheet.sourceData[field] = sheet.sourceData[field].split('\nSQL示例:')[0];
         }
@@ -561,8 +561,16 @@ test('VWD动态说明：默认关闭模板保留冻结基线，逐项对照新�
                 .map(ident => ident === 'kuozhanshuju' ? '_kuozhanshuju' : ident);
         }
         sheet.sourceData.note = sheet.sourceData.note.replace('如 _xxx', '如 _扩展数据');
+        // 已审核的协议文案变化：业务限制保留，编号与语法交由当前宿主请求提供。
+        sheet.sourceData.note = sheet.sourceData.note
+            .replace('本表唯一记录已由开局模板初始化（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。', '本表唯一记录已由开局模板初始化；禁止新增或删除记录，只允许按需更新现有记录。')
+            .replace('数组表：每行一个数组元素，行号即数组顺序；按行新增、移除或更新元素。', '数组表：每行一个数组元素，按当前表格中的元素顺序维护；按行新增、移除或更新元素。')
+            .replace('\nnative 使用本表提示中方括号里的行号（从 0 开始），不填 SQL row_id；SQL 使用当前数据中的 row_id，不按显示顺序推算。', '')
+            .replace('SQL 字符串外围的单引号只是 SQL 写法，不属于单元格内容。', '本次要求 SQL 脚本时，SQL 字符串外围的单引号不属于单元格内容。');
+        sheet.sourceData.initNode = sheet.sourceData.initNode.replace('开局模板已初始化唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。', '开局模板已初始化唯一记录；自动填表阶段禁止再次初始化，只允许按需更新现有记录。');
+        sheet.sourceData.updateNode = sheet.sourceData.updateNode.replace('只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；', '只允许更新现有记录，禁止新增或删除记录；');
     }
-    assert.deepStrictEqual(comparable, expected, '除 SQL 示例、下划线物理列名和只读例子外，默认模板应与冻结基线一致');
+    assert.deepStrictEqual(comparable, expected, '除已审核的协议说明、SQL 示例、下划线物理列名和只读例子外，默认模板应与冻结基线一致');
     assert.deepStrictEqual(now.layout, baseLayout, '默认布局应与冻结基线一致');
 });
 
