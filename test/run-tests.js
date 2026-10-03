@@ -3712,7 +3712,7 @@ test('native / sqlite 单模式', () => {
     // 模板 note 与模式无关（与默认模板一致），模式由插件填表提示词决定
     assert.ok(!rn.template[hero].sourceData.note.includes('原生 DSL'), 'note 不应区分 native 模式');
     assert.ok(!rn.template[hero].sourceData.note.includes('SQLite SQL'), 'note 不应区分 sqlite 模式');
-    assert.strictEqual(rn.template[hero].sourceData.note, rs.template[hero].sourceData.note.replace(/\nSQL 示例仅演示写法[^\n]*$/, ''), '除 SQL 示例适用说明外，两种模式保留相同业务 note');
+    assert.strictEqual(rn.template[hero].sourceData.note, rs.template[hero].sourceData.note.replace(/\nSQL 示例仅在本次输出要求 SQL 脚本时适用[^\n]*$/, ''), '除 SQL 示例适用说明外，两种模式保留相同业务 note');
     assert.ok(!rn.template[hero].sourceData.note.includes('【列定义】'), '字段映射由宿主权威表头/DDL提供，不在 note 重复');
     assert.ok(rn.template[hero].sourceData.note.includes('【字段说明与规则】'), 'note 应含强制约束');
 });
