@@ -558,6 +558,7 @@ function installExtensionRuntime(window) {
             const mk = layoutExt && layoutExt.mvu2shujuku;
             if (mk && typeof mk.layout === 'string') {
                 activeLayout = resolveRuntimeLayout(mk.layout);
+                activeCardApiMetadata = mk;
                 // 记录布局归属卡：用“读取时会看到的角色对象”（列表对象，带真实头像）
                 let layoutChar = null;
                 try { layoutChar = currentCharacter(); } catch (e) {}
@@ -1662,6 +1663,7 @@ function installExtensionRuntime(window) {
     // activeLayout 归属的卡（卡名|头像）：切卡空窗期用旧卡布局读新卡表格会产生错形状数据，
     // 读路径与写路径都以它为门槛，布局未就绪时返回空/重试
     let activeLayoutCardKey = '';
+    let activeCardApiMetadata = {};
     // 当前卡是否依赖 <StatusPlaceHolderImpl/>（前端注入正则）；由扩展本体维护占位符，
     // 不依赖 tavern_helper 桥是否运行
     let activePlaceholderNeeded = false;
@@ -1821,6 +1823,7 @@ function installExtensionRuntime(window) {
             // 旧桥没有转换标识，必须由当前卡的模板数据佐证；仅名字相同不足以接管。
             if (!payload.convertedAt && !templateEntry) return false;
             activeLayout = resolveRuntimeLayout(currentLayout);
+            activeCardApiMetadata = marker;
             activeLayoutCardKey = cardCacheKey(ch);
             activePlaceholderNeeded = !!payload.statusPlaceholderNeeded;
             if (payload.templateBase64) {
@@ -2434,7 +2437,7 @@ function installExtensionRuntime(window) {
                     // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
                     // 普通旧布局缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
                     // 最终 importTableAsJson 还可能存旧 checkpoint，导致“写入未保存”。
-                    const effectiveTarget = (() => {
+                    let effectiveTarget = (() => {
                         if (!target || typeof target !== 'object') return prev || {};
                         const out = JSON.parse(JSON.stringify(prev || {}));
                         // 切卡隔离：前端可能缓存上一张卡的 stat_data（target 混入当前布局外的组）。
@@ -2473,6 +2476,10 @@ function installExtensionRuntime(window) {
                         }
                         return out;
                     })();
+                    effectiveTarget = await validateCardStat(effectiveTarget, writeSession.schemaProof);
+                    assertRuntimeSession(writeSession);
+                    const unmappedAfterSchema = window.MVU2SHUJUKU_CORE.unmappedStatGroups(activeLayout, prev, effectiveTarget);
+                    if (unmappedAfterSchema.length) throw new Error('Schema 产生未映射组：' + unmappedAfterSchema.join('、'));
                     // 诊断：打印实际到达写路径的 系统._hypnoos（成就/购买等内部状态），
                     // 判断前端是否把标记放进写回、以及我们是否丢值。
                     try {
@@ -3151,9 +3158,16 @@ function installExtensionRuntime(window) {
                 if (!tableSnapshotCoversLayout(cur, activeLayout)) {
                     const persisted = readPersistedTableData();
                     if (persisted) return statDataFromTablesCached(activeLayout, persisted);
-                    // 无持久化帧（全新聊天、插件尚未建锚/物化）：退回按运行时表重建。
-                    // 只有表头时单例表回到布局默认值（= 卡模板初始行，与旧行为一致），
-                    // 避免前端拿到空对象后按它自己的默认值（如 25/6000）写回。
+                    // 无存档且尚未物化数据行时，读取卡内初始模板。JSON 可选列的
+                    // 空单元格表示字段不存在，不能靠 codec 恢复默认值；已开始的
+                    // 聊天仍按当前表读取，避免复活游玩中删除的字段。
+                    const hasRows = Object.values(cur).some(sheet => sheet && Array.isArray(sheet.content) && sheet.content.length > 1);
+                    const chat = getContextSafe()?.chat;
+                    if (!hasRows && !mvu2shujukuChatHasFullCheckpoint() &&
+                        Array.isArray(chat) && (chat.length === 0 || mvu2shujukuChatIsPristineOpening())) {
+                        const initial = cachedTemplateForCurrentCard();
+                        if (initial) return statDataFromTablesCached(activeLayout, initial);
+                    }
                     return statDataFromTablesCached(activeLayout, cur);
                 }
                 return statDataFromTablesCached(activeLayout, cur);
@@ -3877,7 +3891,7 @@ function installExtensionRuntime(window) {
     async function applyMvuCommandsWithEvents(stat, cmds, display) {
         const at = (path) => {
             let cur = stat;
-            for (const p of String(path || '').split('.').filter(Boolean)) cur = cur == null ? undefined : cur[p];
+            for (const p of mvuVariablePathParts(path, stat)) cur = cur == null ? undefined : cur[p];
             try { return JSON.parse(JSON.stringify(cur)); } catch (e) { return cur; }
         };
         for (const cmd of cmds) {
@@ -3910,6 +3924,8 @@ function installExtensionRuntime(window) {
         } catch (e) {}
         const infos = parseMvuCommands(processedMessage).map(mvuCommandInfoFromInternal);
         await emitMvuEvent('mag_command_parsed', out, infos, originalMessage);
+        if ((readCardApiMetadata().schemaKeys || []).length) await currentCardApi.ready();
+        for (const key of readCardApiMetadata().schemaKeys || []) await emitMvuEvent('mvu2shujuku_command_normalize:' + key, out, infos, originalMessage);
         // 数据库 Schema 已接管类型、CHECK 与行约束。仍按 MVU 顺序
         // 通知旧 Zod 监听器（保留事件兼容），但对隔离快照执行：
         // 转换后遗留的外部 Schema 不能再删改真正将要落库的命令。
@@ -3924,6 +3940,8 @@ function installExtensionRuntime(window) {
         const zodEnded = JSON.parse(JSON.stringify(out));
         const zodBefore = JSON.parse(JSON.stringify(before));
         await emitMvuEvent('mag_variable_update_ended_for_zod', zodEnded, zodBefore);
+        out.stat_data = await validateCardStat(out.stat_data);
+        if ((readCardApiMetadata().schemaKeys || []).length) out.display_data = JSON.parse(JSON.stringify(out.stat_data));
         Object.defineProperty(out, '__mvu2shujukuBusinessProcessed', { value: true });
         return out;
     }
@@ -3972,6 +3990,17 @@ function installExtensionRuntime(window) {
     });
     function noteGlobalOriginals(w) { return runtimeGlobals.note(w); }
     function restoreGlobalOriginals() { runtimeGlobals.restoreAll(); }
+    let currentCardApi = null;
+    function readCardApiMetadata() {
+        const ch = currentCharacter(); const data = ch && (ch.data || ch);
+        return data && data.extensions && data.extensions.mvu2shujuku
+            || (layoutBelongsToCurrentCard(activeLayoutCardKey) ? activeCardApiMetadata : {});
+    }
+    async function validateCardStat(stat, proof) {
+        if (!(readCardApiMetadata().schemaKeys || []).length) return JSON.parse(JSON.stringify(stat || {}));
+        if (!currentCardApi) throw new Error('原卡 Schema 接入尚未就绪，已停止写入');
+        return currentCardApi.validate(stat, proof);
+    }
     function applyWindowMvuShim() {
         const shimSession = captureRuntimeSession();
         const core = window.MVU2SHUJUKU_CORE;
@@ -3983,7 +4012,7 @@ function installExtensionRuntime(window) {
         // 否则角色懒加载缺 extensions 时会把转换卡误判为非转换卡而撤销接管。
         let currentMarkedConverted = false;
         try { currentMarkedConverted = isConvertedMvuCard(currentCharacter()); } catch (e) {}
-        if (!activeLayout && !currentMarkedConverted) {
+        if ((!activeLayout || !layoutBelongsToCurrentCard(activeLayoutCardKey)) && !currentMarkedConverted) {
             restoreWindowMvuShim();
             return;
         }
@@ -3993,6 +4022,14 @@ function installExtensionRuntime(window) {
             windowMvuGlobalAnnounced = false;
             windowMvuInitializedFunctions = new WeakSet();
             const sessionMvu = windowMvuFake;
+            const sessionCardApi = window.__MVU2SHUJUKU_CARD_API_FACTORY__({
+                readMetadata: readCardApiMetadata, isCurrent: () => isRuntimeSessionCurrent(shimSession) && currentCardApi === sessionCardApi,
+                readMvu: () => sessionMvu,
+                wait: ms => new Promise(resolve => hostWindow.setTimeout(resolve, ms)),
+                unmapped: stat => core.unmappedStatGroups(activeLayout, {}, stat),
+            });
+            currentCardApi = sessionCardApi;
+            sessionMvu.registerSchema = sessionCardApi.registerSchema;
             windowMvuFake.__mvu2shujukuFake = true;
             windowMvuFake.events = {
                 VARIABLE_INITIALIZED: 'mag_variable_initialized',
@@ -4120,7 +4157,8 @@ function installExtensionRuntime(window) {
                     }
                     const nextStat = (data && data.stat_data) || {};
                     const writeChatKey = autoInitChatId();
-                    const writeSession = { ...callerSession, businessEventEmitted: !!(data && data.__mvu2shujukuBusinessProcessed) };
+                    const writeSession = { ...callerSession, businessEventEmitted: !!(data && data.__mvu2shujukuBusinessProcessed),
+                        schemaProof: currentCardApi && currentCardApi.proofOf(nextStat) };
                     const ok = await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, writeSession);
                     if (ok && isRuntimeSessionCurrent(shimSession)) refreshOpeningContinuityAfterWrite(writeChatKey, nextStat);
                     return !!ok;
@@ -4163,6 +4201,15 @@ function installExtensionRuntime(window) {
                 // 覆盖前先登记真原始值（Mvu/getAllVariables/三个全局函数），
                 // 切卡还原时从共享注册表取回，绝不把桥/扩展自己的接管当原始值。
                 const originalRec = noteGlobalOriginals(w);
+                if (w.TavernHelper && w.TavernHelper.__mvu2shujukuCardApi !== currentCardApi) {
+                    const helper = currentCardApi.facade(runtimeGlobals.original(w, 'TavernHelper'));
+                    Object.defineProperty(helper, '__mvu2shujukuCardApi', { value: currentCardApi });
+                    runtimeGlobals.patch(w, 'TavernHelper', helper);
+                }
+                if (typeof w.createChatMessages === 'function' && w.createChatMessages.__mvu2shujukuCardApi !== currentCardApi) {
+                    const create = currentCardApi.wrapCreate(runtimeGlobals.original(w, 'createChatMessages'), w);
+                    create.__mvu2shujuku = true; create.__mvu2shujukuCardApi = currentCardApi; runtimeGlobals.patch(w, 'createChatMessages', create);
+                }
                 // 旧 MVU 状态栏常直接读 getChatMessages(id)[0].data.stat_data，
                 // 而数据库不再把当前状态物理存入消息 data。只在读取结果的
                 // 浅副本上投影 stat_data，不污染真实聊天消息，并兼容同步/异步 TH API。
@@ -4190,7 +4237,7 @@ function installExtensionRuntime(window) {
                 }
                 const oldM = w.Mvu;
                 if (oldM && typeof oldM === 'object' && oldM !== windowMvuFake) {
-                    const SKIP = { getMvuData: 1, replaceMvuData: 1, setMvuVariable: 1, getMvuVariable: 1, getRecordFromMvuData: 1, parseMessage: 1, reloadInitVar: 1, getCurrentMvuData: 1, replaceCurrentMvuData: 1, isDuringExtraAnalysis: 1, events: 1 };
+                    const SKIP = { getMvuData: 1, replaceMvuData: 1, setMvuVariable: 1, getMvuVariable: 1, getRecordFromMvuData: 1, parseMessage: 1, reloadInitVar: 1, getCurrentMvuData: 1, replaceCurrentMvuData: 1, registerSchema: 1, isDuringExtraAnalysis: 1, events: 1 };
                     for (const pk in oldM) {
                         if (!Object.prototype.hasOwnProperty.call(oldM, pk)) continue;
                         if (SKIP[pk]) continue;
@@ -4465,6 +4512,8 @@ function installExtensionRuntime(window) {
     }
     // 撤销 Mvu 接管：恢复各窗口原 window.Mvu，停止周期复查，切回转换卡时再接管。
     function restoreWindowMvuShim() {
+        currentCardApi = null;
+        windowMvuFakeSession = null;
         if (runtimeWindows) runtimeWindows.invalidate();
         pendingLateFrontendUpdate = null;
         if (windowMvuShimTimer) {
@@ -4606,7 +4655,7 @@ function installExtensionRuntime(window) {
             try {
                 const ext = charExtensions(ch) || {};
                 const marker = ext.mvu2shujuku || {};
-                if (typeof marker.layout === 'string' || Array.isArray(marker.layout)) activeLayout = resolveRuntimeLayout(marker.layout);
+                if (typeof marker.layout === 'string' || Array.isArray(marker.layout)) { activeLayout = resolveRuntimeLayout(marker.layout); activeCardApiMetadata = marker; }
                 if (activeLayout) activeLayoutCardKey = cardCacheKey(currentCharacter() || ch);
             } catch (e) {
                 dbgWarn(' 同步运行时：提前解析 layout 失败，等自动建表流程重试:', e && e.message ? e.message : e);
@@ -4652,7 +4701,7 @@ function installExtensionRuntime(window) {
         if (settings.installMvuShim !== 'auto') {
             opts.installMvuShim = settings.installMvuShim === 'yes';
         }
-        let result = core.convert(inputBytes, opts);
+        let result = await core.convertWithRemoteSchemas(inputBytes, opts);
         mergeState.appliedRefs = [];
         activeProfileAppliedToLastResult = false;
         if (activeProfileName) {

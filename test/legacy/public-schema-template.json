@@ -1,0 +1,690 @@
+{
+  "schema": [
+    {
+      "name": "主角",
+      "tableName": "主角表",
+      "ident": "zhujiaobiao",
+      "kind": "singleton",
+      "keyCol": "键名",
+      "keyValue": "主角",
+      "columns": [
+        {
+          "zh": "姓名",
+          "path": [
+            "主角",
+            "姓名"
+          ],
+          "value": "未知",
+          "desc": "",
+          "type": "TEXT",
+          "range": null,
+          "ident": "xingming",
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": [],
+          "logicalType": "text"
+        },
+        {
+          "zh": "生命",
+          "path": [
+            "主角",
+            "生命"
+          ],
+          "value": 100,
+          "desc": "",
+          "type": "INTEGER",
+          "range": null,
+          "ident": "shengming",
+          "isPair": false,
+          "logicalType": "number",
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "炼丹_阶级",
+          "path": [
+            "主角",
+            "炼丹",
+            "阶级"
+          ],
+          "value": "未入门",
+          "desc": "",
+          "type": "TEXT",
+          "range": null,
+          "ident": "liandan_jieji",
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": [],
+          "logicalType": "text"
+        },
+        {
+          "zh": "_扩展数据",
+          "path": [
+            "主角",
+            "_扩展数据"
+          ],
+          "value": "",
+          "desc": "本表未在模板声明的动态字段（JSON 存储，读取时自动还原；内部数据，AI 不应直接修改）",
+          "type": "TEXT",
+          "range": null,
+          "ident": "_kuozhanshuju",
+          "isObject": true,
+          "jsonKind": "object"
+        }
+      ],
+      "rows": [
+        [
+          1,
+          "未知",
+          100,
+          "未入门",
+          ""
+        ]
+      ],
+      "childTables": [],
+      "source": "initvar",
+      "reminders": [],
+      "scalarValueCol": "",
+      "wildcardRules": [],
+      "groupChecks": [],
+      "extraAllowed": {
+        "xingming": [],
+        "shengming": [],
+        "liandan_jieji": [],
+        "_kuozhanshuju": []
+      }
+    },
+    {
+      "name": "世界",
+      "tableName": "世界表",
+      "ident": "shijiebiao",
+      "kind": "singleton",
+      "keyCol": "键名",
+      "keyValue": "世界",
+      "columns": [
+        {
+          "zh": "当前时间",
+          "path": [
+            "世界",
+            "当前时间"
+          ],
+          "value": "未知",
+          "desc": "",
+          "type": "TEXT",
+          "range": null,
+          "ident": "dangqianshijian",
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": [],
+          "logicalType": "text"
+        },
+        {
+          "zh": "_扩展数据",
+          "path": [
+            "世界",
+            "_扩展数据"
+          ],
+          "value": "",
+          "desc": "本表未在模板声明的动态字段（JSON 存储，读取时自动还原；内部数据，AI 不应直接修改）",
+          "type": "TEXT",
+          "range": null,
+          "ident": "_kuozhanshuju",
+          "isObject": true,
+          "jsonKind": "object"
+        }
+      ],
+      "rows": [
+        [
+          1,
+          "未知",
+          ""
+        ]
+      ],
+      "childTables": [],
+      "source": "initvar",
+      "reminders": [],
+      "scalarValueCol": "",
+      "wildcardRules": [],
+      "groupChecks": [],
+      "extraAllowed": {
+        "dangqianshijian": [],
+        "_kuozhanshuju": []
+      }
+    },
+    {
+      "name": "道侣",
+      "tableName": "道侣表",
+      "ident": "daolubiao",
+      "kind": "rows",
+      "keyCol": "键名",
+      "keyValue": "",
+      "columns": [
+        {
+          "zh": "键名",
+          "path": [
+            "道侣"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "TEXT",
+          "ident": "jianming",
+          "enum": null,
+          "format": "",
+          "check": [],
+          "range": null
+        },
+        {
+          "zh": "性别",
+          "path": [
+            "道侣",
+            "性别"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "TEXT",
+          "logicalType": "text",
+          "range": null,
+          "ident": "xingbie",
+          "isObject": false,
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "种族",
+          "path": [
+            "道侣",
+            "种族"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "TEXT",
+          "logicalType": "text",
+          "range": null,
+          "ident": "zhongzu",
+          "isObject": false,
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "境界",
+          "path": [
+            "道侣",
+            "境界"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "TEXT",
+          "logicalType": "text",
+          "range": null,
+          "ident": "jingjie",
+          "isObject": false,
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "生命",
+          "path": [
+            "道侣",
+            "生命"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "INTEGER",
+          "logicalType": "number",
+          "range": null,
+          "ident": "shengming",
+          "isObject": false,
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "灵力",
+          "path": [
+            "道侣",
+            "灵力"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "INTEGER",
+          "logicalType": "number",
+          "range": null,
+          "ident": "lingli",
+          "isObject": false,
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "修为",
+          "path": [
+            "道侣",
+            "修为"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "INTEGER",
+          "logicalType": "number",
+          "range": null,
+          "ident": "xiuwei",
+          "isObject": false,
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "道心",
+          "path": [
+            "道侣",
+            "道心"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "INTEGER",
+          "logicalType": "number",
+          "range": null,
+          "ident": "daoxin",
+          "isObject": false,
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "亲密",
+          "path": [
+            "道侣",
+            "亲密"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "INTEGER",
+          "logicalType": "number",
+          "range": null,
+          "ident": "qinmi",
+          "isObject": false,
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "性格",
+          "path": [
+            "道侣",
+            "性格"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "TEXT",
+          "logicalType": "text",
+          "range": null,
+          "ident": "xingge",
+          "isObject": false,
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "_扩展数据",
+          "path": [
+            "道侣",
+            "_扩展数据"
+          ],
+          "value": "",
+          "desc": "本表未在模板声明的动态字段（JSON 存储，读取时自动还原；内部数据，AI 不应直接修改）",
+          "type": "TEXT",
+          "range": null,
+          "ident": "_kuozhanshuju",
+          "isObject": true,
+          "jsonKind": "object"
+        }
+      ],
+      "rows": [],
+      "childTables": [],
+      "source": "initvar",
+      "reminders": [],
+      "scalarValueCol": "",
+      "wildcardRules": [],
+      "groupChecks": [],
+      "extraAllowed": {
+        "jianming": [],
+        "xingbie": [],
+        "zhongzu": [],
+        "jingjie": [],
+        "shengming": [],
+        "lingli": [],
+        "xiuwei": [],
+        "daoxin": [],
+        "qinmi": [],
+        "xingge": [],
+        "_kuozhanshuju": []
+      }
+    },
+    {
+      "name": "储物袋",
+      "tableName": "储物袋表",
+      "ident": "chuwudaibiao",
+      "kind": "rows",
+      "keyCol": "键名",
+      "keyValue": "",
+      "columns": [
+        {
+          "zh": "键名",
+          "path": [
+            "储物袋"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "TEXT",
+          "ident": "jianming",
+          "enum": null,
+          "format": "",
+          "check": [],
+          "range": null
+        },
+        {
+          "zh": "数量",
+          "path": [
+            "储物袋",
+            "数量"
+          ],
+          "value": "",
+          "desc": "",
+          "type": "INTEGER",
+          "logicalType": "number",
+          "range": null,
+          "ident": "shuliang",
+          "isObject": false,
+          "isPair": false,
+          "enum": null,
+          "format": "",
+          "check": []
+        },
+        {
+          "zh": "_扩展数据",
+          "path": [
+            "储物袋",
+            "_扩展数据"
+          ],
+          "value": "",
+          "desc": "本表未在模板声明的动态字段（JSON 存储，读取时自动还原；内部数据，AI 不应直接修改）",
+          "type": "TEXT",
+          "range": null,
+          "ident": "_kuozhanshuju",
+          "isObject": true,
+          "jsonKind": "object"
+        }
+      ],
+      "rows": [],
+      "childTables": [],
+      "source": "initvar",
+      "reminders": [],
+      "scalarValueCol": "",
+      "wildcardRules": [],
+      "groupChecks": [],
+      "extraAllowed": {
+        "jianming": [],
+        "shuliang": [],
+        "_kuozhanshuju": []
+      },
+      "writePaths": [
+        [
+          "主角",
+          "储物袋"
+        ],
+        [
+          "储物袋"
+        ]
+      ]
+    },
+    {
+      "name": "$器灵台词",
+      "tableName": "$器灵台词表",
+      "ident": "qilingtaicibiao",
+      "kind": "array",
+      "keyCol": "键名",
+      "keyValue": "",
+      "columns": [
+        {
+          "zh": "内容",
+          "path": [
+            "$器灵台词",
+            "内容"
+          ],
+          "value": "",
+          "desc": "数组元素（JSON 标量编码，读取时保留原始类型）",
+          "type": "TEXT",
+          "logicalType": "jsonScalar",
+          "ident": "neirong",
+          "enum": null,
+          "format": "",
+          "check": []
+        }
+      ],
+      "rows": [],
+      "childTables": [],
+      "source": "top-level-array",
+      "wildcardRules": [],
+      "groupChecks": [],
+      "extraAllowed": {
+        "neirong": []
+      }
+    }
+  ],
+  "template": {
+    "mate": {
+      "type": "chatSheets",
+      "version": 2,
+      "updateConfigUiSentinel": -1,
+      "globalInjectionConfig": {
+        "readableEntryPlacement": {
+          "position": "before_character_definition",
+          "depth": 2,
+          "order": 99981
+        },
+        "wrapperPlacement": {
+          "position": "before_character_definition",
+          "depth": 2,
+          "order": 99980
+        }
+      }
+    },
+    "sheet_zhujiaobiao": {
+      "uid": "sheet_zhujiaobiao",
+      "name": "主角表",
+      "sourceData": {
+        "note": "本表唯一记录已由开局模板初始化；禁止新增或删除记录，只允许按需更新现有记录。\n下划线开头字段（如 _扩展数据）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。\n更新以正文和规则为依据，不得为凑表而虚构数据。\nSQL 示例仅在本次输出要求 SQL 脚本时适用；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。",
+        "initNode": "开局模板已初始化唯一记录；自动填表阶段禁止再次初始化，只允许按需更新现有记录。",
+        "deleteNode": "禁止。",
+        "updateNode": "只允许更新现有记录，禁止新增或删除记录；根据正文、设定与本表规则，已有字段的值发生变化时更新。\nSQL示例: UPDATE zhujiaobiao SET xingming = '新值' WHERE row_id=1;",
+        "insertNode": "禁止。",
+        "ddl": "CREATE TABLE zhujiaobiao ( -- 主角表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  xingming TEXT NOT NULL DEFAULT '未知', -- 姓名\n  shengming INTEGER NOT NULL DEFAULT 100, -- 生命\n  liandan_jieji TEXT NOT NULL DEFAULT '未入门', -- 炼丹_阶级\n  _kuozhanshuju TEXT NOT NULL DEFAULT '{}' -- _扩展数据\n);",
+        "hiddenPhysicalColumns": [
+          "_kuozhanshuju"
+        ]
+      },
+      "content": [
+        [
+          "row_id",
+          "姓名",
+          "生命",
+          "炼丹_阶级",
+          "_扩展数据"
+        ],
+        [
+          1,
+          "未知",
+          100,
+          "未入门",
+          "{}"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 0
+    },
+    "sheet_shijiebiao": {
+      "uid": "sheet_shijiebiao",
+      "name": "世界表",
+      "sourceData": {
+        "note": "本表唯一记录已由开局模板初始化；禁止新增或删除记录，只允许按需更新现有记录。\n下划线开头字段（如 _扩展数据）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。\n更新以正文和规则为依据，不得为凑表而虚构数据。\nSQL 示例仅在本次输出要求 SQL 脚本时适用；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。",
+        "initNode": "开局模板已初始化唯一记录；自动填表阶段禁止再次初始化，只允许按需更新现有记录。",
+        "deleteNode": "禁止。",
+        "updateNode": "只允许更新现有记录，禁止新增或删除记录；根据正文、设定与本表规则，已有字段的值发生变化时更新。\nSQL示例: UPDATE shijiebiao SET dangqianshijian = '新值' WHERE row_id=1;",
+        "insertNode": "禁止。",
+        "ddl": "CREATE TABLE shijiebiao ( -- 世界表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  dangqianshijian TEXT NOT NULL DEFAULT '未知', -- 当前时间\n  _kuozhanshuju TEXT NOT NULL DEFAULT '{}' -- _扩展数据\n);",
+        "hiddenPhysicalColumns": [
+          "_kuozhanshuju"
+        ]
+      },
+      "content": [
+        [
+          "row_id",
+          "当前时间",
+          "_扩展数据"
+        ],
+        [
+          1,
+          "未知",
+          "{}"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 1
+    },
+    "sheet_daolubiao": {
+      "uid": "sheet_daolubiao",
+      "name": "道侣表",
+      "sourceData": {
+        "note": "行表，以「键名」为唯一标识；同名记录只存在一行，已有记录按需更新，新记录按需新增。\n下划线开头字段（如 _扩展数据）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。\n更新以正文和规则为依据，不得为凑表而虚构数据。\nSQL 示例仅在本次输出要求 SQL 脚本时适用；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。",
+        "initNode": "开局为空表；出现符合本表定义的新记录时，新增一行完整记录。",
+        "deleteNode": "根据正文、设定与本表规则，已有记录所对应的对象不再属于本表记录范围时删除。\nSQL示例: DELETE FROM daolubiao WHERE jianming = '键名';",
+        "updateNode": "根据正文、设定与本表规则，已有记录的字段值发生变化时更新。\nSQL示例: UPDATE daolubiao SET xingbie = '新值' WHERE jianming = '键名';",
+        "insertNode": "根据正文、设定与本表规则，出现本表尚未记录的新键名时添加完整记录。\nSQL示例: INSERT INTO daolubiao (jianming, xingbie, zhongzu, jingjie, shengming, lingli, xiuwei, daoxin, qinmi, xingge) VALUES ('键名', '性别示例', '种族示例', '境界示例', 0, 0, 0, 0, 0, '性格示例');",
+        "ddl": "CREATE TABLE daolubiao ( -- 道侣表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  jianming TEXT NOT NULL DEFAULT '' UNIQUE, -- 键名\n  xingbie TEXT NOT NULL DEFAULT '', -- 性别\n  zhongzu TEXT NOT NULL DEFAULT '', -- 种族\n  jingjie TEXT NOT NULL DEFAULT '', -- 境界\n  shengming INTEGER NOT NULL DEFAULT 0, -- 生命\n  lingli INTEGER NOT NULL DEFAULT 0, -- 灵力\n  xiuwei INTEGER NOT NULL DEFAULT 0, -- 修为\n  daoxin INTEGER NOT NULL DEFAULT 0, -- 道心\n  qinmi INTEGER NOT NULL DEFAULT 0, -- 亲密\n  xingge TEXT NOT NULL DEFAULT '', -- 性格\n  _kuozhanshuju TEXT NOT NULL DEFAULT '{}' -- _扩展数据\n);",
+        "hiddenPhysicalColumns": [
+          "_kuozhanshuju"
+        ]
+      },
+      "content": [
+        [
+          "row_id",
+          "键名",
+          "性别",
+          "种族",
+          "境界",
+          "生命",
+          "灵力",
+          "修为",
+          "道心",
+          "亲密",
+          "性格",
+          "_扩展数据"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 2
+    },
+    "sheet_chuwudaibiao": {
+      "uid": "sheet_chuwudaibiao",
+      "name": "储物袋表",
+      "sourceData": {
+        "note": "行表，以「键名」为唯一标识；同名记录只存在一行，已有记录按需更新，新记录按需新增。\n下划线开头字段（如 _扩展数据）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。\n更新以正文和规则为依据，不得为凑表而虚构数据。\nSQL 示例仅在本次输出要求 SQL 脚本时适用；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。",
+        "initNode": "开局为空表；出现符合本表定义的新记录时，新增一行完整记录。",
+        "deleteNode": "根据正文、设定与本表规则，已有记录所对应的对象不再属于本表记录范围时删除。\nSQL示例: DELETE FROM chuwudaibiao WHERE jianming = '键名';",
+        "updateNode": "根据正文、设定与本表规则，已有记录的字段值发生变化时更新。\nSQL示例: UPDATE chuwudaibiao SET shuliang = 1 WHERE jianming = '键名';",
+        "insertNode": "根据正文、设定与本表规则，出现本表尚未记录的新键名时添加完整记录。\nSQL示例: INSERT INTO chuwudaibiao (jianming, shuliang) VALUES ('键名', 0);",
+        "ddl": "CREATE TABLE chuwudaibiao ( -- 储物袋表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  jianming TEXT NOT NULL DEFAULT '' UNIQUE, -- 键名\n  shuliang INTEGER NOT NULL DEFAULT 0, -- 数量\n  _kuozhanshuju TEXT NOT NULL DEFAULT '{}' -- _扩展数据\n);",
+        "hiddenPhysicalColumns": [
+          "_kuozhanshuju"
+        ]
+      },
+      "content": [
+        [
+          "row_id",
+          "键名",
+          "数量",
+          "_扩展数据"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 3
+    },
+    "sheet_qilingtaicibiao": {
+      "uid": "sheet_qilingtaicibiao",
+      "name": "$器灵台词表",
+      "sourceData": {
+        "note": "数组表：每行一个数组元素，按当前表格中的元素顺序维护；按行新增、移除或更新元素。\nSQL 示例仅在本次输出要求 SQL 脚本时适用；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。",
+        "initNode": "开局为空表；出现符合本表定义的新元素时，新增一行完整记录。",
+        "deleteNode": "根据正文、设定与本表规则，已有数组元素不再属于当前数组时删除对应行。\nSQL示例: DELETE FROM qilingtaicibiao WHERE row_id = 1;",
+        "updateNode": "根据正文、设定与本表规则，已有数组元素的内容发生变化时更新该行。\nSQL示例: UPDATE qilingtaicibiao SET neirong = '\"新值\"' WHERE row_id = 1;",
+        "insertNode": "根据正文、设定与本表规则，数组出现本表尚未记录的新元素时添加（行号自动分配，行序即数组顺序）。\nSQL示例: INSERT INTO qilingtaicibiao (neirong) VALUES ('\"新值\"');",
+        "ddl": "CREATE TABLE qilingtaicibiao ( -- $器灵台词表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  neirong TEXT NOT NULL DEFAULT '' -- 内容\n);",
+        "hiddenPhysicalColumns": [
+          "neirong"
+        ]
+      },
+      "content": [
+        [
+          "row_id",
+          "内容"
+        ]
+      ],
+      "updateConfig": {
+        "skipFloors": -1
+      },
+      "exportConfig": {
+        "enabled": false,
+        "splitByRow": false
+      },
+      "orderNo": 4
+    }
+  },
+  "card": {
+    "name": "公开旧桥格式",
+    "extensions": {
+      "mvu2shujuku": {
+        "convertedAt": "2026-10-05T00:00:00.000Z"
+      },
+      "regex_scripts": []
+    }
+  }
+}

@@ -544,13 +544,13 @@ test('教程标准 Zod Schema 脚本：record/array/coerce/prefault/clamp/复用
     assert.ok(role, 'z.record 顶层组应转换为动态行表');
     for (const h of ['角色名称', '姓名', '好感度', '阶段', '代号']) assert.ok(role.content[0].includes(h), `角色表应包含 ${h} 列`);
     assert.ok(role.sourceData.ddl.includes("xingming TEXT NOT NULL DEFAULT '未知'"), '动态条目字段 prefault 应成为数据库列默认值');
-    assert.ok(role.sourceData.ddl.includes('haogandu INTEGER NOT NULL DEFAULT 5 CHECK(haogandu BETWEEN 0 AND 100)'), 'coerce.number + clamp + prefault 应迁移类型、范围和默认值');
+    assert.ok(role.sourceData.ddl.includes('haogandu TEXT'), '业务transform输出不能按输入类型固定为INTEGER，应以完整JSON保存');
     assert.ok(role.sourceData.ddl.includes("jieduan TEXT NOT NULL DEFAULT '初识' CHECK(jieduan IN ('初识', '熟悉'))"), 'enum + prefault 应迁移枚举和默认值');
     const tags = byName('角色_标签表');
     assert.ok(tags && tags.content[0].includes('角色_角色名称') && tags.content[0].includes('内容'), 'z.array 应按带业务父键名的既有数组规则转换为有序关系子表');
     assert.strictEqual(tags.content.length, 1, 'prefault([]) 应生成结构完整但没有虚构数据行的空数组表');
     assert.ok(role.sourceData.note.includes('- 阶段：\n') && role.sourceData.note.includes('  - 当前关系阶段'), 'describe 应进入字段分组填写提示');
-    assert.ok(system.sourceData.ddl.includes('CHECK(dengji BETWEEN 1 AND 10)'), '固定对象中的 clamp 范围应迁移');
+    assert.ok(!system.sourceData.ddl.includes('CHECK(dengji BETWEEN 1 AND 10)'), '业务变换由实际Schema执行，不猜测其输出类型和数据库范围');
     assert.ok(system.sourceData.ddl.includes("moshi TEXT NOT NULL DEFAULT 'A'"), '缺失 InitVar 字段应由静态 prefault 补齐');
     assert.ok(system.sourceData.ddl.includes("biaoti TEXT NOT NULL DEFAULT '默认标题'"), '静态 default 应迁移为字段默认值');
     assert.ok(system.sourceData.ddl.includes('qiyong INTEGER NOT NULL DEFAULT 1'), 'boolean prefault 应保留布尔类型和默认值');
@@ -558,14 +558,15 @@ test('教程标准 Zod Schema 脚本：record/array/coerce/prefault/clamp/复用
     const items = byName('系统_物品表');
     assert.ok(items && items.content[0].includes('数量') && items.content[0].includes('说明'), '嵌套 z.record 即使初始为空也应生成带 value Schema 字段的动态子表');
     assert.ok(r.reportText.includes('无法静态等价迁移的 refine'), '任意 Zod 校验必须进入人工检查报告');
-    assert.ok(r.reportText.includes('角色.<动态键>.复杂字段') && r.reportText.includes('Schema 表达式'), '无法识别的 Zod 类型组合必须带字段路径报告，不能静默丢失');
+    assert.ok(r.reportText.includes('角色.<动态键>.复杂字段') && r.reportText.includes('联合结构'), '联合结构必须带字段路径报告，保留完整 JSON，不能静默丢失');
     const scripts = r.card.data.extensions.tavern_helper.scripts;
-    assert.ok(!scripts.some(s => s.name === '变量结构'), '已提取的纯 registerMvuSchema 脚本应移除');
+    assert.ok(scripts.some(s => s.name === '变量结构' && s.content.includes('api.registerSchema')), '原 Schema 应保留并接入候选校验');
+    assert.ok(r.card.data.extensions.mvu2shujuku.schemaKeys.length === 1);
 
     const noCheck = core.convert(card, { mode: 'both', ddlIncludeCheck: false });
     const noCheckRole = Object.values(noCheck.template).find(s => s && s.name === '角色表');
     assert.ok(!noCheckRole.sourceData.ddl.includes('CHECK('), '关闭 CHECK 时 Zod 约束只进入提示词，不应强制写入 DDL');
-    assert.ok(noCheckRole.sourceData.note.includes('数值范围 0~100'), '关闭 CHECK 不应删除提供给填表模型的范围提示');
+    assert.ok(noCheck.reportText.includes('transform'), '业务变换由原Schema执行并报告，不能把任意函数猜成静态数值范围');
 });
 
 test('动态构造的 registerMvuSchema 无法静态解析时必须报告降级', () => {
@@ -976,20 +977,21 @@ test('道渊状态栏字段扫描', () => {
 
 /* ---------------- buildSchema / generateTemplate ---------------- */
 section('buildSchema / generateTemplate');
-test('道渊：15 张表（含关系子表），结构正确', () => {
+test('道渊：关系子表与未知变换的完整JSON结构正确', () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const t = r.template;
     const byName = (name) => Object.keys(t).find(k => t[k].name === name);
-    assert.strictEqual(Object.keys(t).filter(k => k.startsWith('sheet_')).length, 15);
+    assert.strictEqual(Object.keys(t).filter(k => k.startsWith('sheet_')).length, 13, '未知变换输出改存完整JSON，储物袋等不再猜测拆表');
     const hero = t[byName('主角表')];
     assert.ok(hero.content[0].includes('生命'), '主角表应有 生命 列');
     assert.ok(hero.sourceData.ddl.includes('CHECK('), '主角表 DDL 应有范围约束（来自卡内规则）');
     assert.ok(hero.sourceData.ddl.includes('DEFAULT'), '主角表 DDL 应有默认值');
     const jade = t[byName('玉简表')];
-    assert.ok(!jade.content[0].includes('历史记录'), '动态历史记录不应留作 JSON 列');
-    const history = t[byName('玉简_历史记录表')];
-    assert.deepStrictEqual(history.content[0].slice(0, 3), ['row_id', '玉简_好友姓名', '消息标识'], '历史记录应拆为带具体业务名称的实体关联键关系表');
+    assert.ok(jade.content[0].includes('历史记录'), '任意变换的历史记录输出应整体JSON保存');
+    assert.strictEqual(byName('玉简_历史记录表'),undefined,'不能猜测未知变换输出后再重复拆表');
+    const jadeLayout = JSON.parse(r.card.data.extensions.mvu2shujuku.layout).find(entry=>entry.table==='玉简表');
+    assert.strictEqual(jadeLayout.cols.find(column=>column[0]==='历史记录')[7],'any','完整JSON保留任意合法输出值');
     // 标识符应为拼音 slug（无下划线冲突、可作 SQL 标识符）
     for (const k of Object.keys(t).filter(k => k.startsWith('sheet_'))) {
         assert.ok(/^sheet_[a-z0-9_]+$/.test(k), `sheet key 应为拼音 slug：${k}`);
@@ -1019,11 +1021,12 @@ test('道渊：15 张表（含关系子表），结构正确', () => {
             }
         }
     }
-    // 越界初始值原样保留（不钳制），CHECK 放行该值
+    // 未知变换输出以JSON保存，保留原初值并检查JSON合法性。
     const world = t[byName('世界表')];
     const coolIdx = world.content[0].indexOf('遭遇冷却');
-    assert.strictEqual(world.content[1][coolIdx], 20, '遭遇冷却 初始值应原样保留为 20');
-    assert.ok(world.sourceData.ddl.includes('OR zaoyulengque IN (20)'), 'CHECK 应放行越界初始值 20');
+    assert.strictEqual(JSON.parse(world.content[1][coolIdx]), 20, '遭遇冷却的JSON单元格应编码数值20');
+    assert.strictEqual(core.statDataFromTables(JSON.parse(r.card.data.extensions.mvu2shujuku.layout),t).stat_data.世界.遭遇冷却,20,'实际codec读回初值仍为数值20');
+    assert.ok(world.sourceData.ddl.includes('json_valid(zaoyulengque)'), '未知变换输出使用合法JSON约束，不能附猜测的数值范围CHECK');
 });
 
 test('模板结构满足插件最小要求', () => {
@@ -2186,8 +2189,8 @@ test('官方教程规范写法：getvar("stat_data").组["字段"][0] 与 _.has'
 /* ---------------- 数据桥脚本 ---------------- */
 section('generateBridgeScript');
 test("旧桥回归：脚本语法与 SD_LAYOUT 结构", () => {
-    const card = requireFixture();
-    const r = core.convert(card, { mode: 'both' });
+    // 冻结的公开旧格式输入；旧桥不承诺支持新转换器的任意JSON输出布局。
+    const r = JSON.parse(fs.readFileSync(path.join(__dirname,'legacy/public-schema-template.json'),'utf8'));
     new Function(legacyBridgeScript(r));
     const m = legacyBridgeScript(r).match(/var SD_LAYOUT=(\[.*?\]);/);
     assert.ok(m, '应包含 SD_LAYOUT');
@@ -2206,8 +2209,8 @@ test("旧桥回归：脚本语法与 SD_LAYOUT 结构", () => {
 
 test("旧桥回归：数据桥 getAllVariables 重建 stat_data（端到端模拟）", () => {
     const vm = require('vm');
-    const card = requireFixture();
-    const r = core.convert(card, { mode: 'both' });
+    // 冻结的公开旧格式输入；旧桥不承诺支持新转换器的任意JSON输出布局。
+    const r = JSON.parse(fs.readFileSync(path.join(__dirname,'legacy/public-schema-template.json'),'utf8'));
     const tables = JSON.parse(JSON.stringify(r.template));
     const byName = (name) => Object.keys(tables).find(k => tables[k].name === name);
     const fakeApi = {
@@ -2782,8 +2785,8 @@ test("旧桥回归：表结构校验：旧模板（同名表缺列）会被识�
 
 test("旧桥回归：性能回归：桥的 重建/写入 按批次只导出一次全表快照（不再每表/每操作导出）", () => {
     const vm = require('vm');
-    const card = requireFixture();
-    const r = core.convert(card, { mode: 'both', installMvuShim: true });
+    // 冻结的公开旧格式输入；旧桥不承诺支持新转换器的任意JSON输出布局。
+    const r = JSON.parse(fs.readFileSync(path.join(__dirname,'legacy/public-schema-template.json'),'utf8'));
     const tables = JSON.parse(JSON.stringify(r.template));
     const chat = [];
     let exportCount = 0;
@@ -3708,10 +3711,11 @@ test("旧桥回归：开场整表快速路径先追平 prev，再应用部分 ne
 });
 
 test('native / sqlite 单模式', () => {
-    const card = requireFixture();
+    const card = require('./synthetic-card')();
+    card.data.extensions.tavern_helper.scripts = [{enabled:true,content:'const S=z.object({状态:z.object({生命:z.number().min(0).max(100).describe("剩余生命"),金币:z.number().describe("可用金币")}),背包:z.array(z.any())});registerMvuSchema(S);'}];
     const rn = core.convert(card, { mode: 'native' });
     const rs = core.convert(card, { mode: 'sqlite' });
-    const hero = Object.keys(rn.template).find(k => rn.template[k].name === '主角表');
+    const hero = Object.keys(rn.template).find(k => rn.template[k].name === '状态表');
     // 模板 note 与模式无关（与默认模板一致），模式由插件填表提示词决定
     assert.ok(!rn.template[hero].sourceData.note.includes('原生 DSL'), 'note 不应区分 native 模式');
     assert.ok(!rn.template[hero].sourceData.note.includes('SQLite SQL'), 'note 不应区分 sqlite 模式');
@@ -5050,7 +5054,7 @@ test("旧桥回归：仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部
                     scripts: [
                         { name: 'MVU', enabled: true, content: "import 'https://testingcf.jsdelivr.net/gh/NLKASHEI/MVU-offline@v1.0.2/mvu_bundle_full.js'" },
                         { name: 'mvu', enabled: true, content: "import 'https://testingcf.jsdelivr.net/gh/MagicalAstrogy/MagVarUpdate@master/artifact/bundle.js'" },
-                        { name: 'ZOD Schema', enabled: true, content: "import { registerMvuSchema } from 'https://example.test/schema.js';\nconst schema = {};\nregisterMvuSchema(schema);" },
+                        { name: 'ZOD Schema', enabled: true, content: "import { registerMvuSchema } from 'https://example.test/schema.js';\nconst schema = z.object({});\nregisterMvuSchema(schema);" },
                         { name: '压缩 ZOD Schema', enabled: true, content: "import{registerMvuSchema as r}from'https://example.test/mvu_zod.js';const e=z,n=e.z.object({值:e.z.string()});$(()=>{r(n)});export{n as Schema};" },
                         { name: '某卡 mvu zod', enabled: true, content: "import 'https://cdn.example.test/card/dist/data_schema/index.js'" },
                         { name: '某卡 mvu zod 业务混合', enabled: true, content: "import 'https://cdn.example.test/card/dist/data_schema/index.js';\nwindow.afterSchemaLoaded = true;" },
@@ -5067,8 +5071,8 @@ test("旧桥回归：仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部
     const thScripts = (d.extensions && d.extensions.tavern_helper && d.extensions.tavern_helper.scripts) || [];
     assert.ok(!thScripts.some(s => String(s.content || '').includes('MVU-offline')), '应移除离线 MVU 引擎 import 脚本');
     assert.ok(!thScripts.some(s => String(s.content || '').includes('MagicalAstrogy/MagVarUpdate')), '应移除官方 MagVarUpdate 引擎 import 脚本');
-    assert.ok(!thScripts.some(s => String(s.name || '') === 'ZOD Schema'), '纯 registerMvuSchema 声明脚本应由数据库 Schema 替代');
-    assert.ok(!thScripts.some(s => String(s.name || '') === '压缩 ZOD Schema'), '别名调用的压缩纯 Schema 脚本也应移除');
+    assert.ok(thScripts.some(s => s.name === 'ZOD Schema' && s.content.includes('api.registerSchema')), '本地 Schema 保留并接入候选校验');
+    assert.ok(thScripts.some(s => s.name === '压缩 ZOD Schema' && s.content.includes('api.registerSchema')), '别名登记也接入候选校验');
     assert.ok(!thScripts.some(s => String(s.name || '') === '某卡 mvu zod'),
         '名称、URL 和脚本形态三重确认的纯 MVU data_schema 启动脚本应由数据库 Schema 替代');
     assert.ok(r.reportText.includes('导入模块正文不在角色卡内') && r.reportText.includes('无法核对其中独有字段'),
@@ -5373,8 +5377,8 @@ test("旧桥回归：桥启动即提供 eventOn 兜底，且 VARIABLE_UPDATE_END
 });
 
 test('getVariables 返回 { stat_data }，updateVariablesWith 接收含 stat_data 的包装对象', async () => {
-    const card = requireFixture();
-    const r = core.convert(card, { mode: 'both' });
+    // 冻结的公开旧格式输入；旧桥不承诺支持新转换器的任意JSON输出布局。
+    const r = JSON.parse(fs.readFileSync(path.join(__dirname,'legacy/public-schema-template.json'),'utf8'));
     const { win } = bridgeSandbox(r);
     const gv = win.getVariables({ type: 'message', message_id: 'latest' });
     assert.ok(gv && typeof gv === 'object' && gv.stat_data && typeof gv.stat_data === 'object', 'getVariables 应返回包含 stat_data 的包装对象');
@@ -7694,7 +7698,8 @@ test('行表初始数据不进模板 content（避免插件 seedRows 反复补�
     // 道侣/人物/机遇等行表同样不应预置模板行
     for (const name of ['道侣表', '人物表', '机遇表']) {
         const s = Object.values(r.template).find(x => x && x.name === name);
-        if (s) assert.strictEqual((s.content || []).length, 1, name + ' 模板 content 只应有表头');
+        const mapping = JSON.parse(r.card.data.extensions.mvu2shujuku.layout).find(entry=>entry.table===name);
+        if (s && mapping && ['rows','nestedRows'].includes(mapping.kind)) assert.strictEqual((s.content || []).length, 1, name + ' 行表模板 content 只应有表头');
     }
 });
 
@@ -8439,13 +8444,6 @@ test('读侧持久化重建回放 sql_sheet_batch：运行时为空窗口内读�
     const vm2 = require('vm');
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
-    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
-        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
-        cols: (e.cols || []).map(c => (e.kind === 'singleton'
-            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
-            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
-        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
-    }));
     const srcDir = path.join(__dirname, '..', 'src');
     const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
     const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
@@ -8506,7 +8504,7 @@ test('读侧持久化重建回放 sql_sheet_batch：运行时为空窗口内读�
         avatar: 'rb.png',
         data: {
             extensions: {
-                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
+                mvu2shujuku: { converter: 'mvu2shujuku', layout: (r.card.data || r.card).extensions.mvu2shujuku.layout },
                 regex_scripts: [],
             },
             character_book: {
@@ -8589,15 +8587,10 @@ test('读侧持久化重建回放 sql_sheet_batch：运行时为空窗口内读�
 
 test('全新聊天运行时仅表头且无 checkpoint：读侧退回布局默认值而非空对象（避免前端按自己的默认值写回）', async () => {
     const vm2 = require('vm');
-    const card = requireFixture();
+    const card = require('./synthetic-card')();
+    card.data.character_book.entries[0].content = JSON.stringify({世界:{遭遇冷却:20},主角:{姓名:'未知'}});
+    card.data.extensions.tavern_helper.scripts = [{name:'公开初始值Schema',enabled:true,content:'const S=z.object({世界:z.object({遭遇冷却:z.number().transform(n=>n).default(20).optional()}),主角:z.object({姓名:z.string().default("未知")})});registerMvuSchema(S);'}];
     const r = core.convert(card, { mode: 'both' });
-    const toLayout = (schema) => core.buildLayout(schema).entries.map(e => ({
-        kind: e.kind, group: e.group, table: e.table, keyCol: e.keyCol || '', keyValue: e.keyValue || '',
-        cols: (e.cols || []).map(c => (e.kind === 'singleton'
-            ? [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || '']
-            : [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, null, !!c.isPair, c.desc || ''])),
-        writePaths: e.writePaths || [], mirrors: e.mirrors || [],
-    }));
     const srcDir = path.join(__dirname, '..', 'src');
     const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
     const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
@@ -8620,7 +8613,7 @@ test('全新聊天运行时仅表头且无 checkpoint：读侧退回布局默认
         avatar: 'fresh.png',
         data: {
             extensions: {
-                mvu2shujuku: { converter: 'mvu2shujuku', layout: JSON.stringify(toLayout(r.schema)) },
+                mvu2shujuku: { converter: 'mvu2shujuku', layout: (r.card.data || r.card).extensions.mvu2shujuku.layout },
                 regex_scripts: [],
             },
             character_book: {
@@ -8691,6 +8684,13 @@ test('全新聊天运行时仅表头且无 checkpoint：读侧退回布局默认
         '全新聊天仅表头时读侧应返回布局默认值而非空对象，实际=' + JSON.stringify(gv.stat_data.世界));
     assert.strictEqual(gv.stat_data.主角 && gv.stat_data.主角.姓名, '未知',
         '全新聊天仅表头时主角表应返回布局默认值，实际=' + JSON.stringify(gv.stat_data.主角 && gv.stat_data.主角.姓名));
+    context.chat = [{is_user:false,mes:'尚未保存的第一开场'}];
+    assert.strictEqual(win.getAllVariables().stat_data.世界.遭遇冷却,20,'仅首楼、尚无存档时也使用初始模板');
+    Object.assign(tables,JSON.parse(JSON.stringify(r.template)));
+    const world = Object.values(tables).find(sheet=>sheet?.name==='世界表');
+    world.content[1][world.content[0].indexOf('遭遇冷却')] = '';
+    context.chat[0].TavernDB_ACU_IsolatedData = {test:{storageFrame:{version:2,checkpoint:{kind:'full',data:tables},logEntries:[]}}};
+    assert.strictEqual('遭遇冷却' in win.getAllVariables().stat_data.世界,false,'已存档的可选JSON空字段不能被初始模板复活');
 });
 
 test('道渊开场：replaceMvuData 等待真正落定，/cut 删除 checkpoint 载体后在存活楼恢复', async () => {
@@ -10649,6 +10649,10 @@ require('./table-codec');
 require('./table-writer');
 require('./array-writer');
 require('./runtime-native');
+require('./card-api-compatibility');
+require('./community-card-contracts');
+require('./remote-schema');
+require('./schema-execution');
 require('./mvu-public-api');
 require('./early-event-fallback');
 require('./mvu-update-views');

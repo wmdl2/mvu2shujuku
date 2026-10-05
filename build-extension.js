@@ -22,6 +22,7 @@ const coreSource = fs.readFileSync(CORE_SRC, 'utf8');
 const pinyinData = fs.readFileSync(PINYIN_SRC, 'utf8');
 const yamlLibsData = fs.readFileSync(YAML_LIBS_SRC, 'utf8');
 const jsonrepairData = fs.readFileSync(JSONREPAIR_SRC, 'utf8');
+const schemaEngineData = fs.readFileSync(path.join(ROOT, 'src/vendor/schema-engine-libs.js'), 'utf8');
 const core = require(CORE_SRC);
 
 // 浏览器端没有 require：把拼音字典内联成 root.__MVU2SHUJUKU_PINYIN__
@@ -46,6 +47,10 @@ const yamlLibsInline = [
 const jsonrepairInline = 'root.__MVU2SHUJUKU_JSONREPAIR_SRC__ = ' + JSON.stringify(jsonrepairData) + ';';
 
 const files = core.assembleExtension({ coreSource, pinyinInline, yamlLibsInline, jsonrepairInline });
+// Keep the interpreter dependencies local; evaluating author declarations happens
+// only in the opaque iframe/worker, never in the parent extension scope.
+files['index.js'] = '(function(root){const createLibraries=function(){var module={exports:{}};var exports=module.exports;\n' + schemaEngineData
+    + '\nreturn module.exports;};root.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__=createLibraries();root.__MVU2SHUJUKU_SCHEMA_ENGINE_SOURCE__="module.exports=("+createLibraries.toString()+")();";})(globalThis);\n' + files['index.js'];
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 // 只写扩展运行文件；README 以仓库根目录的手写文档为准

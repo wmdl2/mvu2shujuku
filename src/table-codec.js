@@ -46,7 +46,7 @@ function createTableCodec(repairJson) {
             if (v === undefined || v === null || v === '') return undefined;
             try {
                 const parsed = JSON.parse(String(v));
-                if (parsed === null) return parsed;
+                if (parsed === null || jsonKind === 'any') return parsed;
                 if (jsonKind === 'array') return Array.isArray(parsed) ? parsed : undefined;
                 return !Array.isArray(parsed) && parsed && typeof parsed === 'object' ? parsed : undefined;
             } catch (e) { return undefined; }
@@ -62,7 +62,8 @@ function createTableCodec(repairJson) {
         if (type === 'pair') return [text(v, fb), desc || ''];
         return text(v, fb);
     };
-    const setPath = (obj, path, value) => {
+    const setPath = (obj, path, value, omitMissingParents = false) => {
+        if (value === undefined && omitMissingParents) return;
         let cur = obj;
         for (let i = 0; i < path.length - 1; i++) {
             if (!own(cur, path[i]) || !cur[path[i]] || typeof cur[path[i]] !== 'object' || Array.isArray(cur[path[i]])) assignOwn(cur, path[i], {});
@@ -211,7 +212,7 @@ function createTableCodec(repairJson) {
                     for (const c of L.cols || []) {
                         if (c[0] === '_扩展数据' || isMetaCol(c)) continue;
                         const cp = Array.isArray(c[3]) && c[3].length ? c[3] : [L.group, c[0]];
-                        setPath(sd, cp, ((c[1] === 'jsonScalarOptional' || c[1] === 'jsonPairOptional') || c[1] === 'jsonObjectOptional') ? (c[6] === true ? undefined : convertCell(c[1], c[1] === 'jsonObjectOptional' ? c[2] : JSON.stringify(c[2]), c[2], c[5], c[7])) : convertCell(c[1], undefined, c[2], c[5], c[7]));
+                        setPath(sd, cp, ((c[1] === 'jsonScalarOptional' || c[1] === 'jsonPairOptional') || c[1] === 'jsonObjectOptional') ? (c[6] === true ? undefined : convertCell(c[1], c[1] === 'jsonObjectOptional' ? c[2] : JSON.stringify(c[2]), c[2], c[5], c[7])) : convertCell(c[1], undefined, c[2], c[5], c[7]), (L.omitMissingParents || []).includes(c[0]));
                     }
                 }
                 else if (L.kind === 'rows') { for (const wp of L.writePaths || []) setPath(sd, wp, L.emptyValue === null ? null : {}); }
@@ -242,7 +243,7 @@ function createTableCodec(repairJson) {
                     // 资产.场币/状态.生命值百分比 等标量字段会全部丢失。
                     const existingAt = getPath(sd, cp);
                     if (existingAt && typeof existingAt === 'object' && !Array.isArray(existingAt) && (vj === undefined || vj === null || vj === '')) continue;
-                    setPath(sd, cp, convertCell(c[1], vj, c[2], c[5], c[7]));
+                    setPath(sd, cp, convertCell(c[1], vj, c[2], c[5], c[7]), (L.omitMissingParents || []).includes(c[0]));
                 }
                 if (vwdMetaCol) vwdPending.push({ entry: L, header, row });
                 const sovIdx = header.indexOf('_扩展数据');
@@ -354,7 +355,7 @@ function createTableCodec(repairJson) {
                         if (ancestorCols.includes(c2[0]) || c2[0] === L.keyCol || c2[0] === '_扩展数据') continue;
                         const vj2 = idxs[j2] >= 0 ? rw2[idxs[j2]] : undefined;
                         const cp2 = c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : [c2[0]];
-                        setPath(item, cp2, convertCell(c2[1], vj2, c2[2], c2[5], c2[7]));
+                        setPath(item, cp2, convertCell(c2[1], vj2, c2[2], c2[5], c2[7]), (L.omitMissingParents || []).includes(c2[0]));
                     }
                     const ovIdx = header.indexOf('_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) mergeMissing(item, parseObject(rw2[ovIdx]) || {});
@@ -386,7 +387,7 @@ function createTableCodec(repairJson) {
                         // 消歧改名（山西→山西2）时，读回仍还原 stat_data.<组>.<山西>，
                         // 不破坏 MVU 原 shape（普通行表列 path 末尾即字段名，行为不变）。
                         const cp2 = c2 && c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : null;
-                        setPath(item, cp2 || [c2[0]], convertCell(c2[1], vj2, c2[2], c2[5], c2[7]));
+                        setPath(item, cp2 || [c2[0]], convertCell(c2[1], vj2, c2[2], c2[5], c2[7]), (L.omitMissingParents || []).includes(c2[0]));
                     }
                     const ovIdx = header.indexOf('_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) {

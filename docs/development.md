@@ -50,6 +50,12 @@ node test/run-tests.js --verbose
 
 ## 验证范围
 
+本地 Schema 接入、缺失根组、世界书别名、创角档案和助手入口恢复的公开回归在 `test/card-api-compatibility.js`。完整宿主入口为 `node test/real-host.js --only=card-api`，固定 DB/TH/ST 版本，覆盖 native 与实际 SQLite 的解析、一次业务变换、档案保存和重载。夹具必须开启酒馆助手对该角色的脚本功能，且导入内嵌世界书；单个脚本标为 enabled 不能证明它已运行。
+
+Schema 独立默认初始化、多行成员调用、同名字段类型、`.or(...)` 联合切换及未声明字段删除使用 `test/community-card-contracts.js`；宿主入口为 `node test/real-host.js --only=community-cards`。启动前检查夹具实际默认值能满足共用入口的生命/金币/背包前置条件；新宿主入口须接入角色级助手启用与内嵌世界书导入，不能只复用写入断言。失败清理不应以 UI 模式切换覆盖原异常。
+
+语料批次同时核对世界书初值和实际采用的首分支原值；表格读回后再写入自身只能证明编码自洽，不能证明源数据保真。其他分支先检查根组布局覆盖，并区分原始字段、Schema 归一化字段及实际宿主初始化，不能把不同分支与同一个基线直接比较。
+
 特殊关联提示使用 `node test/real-host.js --only=prompts --filter-initvar --relation-prompts`。
 模板库存和同一请求的说明增量由 `test/measure-template-delta.js` 计量，复现与边界见
 [增量测量](benchmarks/prompt-2026-09-15.md)。夹具按实际列编码读写，路由回调异常交回主流程收尾。
@@ -63,6 +69,12 @@ node test/run-tests.js --verbose
 使用 Node 22，开始前执行 `node --version`。核心回归使用内置模块、仓库源码和 vendored 解析库。
 
 TauriTavern 的 iframe/global/滚动组件取证使用 `node test/tauritavern-audit.js`，需要参考源码树、参考 SillyTavern 的 jquery/lodash 和 Playwright 浏览器。占位符组件另需参考 SillyTavern 的 TypeScript，脚本从助手源码提取实际函数并去除类型。可用 `MVU_REFERENCE_ROOT`、`MVU_HELPER_ROOT` 选择参考区和助手源码版本，`MVU_TAURI_AUDIT_OUTPUT` 指定结果目录。脚本只用公开合成卡、当前插件构建和实际参考模块，数据库 API 为替代实现；原 MVU 对照运行真实 initGlobals 发布函数，engine/store/watch 为替代实现。默认输出观察记录，退出成功不等于正式 WebView/native/SQLite 验收通过；`MVU_TAURI_ASSERT_FIXED=1` 额外断言 v0.4.9 修复的接口行为、原发布协议冷恢复读值和无浏览器异常；占位符分支由 `test/tauritavern-placeholder.js` 执行实际助手消息更新/刷新函数与 TT updateMessageBlock/渲染事务，格式化、前端挂载、装饰器和数据库为替代实现。覆盖边界见[运行兼容性审查](validation/2026-10-03-tauritavern-runtime-audit.md)。
+手机尺寸发送和真实 DOM 虚拟化管理链使用 `node test/tauritavern-mobile.js`，另需支持 participant 的助手 4.11.2 源码和 TT 2.3.0 固定的 virtual-core 3.17.7（默认读参考 TT 的 node_modules，可用 `MVU_TAURI_VIRTUAL_CORE_ROOT` 指定包目录）。使用实际 TT composition/controller、发送函数、助手 participant 与高度测量；Vue 挂载、格式化及数据库替代。`MVU_TAURI_MODES=virtual` 可只补虚拟化路径。脚本断言既包括正常接口，也包括仍存在的宿主滚动现象，退出成功不等于缺陷已修复。版本、复用命令和 Android IME 未覆盖范围见[手机与虚拟化检查](validation/2026-10-04-tauritavern-mobile-virtualization.md)。
+
+同一组件脚本的 `MVU_TAURI_OWNERSHIP=1` 补测提示词模板 1.17.9 实际显示渲染和 vendored EJS 引擎引起的虚拟化节点归属冲突；世界书、环境、正则及收尾回调替代。`MVU_TAURI_OWNERSHIP=all` 与手机／虚拟化原场景统一运行。断言包含预期归属保护触发，不以退出成功宣称模板组合全面兼容。
+
+删楼与重新生成的组件风险检查用 `node test/tauritavern-rollback-risk.js`，需要参考区的 TT、数据库、助手源码，以及参考 SillyTavern 的 TypeScript/lodash。`MVU_REROLL_SCRIPT_JSON` 可指向外部重Roll脚本 JSON，补测其实际原生/全流程/回填函数；只记录文件指纹，不复制正文。`MVU_ROLLBACK_AUDIT_OUTPUT` 指定结果 JSON。17 项基础观察及 6 项可选脚本观察既包含正常对照，也包含已确认的条件风险；数据库事务、完整回放、UI、网络和 I/O 为夹具替代，不能当作 Android 或最新版 native/SQLite 验收。详见[重新生成与表格回退风险](validation/2026-10-05-tauritavern-regeneration-rollback.md)。
+
 SQLite 执行检查另需 Python 3 标准库 `sqlite3`：Windows 默认 `python`，其他平台默认 `python3`，可用 `PYTHON` 指定解释器；测试进程固定 Python UTF-8 输入，与 Node 传入的 JSON 编码一致。实机另需宿主与浏览器依赖。
 JSON 路径更新及固定附属字段的填表、重载和删楼场景使用 `node test/real-host.js --only=json-path`，
 范围见 [JSON 与合表验收](validation/2026-09-14-json-path.md)。
@@ -229,3 +241,15 @@ node test/sp-version-browser.js
 浏览器组件沿用 Playwright 测试环境，以固定响应模拟旧 `spv9.2.5.1` 和新 `naiv1` 官方模块 URL，验证 iframe 的真实 import
 和 ResourceTiming。只模拟数据库公开 API，不运行完整数据库，不将此结果写成新版宿主兼容验收。
 官方标签历史用于确认功能存在，最低受测版本与功能引入版本须分别记录。
+
+远程 Schema 与分支契约在 `test/remote-schema.js`；异步生产入口是 `core.convertWithRemoteSchemas(input, options)`，同步 `convert` 继续支持调用方传入 `remoteSchemaSources`。每项快照包含 `url`、`source`，异步入口核对指纹并绑定脚本索引；`preserveRemoteSchemaUrls` 保留原链接，`refreshRemoteSchemas` 强制刷新分析缓存。缓存最多32项、5分钟，失败不缓存。`localizeRemoteSchemas` 是显式核心选项，含 `import.meta` 的模块拒绝直接本地化，其他依赖仍可能外部加载。下载代码仅在隔离执行环境中构造登记所需 Schema，不在宿主页面启动作者业务。
+
+宿主 `--only=remote-schema` 可单独验收远程场景；`--only=community-cards` 同时运行 `test/remote-schema-host.js`，验证原模块登记、实际变换、状态读取不重复下载、分支根组与混合类型切换，以及删行后动态字段的业务键定位。先检查公共夹具的源码/列编码与启动前置条件；固定构建后验收，运行中不修改受测源码。语料输入先使用原始 InitVar 或该分支，不用新表格读回数据充当原始输入；作者脚本的模块导出、启动副作用与 Schema 组件单独处理。
+
+远程夹具应等当前脚本 iframe 完成原登记后再冻结下载计数，不能把尚未完成的脚本启动计入状态读取成本。数据库导出可能返回克隆快照；同批删行后动态字段按最新快照的业务键重新定位，并在成功写入后更新本批快照以合并后续字段。
+
+### Schema 执行依赖与验证
+
+生产 Schema 执行使用固定的 Zod 4.4.3、Acorn 8.16.0、Lodash 4.18.1 与本项目 JSON 修复库，许可证在 `src/vendor/schema-engine-LICENSES.md`。独立公开构建工具 `tools/schema-engine` 带锁文件：在该目录运行 `npm ci --ignore-scripts`、`node build.js`，然后在项目根运行 `node build-extension.js`。普通源码开发无需重新安装或重建依赖包。
+
+`test/schema-execution.js` 通过真实生产入口验证等价属性语法、函数与循环、词法作用域、登记调用链、默认值及数据写读；未知必要依赖、环境字段名和构造超时应明确失败。`node test/schema-execution-browser.js` 检查构建中的浏览器执行器；`node test/real-host.js --only=remote-schema` 另外检查真实宿主浏览器转换，以及原脚本运行时校验和两种存储模式。测试依赖 Node 22；浏览器检查沿用真实宿主测试的 Playwright 环境。不要把旧静态解析辅助 API 的成功当作启用注册 Schema 的生产验收。

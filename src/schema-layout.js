@@ -2,7 +2,7 @@
 
 // 结构推导与布局生成；解析库、命名及词法服务由调用方注入。
 function createSchemaLayout(dependencies) {
-    const { getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, maskJsStringsAndComments, createStatusUsage, isPromptVisibleColumn, isMvuOutputDocument = () => false, vwdExperimental = () => false } = dependencies;
+    const { createJsSource, getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, maskJsStringsAndComments, createStatusUsage, isPromptVisibleColumn, isMvuOutputDocument = () => false, vwdExperimental = () => false, canValidateRegisteredSchema = () => false } = dependencies;
     function leafInfo(v) {
             if (Array.isArray(v)) {
                 return { value: v.length > 0 ? v[0] : '', desc: v.length > 1 ? String(v[1]) : '' };
@@ -587,6 +587,7 @@ function createSchemaLayout(dependencies) {
             const zodDescs = {};
             let zodSchemaRoot = null;
             let zodDefaultsRoot = null;
+            let zodValidationRoot = null;
             let zodDisabledRoot = null;
             const wildcardFields = new Set();
             const wildcardRules = {};
@@ -1036,8 +1037,9 @@ function createSchemaLayout(dependencies) {
                     const kind = rawKind === 'record' || rawKind === 'object' ? 'object' : rawKind;
                     (globalFieldKindSets[zm[1]] || (globalFieldKindSets[zm[1]] = new Set())).add(kind);
                 }
-                const parsedSchema = parseRegisteredZodSchema(source);
+                const parsedSchema = script.__mvuSchemaSnapshot || parseRegisteredZodSchema(source);
                 if (parsedSchema && parsedSchema.root && parsedSchema.root.kind === 'object') {
+                    if (script.enabled !== false && (script.__mvuRemoteRegistration || canValidateRegisteredSchema(source))) zodValidationRoot = mergeZodSchemaNodes(zodValidationRoot, parsedSchema.root);
                     if (script.enabled !== false) zodDefaultsRoot = mergeZodSchemaNodes(zodDefaultsRoot, parsedSchema.root);
                     else {
                         const reference = JSON.parse(JSON.stringify(parsedSchema.root));
@@ -1058,13 +1060,13 @@ function createSchemaLayout(dependencies) {
                         shapes, fieldTypes, objectSchemas, ranges, enums, zodDescs,
                         numericFields, dynamicDicts, dynamicPaths, dynamicGroups, dynamicKeyNames,
                     });
-                    if (report) report.note(`已从酒馆助手脚本「${String(script.name || '未命名 Schema')}」提取 Zod 结构与声明式约束。`);
+                    if (report) report.note(`已从酒馆助手脚本「${String(script.name || '未命名 Schema')}」${script.__mvuSchemaSnapshot ? '隔离执行取得真实 Zod 对象，生成' : '静态提取'}结构与声明式约束。`);
                     const clampCount = countZodSchemaFlag(parsedSchema.root, 'clampTransform');
                     if (clampCount && report) {
-                        report.manual(`变量结构脚本中 ${clampCount} 处 _.clamp 自动钳制未执行；范围提示与可选数据库 CHECK 已迁移，越界值由数据库原有失败/重填流程处理，不能保证与原自动修正行为相同。`);
+                        report.manual(`变量结构脚本中 ${clampCount} 处 _.clamp 未在静态数据库层自动执行；范围提示与可选数据库 CHECK 已迁移，已接入原卡 Schema 时由运行时候选校验执行钳制，否则越界值仍由数据库原有失败/重填流程处理。`);
                     }
                     const coerceCount = countZodSchemaFlag(parsedSchema.root, 'coerce');
-                    if (coerceCount && report) report.manual(`变量结构脚本中 ${coerceCount} 处 coerce 类型自动纠正未执行；表格按声明类型保存，不能保证与原脚本的任意输入转换行为相同。`);
+                    if (coerceCount && report) report.manual(`变量结构脚本中 ${coerceCount} 处 coerce 未在静态数据库层自动执行；表格按声明类型保存，有本地注册 Schema 的脚本时由运行时候选校验纠正，否则不能保证与原脚本的任意输入转换行为相同。`);
                 } else if (/registerMvuSchema/.test(source) && report) {
                     report.manual(`酒馆助手脚本「${String(script.name || '未命名 Schema')}」调用了 registerMvuSchema，但未能静态解析注册对象；转换会继续，InitVar 数据仍可建表，但该脚本中的结构与约束可能降级。`);
                 }
@@ -1081,10 +1083,10 @@ function createSchemaLayout(dependencies) {
                     const detailed = uniqueUnsupported.filter(item => item.kind !== 'catch');
                     if (catchItems.length) {
                         const samples = catchItems.slice(0, 6).map(item => item.path || '未知路径').join('、');
-                        report.manual(`Zod Schema 有 ${catchItems.length} 处 .catch(fallback) 非法输入回退未模拟（如 ${samples}${catchItems.length > 6 ? ' 等' : ''}）；字段结构与可声明约束仍已迁移，默认初值仅从启用脚本补齐，非法数据库值由 CHECK/填表重试处理。`);
+                        report.manual(`Zod Schema 有 ${catchItems.length} 处 .catch(fallback) 非法输入回退未静态模拟（如 ${samples}${catchItems.length > 6 ? ' 等' : ''}）；字段结构与可声明约束仍已迁移。有本地注册 Schema 的脚本时由运行时校验执行回退，否则非法数据库值由 CHECK/填表重试处理。`);
                     }
                     for (const item of detailed.slice(0, 20)) {
-                        report.manual(`Zod 字段「${item.path || '未知路径'}」含无法静态等价迁移的 ${item.kind}：${item.expression}。数据库结构与读写仍保留，但该自定义校验/转换不会执行。`);
+                        report.manual(`Zod 字段「${item.path || '未知路径'}」含无法静态等价迁移的 ${item.kind}：${item.expression}。数据库结构与读写仍保留；静态数据库层不会执行该自定义校验/转换，有本地注册 Schema 的脚本时由运行时候选校验执行。`);
                     }
                     if (detailed.length > 20) {
                         report.manual(`另有 ${detailed.length - 20} 条 Zod 自定义语义未逐条列出，请检查原 Schema 脚本。`);
@@ -1095,7 +1097,7 @@ function createSchemaLayout(dependencies) {
             for (const [field, kinds] of Object.entries(globalFieldKindSets)) {
                 if (kinds.size === 1) globalFieldTypes[field] = [...kinds][0];
             }
-            return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, yamlTypePaths, ranges, enums, enumPaths, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, zodDefaultsRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, fixedFieldParents, dynamicKeyNames, checkPaths, ruleSources, ruleBindings };
+            return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, yamlTypePaths, ranges, enums, enumPaths, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, zodDefaultsRoot, zodValidationRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, fixedFieldParents, dynamicKeyNames, checkPaths, ruleSources, ruleBindings };
         }
     
     function parseRegisteredZodSchema(source) {
@@ -1103,46 +1105,78 @@ function createSchemaLayout(dependencies) {
             if (!/registerMvuSchema/.test(text)) return null;
             const definitions = {};
             const unsupported = [];
-            const readBalancedEnd = (s, open, openCh, closeCh) => {
-                let depth = 0, quote = '', lineComment = false, blockComment = false;
-                for (let i = open; i < s.length; i++) {
-                    const ch = s[i], nx = s[i + 1];
-                    if (lineComment) { if (ch === '\n') lineComment = false; continue; }
-                    if (blockComment) { if (ch === '*' && nx === '/') { blockComment = false; i++; } continue; }
-                    if (quote) { if (ch === '\\') { i++; continue; } if (ch === quote) quote = ''; continue; }
-                    if (ch === '/' && nx === '/') { lineComment = true; i++; continue; }
-                    if (ch === '/' && nx === '*') { blockComment = true; i++; continue; }
-                    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
-                    if (ch === openCh) depth++;
-                    else if (ch === closeCh && --depth === 0) return i;
+            const js = createJsSource();
+            const readBalancedEnd = (s, open) => js.balancedEnd(s, open);
+            const splitJsTopLevelArgs = s => js.split(s);
+            const sourceTokens = js.tokens(text);
+            const registrationNames = new Set(['registerMvuSchema']);
+            const importedAlias = text.match(/registerMvuSchema\s+as\s+(\w+)/);
+            if (importedAlias) registrationNames.add(importedAlias[1]);
+            const scopeStack = [];
+            const scopes = sourceTokens.map((token, index) => {
+                if (token.kind !== 'literal' && token.value === '}') scopeStack.pop();
+                const scope = scopeStack.join('/');
+                if (token.kind !== 'literal' && token.value === '{') scopeStack.push(index);
+                return scope;
+            });
+            const registrationScopes = sourceTokens.flatMap((token, i) => registrationNames.has(token.value) && sourceTokens[i + 1]?.value === '(' ? [scopes[i]] : []);
+            const visibleAtRegistration = scope => !scope || registrationScopes.some(parent => parent === scope || parent.startsWith(scope + '/'));
+            for (let i = 0; i < sourceTokens.length; i++) {
+                if (!visibleAtRegistration(scopes[i])) continue;
+                if (sourceTokens[i].value === 'function' && sourceTokens[i + 1]?.kind === 'identifier') {
+                    const name = sourceTokens[i + 1].value, open = sourceTokens[i + 2];
+                    if (open?.value === '(') {
+                        const close = js.balancedEnd(text, open.start);
+                        const bodyOpen = sourceTokens.find(t => t.start > close && t.value === '{');
+                        const bodyClose = bodyOpen && js.balancedEnd(text, bodyOpen.start);
+                        if (bodyClose >= 0) {
+                            const body = text.slice(bodyOpen.end, bodyClose).trim();
+                            const returned = body.match(/^return\s+([^]*?);?$/);
+                            if (returned) definitions[name] = '(' + text.slice(open.end, close) + ')=>' + returned[1].replace(/;$/, '');
+                            const bodyIndex = sourceTokens.findIndex(t => t.start === bodyClose);
+                            if (!registrationScopes.some(scope => scope === scopes[i] + (scopes[i] ? '/' : '') + sourceTokens.findIndex(t => t.start === bodyOpen.start) || scope.startsWith(scopes[i] + (scopes[i] ? '/' : '') + sourceTokens.findIndex(t => t.start === bodyOpen.start) + '/'))) i = bodyIndex;
+                            continue;
+                        }
+                    }
                 }
-                return -1;
-            };
-            const readInitializerEnd = (s, start) => {
-                let quote = '', lineComment = false, blockComment = false;
-                const stack = [];
-                const pairs = { '(': ')', '[': ']', '{': '}' };
-                for (let i = start; i < s.length; i++) {
-                    const ch = s[i], nx = s[i + 1];
-                    if (lineComment) { if (ch === '\n') lineComment = false; continue; }
-                    if (blockComment) { if (ch === '*' && nx === '/') { blockComment = false; i++; } continue; }
-                    if (quote) { if (ch === '\\') { i++; continue; } if (ch === quote) quote = ''; continue; }
-                    if (ch === '/' && nx === '/') { lineComment = true; i++; continue; }
-                    if (ch === '/' && nx === '*') { blockComment = true; i++; continue; }
-                    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
-                    if (pairs[ch]) stack.push(pairs[ch]);
-                    else if (stack.length && ch === stack[stack.length - 1]) stack.pop();
-                    else if (!stack.length && ch === ';') return i;
+                if (!['const', 'let', 'var'].includes(sourceTokens[i].value)) continue;
+                let cursor = i + 1;
+                while (sourceTokens[cursor]) {
+                    let name, destructure = null;
+                    if (sourceTokens[cursor].kind === 'identifier') name = sourceTokens[cursor++].value;
+                    else if (sourceTokens[cursor].value === '{' || sourceTokens[cursor].value === '[') {
+                        const end = js.balancedEnd(text, sourceTokens[cursor].start);
+                        destructure = text.slice(sourceTokens[cursor].start, end + 1);
+                        cursor = sourceTokens.findIndex(t => t.start === end) + 1;
+                    } else break;
+                    let eq = cursor;
+                    while (eq < sourceTokens.length && !['=', ';', ',', '{'].includes(sourceTokens[eq].value)) eq++;
+                    if (sourceTokens[eq]?.value !== '=') {
+                        if (sourceTokens[eq]?.value === ',') { cursor = eq + 1; continue; }
+                        break;
+                    }
+                    const stack = [], pairs = { '(': ')', '[': ']', '{': '}' };
+                    let end = eq + 1;
+                    for (; end < sourceTokens.length; end++) {
+                        const part = sourceTokens[end];
+                        if (part.kind === 'literal') continue;
+                        if (pairs[part.value]) stack.push(pairs[part.value]);
+                        else if (part.value === stack[stack.length - 1]) stack.pop();
+                        else if (!stack.length && ([';', ','].includes(part.value)
+                            || ['const', 'let', 'var', 'export', 'function', 'class', 'import'].includes(part.value)
+                                && /[\r\n]/.test(text.slice(sourceTokens[end - 1]?.end ?? 0, part.start)))) break;
+                    }
+                    const expression = text.slice(sourceTokens[eq].end, sourceTokens[end]?.start ?? text.length).trim();
+                    if (name) definitions[name] = expression;
+                    else if (destructure?.startsWith('{') && /^\w+\.shape$/.test(expression)) {
+                        const members = js.split(destructure.slice(1, -1)), excluded = members.filter(x => !x.startsWith('...')).map(x => x.split(':')[0].trim());
+                        const rest = members.find(x => /^\.\.\.\w+$/.test(x));
+                        if (rest) definitions[rest.slice(3)] = expression.replace(/\.shape$/, '') + '.omit(' + JSON.stringify(Object.fromEntries(excluded.map(x => [x, true]))) + ')';
+                    }
+                    i = end - 1;
+                    if (sourceTokens[end]?.value !== ',') break;
+                    cursor = end + 1;
                 }
-                return s.length;
-            };
-            const defRe = /\b(?:const|let|var)\s+([A-Za-z_$\u3400-\u9fff][\w$\u3400-\u9fff]*)\s*(?:\:[^=;]+)?=/g;
-            let dm;
-            while ((dm = defRe.exec(text))) {
-                const start = defRe.lastIndex;
-                const end = readInitializerEnd(text, start);
-                definitions[dm[1]] = text.slice(start, end).trim();
-                defRe.lastIndex = Math.max(defRe.lastIndex, end + 1);
             }
             const stripOuter = raw => {
                 let s = String(raw || '').trim().replace(/\s+(?:as\s+const|satisfies\s+[\s\S]+)$/g, '').trim();
@@ -1153,8 +1187,23 @@ function createSchemaLayout(dependencies) {
                 }
                 return s;
             };
-            const literal = raw => {
+            const literal = (raw, seen = new Set()) => {
                 const s = stripOuter(raw);
+                if (Object.prototype.hasOwnProperty.call(definitions, s) && !seen.has(s)) {
+                    const next = new Set(seen); next.add(s); return literal(definitions[s], next);
+                }
+                if (s === 'Number.MAX_SAFE_INTEGER') return Number.MAX_SAFE_INTEGER;
+                if (s === 'Infinity' || s === '-Infinity') return s[0] === '-' ? -Infinity : Infinity;
+                if (s[0] === '[' && s[s.length - 1] === ']') {
+                    const values = [];
+                    for (const part of js.split(s.slice(1, -1))) {
+                        if (!part) continue;
+                        const value = literal(part.startsWith('...') ? part.slice(3) : part, seen);
+                        if (part.startsWith('...')) { if (!Array.isArray(value)) return undefined; values.push(...value); }
+                        else { if (value === undefined) return undefined; values.push(value); }
+                    }
+                    return values;
+                }
                 if (s === 'undefined') return undefined;
                 try { return getMvuYamlLibs().JSON5.parse(s); } catch (e) {}
                 if (/^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(s)) return Number(s);
@@ -1179,16 +1228,59 @@ function createSchemaLayout(dependencies) {
             const cloneNode = node => node ? JSON.parse(JSON.stringify(node)) : node;
             const parseExpr = (raw, path, resolving) => {
                 let s = stripOuter(raw).replace(/^\s*\/\*[\s\S]*?\*\//, '').trim();
+                // Member access may span lines or comments; preserve literal contents.
+                const memberTokens = js.tokens(s);
+                let compact = '', memberEnd = 0;
+                for (let i = 0; i < memberTokens.length; i++) {
+                    const token = memberTokens[i];
+                    const gap = s.slice(memberEnd, token.start);
+                    compact += (token.value === '.' || memberTokens[i - 1]?.value === '.' ? '' : gap) + token.value;
+                    memberEnd = token.end;
+                }
+                s = compact + s.slice(memberEnd);
+                if (s[0] === '(') {
+                    const end = readBalancedEnd(s, 0);
+                    if (end >= 0 && s.slice(end + 1).trim().startsWith('.')) s = s.slice(1, end) + s.slice(end + 1);
+                }
                 const ref = s.match(/^([A-Za-z_$\u3400-\u9fff][\w$\u3400-\u9fff]*)(?:\.shape)?\s*$/);
                 if (ref && definitions[ref[1]] && !(resolving || new Set()).has(ref[1])) {
                     const next = new Set(resolving || []); next.add(ref[1]);
                     const node = parseExpr(definitions[ref[1]], path, next);
                     return cloneNode(node);
                 }
+                const chainedRef = s.match(/^([A-Za-z_$\u3400-\u9fff][\w$\u3400-\u9fff]*)\s*(?=\.)/);
+                if (chainedRef && !/^[\w$]+\.z\./.test(s) && definitions[chainedRef[1]] && !(resolving || new Set()).has(chainedRef[1])) {
+                    const next = new Set(resolving || []); next.add(chainedRef[1]);
+                    return parseExpr(definitions[chainedRef[1]] + s.slice(chainedRef[0].length), path, next);
+                }
                 const lazy = s.match(/^(?:[A-Za-z_$][\w$]*\.)?z\.lazy\s*\(\s*\(\s*\)\s*=>\s*([A-Za-z_$\u3400-\u9fff][\w$\u3400-\u9fff]*)\s*\)/);
                 if (lazy && definitions[lazy[1]] && !(resolving || new Set()).has(lazy[1])) {
                     const next = new Set(resolving || []); next.add(lazy[1]);
                     return parseExpr(definitions[lazy[1]], path, next);
+                }
+                const helperCall = s.match(/^([A-Za-z_$\u3400-\u9fff][\w$\u3400-\u9fff]*)\s*\(/);
+                if (helperCall && definitions[helperCall[1]] && (resolving || new Set()).size < 80) {
+                    const definition = stripOuter(definitions[helperCall[1]]);
+                    const signature = definition.match(/^(\([^]*?\)|[A-Za-z_$][\w$]*)\s*=>\s*/);
+                    const helperOpen = s.indexOf('('), helperClose = readBalancedEnd(s, helperOpen);
+                    if (signature && helperClose >= 0) {
+                        const body = definition.slice(signature[0].length).trim();
+                        if (!body.startsWith('{')) {
+                            const params = js.split(signature[1].replace(/^\(|\)$/g, '')).map(p => p.split('=')[0].trim());
+                            const args = js.split(s.slice(helperOpen + 1, helperClose)), replacements = {};
+                            let valid = true;
+                            params.forEach((param, i) => {
+                                const pair = js.split(param, '=');
+                                if (!/^[A-Za-z_$][\w$]*$/.test(pair[0])) { valid = false; return; }
+                                replacements[pair[0]] = args[i] || pair[1] || 'undefined';
+                            });
+                            if (valid) {
+                                const next = new Set(resolving || []), key = 'call:' + s.slice(0, helperClose + 1);
+                                if (next.has(key)) return null; next.add(key);
+                                return parseExpr(js.substitute(body, replacements) + s.slice(helperClose + 1), path, next);
+                            }
+                        }
+                    }
                 }
                 const preprocess = s.match(/^(?:[A-Za-z_$][\w$]*\.)?z\.preprocess\s*\(/);
                 if (preprocess) {
@@ -1200,7 +1292,7 @@ function createSchemaLayout(dependencies) {
                         if (preArgs.length >= 2) return parseExpr(preArgs[preArgs.length - 1] + s.slice(preClose + 1), path, resolving);
                     }
                 }
-                const call = s.match(/^(?:(?:[A-Za-z_$][\w$]*\.)?z\.)?(coerce\.)?(object|record|array|string|number|boolean|enum|literal|any|unknown)\s*\(/);
+                const call = s.match(/^(?:(?:[A-Za-z_$][\w$]*\.)?z\.)?(coerce\.)?(object|record|array|string|number|boolean|enum|literal|any|unknown|union|discriminatedUnion)\s*\(/);
                 if (!call) return null;
                 const open = s.indexOf('(', call.index + call[0].length - 1);
                 const close = readBalancedEnd(s, open, '(', ')');
@@ -1213,7 +1305,8 @@ function createSchemaLayout(dependencies) {
                     const body = String(args[0] || '').trim();
                     if (body[0] === '{' && body[body.length - 1] === '}') {
                         for (const rawPart of splitJsTopLevelArgs(body.slice(1, -1))) {
-                            const part = String(rawPart || '').replace(/^\s*(?:\/\*[\s\S]*?\*\/\s*)+/, '').trim();
+                            const firstToken = js.tokens(rawPart)[0];
+                            const part = firstToken ? String(rawPart).slice(firstToken.start).trim() : '';
                             if (!part) continue;
                             if (part.startsWith('...')) {
                                 const spreadRaw = part.slice(3).trim().replace(/\.shape$/, '');
@@ -1228,7 +1321,10 @@ function createSchemaLayout(dependencies) {
                             const childRaw = part.slice(ci + 1);
                             const child = parseExpr(childRaw, [...path, key], resolving);
                             if (key && child) node.fields[key] = child;
-                            else if (key && /\bz\s*\.|\.z\s*\./.test(childRaw)) unsupported.push({ path: [...path, key].join('.'), kind: 'Schema 表达式', expression: childRaw.trim().slice(0, 160) });
+                            else if (key) {
+                                node.fields[key] = { kind: 'unknown', optional: true, unresolved: true };
+                                unsupported.push({ path: [...path, key].join('.'), kind: 'Schema 表达式（完整 JSON 保留）', expression: childRaw.trim().slice(0, 160) });
+                            }
                         }
                     }
                 } else if (kind0 === 'record') {
@@ -1237,12 +1333,12 @@ function createSchemaLayout(dependencies) {
                     const valuePath = [...path, '<动态键>'];
                     const valueNode = parseExpr(valueArg, valuePath, resolving);
                     if (!valueNode && /\bz\s*\.|\.z\s*\./.test(String(valueArg || ''))) unsupported.push({ path: valuePath.join('.'), kind: 'Schema 表达式', expression: String(valueArg).trim().slice(0, 160) });
-                    node = { kind: 'object', fields: {}, dynamic: true, keySchema: keyNode, value: valueNode || { kind: 'text' } };
+                    node = { kind: 'object', fields: {}, dynamic: true, keySchema: keyNode, value: valueNode || { kind: 'unknown', optional: true } };
                 } else if (kind0 === 'array') {
                     const elementPath = [...path, '<元素>'];
                     const elementNode = parseExpr(args[0], elementPath, resolving);
                     if (!elementNode && /\bz\s*\.|\.z\s*\./.test(String(args[0] || ''))) unsupported.push({ path: elementPath.join('.'), kind: 'Schema 表达式', expression: String(args[0]).trim().slice(0, 160) });
-                    node = { kind: 'array', element: elementNode || { kind: 'text' } };
+                    node = { kind: 'array', element: elementNode || { kind: 'unknown', optional: true } };
                 } else if (kind0 === 'enum') {
                     const vals = literal(args[0]);
                     node = { kind: 'text', enum: Array.isArray(vals) ? vals : [] };
@@ -1250,7 +1346,8 @@ function createSchemaLayout(dependencies) {
                     const v = literal(args[0]);
                     node = { kind: typeof v === 'number' ? 'number' : (typeof v === 'boolean' ? 'boolean' : 'text'), enum: [v] };
                 } else {
-                    node = { kind: kind0 === 'string' ? 'text' : (kind0 === 'any' || kind0 === 'unknown' ? 'text' : kind0) };
+                    node = { kind: kind0 === 'string' ? 'text' : (['any', 'unknown', 'union', 'discriminatedUnion'].includes(kind0) ? 'unknown' : kind0) };
+                    if (['union', 'discriminatedUnion'].includes(kind0)) unsupported.push({ path: path.join('.'), kind: '联合结构（完整 JSON 保留）', expression: s.slice(0, 160) });
                     if (call[1]) node.coerce = true;
                 }
                 let tail = s.slice(close + 1).trim();
@@ -1275,16 +1372,32 @@ function createSchemaLayout(dependencies) {
                     else if (op === 'default' || op === 'prefault') {
                         const v = literal(opArgs[0]);
                         if (v !== undefined) { node.hasDefault = true; node.defaultValue = v; node.defaultKind = op; }
-                        else unsupported.push({ path: path.join('.'), kind: op, expression: opRaw.slice(0, 160) });
+                        else { node.dynamicDefault = true; unsupported.push({ path: path.join('.'), kind: op, expression: opRaw.slice(0, 160) }); }
                     } else if (op === 'transform') {
-                        const clamp = opRaw.match(/_\.clamp\s*\([^,]+,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d+)?|\.\d+))\s*\)/);
-                        if (clamp) { node.min = Number(clamp[1]); node.max = Number(clamp[2]); node.clampTransform = true; }
-                        else unsupported.push({ path: path.join('.'), kind: 'transform', expression: opRaw.slice(0, 160) });
+                        const clampCall = /_\.clamp\s*\(/.exec(opRaw);
+                        const clampOpen = clampCall ? opRaw.indexOf('(', clampCall.index) : -1;
+                        const clampClose = clampOpen >= 0 ? readBalancedEnd(opRaw, clampOpen) : -1;
+                        const clampArgs = clampClose >= 0 ? js.split(opRaw.slice(clampOpen + 1, clampClose)) : [];
+                        const lo = literal(clampArgs[1]), hi = literal(clampArgs[2]);
+                        if (clampArgs.length === 3 && typeof lo === 'number' && typeof hi === 'number') {
+                            if (Number.isFinite(lo)) node.min = lo;
+                            if (Number.isFinite(hi)) node.max = hi;
+                            node.clampTransform = true;
+                        } else unsupported.push({ path: path.join('.'), kind: 'transform', expression: opRaw.slice(0, 160) });
+                    } else if (op === 'passthrough' || op === 'loose' || op === 'catchall') {
+                        node.passthrough = true;
+                    } else if (op === 'or') {
+                        // A union can change the physical value shape, including object → scalar.
+                        unsupported.push({ path: path.join('.'), kind: '联合结构（完整 JSON 保留）', expression: opRaw.slice(0, 160) });
+                        node = { kind: 'unknown', ...(node.hasDefault ? { hasDefault: true, defaultValue: node.defaultValue, defaultKind: node.defaultKind } : {}) };
                     } else if (op === 'refine' || op === 'superRefine' || op === 'preprocess' || op === 'pipe') {
                         unsupported.push({ path: path.join('.'), kind: op, expression: opRaw.slice(0, 160) });
                     } else if (op === 'extend' && node.kind === 'object') {
                         const ext = parseExpr('z.object(' + String(opArgs[0] || '{}') + ')', path, resolving);
                         if (ext) Object.assign(node.fields, ext.fields || {});
+                    } else if (op === 'omit' && node.kind === 'object') {
+                        const removed = literal(opArgs[0]);
+                        if (removed && typeof removed === 'object') for (const key of Object.keys(removed)) delete node.fields[key];
                     } else if (op === 'merge' && node.kind === 'object') {
                         const ext = parseExpr(opArgs[0], path, resolving);
                         if (ext && ext.kind === 'object') Object.assign(node.fields, cloneNode(ext.fields));
@@ -1325,7 +1438,7 @@ function createSchemaLayout(dependencies) {
                 if (incoming.value) out.value = mergeZodSchemaNodes(out.value, incoming.value) || incoming.value;
                 if (incoming.keySchema) out.keySchema = mergeZodSchemaNodes(out.keySchema, incoming.keySchema) || incoming.keySchema;
             }
-            for (const key of ['min', 'max', 'enum', 'desc', 'hasDefault', 'defaultValue', 'defaultKind', 'coerce', 'clampTransform', 'nullable', 'optional']) {
+            for (const key of ['min', 'max', 'enum', 'desc', 'hasDefault', 'defaultValue', 'defaultKind', 'dynamicDefault', 'unresolved', 'passthrough', 'coerce', 'clampTransform', 'nullable', 'optional']) {
                 if (incoming[key] !== undefined) out[key] = incoming[key];
             }
             return out;
@@ -1371,7 +1484,7 @@ function createSchemaLayout(dependencies) {
                 for (const [field, child] of Object.entries(row.fields || {})) {
                     if (!acc.shapes[target].includes(field)) acc.shapes[target].push(field);
                     acc.fieldTypes[target][field] = child.kind;
-                    if (child.kind === 'object' || child.kind === 'array') acc.objectSchemas[target][field] = child;
+                    if (['object', 'array', 'unknown'].includes(child.kind)) acc.objectSchemas[target][field] = child;
                     if (child.kind === 'number') acc.numericFields.add(field);
                     if (Number.isFinite(child.min) && Number.isFinite(child.max)) acc.ranges[field] = [child.min, child.max];
                     if (Array.isArray(child.enum) && child.enum.length >= 2) acc.enums[field] = child.enum.slice();
@@ -1422,6 +1535,26 @@ function createSchemaLayout(dependencies) {
             walk(data, root);
             return count;
         }
+
+    function missingRegisteredZodDefaults(data, root) {
+        const missing = [];
+        const visit = (value, node, path) => {
+            if (!node) { missing.push(path); return; }
+            if (value === undefined) {
+                if (node.dynamicDefault || node.unresolved || !node.optional) missing.push(path);
+                return;
+            }
+            if (node.kind === 'object' && isPlainObject(value)) {
+                if (node.dynamic) {
+                    for (const [key, child] of Object.entries(value)) visit(child, node.value, [...path, key]);
+                } else for (const [key, child] of Object.entries(node.fields || {})) visit(value[key], child, [...path, key]);
+            } else if (node.kind === 'array' && Array.isArray(value)) {
+                value.forEach((child, i) => visit(child, node.element, [...path, String(i)]));
+            }
+        };
+        visit(data, root, []);
+        return missing;
+    }
     
     function scanGreetingShapeVariation(data, extraBranchSources = []) {
             const dynamicPaths = new Set();
@@ -2008,7 +2141,7 @@ function createSchemaLayout(dependencies) {
                 const li = leafInfo(v);
                 const path = [...prefixPath, key];
                 const fixedSchema = opts.objectSchemaAt && opts.objectSchemaAt(path);
-                if (fixedSchema && (fixedSchema.kind === 'object' || fixedSchema.kind === 'array') && (fixedSchema.nullable || fixedSchema.optional)) {
+                if (fixedSchema && (fixedSchema.kind === 'unknown' || (['object', 'array'].includes(fixedSchema.kind) && (fixedSchema.nullable || fixedSchema.optional)))) {
                     cols.push(optionalJsonContainerColumn(key, v, path, fixedSchema, usedIdents));
                     continue;
                 }
@@ -2225,7 +2358,8 @@ function createSchemaLayout(dependencies) {
         }
         return { zh: key, path, value: encoded, desc: describeObjectSchema(node) || '可空对象/数组（JSON 整体存储）',
             type: 'TEXT', range: null, ident: toIdent(key, usedIdents, 'column'), isObject: true,
-            logicalType: 'jsonObjectOptional', jsonKind: node && node.kind === 'array' ? 'array' : 'object', objectSchema: node || null };
+            jsonDefaultMissing: !!(node && node.kind === 'unknown'),
+            logicalType: 'jsonObjectOptional', jsonKind: node && node.kind === 'unknown' ? 'any' : node && node.kind === 'array' ? 'array' : 'object', objectSchema: node || null };
     }
     
     function schemaTypeLabel(node) {
@@ -2281,7 +2415,7 @@ function createSchemaLayout(dependencies) {
                 for (const key of keys) {
                     const childSchema = schemaFields ? schemaFields[key] : null;
                     const childValue = valueFields && Object.prototype.hasOwnProperty.call(valueFields, key) ? valueFields[key] : undefined;
-                    if (childSchema && (childSchema.kind === 'object' || childSchema.kind === 'array') && (childSchema.nullable || childSchema.optional)) {
+                    if (childSchema && (childSchema.kind === 'unknown' || (['object', 'array'].includes(childSchema.kind) && (childSchema.nullable || childSchema.optional)))) {
                         const col = optionalJsonContainerColumn([...displayParts, key].join('_'), childValue, [...pathParts, key], childSchema, new Set());
                         col.itemPath = [...relativeParts, key];
                         out.push(col);
@@ -2351,8 +2485,16 @@ function createSchemaLayout(dependencies) {
             const yamlTypePaths = (shapeInfo && shapeInfo.yamlTypePaths || []).slice().sort((a, b) => b.path.length - a.path.length);
             const nullableNodeAt = path => {
                 let node = zodSchemaRoot;
+                let validatingNode = shapeInfo && shapeInfo.zodValidationRoot;
                 for (const part of path || []) {
                     if (node && node.dynamic) node = node.value;
+                    if (validatingNode && validatingNode.dynamic) validatingNode = validatingNode.value;
+                    if (validatingNode && validatingNode.kind === 'object' && !validatingNode.dynamic
+                        && validatingNode.fields && !Object.prototype.hasOwnProperty.call(validatingNode.fields, part)) {
+                        // Undeclared keys may be removed or retained by the actual Schema. Never recreate absent values.
+                        return { kind: 'unknown', optional: true, undeclared: true };
+                    }
+                    validatingNode = validatingNode && validatingNode.fields && validatingNode.fields[part];
                     node = node && node.fields && node.fields[part];
                 }
                 if (node) return node;
@@ -2402,9 +2544,10 @@ function createSchemaLayout(dependencies) {
                 return ((shapeFieldTypes[pathArr[0]] || {})[pathArr[1]] === 'array');
             };
             const groupNameSet = new Set(Object.keys(initvar));
+            for (const name of Object.keys(shapeInfo && shapeInfo.branchRootNodes || {})) groupNameSet.add(name);
             // 可选顶层容器即使初始缺失，也必须有可写的物理位置；不把缺失补成 {}。
             for (const [name, node] of Object.entries(zodSchemaRoot && zodSchemaRoot.fields || {})) {
-                if (node && ['object', 'array'].includes(node.kind) && (node.nullable || node.optional)) groupNameSet.add(name);
+                if (node) groupNameSet.add(name);
             }
     
             // 通用表种类推导：
@@ -2489,12 +2632,19 @@ function createSchemaLayout(dependencies) {
             }
     
             function applyDeclaredShape(column, group, field) {
-                const kind = declaredFieldKind(group, field);
+                const zodField = nullableNodeAt(column.path) || declaredZodField(group, field);
+                const kind = zodField && zodField.kind || declaredFieldKind(group, field);
                 const schema = (shapeObjectSchemas[group] || {})[field];
-                const zodField = declaredZodField(group, field);
                 if ((column.value === '' || column.value === undefined) && zodField && zodField.hasDefault) {
                     const dv = zodField.defaultValue;
                     column.value = (dv && typeof dv === 'object') ? JSON.stringify(dv) : dv;
+                }
+                if (kind === 'unknown') {
+                    if (column.logicalType === 'jsonObjectOptional' && column.jsonKind === 'any') return column;
+                    const original = leafInfo(column.value).value;
+                    column.type = 'TEXT'; column.isObject = true; column.logicalType = 'jsonObjectOptional';
+                    column.jsonKind = 'any'; column.objectSchema = zodField;
+                    column.value = original === undefined ? undefined : JSON.stringify(original);
                 }
                 if (kind === 'number' || kind === 'boolean') {
                     column.type = 'INTEGER';
@@ -2570,10 +2720,12 @@ function createSchemaLayout(dependencies) {
             }
     
             const completeRecordValue = node => node && node.dynamic && node.value
-                && ['object', 'array'].includes(node.value.kind) && (node.value.nullable || node.value.optional || node.value.kind === 'array'
+                && ['object', 'array', 'unknown'].includes(node.value.kind) && (node.value.kind === 'unknown' || node.value.nullable || node.value.optional || node.value.kind === 'array'
                     || node.value.dynamic || !Object.keys(node.value.fields || {}).length)
                 ? node.value : null;
             // 根层与关系表共用声明/样本类型契约；空记录不能抹去声明，混合/null 使用 JSON 标量。
+            const mixedRecordSample = values => values.some(value => Array.isArray(value) && !isPairLeaf(value))
+                || (values.some(isPlainObject) && values.some(value => !isPlainObject(value)));
             const recordScalarKind = (node, values) => {
                 if (node && !['object', 'array'].includes(node.kind)) {
                     if (node.nullable || node.optional || !['number', 'boolean', 'string', 'text'].includes(node.kind)) return 'mixed';
@@ -2621,8 +2773,9 @@ function createSchemaLayout(dependencies) {
                 }
                 const raw = initvar[groupName];
                 const tableName = claimTopLevelTableName(groupName);
-                const containerNode = nullableNodeAt([groupName]);
-                if (containerNode && ['object', 'array'].includes(containerNode.kind) && (containerNode.nullable || containerNode.optional)) {
+                let containerNode = shapeInfo && shapeInfo.branchRootNodes && shapeInfo.branchRootNodes[groupName] || nullableNodeAt([groupName]);
+                if (containerNode && (containerNode.kind === 'unknown' || raw === undefined)) containerNode = { ...containerNode, kind: containerNode.kind === 'object' || containerNode.kind === 'array' ? containerNode.kind : 'unknown', optional: true };
+                if (containerNode && ['object', 'array', 'unknown'].includes(containerNode.kind) && (containerNode.nullable || containerNode.optional)) {
                     const column = optionalJsonContainerColumn('内容', raw, [groupName], containerNode, new Set(['row_id']));
                     groups.push({ name: groupName, tableName, ident: toIdent(tableName, usedTableIdents, 'table'),
                         kind: 'singleton', keyCol: '', keyValue: groupName, valueCol: column.zh,
@@ -2709,7 +2862,8 @@ function createSchemaLayout(dependencies) {
                 if (Object.values(raw).some(v => isPlainObject(v) && Object.prototype.hasOwnProperty.call(v, rowsKeyCol))) {
                     rowsKeyCol += '_键名';
                 }
-                const recordValue = completeRecordValue(containerNode);
+                const recordValue = completeRecordValue(containerNode)
+                    || (kind === 'rows' && !containerNode && mixedRecordSample(Object.values(raw)) ? { kind: 'unknown', optional: true } : null);
                 if (recordValue) {
                     addNullableRecordGroup({ name: groupName, tableName, kind: 'rows', keyCol: rowsKeyCol,
                         keyValue: '', source: 'optional-record', writePaths: [[groupName]] }, recordValue,
@@ -2815,6 +2969,11 @@ function createSchemaLayout(dependencies) {
                         for (const subKey of Object.keys(entry)) {
                             const sv = entry[subKey];
                             const spath = [...prefixPath, entryName, subKey];
+                            const opaqueSchema = nullableNodeAt([groupName, subKey]);
+                            if (opaqueSchema && opaqueSchema.kind === 'unknown') {
+                                entryCols.push(optionalJsonContainerColumn(subKey, sv, spath, opaqueSchema, entryUsed));
+                                continue;
+                            }
                             if (Array.isArray(sv) && (!isPairLeaf(sv) || declaredFieldKind(groupName, subKey) === 'array') && !String(subKey).startsWith('_')) {
                                 let ct = rowChildByKey.get(subKey);
                                 if (!ct) {
@@ -2858,7 +3017,10 @@ function createSchemaLayout(dependencies) {
                                     continue;
                                 }
                             }
-                            if (isLeaf(sv)) {
+                            const rowFieldSchema = nullableNodeAt([groupName, subKey]);
+                            if (rowFieldSchema?.kind === 'unknown') {
+                                entryCols.push(optionalJsonContainerColumn(subKey, sv, spath, rowFieldSchema, entryUsed));
+                            } else if (isLeaf(sv)) {
                                 const li = leafInfo(sv);
                                 if (Array.isArray(sv)) pairFields.add(subKey);
                                 if (li.desc && !fieldDescs[subKey]) fieldDescs[subKey] = li.desc;
@@ -3365,7 +3527,13 @@ function createSchemaLayout(dependencies) {
                             ? ct.ancestorKeyCols.map(x => ({ ...x }))
                             : [{ col: parentKeyCol, entity: relationEntity, parentTable: g.tableName, parentKeyCol: g.keyCol }])
                         : [];
-                    const recordValue = completeRecordValue(nullableNodeAt(ct.path));
+                    const recordNode = nullableNodeAt(ct.path);
+                    const sampleDictionaries = ct.parentRows
+                        ? (Array.isArray(ct.ancestorEntries) ? ct.ancestorEntries.map(a => a.value) : Object.values(ct.value || {}))
+                        : [ct.value];
+                    const recordSamples = sampleDictionaries.flatMap(dict => isPlainObject(dict) ? Object.values(dict) : []);
+                    const recordValue = completeRecordValue(recordNode)
+                        || (!recordNode && mixedRecordSample(recordSamples) ? { kind: 'unknown', optional: true } : null);
                     if (recordValue) {
                         const parentBasePath = Array.isArray(g.writePaths) && g.writePaths.length
                             ? g.writePaths[0].slice() : [g.name];
@@ -3497,7 +3665,8 @@ function createSchemaLayout(dependencies) {
                                     const pairInfo = leafInfo(sv);
                                     if (pairInfo.desc && !fieldDescs[subKey]) fieldDescs[subKey] = pairInfo.desc;
                                 }
-                                row[subKey] = isLeaf(sv) && !arrayValue ? leafInfo(sv).value : JSON.stringify(sv);
+                                const unknownValue = nullableNodeAt([...ct.path, subKey])?.kind === 'unknown';
+                                row[subKey] = isLeaf(sv) && !arrayValue && !unknownValue ? leafInfo(sv).value : JSON.stringify(sv);
                                 if ((!isLeaf(sv) || arrayValue) && !columns.some(c => c.zh === subKey)) {
                                     objectFields.add(subKey);
                                     fieldOrder.push(subKey);
@@ -3648,6 +3817,21 @@ function createSchemaLayout(dependencies) {
                 }
             }
             const attached = attachFieldRules(groups, shapeInfo, report);
+            // A complete JSON column owns its descendants. Extra usage columns would
+            // overwrite those values during readback, even when left at empty defaults.
+            for (const g of attached) {
+                const complete = g.columns.filter(c => c.isObject && Array.isArray(c.path));
+                const removed = new Set();
+                g.columns.forEach((c, i) => {
+                    if (!Array.isArray(c.path)) return;
+                    if (complete.some(parent => parent !== c && parent.path.length < c.path.length
+                        && parent.path.every((part, j) => part === c.path[j]))) removed.add(i);
+                });
+                if (!removed.size) continue;
+                g.columns = g.columns.filter((_, i) => !removed.has(i));
+                g.rows = (g.rows || []).map(row => row.filter((_, i) => i === 0 || !removed.has(i - 1)));
+                report.note(`表「${g.tableName}」的 ${removed.size} 个嵌套字段已由完整 JSON 列承载，不再重复建列。`);
+            }
             disambiguateColumnSlugs(attached, report);
             // 只提升已有 null 样本的普通叶子列；空字符串、缺列和 null 不互相猜测。
             // SP 部分 native 写入路径会把 null 归一化为空单元格，故用 JSON 标量
@@ -3666,14 +3850,38 @@ function createSchemaLayout(dependencies) {
                         if (mergedSchema.kind === 'number' || mergedSchema.kind === 'boolean') c.type = 'INTEGER';
                         if (!c.isPair && ['number', 'boolean', 'string'].includes(mergedSchema.kind)) c.logicalType = mergedSchema.kind;
                     }
-                    if (c.isObject || c.zh === g.keyCol || c.zh === g.parentKeyCol
+                    if (c.isObject) {
+                        if (c.zh === '_扩展数据') return;
+                        const declaredObject = nullableNodeAt(c.path);
+                        if (declaredObject?.kind === 'unknown' && declaredObject.optional) {
+                            c.logicalType = 'jsonObjectOptional'; c.jsonKind = 'any';
+                            c.containerSchema = declaredObject; c.value = undefined;
+                            if (declaredObject.undeclared) c.omitMissingParents = true;
+                            if (g.kind === 'singleton') {
+                                let original = initvar;
+                                for (const part of c.path || []) original = original == null ? undefined : original[part];
+                                if (original === undefined) for (const row of g.rows || []) row[i + 1] = undefined;
+                            }
+                        }
+                        return;
+                    }
+                    if (c.zh === g.keyCol || c.zh === g.parentKeyCol
                         || (g.ancestorKeyCols || []).some(a => a.col === c.zh)
                         || c.logicalType === 'jsonScalar') return;
                     const declared = nullableNodeAt(c.path);
+                    // Exact declarations outrank leaf-name hints collected from other groups.
+                    if (declared && ['text', 'number', 'boolean'].includes(declared.kind)) {
+                        c.type = declared.kind === 'text' ? 'TEXT' : 'INTEGER';
+                        if (!c.isPair) c.logicalType = declared.kind;
+                        c.range = declared.kind === 'number' && Number.isFinite(declared.min) && Number.isFinite(declared.max)
+                            ? [declared.min, declared.max] : declared.kind === 'number' ? c.range : null;
+                        if (Array.isArray(declared.enum)) c.enum = declared.enum.slice();
+                    }
                     const presenceDeclared = declared && (declared.nullable || declared.optional);
                     if (!presenceDeclared && c.value !== null && !(g.rows || []).some(r => r[i + 1] === null)) return;
                     c.type = 'TEXT';
                     c.logicalType = c.isPair ? 'jsonPairOptional' : 'jsonScalarOptional';
+                    if (declared?.undeclared) c.omitMissingParents = true;
                     if (g.kind !== 'singleton' && c.value === '') c.value = undefined;
                     if (g.kind === 'singleton' && declared && declared.optional && !declared.hasDefault) {
                         let original = initvar;
@@ -4406,6 +4614,12 @@ function createSchemaLayout(dependencies) {
                     }
                 }
             }
+            for (const entry of entries) {
+                const group = schema.find(g => g.tableName === entry.table);
+                if (!group) continue;
+                const names = group.columns.filter(c => c.omitMissingParents).map(c => c.zh);
+                if (names.length) entry.omitMissingParents = names;
+            }
             return { entries, pathIndex, tableByName };
         }
     
@@ -4439,6 +4653,7 @@ function createSchemaLayout(dependencies) {
             // 旧读者忽略第 8 项即可。noteTemplate 只在转换期由 buildNote 填充。
             for (let i = 0; i < safe.length; i++) {
                 const src = layout.entries[i];
+                if (src?.omitMissingParents) safe[i].omitMissingParents = src.omitMissingParents;
                 if (src && src.vwd) safe[i].vwd = src.vwd;
             }
             return JSON.stringify(safe);
@@ -4491,7 +4706,7 @@ function createSchemaLayout(dependencies) {
             }
             return entries;
         }
-    return { leafInfo, maskYamlBlockScalarBodies, yamlStripQuotes, parseInlineEnumValues, yamlCheckItems, yamlExpandTemplateKeys, expandYamlTemplateFieldKey, protectYamlTemplateScalarValues, prepareMvuRuleYaml, yamlCollectCheckRanges, collectRulesFromYaml, yamlParseRange, isMvuRulePathKey, registerYamlWildcard, registerWildcardTypeShape, registerYamlField, parseMvuShapes, parseRegisteredZodSchema, mergeZodSchemaNodes, countZodSchemaFlag, mergeRegisteredZodIntoShapeInfo, applyRegisteredZodDefaults, scanGreetingShapeVariation, extractListItems, stripRuleQuotes, scanDynamicKeyNamesFromRules, parseZodStyleRules, isSchemaFieldName, mergeShapeMetadata, parseTypeSchema, parseShapeString, extractYamlBlockScalar, cardTextBlobs, scanStatusUsage, isPairLeaf, isLeaf, collectColumns, inferType, jsonColumnFromObject, schemaTypeLabel, schemaExample, describeObjectSchema, fixedObjectFromValue, fixedObjectSchema, flattenFixedObjectColumns, buildSchema, rowFirstValue, attachFieldRules, sanitizeMacroColumnZh, disambiguateColumnSlugs, isVwdMetaColumn, vwdFieldId, columnLayoutType, buildLayout, buildLayoutJson, resolveLayoutMacros };
+    return { leafInfo, maskYamlBlockScalarBodies, yamlStripQuotes, parseInlineEnumValues, yamlCheckItems, yamlExpandTemplateKeys, expandYamlTemplateFieldKey, protectYamlTemplateScalarValues, prepareMvuRuleYaml, yamlCollectCheckRanges, collectRulesFromYaml, yamlParseRange, isMvuRulePathKey, registerYamlWildcard, registerWildcardTypeShape, registerYamlField, parseMvuShapes, parseRegisteredZodSchema, mergeZodSchemaNodes, countZodSchemaFlag, mergeRegisteredZodIntoShapeInfo, applyRegisteredZodDefaults, missingRegisteredZodDefaults, scanGreetingShapeVariation, extractListItems, stripRuleQuotes, scanDynamicKeyNamesFromRules, parseZodStyleRules, isSchemaFieldName, mergeShapeMetadata, parseTypeSchema, parseShapeString, extractYamlBlockScalar, cardTextBlobs, scanStatusUsage, isPairLeaf, isLeaf, collectColumns, inferType, jsonColumnFromObject, schemaTypeLabel, schemaExample, describeObjectSchema, fixedObjectFromValue, fixedObjectSchema, flattenFixedObjectColumns, buildSchema, rowFirstValue, attachFieldRules, sanitizeMacroColumnZh, disambiguateColumnSlugs, isVwdMetaColumn, vwdFieldId, columnLayoutType, buildLayout, buildLayoutJson, resolveLayoutMacros };
 }
 
 module.exports = createSchemaLayout;

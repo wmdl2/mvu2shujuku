@@ -100,14 +100,40 @@ async function runtimeTest(page, source = syntheticCard(), convertCore = core, m
         if (!response.ok) throw new Error('import HTTP ' + response.status);
         return response.json();
     }, card);
-    await page.reload({ waitUntil: 'domcontentloaded' });
     const avatar = imported.file_name + '.png';
+    if (process.argv.includes('--only=card-api') || process.argv.some(arg=>['--only=community-cards','--only=remote-schema'].includes(arg))) await page.evaluate(async avatar => {
+        const st = await import('/script.js');
+        const ctx = window.SillyTavern.getContext(), helper = ctx.extensionSettings.tavern_helper;
+        helper.script.enabled.characters = [...new Set([...helper.script.enabled.characters, avatar])];
+        helper.script.popuped.characters = [...new Set([...helper.script.popuped.characters, avatar])];
+        await st.saveSettings();
+    }, avatar);
+    await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(avatar => window.SillyTavern?.getContext().characters.some(ch => ch.avatar === avatar), avatar, { timeout: 90000 });
+    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema'].includes(arg))) await page.evaluate(async () => {
+        const { power_user } = await import('/scripts/power-user.js');
+        power_user.world_import_dialog = false;
+    });
     await page.evaluate(avatar => { const ctx = window.SillyTavern.getContext(); return ctx.selectCharacterById(ctx.characters.findIndex(ch => ch.avatar === avatar)); }, avatar);
+    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema'].includes(arg))) await page.evaluate(async () => {
+        const world = await import('/scripts/world-info.js');
+        await world.importEmbeddedWorldInfo(true);
+    });
     await page.waitForFunction(() => window.Mvu?.getMvuData?.()?.stat_data?.背包?.length === 4 && window.SillyTavern.getContext().chat.some(m => m.TavernDB_ACU_IsolatedData), {}, { timeout: Number(process.env.MVU_INIT_TEST_TIMEOUT || 90000) });
     await waitCommittedGold(page, 10);
     const state = { avatar, chat: await page.evaluate(() => window.SillyTavern.getContext().chatId) };
     record('new-chat' + (modeLabel ? '-' + modeLabel : ''), await page.evaluate(() => window.Mvu.getMvuData().stat_data));
+    if (process.argv.includes('--only=card-api')) {
+        await page.evaluate(() => { window.__mvu2shujukuDebug = true; });
+        console.log('CARD_API_PREFLIGHT', JSON.stringify(await page.evaluate(async () => ({
+            marker: window.SillyTavern.getContext().characters[window.SillyTavern.getContext().characterId].extensions?.mvu2shujuku?.schemaKeys,
+            trees: (await window.TavernHelper.getScriptTrees({type:'character'})).map(x => ({type:x.type,name:x.name,enabled:x.enabled})),
+            frames: [...document.querySelectorAll('iframe')].map(frame => {
+                try { return {id:frame.id,schema:!!frame.contentWindow.__fixtureOriginalSchema,mvu:typeof frame.contentWindow.Mvu?.registerSchema}; }
+                catch (_) { return {id:frame.id}; }
+            }),
+        }))));
+    }
     assert.strictEqual(await page.evaluate(async () => {
         const value = window.Mvu.getMvuData(); value.stat_data.状态.金币 = 37;
         value.stat_data.背包 = ['新钥匙', 1, false, null, { 奖励: 1 }];
@@ -934,7 +960,14 @@ async function main() {
         try {
             const only = process.argv.find(arg => arg.startsWith('--only='))?.slice(7);
             const saved = path.join(work, 'state.json');
-            if (only === 'rollback') await require('./rollback-host')({ page, runtimeTest, vwdCard, setStorageMode, assertStorageMode, openState, waitCommittedGold, replaceMvuDataWhenIdle, record, work, runId });
+            if (only === 'card-api') await require('./card-api-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
+            else if (only === 'remote-schema') await require('./remote-schema-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
+            else if (only === 'community-cards') {
+                const harness = { page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record };
+                await require('./community-card-host')(harness);
+                await require('./remote-schema-host')(harness);
+            }
+            else if (only === 'rollback') await require('./rollback-host')({ page, runtimeTest, vwdCard, setStorageMode, assertStorageMode, openState, waitCommittedGold, replaceMvuDataWhenIdle, record, work, runId });
             else if (only === 'compat-probe') await require('./compatibility-probe')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'vwd-prompt') await require('./vwd-prompt-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'nullable-record') await require('./nullable-record-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
