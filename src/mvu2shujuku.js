@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.4.10';
+    const VERSION = '0.5.0';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -87,6 +87,58 @@
         if (typeof require === 'function') return require('./result-view.js');
         throw new Error('转换结果视图未加载，请使用构建后的 index.js');
     }
+    function getCardApiFactory() {
+        if (typeof root.__MVU2SHUJUKU_CARD_API_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CARD_API_FACTORY__;
+        if (typeof require === 'function') return require('./card-api.js');
+        throw new Error('Card API factory unavailable');
+    }
+    function getJsSourceFactory() {
+        if (typeof root.__MVU2SHUJUKU_JS_SOURCE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_JS_SOURCE_FACTORY__;
+        if (typeof require === 'function') return require('./js-source.js');
+        throw new Error('JS source factory unavailable');
+    }
+    function getRemoteSchemaFactory() {
+        if (typeof root.__MVU2SHUJUKU_REMOTE_SCHEMA_FACTORY__ === 'function') return root.__MVU2SHUJUKU_REMOTE_SCHEMA_FACTORY__;
+        if (typeof require === 'function') return require('./remote-schema.js');
+        throw new Error('远程 Schema 分析模块未加载');
+    }
+    let remoteSchemaService;
+    function getRemoteSchemaService() {
+        return remoteSchemaService || (remoteSchemaService = getRemoteSchemaFactory()({ createJsSource: getJsSourceFactory() }));
+    }
+    function getSchemaExecutionFactory() {
+        if (typeof root.__MVU2SHUJUKU_SCHEMA_EXECUTION_FACTORY__ === 'function') return root.__MVU2SHUJUKU_SCHEMA_EXECUTION_FACTORY__;
+        if (typeof require === 'function') return require('./schema-execution');
+        throw new Error('Schema 执行模块未加载');
+    }
+    function getSchemaExecutionBrowserFactory() {
+        if (typeof root.__MVU2SHUJUKU_SCHEMA_EXECUTION_BROWSER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_SCHEMA_EXECUTION_BROWSER_FACTORY__;
+        if (typeof require === 'function') return require('./schema-execution-browser');
+        throw new Error('Schema 浏览器隔离环境未加载');
+    }
+    let schemaExecutionService;
+    function getSchemaExecutionService() {
+        if (schemaExecutionService) return schemaExecutionService;
+        if (typeof require === 'function') return schemaExecutionService = require('./schema-execution-node');
+        const source = root.__MVU2SHUJUKU_SCHEMA_ENGINE_SOURCE__;
+        if (!source) throw new Error('Schema 执行依赖未加载，请重新构建插件');
+        const libraries = root.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__;
+        return schemaExecutionService = getSchemaExecutionBrowserFactory()({ createExecution: getSchemaExecutionFactory(), libraries, runtimeSource: source, document: root.document });
+    }
+    function schemaExecutionInputs(card, remoteSchemaSources = []) {
+        const scripts = (card.data || card).extensions?.tavern_helper?.scripts || [];
+        return scripts.flatMap((script, index) => {
+            if (script.enabled === false) return [];
+            const remote = remoteSchemaSources.find(snapshot => snapshot.index === index);
+            const source = remote ? remote.source : String(script.content || script.code || script.script || '');
+            return remote || connectRegisteredSchema(source).count > 0 ? [{ index, source }] : [];
+        });
+    }
+    function schemaExecutionSnapshot(input, result) {
+        let rootNode;
+        for (const node of result.roots) rootNode = getSchemaLayout().mergeZodSchemaNodes(rootNode, node);
+        return { ...input, root: rootNode, unsupported: result.unsupported, engine: result.engine };
+    }
     function getSchemaLayoutFactory() {
         if (typeof root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ === 'function') return root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__;
         if (typeof require === 'function') return require('./schema-layout.js');
@@ -104,9 +156,10 @@
     }
     function getSchemaLayout() {
         if (!sharedSchemaLayout) sharedSchemaLayout = getSchemaLayoutFactory()({
-            getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf,
+            createJsSource: getJsSourceFactory(), getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf,
             maskJsStringsAndComments, createStatusUsage: getStatusUsageFactory(), isPromptVisibleColumn, isMvuOutputDocument,
             vwdExperimental: isVwdExperimental,
+            canValidateRegisteredSchema: source => connectRegisteredSchema(source).count > 0,
         });
         return sharedSchemaLayout;
     }
@@ -838,7 +891,7 @@
                 const encodedDefault = c.jsonDefaultMissing === true || dv === undefined ? '' : (typeof dv === 'string' ? dv : JSON.stringify(dv));
                 def += ` NOT NULL DEFAULT '${sqlQuote(encodedDefault)}'`;
                 if (includeCheck) {
-                    const kinds = c.jsonKind === 'array' ? "'array'" : "'object'";
+                    const kinds = c.jsonKind === 'any' ? "'array', 'object', 'text', 'integer', 'real', 'true', 'false'" : c.jsonKind === 'array' ? "'array'" : "'object'";
                     def += ` CHECK(${c.ident} = '' OR (json_valid(${c.ident}) AND json_type(${c.ident}) IN ('null', ${kinds})))`;
                     def += jsonPathChecksSql(c);
                 }
@@ -1451,6 +1504,7 @@
      */
     // 新调用直接取本次结果；旧数字接口及失败 getter 仅供已有调用方兼容。
     // plannedChanges 是计划差异数量，不代表成功次数或实际宿主 API 调用次数。
+    function unmappedStatGroups(...args) { return getTableWriter().unmappedStatGroups(...args); }
     async function writeStatDiffToDbResult(api, layoutEntries, prevStat, nextStat, persistedTables) {
         return getTableWriter().writeStatDiffToDbResult(api, layoutEntries, prevStat, nextStat, persistedTables);
     }
@@ -1854,7 +1908,7 @@
             // 仅匹配已知的引擎发布物。不能因为 URL/仓库名里出现 mvu 就删除：很多
             // 配置助手、前端和用户业务模块也会在名字里带 mvu。
             const knownEngine =
-                /(?:^|\/)MagicalAstrogy\/MagVarUpdate(?:@[^/]*)?\/(?:artifact|dist)\/[^?#]*(?:bundle|index)[^/?#]*\.js(?:[?#]|$)/i.test(spec) ||
+                /(?:^|\/)(?:MagicalAstrogy|NLKASHEI)\/MagVarUpdate(?:@[^/]*)?\/(?:artifact|dist)\/[^?#]*(?:bundle|index)[^/?#]*\.js(?:[?#]|$)/i.test(spec) ||
                 /(?:^|\/)NLKASHEI\/MVU-offline(?:@[^/]*)?\/[^?#]*mvu[_-]?bundle[^/?#]*\.js(?:[?#]|$)/i.test(spec);
             if (knownEngine) {
                 hasKnownEngineImport = true;
@@ -1882,7 +1936,10 @@
             if (aliased) return aliased[1];
             return /\bregisterMvuSchema\b/.test(s) ? 'registerMvuSchema' : '';
         })();
-        if (schemaRegisterAlias && isPureRegisteredSchemaScript(s, schemaRegisterAlias)) return true;
+        const importedRegistration = /import\s*\{[^}]*\bregisterMvuSchema\b[^}]*\}\s*from\s*['"][^'"]+['"]/.test(s);
+        if (schemaRegisterAlias && !importedRegistration && isPureRegisteredSchemaScript(s, schemaRegisterAlias)) return true;
+        // Imported local schemas can register candidate validation. Bare declarations
+        // still serve as static references; unknown external schemas need source.
         // 未知内联 bundle 即使很大也可能混有业务，无法证明来源时保留并报告。
         return false;
     }
@@ -2155,12 +2212,57 @@
         return { text, count: edits.length / 2 };
     }
 
+    function connectRegisteredSchema(source) {
+        if (!/import\s*\{[^}]*\bregisterMvuSchema\b[^}]*\}\s*from\s*['"][^'"]+['"]/.test(source)) return { text: source, key: '', count: 0 };
+        const js = getJsSourceFactory()(), tokens = js.tokens(source);
+        const aliases = new Set(['registerMvuSchema']);
+        const alias = source.match(/registerMvuSchema\s+as\s+([A-Za-z_$][\w$]*)/); if (alias) aliases.add(alias[1]);
+        const calls = tokens.filter((t, i) => aliases.has(t.value) && tokens[i + 1]?.value === '(' && tokens[i - 1]?.value !== '.');
+        if (!calls.length) return { text: source, key: '', count: 0 };
+        let hash = 2166136261; for (let i = 0; i < source.length; i++) hash = Math.imul(hash ^ source.charCodeAt(i), 16777619);
+        const key = 'schema-' + (hash >>> 0).toString(16) + '-' + source.length;
+        const replacements = [];
+        for (const call of calls) {
+            const original = call.value;
+            const wrapper = `(schema => { const result = ${original}(schema); let remaining = 40, timer = null; const bind = () => { const api = window.parent && window.parent.Mvu || window.Mvu; if (api && api.__mvu2shujukuFake && typeof api.registerSchema === 'function' && api.registerSchema(schema, ${JSON.stringify(key)})) { if (timer !== null) window.clearTimeout(timer); timer = null; return; } if (timer === null && remaining-- > 0) timer = window.setTimeout(() => { timer = null; bind(); }, 250); }; bind(); if (typeof waitGlobalInitialized === 'function') Promise.resolve(waitGlobalInitialized('Mvu')).then(bind).catch(console.warn); if (typeof eventOn === 'function') eventOn('global_Mvu_initialized', () => { remaining = 40; bind(); }); return result; })`;
+            replacements.push({ start: call.start, end: call.end, value: wrapper });
+        }
+        tokens.forEach((token, i) => {
+            if (token.value === 'eventOn' && tokens[i + 1]?.value === '(' && /^['"]mag_command_parsed_for_zod['"]$/.test(tokens[i + 2]?.value || '')) {
+                const event = tokens[i + 2]; replacements.push({ start: event.start, end: event.end, value: JSON.stringify('mvu2shujuku_command_normalize:' + key) });
+            }
+        });
+        let text = source;
+        for (const replacement of replacements.sort((a, b) => b.start - a.start)) text = text.slice(0, replacement.start) + replacement.value + text.slice(replacement.end);
+        return { text, key, count: calls.length };
+    }
     function transformCard(card, opts = {}) {
         const report = opts.report || createReport();
         const mode = opts.mode || 'both';
         const nameSuffix = opts.nameSuffix !== undefined ? opts.nameSuffix : '_数据库';
         const data = card.data || card;
+        const remoteSchemas = opts.remoteSchemaSources || [];
+        const shapeCard = deepClone(card);
+        for (const snapshot of remoteSchemas) {
+            const script = (shapeCard.data || shapeCard).extensions?.tavern_helper?.scripts?.[snapshot.index];
+            if (!script || script.enabled === false) continue;
+            if (!getRemoteSchemaService().supported(snapshot.source)) throw new Error('远程 Schema 登记接口尚不支持：' + snapshot.url);
+            script.content = getRemoteSchemaService().analysisSource(snapshot.source);
+            script.__mvuRemoteRegistration = true;
+            report.note(`已分析远程 Schema「${script.name}」；源码 SHA-256=${snapshot.sha256 || '本地提供'}。`);
+            if (snapshot.pinWarning) report.warn(snapshot.pinWarning, 'schema');
+        }
+        const shapeScripts = (shapeCard.data || shapeCard).extensions?.tavern_helper?.scripts || [];
+        for (const input of schemaExecutionInputs(card, remoteSchemas)) {
+            let snapshot = opts.schemaSnapshots?.find(item => item.index === input.index && item.source === input.source);
+            if (!snapshot) {
+                try { snapshot = schemaExecutionSnapshot(input, getSchemaExecutionService().inspectSync(input.source)); }
+                catch (error) { throw new Error(`Schema「${shapeScripts[input.index].name || '未命名'}」执行失败：${error.message}`); }
+            }
+            shapeScripts[input.index].__mvuSchemaSnapshot = snapshot;
+        }
         const cb = data.character_book || {};
+        const originalWorldbookName = String(cb.name || (data.extensions && data.extensions.world) || '');
         const entries = Array.isArray(cb.entries) ? cb.entries : [];
 
         // 1. initvar。MVU 语义（源码 initCheck/loadInitVarData）：
@@ -2234,6 +2336,18 @@
                 `；以首个分支为基准（MVU 按分支替换、不合并），各分支初始化值在开局时按所选分支注入。`
             );
         }
+        const shapeInfo = parseMvuShapes(shapeCard, report);
+        if (Object.keys(initvar).length === 0 && shapeInfo.zodDefaultsRoot) {
+            const defaults = {};
+            applyRegisteredZodDefaults(defaults, shapeInfo.zodDefaultsRoot);
+            const missing = getSchemaLayout().missingRegisteredZodDefaults(defaults, shapeInfo.zodDefaultsRoot);
+            if (Object.keys(defaults).length && !missing.length) {
+                initvar = defaults;
+                report.note('未找到可用 InitVar，已采用已启用 Zod Schema 的静态默认值初始化。');
+            } else if (missing.length) {
+                report.warn(`Zod Schema 静态默认值不足以初始化；缺少必填初值或含动态默认：${missing.map(p => p.join('.') || '<根>').join('、')}。`, 'schema');
+            }
+        }
         if (Object.keys(initvar).length === 0) {
             const msg =
                 `未找到可用的 [InitVar] 或分支 <initvar>，无法识别为 MVU 变量卡。` +
@@ -2260,11 +2374,26 @@
             const analyzed = analyzeMvuInitMetadata(branch);
             branchMetadataAnalyses.push(analyzed);
         }
+        // Union layout identities, never branch values. Missing roots remain absent.
+        if (branchMetadataAnalyses.length > 1) {
+            const branches = branchMetadataAnalyses.map(item => item.data);
+            const roots = new Set(branches.flatMap(branch => Object.keys(branch)));
+            shapeInfo.branchRootNodes = {};
+            const kind = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+            for (const name of roots) {
+                if (name === '$meta') continue;
+                const values = branches.filter(branch => Object.prototype.hasOwnProperty.call(branch, name)).map(branch => branch[name]);
+                if (!Object.prototype.hasOwnProperty.call(initvar, name) || values.length < branches.length || new Set(values.map(kind)).size > 1) {
+                    shapeInfo.branchRootNodes[name] = { kind: 'unknown', optional: true };
+                }
+            }
+            const names = Object.keys(shapeInfo.branchRootNodes);
+            if (names.length) report.note(`已为多开场分支预建 ${names.length} 个可缺失完整 JSON 根组；初值仍仅取当前开场，不合并其他分支数据：${names.join('、')}。`);
+        }
 
         const usage = scanStatusUsage(card, Object.keys(initvar));
         report.note(`状态栏/脚本字段扫描：${Object.keys(usage).map(g => `${g}(${usage[g].length})`).join('、') || '无'}。`);
 
-        const shapeInfo = parseMvuShapes(card, report);
         // Zod prefault/default 是缺值时的声明式初始值。这里只补静态字面量，不执行
         // 函数或 transform；已有 InitVar 值始终优先，符合 Zod 对已提供输入的处理。
         if (shapeInfo.zodDefaultsRoot) {
@@ -2601,8 +2730,17 @@
         const th = (data.extensions && data.extensions.tavern_helper) || {};
         const scripts = Array.isArray(th.scripts) ? th.scripts : [];
         const keptScripts = [];
-        for (const s of scripts) {
+        const schemaKeys = [];
+        for (const [scriptIndex, s] of scripts.entries()) {
             const content = String(s.content || '');
+            const remote = remoteSchemas.find(snapshot => snapshot.index === scriptIndex);
+            if (remote && s.enabled !== false) {
+                const adapter = getRemoteSchemaService().runtimeAdapter(remote, content, !!opts.localizeRemoteSchemas);
+                keptScripts.push({ ...deepClone(s), type: 'script', content: adapter.content });
+                schemaKeys.push(adapter.key);
+                report.auto(`远程 Schema「${s.name}」已通过原登记接口接入数据桥；${opts.localizeRemoteSchemas ? '源码保存到转换卡' : '运行时复用原模块，不由插件另行下载分析源码'}。`);
+                continue;
+            }
             if (isMvuEngineScriptContent(content, s.name)) {
                 if (isUninspectableExternalSchemaImport(content, s.name)) {
                     report.manual(`已移除纯外部 Schema 导入「${s.name}」以避免旧 Zod 继续拦截数据库更新；导入模块正文不在角色卡内，无法核对其中独有字段、默认值和校验。若转换报告/表格缺少这些内容，请提供该模块源码后人工补入模板。`);
@@ -2617,7 +2755,17 @@
                 `保留 tavern_helper 脚本「${s.name}」（${usesMvuApi ? '调用 Mvu.* 的业务脚本，改由数据库桥兼容层提供标准接口' : (ambiguousMvuImport ? '名称疑似与 MVU 有关，但不是已知引擎产物；为避免误删业务功能已保留，请按需核对' : (isExternal ? '外部 import，无法静态确认其内部调用；已默认安装 MVU 兼容层兜底，若仍有异常请人工检查' : '未检测到 MVU API；若依赖 MVU 变量请人工检查'))}）。`
             );
             const kept = deepClone(s);
-            const chatMirrorRewrite = rewriteLegacyMvuChatMirrorScript(content, Object.keys(initvar));
+            const connectedSchema = s.enabled !== false ? connectRegisteredSchema(content) : { count: 0 };
+            if (connectedSchema.count) {
+                kept.content = connectedSchema.text;
+                schemaKeys.push(connectedSchema.key);
+                report.auto(`脚本「${s.name}」的原卡 Schema 已接入提交前候选校验；自定义业务逻辑由已加载的原 Schema 执行，校验失败不写数据库。`);
+            }
+            // Wait for the converted-card shim before loading side-effect-only external modules.
+            if (isExternal && !connectedSchema.count && /^\s*import\s*['"][^'"]+['"]\s*;?\s*$/.test(content)) {
+                kept.content = `await waitGlobalInitialized('Mvu');\n` + content.replace(/^\s*import\s*(['"])([^'"]+)\1\s*;?\s*$/, (_, quote, url) => 'await import(' + JSON.stringify(url) + ');');
+            }
+            const chatMirrorRewrite = rewriteLegacyMvuChatMirrorScript(kept.content, Object.keys(initvar));
             if (chatMirrorRewrite.count) {
                 kept.content = chatMirrorRewrite.text;
                 report.auto(`脚本「${s.name}」中 ${chatMirrorRewrite.count} 处旧 MVU chat 根变量镜像事务已改写为 Mvu.getMvuData/replaceMvuData（其他 chat 设置仍保留 TavernHelper 原作用域）。`);
@@ -2690,6 +2838,13 @@
             mode,
             convertedAt,
             originalName: origName,
+            schemaKeys: [...new Set(schemaKeys)],
+            ...(remoteSchemas.length ? { remoteSchemas: remoteSchemas.map(snapshot => ({
+                url: snapshot.url, runtimeUrl: snapshot.runtimeUrl || snapshot.url,
+                sha256: snapshot.sha256 || '', commit: snapshot.commit || '',
+                method: opts.localizeRemoteSchemas ? 'localized' : 'original-registration',
+            })) } : {}),
+            worldbookAliases: originalWorldbookName && data.character_book && data.character_book.name !== originalWorldbookName ? { [originalWorldbookName]: data.character_book.name } : {},
             templateUid: Object.keys(template).filter(k => k.startsWith('sheet_')).map(k => template[k].uid),
             // 布局随卡保存：扩展用它从数据库表格实时重建 stat_data，供 EJS 读取（不依赖卡内桥）
             layout: buildLayoutJson(layout),
@@ -2792,6 +2947,15 @@
             promptKeys: templatePromptKeys(result.template),
             bridgeOptions: transformed.bridgeOptions, sourceRegexScripts: transformed.sourceRegexScripts });
         return result;
+    }
+    async function convertWithRemoteSchemas(input, opts = {}) {
+        const remoteSchemaSources = await getRemoteSchemaService().resolve(parseCard(input), opts);
+        const schemaSnapshots = [];
+        for (const item of schemaExecutionInputs(parseCard(input), remoteSchemaSources)) {
+            try { schemaSnapshots.push(schemaExecutionSnapshot(item, await getSchemaExecutionService().inspect(item.source))); }
+            catch (error) { throw new Error(`Schema 隔离执行失败（脚本 ${item.index + 1}）：${error.message}`); }
+        }
+        return convert(input, { ...opts, remoteSchemaSources, schemaSnapshots });
     }
 
     // 产物装配与卡片分析分开；模板编辑无需重复解析 initvar、Schema、业务脚本和 EJS。
@@ -3084,6 +3248,11 @@
             ['__MVU2SHUJUKU_TABLE_CODEC_FACTORY__', getTableCodecFactory],
             ['__MVU2SHUJUKU_INPUT_PARSER_FACTORY__', getInputParserFactory],
             ['__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__', getEjsTransformFactory],
+            ['__MVU2SHUJUKU_CARD_API_FACTORY__', getCardApiFactory],
+            ['__MVU2SHUJUKU_JS_SOURCE_FACTORY__', getJsSourceFactory],
+            ['__MVU2SHUJUKU_REMOTE_SCHEMA_FACTORY__', getRemoteSchemaFactory],
+            ['__MVU2SHUJUKU_SCHEMA_EXECUTION_FACTORY__', getSchemaExecutionFactory],
+            ['__MVU2SHUJUKU_SCHEMA_EXECUTION_BROWSER_FACTORY__', getSchemaExecutionBrowserFactory],
             ['__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__', getSchemaLayoutFactory],
             ['__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__', getTablePromptsFactory],
             ['__MVU2SHUJUKU_STATUS_USAGE_FACTORY__', getStatusUsageFactory],
@@ -3189,6 +3358,7 @@
         setVwdExperimental,
         isVwdExperimental,
         writeStatDiffToDbResult,
+        unmappedStatGroups,
         writeStatDiffToDb,
         get lastStatWriteFailed() { return getTableWriter().lastStatWriteFailed; },
         rewriteEjsConditions,
@@ -3197,6 +3367,7 @@
         toPinyinSlug,
         transformCard,
         convert,
+        convertWithRemoteSchemas,
         refreshConversion,
         assembleExtension,
         extensionManifest,

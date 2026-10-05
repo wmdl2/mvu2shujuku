@@ -29,6 +29,7 @@ function createRuntimeGlobals(options) {
                 rec = null;
             }
             if (!rec) rec = { w, get: undefined, hasGet: false, upd: undefined, hasUpd: false, rep: undefined, hasRep: false, ins: undefined, hasIns: false, mvu: undefined, hasMvu: false, gav: undefined, hasGav: false, wait: undefined, hasWait: false, msg: undefined, hasMsg: false };
+            rec.patches = rec.patches || new Map();
             rec.document = doc;
             if (!reg.list.includes(rec)) reg.list.push(rec);
             reg.originalsByWindow.set(w, rec);
@@ -43,6 +44,17 @@ function createRuntimeGlobals(options) {
             return rec;
         } catch (e) { return null; }
     }
+    function patch(w, key, value) {
+        const rec = note(w); if (!rec) return false;
+        let saved = rec.patches.get(key);
+        if (!saved) { saved = { descriptor: Object.getOwnPropertyDescriptor(w, key), value: w[key] }; rec.patches.set(key, saved); }
+        const descriptor = Object.getOwnPropertyDescriptor(w, key);
+        if (descriptor && !descriptor.configurable && !descriptor.writable) return false;
+        try { Object.defineProperty(w, key, { value, configurable: true, writable: true, enumerable: descriptor ? descriptor.enumerable : true }); }
+        catch (_) { return false; }
+        saved.installed = value; return true;
+    }
+    function original(w, key) { const rec = note(w); return rec && rec.patches.has(key) ? rec.patches.get(key).value : w[key]; }
     function sameDescriptor(a, b) {
         return !!a && !!b && ['value', 'get', 'set', 'writable', 'configurable', 'enumerable'].every(key => a[key] === b[key]);
     }
@@ -69,6 +81,11 @@ function createRuntimeGlobals(options) {
             const w = rec.w;
             if (!w) return true;
             if (Object.prototype.hasOwnProperty.call(rec, 'document') && rec.document !== w.document) return true;
+            for (const [key, saved] of rec.patches || []) {
+                const descriptor = Object.getOwnPropertyDescriptor(w, key);
+                if (!descriptor || descriptor.value !== saved.installed) continue;
+                if (saved.descriptor) Object.defineProperty(w, key, saved.descriptor); else delete w[key];
+            }
             if (isOursShimFn(w.getVariables)) { if (rec.hasGet) w.getVariables = rec.get; else delete w.getVariables; }
             if (isOursShimFn(w.updateVariablesWith)) { if (rec.hasUpd) w.updateVariablesWith = rec.upd; else delete w.updateVariablesWith; }
             if (isOursShimFn(w.replaceVariables)) { if (rec.hasRep) w.replaceVariables = rec.rep; else delete w.replaceVariables; }
@@ -117,7 +134,7 @@ function createRuntimeGlobals(options) {
         releaseMissing(new Set(Array.isArray(windows) ? windows : []));
     }
     function restoreAll() { releaseMissing(null); }
-    return { note, publishMvu, retainWindows, restoreAll };
+    return { note, patch, original, publishMvu, retainWindows, restoreAll };
 }
 
 if (typeof module !== 'undefined' && module.exports) module.exports = createRuntimeGlobals;

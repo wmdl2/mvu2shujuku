@@ -1,0 +1,8 @@
+{
+  "name": "mvu2shujuku-schema-engine-build",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": { "build": "node build.js" },
+  "dependencies": { "acorn": "8.16.0", "lodash": "4.18.1", "zod": "4.4.3" },
+  "devDependencies": { "webpack": "5.105.4" }
+}

@@ -5,6 +5,16 @@ function createMvuCommands(deps) {
     'use strict';
     const { getMvuYamlLibs } = deps || {};
 
+    function commandPathParts(path) {
+        const text = String(path == null ? '' : path);
+        // Local Schema path normalizers emit a sequence of JSON-quoted brackets.
+        // Keep dots and slashes inside a quoted key literal.
+        if (/^(?:\["(?:[^"\\]|\\.)*"\])+$/.test(text)) {
+            return [...text.matchAll(/\[("(?:[^"\\]|\\.)*")\]/g)].map(match => JSON.parse(match[1]));
+        }
+        return text.split('.').filter(p => p !== '');
+    }
+
     function parseMvuCmdValue(raw) {
         const t = String(raw == null ? '' : raw).trim();
         if (t === 'true') return true;
@@ -123,7 +133,11 @@ function createMvuCommands(deps) {
         if (type === 'assign') type = 'insert';
         if (type === 'remove' || type === 'unset') type = 'delete';
         const args = info.args;
-        const cleanPath = (v) => String(v == null ? '' : v).replace(/^['"]|['"]$/g, '').replace(/^\//, '').replace(/\//g, '.');
+        const cleanPath = (v) => {
+            const text = String(v == null ? '' : v);
+            if (/^\["/.test(text)) return text;
+            return text.replace(/^['"]|['"]$/g, '').replace(/^\//, '').replace(/\//g, '.');
+        };
         if (type === 'move') return { type, from: cleanPath(args[0]), path: cleanPath(args[1]), full_match: info.full_match || '', reason: info.reason || '' };
         const path = cleanPath(args[0]);
         if (type === 'delete') return { type, path, keyOrIndex: args.length > 1 ? parseMvuCmdValue(args[1]) : undefined, full_match: info.full_match || '', reason: info.reason || '' };
@@ -142,7 +156,7 @@ function createMvuCommands(deps) {
         };
         const note = (path, oldV, newV, reason) => {
             const r = reason ? ' (' + reason + ')' : '';
-            const parts = String(path).split('.').filter(Boolean);
+            const parts = commandPathParts(path);
             const value = String(oldV) + '->' + String(newV) + r;
             if (display) setPathArr(display, parts, value);
             const delta = stat.$internal && stat.$internal.delta_data;
@@ -150,10 +164,10 @@ function createMvuCommands(deps) {
         };
         for (const cmd of cmds) {
             if (!cmd.path) continue;
-            const parts = String(cmd.path).split('.').filter((p) => p !== '');
+            const parts = commandPathParts(cmd.path);
             if (parts.some((p) => p.charAt(0) === '_')) continue;
             if (cmd.type === 'move') {
-                const mf = String(cmd.from || '').replace(/^\//, '').replace(/\//g, '.').split('.').filter((p) => p !== '');
+                const mf = commandPathParts(cmd.from);
                 if (mf.some((p) => p.charAt(0) === '_')) continue;
                 let mv;
                 let mc = stat, mok = true;

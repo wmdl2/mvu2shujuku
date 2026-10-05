@@ -1,10 +1,19 @@
 # 文档与维护入口
 
+远程 Schema、多开场分支及 0.5.0 最终验收见 [验证记录](validation/2026-10-05-remote-schema-branches.md)。注册 Schema、创角档案、世界书别名及 3.2 MVU 卡缺口的前序修复见 [v0.4.11 验证](validation/2026-10-05-card-api-compatibility.md)。
+
 按当前问题选择资料，不需要每次全文读取所有文档。
 
 | 当前问题 | 入口 |
 | --- | --- |
+| 真实 JavaScript/Zod Schema 构造、隔离执行与通用语法修复 | [执行验证](validation/2026-10-05-schema-execution.md) |
+| 社区语料问题根因、可玩性边界和改造前静态解析缺口 | [根因分析](validation/2026-10-05-conversion-root-causes.md) |
+| 远程 Schema、版本固定、多开场及 0.5.0 验收 | [远程与分支验证](validation/2026-10-05-remote-schema-branches.md) |
+| 社区 MVU/ZOD 角色卡批次、Schema 默认初始化与同名字段类型 | [逐卡转换验证](validation/2026-10-05-community-card-conversion.md) |
+| 3.2 MVU 卡的结构、创角、外部引擎与世界书转换缺口 | [卡片转换检查](validation/2026-10-05-card-32-conversion-audit.md) |
+| TT 原生重新生成、重Roll脚本与表格回退时序风险 | [重新生成风险检查](validation/2026-10-05-tauritavern-regeneration-rollback.md) |
 | TauriTavern 历史滚动、状态栏冷恢复与 Mvu 初始化兼容 | [运行兼容性审查](validation/2026-10-03-tauritavern-runtime-audit.md) |
+| 安卓发送跳楼、DOM 虚拟化与助手流式渲染限制 | [手机与虚拟化检查](validation/2026-10-04-tauritavern-mobile-virtualization.md) |
 | 字面键、根层标量、规则迁移凭证与禁用结构声明 | [通用转换契约修复](validation/2026-10-03-converter-contracts.md) |
 | 变量输出格式整条移除与更新规则按迁移拆分 | [输出格式与规则拆分验证](validation/2026-10-03-output-format-ownership.md) |
 | 双模式业务说明与宿主输出协议的职责分工 | [表格协议说明验证](validation/2026-10-03-table-protocol-notes.md) |

@@ -10,6 +10,8 @@ test('MVU 更新视图：每轮 display 完整、delta 仅含本轮嵌套路径�
     const events = [];
     const context = { window: { MVU2SHUJUKU_CORE: core }, hostWindow: {}, console,
         openingBulkClosedChats: new Set(), runtimeScopedChatKey: x => x, autoInitChatId: () => 'chat', pruneOrderedCollection() {},
+        currentCardApi: null, readCardApiMetadata: () => ({}), validateCardStat: async data => data,
+        mvuVariablePathParts: path => String(path).split('.').filter(Boolean),
         emitMvuEvent: async (name, ...args) => { if (name === 'mag_variable_update_ended') events.push(JSON.parse(JSON.stringify(args))); },
     };
     // 命令规则来自真实模块；这里只提取仍属于运行时的事件协调逻辑。

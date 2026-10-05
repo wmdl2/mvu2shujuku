@@ -642,3 +642,5 @@ test('可空动态记录：实际扩展 replace 立即读回和宿主回调保�
         assert.deepStrictEqual(clone(h.win.Mvu.getMvuData().stat_data), expected);
     }
 });
+
+module.exports = { nativeRuntime };

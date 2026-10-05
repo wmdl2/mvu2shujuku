@@ -14,6 +14,15 @@ function createTableWriter(dependencies) {
         debug: dbg = () => {}, warn: dbgWarn = () => {} } = dependencies;
     if (typeof safeParseJson !== 'function') throw new Error('写入模块需要 JSON 解析函数');
     let statWriteHadFailure = false;
+    function unmappedStatGroups(layout, previous, next) {
+        const mapped = new Set((Array.isArray(layout) ? layout : []).flatMap(entry => {
+            const kind = entry.kind;
+            const paths = entry.writePaths && entry.writePaths.length ? entry.writePaths : [entry.path && entry.path.length ? entry.path : [entry.group]];
+            return paths.map(path => path[0]);
+        }));
+        return Object.keys(next || {}).filter(key => !mapped.has(key) && key !== '$internal' && key !== '$meta'
+            && JSON.stringify(next[key]) !== JSON.stringify((previous || {})[key]));
+    }
     async function runStatDiffWrite(api, layoutEntries, prevStat, nextStat, persistedTables, writeState) {
         let abortWrites = false;
         const noteWriteFailure = (reason) => {
@@ -27,6 +36,8 @@ function createTableWriter(dependencies) {
             else dbgWarn(' ' + label + ' 返回失败结果。');
         };
         const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
+        const unmapped = unmappedStatGroups(entries, prevStat, nextStat);
+        if (unmapped.length) { noteWriteFailure('存在未映射的变量组：' + unmapped.join('、')); return 0; }
         // 登记、更新和新增共用同一判定，避免标量化的数字/布尔 pair 只在更新路径识别。
         const pairColumnType = col => {
             if (!Array.isArray(col)) return '';
@@ -909,7 +920,7 @@ function createTableWriter(dependencies) {
                     if (ovRow === -1) continue; // 行已不存在，无需清理
                 }
                 // 删除在运行时读取当前单元格再执行，避免覆盖同批次的溢出写入（见 runDirectOps）
-                directOps.push({ kind: 'overflow-remove', key: found.key, sheet, header, layout: L, rowIndex: ovRow, removeKey: op.mergeKey });
+                directOps.push({ kind: 'overflow-remove', key: found.key, sheet, header, layout: L, rowIndex: ovRow, rowKey: op.rowKey, ancestorValues, removeKey: op.mergeKey });
                 continue;
             }
             if (op.overflow) {
@@ -959,7 +970,7 @@ function createTableWriter(dependencies) {
                 const ovStr = JSON.stringify(ovMerged);
                 if (sameValue(sheet.content[ovRow] ? sheet.content[ovRow][ovcIdx] : undefined, ovStr)) continue;
                 // 运行时再读当前单元格合并写入（同批次可能有删除操作，见 runDirectOps）
-                directOps.push({ kind: 'overflow', key: found.key, sheet, header, layout: L, rowIndex: ovRow, mergeKey: op.mergeKey, mergePath: op.mergePath || [op.mergeKey], value: op.value });
+                directOps.push({ kind: 'overflow', key: found.key, sheet, header, layout: L, rowIndex: ovRow, rowKey: op.rowKey, ancestorValues, mergeKey: op.mergeKey, mergePath: op.mergePath || [op.mergeKey], value: op.value });
                 continue;
             }
             if (op.replace && (E.kind === 'array' || E.kind === 'pathArray' || E.kind === 'nestedArray')) {
@@ -1533,6 +1544,10 @@ function createTableWriter(dependencies) {
         return resolved.length + directOps.length;
 
         async function runDirectOps() {
+            let latestTables;
+            if (deletions.length && directOps.some(d => d.kind === 'overflow' || d.kind === 'overflow-remove') && typeof api.exportTableAsJson === 'function') {
+                latestTables = await Promise.resolve(api.exportTableAsJson());
+            }
             for (const d of directOps) {
                 if (abortWrites) break;
                 try {
@@ -1551,6 +1566,15 @@ function createTableWriter(dependencies) {
                         const jok = await Promise.resolve(api.updateCell(d.layout.table, 1, '内容', d.value));
                         if (!jok) markWriteFailure('JSON updateCell(' + d.layout.table + ')');
                     } else if (d.kind === 'overflow' || d.kind === 'overflow-remove') {
+                        // Earlier row deletions may move the target. Locate by business
+                        // identity again instead of writing to the old physical index.
+                        d.sheet = latestTables && Object.values(latestTables).find(sheet => sheet && sheet.name === d.layout.table) || d.sheet;
+                        if (d.layout.kind === 'rows' || d.layout.kind === 'nestedRows') {
+                            d.rowIndex = d.layout.kind === 'nestedRows'
+                                ? findRelationRowByAncestors(d.sheet, d.layout, d.ancestorValues, d.rowKey)
+                                : findRowByColumn(d.sheet, d.layout.keyCol, d.rowKey);
+                            if (d.rowIndex < 1) throw new Error('动态字段目标行已不存在');
+                        }
                         // 同一次写入可能同时有“改动态字段”和“删动态字段”：必须读当前单元格再
                         // 合并/删除，不能直接覆盖整列（否则先写后删会把本次新增也抹掉）。
                         const curRow = d.sheet && d.sheet.content && d.sheet.content[d.rowIndex];
@@ -1563,6 +1587,7 @@ function createTableWriter(dependencies) {
                             if (!sameValue(curRow[ovcIdx], out)) {
                                 const ook = await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', out));
                                 if (!ook) markWriteFailure('溢出列 updateCell(' + d.layout.table + ')');
+                                else curRow[ovcIdx] = out;
                             }
                         }
                     } else if (d.kind === 'overflow-insert') {
@@ -1590,7 +1615,7 @@ function createTableWriter(dependencies) {
             statWriteHadFailure = state.failed;
         }
     }
-    return { writeStatDiffToDb, writeStatDiffToDbResult, get lastStatWriteFailed() { return statWriteHadFailure; } };
+    return { unmappedStatGroups, writeStatDiffToDb, writeStatDiffToDbResult, get lastStatWriteFailed() { return statWriteHadFailure; } };
 }
 
 if (typeof module !== 'undefined' && module.exports) module.exports = createTableWriter;
