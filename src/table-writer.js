@@ -981,7 +981,7 @@ function createTableWriter(dependencies) {
                 const oldRows = sheet.content.slice(1).filter(r => E.kind !== 'nestedArray' || (r && parentIdx >= 0 && String(r[parentIdx]) === String(parentVal)));
                 const oldVals = oldRows.map(r => (r && valueIdx >= 0 ? r[valueIdx] : undefined));
                 const valueDef = (L.cols || []).find(c => c[0] === (L.valueCol || (header[1] || '内容')));
-                const isJsonScalarArray = E.kind === 'array' && valueDef && valueDef[1] === 'jsonScalar';
+                const isJsonScalarArray = valueDef && valueDef[1] === 'jsonScalar';
                 const encodeArrayValue = (v) => {
                     if (!isJsonScalarArray) return v;
                     try { const encoded = JSON.stringify(v); return encoded === undefined ? 'null' : encoded; } catch (e) { return 'null'; }
@@ -1299,6 +1299,8 @@ function createTableWriter(dependencies) {
             if (r.isJsonScalarArray) {
                 try { const encoded = JSON.stringify(value); return encoded === undefined ? 'null' : encoded; } catch (e) { return 'null'; }
             }
+            const valueDef = (r.layout.cols || []).find(c => c[0] === (r.layout.valueCol || '内容'));
+            if (valueDef?.[1] === 'boolean') return value ? '1' : '0';
             if (value && typeof value === 'object') {
                 try { return JSON.stringify(value); } catch (e) { return 'null'; }
             }

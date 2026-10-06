@@ -8,7 +8,7 @@
 - 表格模板 JSON（开局自动建表，不需要手动导入）
 - 转换报告（Markdown：自动转换项 / 需人工项 / 警告）
 
-**v0.5.0** 的变更见 [更新日志](CHANGELOG.md)，验证见 [验收记录](docs/validation/2026-10-05-remote-schema-branches.md)；详细支持范围、运行时兼容接口与已知边界见 [MVU 转换与兼容清单](COMPATIBILITY.md)。
+**v0.5.1** 修正数字列及数组类型，补齐动态 Schema 登记与回退引擎清理，并优化大资源卡转换，变更见 [更新日志](CHANGELOG.md)，验证见 [类型验收记录](docs/validation/2026-10-05-type-mapping.md)和[入口验收记录](docs/validation/2026-10-06-script-entrypoints.md)；详细支持范围、运行时兼容接口与已知边界见 [MVU 转换与兼容清单](COMPATIBILITY.md)。
 项目依据的上游实现、社区教程及其适用范围见 [参考与致谢](REFERENCES.md)。
 
 转换器删除转换副本中的 `[InitVar]`、可完整解析的专用静态规则和明确的旧输出文档；原卡保持不变。`[mvu_update]` 标记本身不是删除依据：业务 EJS、非专名混合条目及无法完整解析的规则会保留，报告会提示核对。正则中的 MVU 关键词、匹配目标和有无按钮也不决定删除；只删除整个替换体为纯旧变量快照宏的规则。保留内容中的 `stat_data` 的 `getMessageVar/setMessageVar` 调用由数据库兼容函数接管，其他消息变量仍按酒馆助手原语义运行。旧管线不使用 `if (false)` 包裹。
@@ -141,7 +141,7 @@ v0.4.11 补齐注册 Schema 中初始数据没有的模块，并保留可接入�
 
 ### 卡片清理
 - **删除** `[InitVar]`、可确认已迁移的结构更新规则，以及明确包含 `<UpdateVariable>`、`<JSONPatch>`、写入命令或纯状态快照的变量输出条目；
-  移除解析 MVU 语法的正则与明确识别的旧 MVU 引擎；本地导入并登记 Schema 的脚本保留并接入写入前校验，无导入的纯结构声明仍仅用于静态提取。
+  移除解析 MVU 语法的正则与明确识别的旧 MVU 引擎；可识别静态或动态导入并登记 Schema 的脚本保留并接入写入前校验，无导入的纯结构声明仍仅用于静态提取。
 - **误标保护**：带 `[mvu_update]` 标记但内容实为剧情/设定文本的条目（如部分“技能化”卡）
   会保留——`format_message_variable`、`get_message_variable` 和 `getvar(stat_data...)` 都只是读取变量，不作为整条删除证据；删除判定要求明确的写入/输出管道。
 - `[mvu_plot]` 剧情条目全部保留，内部 `{{get_message_variable::…}}` 宏改写为数据库表引用。

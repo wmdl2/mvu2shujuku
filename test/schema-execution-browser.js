@@ -19,12 +19,17 @@ async function main(){
     const r=await core.convertWithRemoteSchemas(card(content));outputs.push(core.statDataFromTables(JSON.parse(r.card.extensions.mvu2shujuku.layout),r.template).stat_data);
    }
    let fetchError,timeoutError;
+   const typedCard=card('const S=z.object({组:z.object({小数:z.number(),整数:z.int(),布尔:z.boolean(),评分:z.number().transform(v=>_.clamp(v,0,5))})});registerMvuSchema(S);');
+   typedCard.character_book.entries[0].content=JSON.stringify({组:{小数:0,整数:2,布尔:false,评分:0}});
+   const typed=await core.convertWithRemoteSchemas(typedCard);
+   const columns=typed.schema.find(g=>g.name==='组').columns.filter(c=>['小数','整数','布尔','评分'].includes(c.zh)).map(c=>[c.zh,c.type]);
    try{await core.convertWithRemoteSchemas(card('const x=await fetch("https://schema-execution.invalid/blocked");const S=z.object({[x]:z.number()});registerMvuSchema(S);'));}catch(e){fetchError=e.message;}
    try{await core.convertWithRemoteSchemas(card('const S=(()=>{while(true){}})();registerMvuSchema(S);'));}catch(e){timeoutError=e.message;}
-   return {outputs,fetchError,timeoutError,frames:document.querySelectorAll('[data-mvu-schema-evaluator]').length};
+   return {outputs,columns,fetchError,timeoutError,frames:document.querySelectorAll('[data-mvu-schema-evaluator]').length};
   });
   assert.deepStrictEqual(result.outputs,[{状态:1},{状态:1},{状态:1}]);assert.match(result.fetchError,/fetch|Failed|Content Security/i);assert.match(result.timeoutError,/超时/);assert.strictEqual(result.frames,0);assert.strictEqual(requests,0);assert.deepStrictEqual(errors,[]);
-  console.log(JSON.stringify({cases:5,requests,frames:result.frames,errors}));
+  assert.deepStrictEqual(Object.fromEntries(result.columns),{小数:'REAL',整数:'INTEGER',布尔:'INTEGER',评分:'TEXT'});
+  console.log(JSON.stringify({cases:6,requests,frames:result.frames,errors,columns:result.columns}));
  }finally{await browser.close();}
 }
 main().catch(error=>{console.error(error.stack);process.exitCode=1;});

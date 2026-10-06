@@ -4,6 +4,7 @@ const core = require('../src/mvu2shujuku');
 module.exports = async function cardApiHost(h) {
     const { page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record } = h;
     const moduleUrl = new URL('/fixture-card-schema.js', page.url()).href;
+    const dynamic = process.env.MVU_SCHEMA_ENTRY_STYLE === 'dynamic';
     let routeFailure = null;
     await page.route(moduleUrl, async route => {
         try { await route.fulfill({ status: 200, contentType: 'text/javascript', body: 'export function registerMvuSchema(schema) { window.__fixtureOriginalSchema = schema; }' }); }
@@ -13,8 +14,10 @@ module.exports = async function cardApiHost(h) {
         await setStorageMode(page, mode);
         const source = require('./synthetic-card')();
         source.data.name = 'Schema与档案验收-' + mode;
+        if (dynamic) source.data.extensions.tavern_helper.scripts.push({ type: 'script', name: '双源原引擎加载器', enabled: true,
+            content: "await new Promise(resolve=>setTimeout(resolve,250));try{await import('https://testingcf.jsdelivr.net/gh/MagicalAstrogy/MagVarUpdate@abcdef/artifact/bundle.js');}catch(e){await import('https://cdn.jsdelivr.net/gh/MagicalAstrogy/MagVarUpdate@abcdef/artifact/bundle.js');}" });
         source.data.extensions.tavern_helper.scripts.push({ type: 'script', name: 'registered business schema', enabled: true,
-            content: `import { registerMvuSchema } from ${JSON.stringify(moduleUrl)};
+            content: `${dynamic ? 'let registerMvuSchema;try{({registerMvuSchema}=await import(' + JSON.stringify(moduleUrl) + '));}catch(e){({registerMvuSchema}=await import(' + JSON.stringify(moduleUrl) + '));}' : 'import { registerMvuSchema } from ' + JSON.stringify(moduleUrl) + ';'}
             const noise = value => value.replace(/[（(]tag[)）]/g, '');
             const Schema=z.object({ 状态:z.object({生命:z.number(),金币:z.number(),变换次数:z.number().default(0),opaque:z.union([z.boolean(),z.array(z.any()),z.null(),z.object({}).passthrough()]).default([false,null])}).passthrough(), 背包:z.array(z.any()),
                 新开关:z.boolean().default(false), 可选模块:z.object({count:z.number()}).optional()
@@ -25,6 +28,7 @@ module.exports = async function cardApiHost(h) {
         if (routeFailure) throw routeFailure;
         await assertStorageMode(page, mode, 'Schema与档案');
         const metadata = core.convert(source).card.data.extensions.mvu2shujuku;
+        if (dynamic) assert(!core.convert(source).card.data.extensions.tavern_helper.scripts.some(s => s.name === '双源原引擎加载器'));
         const observed = await page.evaluate(async marker => {
             const ctx = window.SillyTavern.getContext();
             const originalBook = Object.keys(marker.worldbookAliases)[0];

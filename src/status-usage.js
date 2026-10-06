@@ -242,14 +242,14 @@ function createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSc
                         if (source && !source.nested) changed = bindings.bind(m[1], { ...source, entries: true }, m.index) || changed;
                     }
                     const entriesCallback = /(?:Object\.entries\(\s*([A-Za-z_$][\w$]*)\s*\)|([A-Za-z_$][\w$]*))(?:(?:\s*\.\s*(?:sort|slice|filter))\s*\((?:[^()]|\([^()]*\))*\))*\s*\.\s*(?:forEach|map)\s*\(\s*\(\s*\[[^,\]]+,\s*([A-Za-z_$][\w$]*)\s*\]\s*\)\s*=>/g;
-                    while ((m = entriesCallback.exec(text))) {
+                    while ((m = entriesCallback.exec(bindings.code))) {
                         if (!bindings.isCode(m.index)) continue;
                         const source = bindings.get(m[1] || m[2], m.index);
                         if (!source || source.nested || (!m[1] && !source.entries)) continue;
                         changed = bindCallback(m[3], { ...source, entries: false, level: (source.level || 0) + 1 }, callbackBody(entriesCallback.lastIndex)) || changed;
                     }
                     const helperCallback = /([A-Za-z_$][\w$]*)\s*\.\s*(?:forEach|map|filter|find|some|every)\s*\(\s*(?:function\s*\(\s*([A-Za-z_$][\w$]*)\s*\)|\(\s*([A-Za-z_$][\w$]*)\s*\)\s*=>|([A-Za-z_$][\w$]*)\s*=>)/g;
-                    while ((m = helperCallback.exec(text))) {
+                    while ((m = helperCallback.exec(bindings.code))) {
                         if (!bindings.isCode(m.index)) continue;
                         const source = bindings.get(m[1], m.index);
                         if (!source || !source.helper || source.entries || source.nested) continue;

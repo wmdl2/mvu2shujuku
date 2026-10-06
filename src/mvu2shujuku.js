@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.5.0';
+    const VERSION = '0.5.1';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -1900,6 +1900,7 @@
     function isMvuEngineScriptContent(content, scriptName) {
         const s = String(content || '');
         if (!s.trim()) return false;
+        if (/MagVarUpdate|MVU-offline/.test(s) && getSchemaExecutionService().analyzeScript(s).pureEngineLoader) return true;
         const importRe = /(?:^|\n)\s*(?:import\s+(?:[^'"\n]+?\s+from\s+)?['"]([^'"]+)['"]\s*;?|(?:await\s+)?import\s*\(\s*['"]([^'"]+)['"]\s*\)\s*;?)/gmi;
         let hasKnownEngineImport = false;
         let hasSchemaOnlyImport = false;
@@ -1937,7 +1938,7 @@
             return /\bregisterMvuSchema\b/.test(s) ? 'registerMvuSchema' : '';
         })();
         const importedRegistration = /import\s*\{[^}]*\bregisterMvuSchema\b[^}]*\}\s*from\s*['"][^'"]+['"]/.test(s);
-        if (schemaRegisterAlias && !importedRegistration && isPureRegisteredSchemaScript(s, schemaRegisterAlias)) return true;
+        if (schemaRegisterAlias && !importedRegistration && !getSchemaExecutionService().analyzeScript(s).registrations.length && isPureRegisteredSchemaScript(s, schemaRegisterAlias)) return true;
         // Imported local schemas can register candidate validation. Bare declarations
         // still serve as static references; unknown external schemas need source.
         // 未知内联 bundle 即使很大也可能混有业务，无法证明来源时保留并报告。
@@ -2213,17 +2214,17 @@
     }
 
     function connectRegisteredSchema(source) {
-        if (!/import\s*\{[^}]*\bregisterMvuSchema\b[^}]*\}\s*from\s*['"][^'"]+['"]/.test(source)) return { text: source, key: '', count: 0 };
+        if (!/registerMvuSchema/.test(source)) return { text: source, key: '', count: 0 };
+        const sites = getSchemaExecutionService().analyzeScript(source).registrations;
+        if (!sites.length) return { text: source, key: '', count: 0 };
         const js = getJsSourceFactory()(), tokens = js.tokens(source);
-        const aliases = new Set(['registerMvuSchema']);
-        const alias = source.match(/registerMvuSchema\s+as\s+([A-Za-z_$][\w$]*)/); if (alias) aliases.add(alias[1]);
-        const calls = tokens.filter((t, i) => aliases.has(t.value) && tokens[i + 1]?.value === '(' && tokens[i - 1]?.value !== '.');
+        const calls = sites;
         if (!calls.length) return { text: source, key: '', count: 0 };
         let hash = 2166136261; for (let i = 0; i < source.length; i++) hash = Math.imul(hash ^ source.charCodeAt(i), 16777619);
         const key = 'schema-' + (hash >>> 0).toString(16) + '-' + source.length;
         const replacements = [];
         for (const call of calls) {
-            const original = call.value;
+            const original = '(' + source.slice(call.start, call.end) + ')';
             const wrapper = `(schema => { const result = ${original}(schema); let remaining = 40, timer = null; const bind = () => { const api = window.parent && window.parent.Mvu || window.Mvu; if (api && api.__mvu2shujukuFake && typeof api.registerSchema === 'function' && api.registerSchema(schema, ${JSON.stringify(key)})) { if (timer !== null) window.clearTimeout(timer); timer = null; return; } if (timer === null && remaining-- > 0) timer = window.setTimeout(() => { timer = null; bind(); }, 250); }; bind(); if (typeof waitGlobalInitialized === 'function') Promise.resolve(waitGlobalInitialized('Mvu')).then(bind).catch(console.warn); if (typeof eventOn === 'function') eventOn('global_Mvu_initialized', () => { remaining = 40; bind(); }); return result; })`;
             replacements.push({ start: call.start, end: call.end, value: wrapper });
         }

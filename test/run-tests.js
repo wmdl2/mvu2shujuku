@@ -3434,7 +3434,7 @@ test('折叠显示类 MVU 更新块清理正则也保留', () => {
     assert.ok(rx.some(x => x.scriptName === '[美化]变量更新'), '匹配更新块并调用兼容 API 不能证明是引擎，业务脚本应保留');
 });
 
-test('INTEGER range 初始值为非数字哨兵时 DDL 放行且默认值保留哨兵', () => {
+test('REAL range 初始值为非数字哨兵时 DDL 放行且默认值保留哨兵', () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3453,7 +3453,7 @@ test('INTEGER range 初始值为非数字哨兵时 DDL 放行且默认值保留�
     const r = core.convert(card, { mode: 'both' });
     const t = Object.values(r.template).find(s => s && s.name === '角色表');
     assert.ok(t, '应有角色表');
-    assert.ok(t.sourceData.ddl.includes("tianfu_dengji INTEGER NOT NULL DEFAULT '无' CHECK(tianfu_dengji BETWEEN 1 AND 100 OR tianfu_dengji IN ('无'))"), '非数字哨兵应作为默认值并在 CHECK 中放行');
+    assert.ok(t.sourceData.ddl.includes("tianfu_dengji REAL NOT NULL DEFAULT '无' CHECK(tianfu_dengji BETWEEN 1 AND 100 OR tianfu_dengji IN ('无'))"), '非数字哨兵应作为默认值并在 CHECK 中放行');
 });
 
 test('INTEGER range 空表默认值不应违反 CHECK', () => {
@@ -9905,13 +9905,13 @@ test('大荒式空动态表：前端别名补列、混合字段名/类型保留�
     const npc = Object.values(r.template).find(x => x && x.name === '寻缘蝶表');
     assert.ok(sect && npc);
     for (const f of ['师尊', '主角派系', '禁闭剩余']) assert.ok(sect.content[0].includes(f), `宗门表应包含 ${f}`);
-    assert.match(sect.sourceData.ddl, /jinbishengyu INTEGER/);
+    assert.match(sect.sourceData.ddl, /jinbishengyu REAL/);
     assert.match(sect.sourceData.ddl, /renkou_zongzhu TEXT/);
-    assert.match(sect.sourceData.ddl, /renkou_changlaoshu INTEGER/);
+    assert.match(sect.sourceData.ddl, /renkou_changlaoshu REAL/);
     assert.doesNotMatch(sect.sourceData.ddl, /\srenkou\s+TEXT/);
     assert.doesNotMatch(sect.sourceData.note, /逻辑路径：/, '普通展开列不应重复输出内部逻辑路径');
     for (const f of ['性癖XP', '性格2', '三围_体型', '元阴_元阳']) assert.ok(npc.content[0].includes(f), `混合字段名 ${f} 不得丢失`);
-    assert.match(npc.sourceData.ddl, /haogandu INTEGER/);
+    assert.match(npc.sourceData.ddl, /haogandu REAL/);
 });
 
 test('通用形状往返：对象内 number 不污染外层、子表对象/普通数组/null 与绝对点路径均保持', () => {
@@ -9996,7 +9996,7 @@ test('通用形状往返：对象内 number 不污染外层、子表对象/普�
     const platform = Object.values(tables).find(x => x && x.name === '平台表');
     const incomeIndex = platform.content[0].indexOf('收益明细_本月总收益');
     assert.ok(incomeIndex >= 0, '固定收益明细对象应展平为叶子列');
-    assert.match(platform.sourceData.ddl, /shouyimingxi_benyuezongshouyi INTEGER/i, '嵌套 number 应只影响对应叶子列');
+    assert.match(platform.sourceData.ddl, /shouyimingxi_benyuezongshouyi REAL/i, '嵌套 number 应只影响对应叶子列');
     const relationLayout = layout.find(x => x.table === '主角_关系网表');
     assert.deepStrictEqual(relationLayout.writePaths, [['主角', '关系网']], '绝对点路径应写回真实完整路径');
     assert.strictEqual(relationLayout.emptyValue, null, '空动态表应记录 null 初始占位');
@@ -10317,7 +10317,7 @@ test('路径化附着：规则分组与 initvar 结构不一致（修为 写在�
     assert.ok(c, '应有展平列 修为_进度百分比');
     assert.deepStrictEqual(c.check, ['突破时更新', '仅正文明确修炼时变动'], '展平列应附着规则 check');
     assert.deepStrictEqual(c.range, [0, 100], '展平列应附着规则 range');
-    assert.strictEqual(c.type, 'INTEGER', '带 range 的列应为 INTEGER');
+    assert.strictEqual(c.type, 'REAL', 'range 不意味着整数约束，普通 number 应为 REAL');
 });
 
 test('路径化附着：6 空格嵌套写法（主角.修为.进度百分比）在 YAML 失败回退正则时也能记录完整路径并附着', () => {
@@ -10653,6 +10653,8 @@ require('./card-api-compatibility');
 require('./community-card-contracts');
 require('./remote-schema');
 require('./schema-execution');
+require('./type-mapping');
+require('./script-entrypoints');
 require('./mvu-public-api');
 require('./early-event-fallback');
 require('./mvu-update-views');

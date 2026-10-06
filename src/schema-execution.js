@@ -3,7 +3,44 @@
 // AST selects dependencies; JavaScript and the bundled Zod implement their semantics.
 function createSchemaExecution({ libraries, runSync, runAsync } = {}) {
     const acorn = libraries.acorn;
-    function prepare(source) {
+    const analysisCache = new Map();
+    const knownEngineUrl = url => /(?:^|\/)(?:MagicalAstrogy|NLKASHEI)\/MagVarUpdate(?:@[^/]*)?\/(?:artifact|dist)\/[^?#]*(?:bundle|index)[^/?#]*\.js(?:[?#]|$)/i.test(url)
+        || /(?:^|\/)NLKASHEI\/MVU-offline(?:@[^/]*)?\/[^?#]*mvu[_-]?bundle[^/?#]*\.js(?:[?#]|$)/i.test(url);
+    function pureEngineLoader(ast) {
+        let found = false;
+        const load = node => {
+            if (node?.type === 'AwaitExpression') return load(node.argument);
+            if (node?.type === 'ImportExpression' && node.source.type === 'Literal' && knownEngineUrl(node.source.value)) { found = true; return true; }
+            return false;
+        };
+        const delay = node => {
+            if (node?.type !== 'AwaitExpression') return false;
+            const promise = node.argument, callback = promise.arguments?.[0];
+            if (promise.type !== 'NewExpression' || promise.callee.name !== 'Promise' || promise.arguments.length !== 1
+                || !['FunctionExpression', 'ArrowFunctionExpression'].includes(callback?.type) || callback.params.length !== 1 || callback.params[0].type !== 'Identifier') return false;
+            const statement = callback.body.type === 'BlockStatement' && callback.body.body.length === 1 ? callback.body.body[0] : null;
+            const call = statement?.type === 'ExpressionStatement' || statement?.type === 'ReturnStatement' ? statement.expression || statement.argument : callback.body;
+            return call?.type === 'CallExpression' && call.callee.name === 'setTimeout' && call.arguments.length === 2
+                && call.arguments[0].type === 'Identifier' && call.arguments[0].name === callback.params[0].name
+                && call.arguments[1].type === 'Literal' && Number.isFinite(call.arguments[1].value) && call.arguments[1].value >= 0 && call.arguments[1].value <= 60000;
+        };
+        const diagnostic = (node, caught) => node?.type === 'CallExpression' && node.callee.type === 'MemberExpression'
+            && node.callee.object.name === 'console' && ['log', 'warn', 'error'].includes(node.callee.property.name)
+            && node.arguments.every(arg => arg.type === 'Literal' || arg.type === 'Identifier' && caught.has(arg.name));
+        function statements(list, caught = new Set()) {
+            return list.every(node => {
+                if (node.type === 'EmptyStatement') return true;
+                if (node.type === 'ImportDeclaration' && node.specifiers.length === 0 && knownEngineUrl(node.source.value)) { found = true; return true; }
+                if (node.type === 'ExpressionStatement') return load(node.expression) || delay(node.expression)
+                    || node.expression.type === 'Literal' && typeof node.expression.value === 'string' || caught.size > 0 && diagnostic(node.expression, caught);
+                if (node.type !== 'TryStatement' || node.finalizer) return false;
+                const names = new Set(caught); if (node.handler?.param?.type === 'Identifier') names.add(node.handler.param.name);
+                return statements(node.block.body, caught) && (!node.handler || statements(node.handler.body.body, names));
+            });
+        }
+        return statements(ast.body) && found;
+    }
+    function prepare(source, analysisOnly = false) {
         const ast = acorn.parse(String(source), { ecmaVersion: 'latest', sourceType: 'module' });
         const parents = new WeakMap(), scopeOf = new WeakMap(), bindingIds = new WeakSet();
         const root = { parent: null, kind: 'function', bindings: new Map() }, bindings = [], imports = new Map();
@@ -39,13 +76,59 @@ function createSchemaExecution({ libraries, runSync, runAsync } = {}) {
         }
         scan(ast,root);
         const lookup=(name,scope)=>{for(let s=scope;s;s=s.parent)if(s.bindings.has(name))return s.bindings.get(name);};
+        const helperBindings = new Map();
+        const bindHelper = (pattern, expression, scope) => {
+            const load = expression?.type === 'AwaitExpression' ? expression.argument : expression;
+            if (load?.type !== 'ImportExpression' || load.source.type !== 'Literal' || typeof load.source.value !== 'string') return;
+            if (pattern.type === 'ObjectPattern') for (const property of pattern.properties) {
+                if (property.type !== 'Property' || property.computed && property.key.type !== 'Literal'
+                    || (property.key.name || property.key.value) !== 'registerMvuSchema' || property.value.type !== 'Identifier') continue;
+                const name = property.value.name, binding = lookup(name, scope);
+                if (binding) { helperBindings.set(binding, name); names.add(name); }
+            }
+            else if (pattern.type === 'Identifier' && /mvu_zod\.js(?:[?#]|$)/.test(load.source.value)) {
+                const binding = lookup(pattern.name, scope); if (binding) helperBindings.set(binding, '*');
+            }
+        };
+        for (const binding of imports.values()) if (binding.imported === 'registerMvuSchema' || binding.imported === '*' && /mvu_zod\.js(?:[?#]|$)/.test(binding.module)) helperBindings.set(binding, binding.imported === '*' ? '*' : binding.names[0]);
+        function origin(node, scope) {
+            if (node.type === 'Identifier') { const binding = lookup(node.name, scope); return binding && helperBindings.get(binding) === node.name; }
+            if (node.type === 'MemberExpression' && (node.computed ? node.property.value : node.property.name) === 'registerMvuSchema' && node.object.type === 'Identifier') return helperBindings.get(lookup(node.object.name, scope)) === '*';
+            if (node.type === 'SequenceExpression') return origin(node.expressions[node.expressions.length - 1], scope);
+            return false;
+        }
+        function scanHelper(node) {
+            if (node.type === 'VariableDeclarator') bindHelper(node.id, node.init, scopeOf.get(node));
+            if (node.type === 'AssignmentExpression') bindHelper(node.left, node.right, scopeOf.get(node));
+            children(node).forEach(([, child]) => scanHelper(child));
+        }
+        scanHelper(ast);
+        function taintHelpers(node) {
+            if (node.type === 'AssignmentExpression' && node.left.type === 'Identifier') {
+                const binding = lookup(node.left.name, scopeOf.get(node));
+                const load = node.right.type === 'AwaitExpression' ? node.right.argument : node.right;
+                if (helperBindings.has(binding) && load.type !== 'ImportExpression') helperBindings.delete(binding);
+            }
+            children(node).forEach(([, child]) => taintHelpers(child));
+        }
+        taintHelpers(ast);
         const registrations=[];
-        const isRegistration=node=>node.type==='CallExpression'&&(node.callee.type==='Identifier'&&names.has(node.callee.name)||node.callee.type==='MemberExpression'&&!node.callee.computed&&node.callee.property.name==='registerMvuSchema'||node.callee.type==='SequenceExpression'&&node.callee.expressions.some(x=>x.type==='MemberExpression'&&x.property.name==='registerMvuSchema'));
+        // Bundlers can forward the imported helper through their module export
+        // objects. Keep the established construction protocol for that shape;
+        // runtime wiring still requires a directly proven import origin.
+        const forwardedMember = node => node.type === 'SequenceExpression' ? forwardedMember(node.expressions[node.expressions.length - 1])
+            : node.type === 'MemberExpression' && (node.computed ? node.property.value : node.property.name) === 'registerMvuSchema';
+        let hasDirectRegistration = false;
+        function findDirect(node) { if (node.type === 'CallExpression' && origin(node.callee, scopeOf.get(node))) hasDirectRegistration = true; children(node).forEach(([, child]) => findDirect(child)); }
+        findDirect(ast);
+        const forwarded = !analysisOnly && !hasDirectRegistration && [...imports.values()].some(binding => /mvu_zod\.js(?:[?#]|$)/.test(binding.module));
+        const isRegistration=node=>node.type==='CallExpression'&&(origin(node.callee,scopeOf.get(node))||forwarded&&forwardedMember(node.callee)||node.callee.type==='Identifier'&&node.callee.name==='registerMvuSchema'&&!lookup(node.callee.name,scopeOf.get(node)));
         function visit(node,fn){fn(node);children(node).forEach(([,c])=>visit(c,fn));}
         visit(ast,node=>{
             if(isRegistration(node)&&node.arguments.length)registrations.push(node);
             if(node.type==='AssignmentExpression'){let left=node.left;while(left.type==='MemberExpression')left=left.object;const b=left.type==='Identifier'&&lookup(left.name,scopeOf.get(node));if(b&&scopeOf.get(node)===b.scope)b.assignments.push(node);}
         });
+        if (analysisOnly) return { registrations: registrations.filter(call => origin(call.callee, scopeOf.get(call))).map(call => ({ start: call.callee.start, end: call.callee.end })), pureEngineLoader: pureEngineLoader(ast) };
         if(!registrations.length)throw new Error('未找到可执行的 Schema 登记调用');
         const selected = new Set(), whole = new Set(), usedBindings = new Set(), deferredBindings=new Set(), neededImports=new Set();
         function mark(node){for(let n=node;n;n=parents.get(n)?.node)selected.add(n);}
@@ -210,6 +293,12 @@ function createSchemaExecution({ libraries, runSync, runAsync } = {}) {
             else if(['string','number','boolean'].includes(type))node={kind:type==='string'?'text':type};
             else {node={kind:'unknown'};if(type==='union'){node.optional=def.options.some(s=>s._zod.def.type==='optional'||s._zod.def.type==='undefined');node.nullable=def.options.some(s=>s._zod.def.type==='nullable'||s._zod.def.type==='null');}if(!['any','unknown'].includes(type))unsupported.push({path:path.join('.'),kind:(type==='union'||type==='intersection'?'联合结构':type)+'（完整 JSON 保留）'});}
             if(def.coerce)node.coerce=true;
+            // Read the actual Zod contract, never infer integer semantics from an initial value.
+            if(type==='number'){
+                const bag=schema._zod.bag;
+                node.integer=/^(?:safeint|u?int\d*)$/.test(bag.format||'')
+                    || (Number.isInteger(bag.multipleOf)&&bag.multipleOf!==0);
+            }
             if(Number.isFinite(schema._zod.bag.minimum))node.min=schema._zod.bag.minimum;if(Number.isFinite(schema._zod.bag.maximum))node.max=schema._zod.bag.maximum;
             for(const check of def.checks||[]){
                 const constraint=check?._zod?.def;
@@ -227,6 +316,13 @@ function createSchemaExecution({ libraries, runSync, runAsync } = {}) {
     }
     function program(plan){return 'async function(__env){const {z,_,__capture,__default,__field,__helper,__clone,__jsonrepair,$,window,waitGlobalInitialized,registerMvuSchema,registerVariableSchema,console,eventOn,errorCatched,jsonrepair,klona}=__env;\n'+plan.code+'\n}';}
     function job(source){const plan=prepare(source);return { execute:execute.toString(),program:program(plan) };}
-    return {prepare,job,inspectSync:source=>runSync(job(source)),inspect:source=>runAsync(job(source))};
+    function analyzeScript(source) {
+        if (!/registerMvuSchema|MagVarUpdate|MVU-offline/.test(source)) return { registrations: [], pureEngineLoader: false };
+        if (analysisCache.has(source)) return analysisCache.get(source);
+        let result; try { result = prepare(source, true); } catch (_) { result = { registrations: [], pureEngineLoader: false }; }
+        if (source.length < 128 * 1024) { if (analysisCache.size >= 32) analysisCache.delete(analysisCache.keys().next().value); analysisCache.set(source, result); }
+        return result;
+    }
+    return {prepare,job,analyzeScript,inspectSync:source=>runSync(job(source)),inspect:source=>runAsync(job(source))};
 }
 module.exports=createSchemaExecution;

@@ -76,7 +76,7 @@ test('普通文本列：新布局清空字符串后不恢复初始文本，旧�
 test('nullable 列：初始 null、空字符串、缺失、零与布尔分别往返', () => {
     const stat = sample(), { layout, template, schema } = convert(stat);
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, stat);
-    assert.strictEqual(schema.find(g => g.name === 'A').columns.find(c => c.zh === 'y').type, 'INTEGER');
+    assert.strictEqual(schema.find(g => g.name === 'A').columns.find(c => c.zh === 'y').type, 'REAL');
     assert.strictEqual(layout.find(l => l.group === 'A').cols.find(c => c[0] === 'x')[1], 'jsonScalarOptional');
     assert.strictEqual(core.statDataFromTables(layout, {}).stat_data.A.x, null, '无表的加载窗口仍使用原始 fallback');
     const text = JSON.stringify(template);
