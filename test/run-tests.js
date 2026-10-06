@@ -2982,7 +2982,8 @@ test('数组表提示词按行增删改，不再“整体替换/禁止增删”'
     const r = core.convert(card, { mode: 'sqlite' });
     const sheet = Object.values(r.template).find(s => s && s.name === '背包表');
     assert.ok(sheet, '应生成背包表');
-    assert.ok(sheet.sourceData.note.startsWith('数组表：'), 'note 不应以表名开头（对齐默认模板）');
+    assert.ok(sheet.sourceData.note.startsWith('数组表：'), '说明沿用数组维护方式，不注入原变量路径');
+    assert.ok(!sheet.sourceData.note.includes('原变量路径：'), '普通表不复制原变量路径');
     assert.ok(sheet.sourceData.note.includes('数组表'), 'note 应说明数组表');
     assert.ok(sheet.sourceData.note.includes('新增'), 'note 应说明新增元素');
     assert.ok(sheet.sourceData.note.includes('移除'), 'note 应说明移除元素');
@@ -3381,12 +3382,17 @@ test('转换产物齐全', () => {
     assert.ok((c.extensions.regex_scripts || []).some(rx => rx.scriptName === 'XML状态栏'), '非 MVU 显示正则应保留');
     assert.ok(c.extensions.mvu2shujuku, '应有转换标记');
     assert.ok(typeof c.extensions.mvu2shujuku.layout === 'string' && Array.isArray(JSON.parse(c.extensions.mvu2shujuku.layout)), '转换标记应包含布局（供扩展重建 stat_data）');
-    assert.ok(!c.character_book.entries.some(e => /\[initvar\]|变量输出格式强调|变量列表/i.test(String(e.comment || ''))), '初始化和明确的旧输出协议应被删除');
+    assert.ok(!c.character_book.entries.some(e => /\[initvar\]|变量列表/i.test(String(e.comment || ''))), '初始化和明确的变量列表应被删除');
+    const unconfirmedOutput = c.character_book.entries.find(e => /变量输出格式强调/i.test(String(e.comment || '')));
+    assert.ok(unconfirmedOutput, '未确认完整格式文档的条目不得仅凭标题删除');
+    assert.strictEqual(unconfirmedOutput.content, (card.data || card).character_book.entries.find(e => /变量输出格式强调/i.test(String(e.comment || ''))).content);
+    assert.match(r.reportText, /无法确认整条仅负责输出协议，已保留/);
     const remainingRules = c.character_book.entries.find(e => e.comment === '[mvu_update]');
     assert.ok(remainingRules, '未进入填表说明的私有字段规则应保留');
     assert.match(remainingRules.content, /\$器灵台词/);
     assert.doesNotMatch(remainingRules.content, /每推进一次剧情\/回合就减1|道侣 —|灵宠 —|人物 —|玉简 —/, '已承接的字段约束和明确归属的提醒应移除');
-    assert.doesNotMatch(r.reportText, /YAML 解析失败|无法确认为完整静态规则文档/);
+    assert.doesNotMatch(r.reportText, /YAML 解析失败/);
+    assert.match(r.reportText, /规则条目「\[mvu_update\]变量输出格式强调」无法确认为完整静态规则文档，已保留原条目/);
     const worldNote = Object.values(r.template).find(t => t.name === '世界表').sourceData.note;
     assert.match(worldNote, /遭遇冷却/);
     assert.match(worldNote, /每推进一次剧情\/回合就减1/);
@@ -4452,7 +4458,8 @@ test('保存后复核：官方字段写入在 UI 独立作用域中使用脱离�
     };
     const document = {
         getElementById: () => null,
-        createElement: () => ({ click: () => {} }),
+        createElement: () => ({ click() {}, setAttribute() {}, focus() {}, remove() {},
+            querySelector: () => ({}) }),
         body: { appendChild: () => {}, removeChild: () => {} },
     };
     const sandbox = {
@@ -10678,6 +10685,8 @@ require('./full-json-containers');
 require('./result-view');
 require('./conversion-profiles');
 require('./save-verification');
+require('./prose-update-rules');
+require('./worldbook-request-filter');
 require('./nested-wildcard-rules');
 require('./vwd-descriptions');
 require('./vwd-prompt');

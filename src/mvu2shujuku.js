@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.5.1';
+    const VERSION = '0.6.0';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -701,7 +701,7 @@
 
     // 解析 [value, desc] 叶子：返回 { value, desc }
     const inputParser = getInputParser();
-    const { miniPngBuffer, parseCardPng, writeCardPng, parseCard, toBase64, btoaSafe, atobSafe } = inputParser;
+    const { miniPngBuffer, parseCardPng, writeCardPng, extractPngAvatar, parseCard, toBase64, btoaSafe, atobSafe } = inputParser;
     function leafInfo(...args) { return getSchemaLayout().leafInfo(...args); }
     function maskYamlBlockScalarBodies(...args) { return getSchemaLayout().maskYamlBlockScalarBodies(...args); }
     function yamlStripQuotes(...args) { return getSchemaLayout().yamlStripQuotes(...args); }
@@ -985,7 +985,7 @@
                 && column.path.some(part => String(part).startsWith('_'))));
     }
     function isAiPromptColumn(group, column) {
-        return column && column.zh !== '_扩展数据'
+        return column && !group.aiReadonly && !column.aiReadonly && column.zh !== '_扩展数据'
             && !isUnderscoreReadonlyColumn(group, column)
             && !isDollarPrivateColumn(group, column);
     }
@@ -1308,7 +1308,7 @@
                     ddl: buildDdl(g, { includeCheck }),
                 },
                 content,
-                updateConfig: { skipFloors: -1 },
+                updateConfig: { skipFloors: -1, ...(g.aiReadonly ? { updateFrequency: 0 } : {}) },
                 exportConfig: { enabled: false, splitByRow: false },
                 orderNo: idx,
             };
@@ -1404,7 +1404,7 @@
         return rewritten;
     }
 
-    function migrateTemplatePromptRuntime(template, regexScripts, report) {
+    function migrateTemplatePromptRuntime(template, regexScripts, report, schema = []) {
         const scripts = (Array.isArray(regexScripts) ? regexScripts : []).filter((r) => {
             if (!r || r.promptOnly !== true || !Array.isArray(r.placement)) return false;
             return r.placement.map(Number).includes(5); // regex_placement.WORLD_INFO
@@ -1429,26 +1429,32 @@
             usable.push({ r, regex, name, initiallyEnabled: !r.disabled });
         }
         let regexChanges = 0;
+        const migrateValue = (initial, sourceLabel, emitReport) => {
+            let value = initial;
+            for (const item of usable) {
+                value = value.replace(item.regex, (...args) => {
+                    const matched = String(args[0] == null ? '' : args[0]);
+                    const replacement = expandWorldInfoReplacement(item.r.replaceString, args);
+                    return '<%- mvu2shujukuApplyWorldInfoRegex(' + JSON.stringify(item.name) + ',' +
+                        JSON.stringify(toBase64(matched)) + ',' + JSON.stringify(toBase64(replacement)) + ',' +
+                        (item.initiallyEnabled ? 'true' : 'false') + ') %>';
+                });
+            }
+            return rewriteRuntimePromptMacros(value, emitReport ? report : null, sourceLabel);
+        };
         for (const key of Object.keys(template || {})) {
             const sheet = template[key];
             if (!sheet || !sheet.sourceData) continue;
             for (const field of TABLE_PROMPT_FIELDS) {
                 if (typeof sheet.sourceData[field] !== 'string') continue;
-                let value = sheet.sourceData[field];
-                for (const item of usable) {
-                    const next = value.replace(item.regex, (...args) => {
-                        const matched = String(args[0] == null ? '' : args[0]);
-                        const replacement = expandWorldInfoReplacement(item.r.replaceString, args);
-                        return '<%- mvu2shujukuApplyWorldInfoRegex(' +
-                            JSON.stringify(item.name) + ',' + JSON.stringify(toBase64(matched)) + ',' +
-                            JSON.stringify(toBase64(replacement)) + ',' + (item.initiallyEnabled ? 'true' : 'false') + ') %>';
-                    });
-                    if (next !== value) regexChanges += 1;
-                    value = next;
-                }
-                sheet.sourceData[field] = rewriteRuntimePromptMacros(value, report, `表「${sheet.name || key}」${field}`);
+                const before = sheet.sourceData[field];
+                sheet.sourceData[field] = migrateValue(before, `表「${sheet.name || key}」${field}`, true);
+                if (usable.length && sheet.sourceData[field] !== rewriteRuntimePromptMacros(before, null, '')) regexChanges++;
             }
         }
+        // 清理原条目前以实际模型说明为凭证，宏/正则迁移也必须反映在凭证中。
+        for (const group of schema) for (const receipt of group._emittedRules || [])
+            receipt.rendered = migrateValue(receipt.rendered, '', false);
         if (regexChanges && report) report.auto(`已将 WORLD_INFO 提示链中的静态查找正则迁移到数据库表格提示词（命中 ${regexChanges} 个字段）；运行时仍读取原正则的启用状态并解析 replacement 宏，原正则继续保留供其他世界书内容使用。`);
         return template;
     }
@@ -1599,7 +1605,167 @@
         } catch (e) { return false; }
     }
 
+    function attachProseMvuRules(schema, shapeInfo, entries, initvar, scripts = [], report) {
+        const layout = buildLayout(schema).entries;
+        const prefixOf = entry => entry.kind === 'pathArray' || entry.kind === 'nestedArray'
+            ? entry.path : entry.kind === 'nestedRows' ? [...entry.parentPath, entry.childKey] : (entry.writePaths && entry.writePaths[0] || [entry.group]);
+        const owners = layout.map(entry => ({ entry, prefix: prefixOf(entry), group: schema.find(g => g.tableName === entry.table) }));
+        if (report) report.note('原变量路径映射（仅供核对，不注入填表说明）：' +
+            owners.map(o => '/' + o.prefix.join('/') + ' → ' + o.group.tableName).join('；') + '。');
+        const partMatches = (pattern, part) => part !== undefined && (pattern === part || pattern.includes('*') &&
+            new RegExp('^' + pattern.split('*').map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$').test(part));
+        const matches = (prefix, path) => prefix.every((part, i) => path[i] !== undefined && partMatches(path[i], part));
+        const bind = (owner, path) => {
+            if (!matches(owner.prefix, path)) return null;
+            const group = owner.group;
+            if (path.length === owner.prefix.length) {
+                const column = group.columns.find(c => c.zh === (owner.entry.valueCol || group.scalarValueCol || '内容'));
+                return { label: '本表', table: group.tableName, json: false, column,
+                    jsonValue: column && (column.isObject || /^json/.test(column.logicalType || '')) };
+            }
+            const suffix = path.slice(owner.prefix.length);
+            if (['array', 'pathArray', 'nestedArray'].includes(group.kind) && suffix.length === 1 && /^(?:-|\d+)$/.test(suffix[0]))
+                return { label: suffix[0] === '-' ? '本表的新记录' : `本表中原数组索引为 ${suffix[0]} 的记录`, table: group.tableName, json: false };
+            if (['array', 'pathArray', 'nestedArray'].includes(group.kind) && suffix.length === 1 && /^(?:\{[^{}]+\}|<[^<>]+>|\*)$/.test(suffix[0]))
+                return { label: '本表中对应数组元素的记录', table: group.tableName, json: false };
+            if (['array', 'pathArray', 'nestedArray'].includes(group.kind) && owner.entry.valueCol && suffix.length > 1 &&
+                /^(?:\d+|\{[^{}]+\}|<[^<>]+>|\*)$/.test(suffix[0])) {
+                const value = group.columns.find(c => c.zh === owner.entry.valueCol);
+                if (value && (value.isObject || /^json/.test(value.logicalType || ''))) return {
+                    label: `对应元素记录的「${value.zh}」`, table: group.tableName, json: true, path: suffix.slice(1) };
+            }
+            if (group.kind === 'json' && !group.scalarType) return { label: '「内容」', table: group.tableName,
+                json: true, path: path.slice(owner.prefix.length) };
+            const columnPathOf = c => (owner.entry.cols || []).find(mapped => mapped.zh === c.zh)?.path || c.path;
+            const columns = (group.columns || []).filter(c => !c.isOverflow && Array.isArray(columnPathOf(c)) && columnPathOf(c).length);
+            const row = owner.entry.kind === 'rows' || owner.entry.kind === 'nestedRows';
+            let columnPath = row ? path.slice(owner.prefix.length) : path;
+            let recordSpecific = '';
+            if (row && columnPath.length > 1 && !columns.some(c => matches(columnPathOf(c), columnPath))) {
+                const record = columnPath[0];
+                if (!/^(?:\{[^{}]+\}|<[^<>]+>|\*)$/.test(record)) {
+                    const initial = owner.prefix.reduce((v, p) => v && v[p], initvar);
+                    if (!initial || !Object.prototype.hasOwnProperty.call(initial, record)) return null;
+                    recordSpecific = record;
+                }
+                columnPath = columnPath.slice(1);
+            }
+            const direct = columns.find(c => columnPathOf(c).length === columnPath.length && matches(columnPathOf(c), columnPath));
+            if (direct) return { label: (recordSpecific ? `记录「${recordSpecific}」的` : '') + `「${direct.zh}」`,
+                table: group.tableName, json: false, jsonValue: direct.isObject || /^json/.test(direct.logicalType || ''), column: direct, recordSpecific };
+            const containers = columns.filter(c => (c.isObject || c.logicalType === 'jsonObjectOptional') && matches(columnPathOf(c), columnPath))
+                .sort((a, b) => columnPathOf(b).length - columnPathOf(a).length);
+            if (containers.length) return { label: (recordSpecific ? `记录「${recordSpecific}」的` : '') + `「${containers[0].zh}」`, table: group.tableName,
+                json: true, path: columnPath.slice(columnPathOf(containers[0]).length) };
+            const flattened = columns.filter(c => columnPathOf(c).length > columnPath.length && matches(columnPath, columnPathOf(c)));
+            if (flattened.length && !flattened.some(c => c.isObject || /^json/.test(c.logicalType || ''))) return {
+                label: flattened.map(c => `「${c.zh}」`).join('、'), table: group.tableName, json: false,
+                objectFields: Object.fromEntries(flattened.map(c => [columnPathOf(c).slice(columnPath.length).join('.'), c.zh])) };
+            return null;
+        };
+        const labelOf = (binding, group) => (binding.table === group.tableName ? '' : `「${binding.table}」的`) +
+            binding.label + (binding.json ? '内部路径 /' + binding.path.map(p => p.replace(/~/g, '~0').replace(/\//g, '~1')).join('/') : '');
+        for (const owner of owners) if (/^[_$]/.test(String(owner.prefix[0] || ''))) owner.group.aiReadonly = true;
+        const specifications = (shapeInfo.proseRuleDocuments || []).flatMap(doc => doc.sections).filter(s => s.path && !s.unmapped);
+        const conflicting = new Set();
+        for (const readonly of specifications.filter(s => s.readonly)) for (const writable of specifications.filter(s => !s.readonly && !s.permissionUnresolved)) {
+            if (readonly.path.length > writable.path.length) continue;
+            if (readonly.path.every((p, i) => partMatches(p, writable.path[i]) || partMatches(writable.path[i], p))) {
+                conflicting.add(readonly); conflicting.add(writable);
+            }
+        }
+        for (const section of conflicting) {
+            section.unmapped = true;
+            if (report) report.warn('只读与可写声明冲突，未自动应用权限或更新频率：/' + section.path.join('/') + '。原说明保留。', 'schema');
+        }
+        for (const doc of shapeInfo.proseRuleDocuments || []) {
+            for (const section of doc.sections) {
+                if (section.unmapped) { section.tables = []; continue; }
+                const pointers = section.path ? [section.path] : [...section.text.matchAll(/(?<![\p{L}\p{N}_$}])\/[\p{L}\p{N}_$][^\s，。、；;:："'<>()[\]（）|=≤≥]*/gu)]
+                    .map(m => m[0].slice(1).split('/').map(s => s.replace(/~1/g, '/').replace(/~0/g, '~')));
+                const targets = new Set();
+                let unresolved = false;
+                const bindings = [];
+                for (const path of pointers) {
+                    const candidates = owners.filter(o => o.prefix.every((part, i) => path[i] !== undefined && partMatches(path[i], part)));
+                    const depth = Math.max(0, ...candidates.map(o => o.prefix.length));
+                    if (!depth) { unresolved = true; continue; }
+                    for (const o of candidates.filter(o => o.prefix.length === depth)) {
+                        const binding = bind(o, path);
+                        if (!binding) { unresolved = true; continue; }
+                        if (section.path && !section.readonly && binding.column && !binding.jsonValue) {
+                            const declared = /^(?:(?:add|replace|remove)\s*[:：]\s*)?(string|number|integer|int|boolean|bool)(?:[（(][^()（）]*[）)])?(?=\s|$)/i.exec(section.declaration || '');
+                            const kind = declared && ({ string: 'text', number: 'number', integer: 'number', int: 'number', boolean: 'boolean', bool: 'boolean' })[declared[1].toLowerCase()];
+                            const actual = /^text/.test(binding.column.logicalType || '') ? 'text' : binding.column.logicalType;
+                            const missingIntegerConstraint = declared && /^(?:integer|int)$/i.test(declared[1]) && actual === 'number' &&
+                                !binding.column.integer && binding.column.type !== 'INTEGER';
+                            if (kind && ['text', 'number', 'boolean'].includes(actual) && (kind !== actual || missingIntegerConstraint)) {
+                                unresolved = true;
+                                if (report) report.warn('原类型说明与已解析字段类型不一致，未迁入填表说明：/' + path.join('/') +
+                                    ' 声明 ' + declared[1] + '，列「' + binding.column.zh + '」为 ' + actual + '。原说明保留。', 'schema');
+                                continue;
+                            }
+                        }
+                        targets.add(o.group); bindings.push({ path, binding, owner: o });
+                    }
+                }
+                if (!pointers.length) {
+                    const candidates = owners.filter(o => o.prefix.join('.') === section.heading);
+                    if (candidates.length === 1) targets.add(candidates[0].group);
+                }
+                if (!targets.size || unresolved) { section.tables = []; continue; }
+                if (section.readonly) for (const { path, owner } of bindings) {
+                    if (path.length === owner.prefix.length) {
+                        for (const o of owners) if (path.every((pattern, i) => partMatches(pattern, o.prefix[i]))) {
+                            o.group.aiReadonly = true; targets.add(o.group);
+                        }
+                    }
+                }
+                section.tables = [...targets].map(g => g.tableName);
+                if (section.permissionUnresolved && section.tables.length && report) report.note('复杂权限说明已按实际路径迁入表格；未据此自动设置只读或更新频率：/' + section.path.join('/') + '。');
+                for (const group of targets) {
+                    if (section.path) {
+                        const binding = bindings.find(b => b.owner.group === group)?.binding ||
+                            (section.readonly && group.aiReadonly ? { label: '本表', table: group.tableName, json: false } : null);
+                        if (!binding) continue;
+                        group.pathSpecifications = [...(group.pathSpecifications || []), { ...section, label: labelOf(binding, group),
+                            jsonPath: binding.json, jsonValue: binding.jsonValue, recordSpecific: binding.recordSpecific }];
+                        if (section.readonly && binding.column && !binding.recordSpecific) binding.column.aiReadonly = true;
+                    } else {
+                        group.proseChecks = [...new Set([...(group.proseChecks || []), section.text])];
+                        const aliases = bindings.map(b => ({ path: '/' + b.path.join('/'), label: labelOf(b.binding, group),
+                            objectFields: b.binding.objectFields, singleton: b.owner.group.kind === 'singleton' }));
+                        group.proseAliases = Object.assign(group.proseAliases || {}, { [section.text]: aliases });
+                    }
+                    if (!section.readonly && !section.permissionUnresolved) group.jsonAiWritable = true;
+                }
+            }
+        }
+        // 固定一行且每个业务列都被明确标记只读，模型也没有增删行的职责。
+        // 行表仍可能需要增删身份记录，JSON 叶子只读也不能扩大为整列只读。
+        for (const group of schema.filter(g => g.kind === 'singleton' && !g.aiReadonly)) {
+            const fields = group.columns.filter(c => !isRelationshipKeyColumn(group, c) &&
+                !isDollarPrivateColumn(group, c) && !isUnderscoreReadonlyColumn(group, c));
+            if (fields.length && fields.every(c => c.aiReadonly)) group.aiReadonly = true;
+        }
+    }
+
     function splitMigratedMvuRules(content, schema, shapeInfo, template) {
+        const prose = (shapeInfo.proseRuleDocuments || []).find(doc => doc.source === content);
+        if (prose) {
+            const kept = [], sheets = Object.values(template || {});
+            let removed = 0;
+            for (const section of prose.sections) {
+                const migrated = section.tables.length && section.tables.every(name => {
+                    const group = schema.find(g => g.tableName === name), sheet = sheets.find(s => s && s.name === name);
+                    return (group._emittedRules || []).some(r => r.text === section.text && String(sheet && sheet.sourceData && sheet.sourceData.note || '').includes(r.rendered));
+                });
+                if (migrated) removed++;
+                else kept.push(prose.outputDocument ? section.text : prose.body.slice(section.start, section.end));
+            }
+            const remainder = prose.prefix + kept.join(prose.outputDocument ? '\n' : '');
+            return { removed, content: kept.length ? prose.outputDocument ? remainder : getSchemaLayout().wrapMvuRuleDocument(content, remainder) : '' };
+        }
         if (!isPureMvuRuleDocument(content)) return null;
         try {
             const YAML = getMvuYamlLibs().YAML;
@@ -1718,7 +1884,7 @@
                 }
             }
             if (!empty) updateDocument(rules, remaining, wrapper ? [wrapper] : []);
-            return { removed, content: empty ? '' : doc.toString({ lineWidth: 0 }) };
+            return { removed, content: empty ? '' : getSchemaLayout().wrapMvuRuleDocument(content, doc.toString({ lineWidth: 0 })) };
         } catch (e) { return null; }
     }
 
@@ -2481,6 +2647,9 @@
             if (dynamic.length) report.note(`检测到动态键规则（如 ${dynamic.slice(0, 5).join('、')}${dynamic.length > 5 ? ' 等' : ''}）；键值由运行期数据决定，规则承接情况以各表说明及未承接规则报告为准。`);
         }
         const schema = buildSchema(initvar, usage, report, shapeInfo, { vwdDescriptions: opts.vwdDescriptions, jsonContainers: opts.jsonContainers });
+        const sourceRegexScripts = (data.extensions && Array.isArray(data.extensions.regex_scripts)) ? data.extensions.regex_scripts : [];
+        const helperScripts = data.extensions && data.extensions.tavern_helper && data.extensions.tavern_helper.scripts;
+        attachProseMvuRules(schema, shapeInfo, entries, initvar, [...(Array.isArray(helperScripts) ? helperScripts : []), ...sourceRegexScripts], report);
         if ([data.first_mes, ...(data.alternate_greetings || [])].some(text => /<initvar\b/i.test(String(text || '')))) {
             report.warn('开场消息含 <initvar>：SP 独立填表会读取原始聊天正文，可能重复发送初始变量（包括已从表格隐藏的字段）。请在 SP 填表设置的标签排除规则中配置起始 <initvar、结束 </initvar>，并检查最终请求；酒馆显示正则不替代此设置。', 'template');
         }
@@ -2491,10 +2660,7 @@
         // 复用调用方已有模板时不会有新的 note，用同一规则现算一份插槽计划，避免布局里
         // 存下空计划而运行期无法按字段替换说明。
         if (opts.template) ensureVwdSlotPlans(schema, { template, mode, report, targetSpVersion: opts.targetSpVersion });
-        const sourceRegexScripts = (data.extensions && Array.isArray(data.extensions.regex_scripts))
-            ? data.extensions.regex_scripts
-            : [];
-        migrateTemplatePromptRuntime(template, sourceRegexScripts, report);
+        migrateTemplatePromptRuntime(template, sourceRegexScripts, report, schema);
         // 固定原规则/宏迁移后的完整模板，运行期只替换说明数据，不再修改 note。
         for (const group of schema) {
             if (!group.vwd || group.vwd.promptVersion !== 1) continue;
@@ -2572,7 +2738,9 @@
             const dedicatedProtocolEntry = /^变量(?:处理|更新|输出)(?:指令集|指令|协议)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(entryTitle);
             const dedicatedOutputEntry = /^(?:variables?|output_format)(?:\s*\([^)]*\))?$/i.test(entryTitle) ||
                 /^(?:变量列表|变量(?:更新|输出)格式(?:强调)?|变量输出规则)(?:\s*\([^)]*\))?$/i.test(entryTitle) || dedicatedProtocolEntry;
-            const ruleDocumentContent = /(?:^|\n)\s*(?:变量更新规则|variables_update_rules)\s*:|(?:^|\n)[ \t]+(?:type|range|check|format)\s*:/mi.test(content);
+            const ruleDocumentContent = /(?:^|\n)\s*(?:变量更新规则|variables_update_rules)\s*:|(?:^|\n)[ \t]+(?:type|range|check|format)\s*:/mi.test(content)
+                || (shapeInfo.proseRuleDocuments || []).some(doc => doc.source === content)
+                || ((dedicatedRuleEntry || explicitUpdateEntry) && isPureMvuRuleDocument(content));
             const outputProtocolContent = /<status_current_variables?|get_message_variable\s*::\s*stat_data|<UpdateVariable|<JSONPatch|json\s*patch|每轮[^\n]{0,40}(?:必须)?输出|^\s*格式:\s*_\.set\s*\(/i.test(content);
             const pureStatusOutput = /^\s*<status_current_variables?>[\s\S]*<\/status_current_variables?>\s*$/i.test(content) &&
                 /get_message_variable|stat_data/i.test(content);
@@ -2581,13 +2749,13 @@
             const purePipelineMarker = explicitUpdateEntry && /变量|更新|输出/i.test(comment) &&
                 /^\s*[🔻🔺▼▲↓↑⬇⬆⏬⏫─━—_=*#.:;\-]+\s*$/u.test(content);
             const outputDocument = !isPlot && (explicitUpdateEntry || dedicatedOutputEntry) && outputProtocolContent && isMvuOutputDocument(content);
-            const splitRules = !isPlot && (dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent
+            const splitRules = !isPlot && (dedicatedRuleEntry || dedicatedOutputEntry || explicitUpdateEntry) && ruleDocumentContent
                 ? splitMigratedMvuRules(content, schema, shapeInfo, template) : null;
             const isMvuUpdate = !isPlot && (
                 (explicitUpdateEntry && (!String(content).trim() || purePipelineMarker)) ||
                 (splitRules && !splitRules.content) ||
                 // 输出文档必须是完整专名；有 EJS 的混合业务不能凭名称删除。
-                outputDocument ||
+                (outputDocument && splitRules && !splitRules.content) ||
                 (dedicatedOutputEntry && isPureMvuOutputMarkup(content)) ||
                 // 教程中 comment 可任意命名；整个正文只有变量快照标签时仍是纯输出管线。
                 pureStatusOutput);
@@ -2596,6 +2764,7 @@
                 continue;
             }
             if (splitRules) {
+                if (outputDocument) report.note(`输出条目「${comment}」已移除确认的格式块，未识别的补充字段保留并报告；字段名属于支持的作者约定，不是 MVU 标准。`);
                 if (splitRules.removed) report.note(`规则条目「${comment}」已移除 ${splitRules.removed} 项迁入表格说明的规则，仅保留未承接内容。`);
                 report.warn(`规则条目「${comment}」剩余内容未迁入填表侧，保留原条目中的未承接部分，仍按原世界书设置注入；请核对是否保留。`, 'schema');
             } else if ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent) {
@@ -2925,9 +3094,9 @@
         ).map(k => [k, normalized[k]]));
     }
 
-    function convert(input, opts = {}) {
+    function convert(input, opts = {}, parsedSourceCard) {
         const report = createReport();
-        const sourceCard = parseCard(input);
+        const sourceCard = parsedSourceCard || parseCard(input);
         const isPngInput = (() => {
             try {
                 if (input && typeof input === 'object' && !ArrayBuffer.isView(input) && !(input instanceof ArrayBuffer)) return false;
@@ -2950,13 +3119,14 @@
         return result;
     }
     async function convertWithRemoteSchemas(input, opts = {}) {
-        const remoteSchemaSources = await getRemoteSchemaService().resolve(parseCard(input), opts);
+        const sourceCard = parseCard(input);
+        const remoteSchemaSources = await getRemoteSchemaService().resolve(sourceCard, opts);
         const schemaSnapshots = [];
-        for (const item of schemaExecutionInputs(parseCard(input), remoteSchemaSources)) {
+        for (const item of schemaExecutionInputs(sourceCard, remoteSchemaSources)) {
             try { schemaSnapshots.push(schemaExecutionSnapshot(item, await getSchemaExecutionService().inspect(item.source))); }
             catch (error) { throw new Error(`Schema 隔离执行失败（脚本 ${item.index + 1}）：${error.message}`); }
         }
-        return convert(input, { ...opts, remoteSchemaSources, schemaSnapshots });
+        return convert(input, { ...opts, remoteSchemaSources, schemaSnapshots }, sourceCard);
     }
 
     // 产物装配与卡片分析分开；模板编辑无需重复解析 initvar、Schema、业务脚本和 EJS。
@@ -3110,6 +3280,10 @@
 
     function extensionStyle() {
         return [
+            '.mvu2shujuku-operation-overlay { position: fixed; inset: 0; z-index: 2147483647; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }',
+            '.mvu2shujuku-operation-box { max-width: min(420px, 90vw); padding: 24px; border-radius: 12px; background: var(--SmartThemeBlurTintColor, #222); color: var(--SmartThemeBodyColor, #eee); border: 1px solid var(--SmartThemeBorderColor, #555); text-align: center; }',
+            '.mvu2shujuku-operation-box strong { display: block; margin: 12px 0; }',
+            '.mvu2shujuku-operation-box p { margin: 0; }',
             '#mvu2shujuku-settings .mvu2shujuku-card {',
             '  border: 1px solid var(--SmartThemeBorderColor, #555);',
             '  border-radius: 8px;',
@@ -3223,6 +3397,12 @@
         throw new Error('扩展运行时模块未加载，请使用构建后的 index.js');
     }
     // 候选快照构造与运行时同源：浏览器端从内联工厂取，Node 端从同一模块取。
+    function getWorldbookRequestFilterFactory() {
+        if (typeof root.__MVU2SHUJUKU_WORLDBOOK_REQUEST_FILTER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_WORLDBOOK_REQUEST_FILTER_FACTORY__;
+        if (typeof require === 'function') return require('./extension-runtime.js').createWorldbookRequestFilter;
+        throw new Error('正文世界书过滤模块缺失');
+    }
+
     function getCandidateBuilderFactory() {
         if (typeof root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__;
         if (typeof require === 'function') {
@@ -3269,6 +3449,7 @@
             ['__MVU2SHUJUKU_CONVERSION_PROFILES_FACTORY__', getConversionProfilesFactory],
             ['__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__', getExtensionRuntimeInstaller],
             ['__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__', getCandidateBuilderFactory],
+            ['__MVU2SHUJUKU_WORLDBOOK_REQUEST_FILTER_FACTORY__', getWorldbookRequestFilterFactory],
             ['__MVU2SHUJUKU_CARD_BRIDGE_INSTALLER__', getCardBridgeInstaller],
             ['__MVU2SHUJUKU_TABLE_WRITER_FACTORY__', getTableWriterFactory],
             ['__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__', getBridgeLifecycleFactory],
@@ -3324,6 +3505,7 @@
         VERSION,
         parseCard,
         parseCardPng,
+        extractPngAvatar,
         writeCardPng,
         parseInitVar,
         analyzeMvuInitMetadata,
@@ -3356,6 +3538,7 @@
         canWriteVwdDescriptions,
         vwdDescriptionDelta,
         getCandidateBuilderFactory,
+        getWorldbookRequestFilterFactory,
         setVwdExperimental,
         isVwdExperimental,
         writeStatDiffToDbResult,

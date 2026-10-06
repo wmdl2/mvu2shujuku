@@ -117,7 +117,7 @@ test('转换契约：启用声明优先于禁用参考，不受脚本顺序影�
 });
 test('转换契约：XML包裹的完整结构输出移除，混合正文与EJS保留', () => {
     const source = '<Format>\nForce_Structured_Output:\n  output_rule:\n    - Reply only with the legacy update block.\n  output_format: |-\n    <UpdateVariable>\n    <JSONPatch>[]</JSONPatch>\n    </UpdateVariable>\n</Format>';
-    for (const [text, retained] of [[source, false], ['剧情说明\n' + source, true], [source + '\n<% if (true) { %>业务<% } %>', true]]) {
+    for (const [text, retained] of [[source.replace('  output_rule:\n    - Reply only with the legacy update block.\n', ''), false], ['剧情说明\n' + source, true], [source + '\n<% if (true) { %>业务<% } %>', true]]) {
         const input = card({ 状态: { 数量: 1 } });
         input.character_book.entries.push({ comment: '[mvu_update]output_format', content: text, enabled: true, constant: true });
         const r = core.convert(input), e = r.card.character_book.entries.find(e => e.comment === '[mvu_update]output_format');

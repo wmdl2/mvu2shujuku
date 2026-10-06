@@ -17,9 +17,25 @@ async function save(options = {}) {
         tavern_helper: { scripts: [{ name: '数据桥', content: 'bridge();', enabled: true }], variables: {} },
     } };
     const before = JSON.stringify(expected), writes = [], reads = [], messages = [];
-    let persisted = copy(expected);
+    let persisted = copy(expected), creates = 0;
+    const overlays = [];
+    const document = {
+        getElementById: () => null,
+        body: { appendChild(node) { overlays.push(node); } },
+        createElement() {
+            const children = { strong: {}, p: {} };
+            return { setAttribute() {}, focus() {}, querySelector: key => children[key],
+                remove() { const i = overlays.indexOf(this); if (i >= 0) overlays.splice(i, 1); } };
+        },
+    };
     const st = { characters: options.noList ? [] : [{ ...copy(expected), avatar: 'new.png' }],
-        createCharacterData: async () => options.noAvatar ? '' : 'new.png' };
+        createCharacterData: async () => {
+            creates++;
+            assert.strictEqual(overlays.length, 1, '创建接口调用期间必须显示保存弹窗');
+            if (options.onCreate) await options.onCreate(context, overlays);
+            if (options.createFailure) throw new Error('公开保存失败');
+            return options.noAvatar ? '' : 'new.png';
+        } };
     if (!options.noRefresh) st.getCharacters = async () => st.characters;
     if (!options.noWriter) st.writeExtensionField = async (index, key, value) => {
         writes.push({ index, key, value: copy(value) });
@@ -31,9 +47,9 @@ async function save(options = {}) {
     if (options.staleList) st.characters = [{ ...copy(expected), avatar: 'old.png' }];
     const context = {
         lastResult: { card: { spec: 'chara_card_v3', data: expected }, meta: { avatarBytes: new Uint8Array([1]) }, files: [] },
-        updateParamsDirty: false, PANEL_ID: 'test', hostDocument: { getElementById: () => null }, Blob,
+        updateParamsDirty: false, PANEL_ID: 'test', hostDocument: document, hostWindow: { setTimeout }, Blob,
         getContextSafe: () => st, window: { MVU2SHUJUKU_CORE: core },
-        charWorldBook: ch => ch.character_book, dbg() {}, dbgWarn() {}, toast() {},
+        charWorldBook: ch => ch.character_book, dbg() {}, dbgWarn() {}, toast() {}, download() {},
         getAcuApi: () => null, autoSaveConversionProfile: async () => {},
         showInfoPopup: (title, text) => messages.push(text),
         fetch: async (url, request) => {
@@ -44,9 +60,10 @@ async function save(options = {}) {
         },
     };
     vm.createContext(context); vm.runInContext(implementation, context);
-    assert.strictEqual(await context.saveCardToSillyTavern(), true, '复核失败不能伪装成创建失败');
+    assert.strictEqual(await context.saveCardToSillyTavern(), !options.createFailure, '复核失败不能伪装成创建失败');
+    assert.strictEqual(overlays.length, 0, '结束后不能遗留保存弹窗');
     assert.strictEqual(JSON.stringify(expected), before, '宿主参数不能反向修改转换结果');
-    return { writes, reads, text: messages.join('\n'), context };
+    return { writes, reads, text: messages.join('\n'), context, creates };
 }
 
 test('保存复核：字段同步后必须实际读回，再确认一致', async () => {
@@ -84,4 +101,15 @@ test('保存复核：没有唯一头像及匹配标记时不猜测目标', async
     const r = await save({ noAvatar: true, noList: true });
     assert.deepStrictEqual(r.writes, []); assert.deepStrictEqual(r.reads, []);
     assert.ok(r.text.includes('创建接口未返回头像'));
+});
+test('保存进度：同一保存尚未结束时第二次调用不得重复创建', async () => {
+    const r = await save({ onCreate: async context => {
+        assert.strictEqual(await context.saveCardToSillyTavern(), false);
+    } });
+    assert.strictEqual(r.creates, 1);
+});
+test('保存进度：接口失败后关闭弹窗并允许再次保存', async () => {
+    const r = await save({ createFailure: true });
+    assert.match(r.text, /公开保存失败/);
+    assert.strictEqual(await r.context.saveCardToSillyTavern(), false);
 });

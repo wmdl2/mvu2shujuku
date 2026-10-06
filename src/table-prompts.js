@@ -34,10 +34,26 @@ function createTablePrompts(deps) {
             if (rendered && typeof opts.onRule === 'function') opts.onRule({ text: rule, rendered, ...scope });
             return rendered;
         };
+        const metadataWriteScope = group.kind === 'json' && !group.aiReadonly && group.jsonAiWritable;
+        if (metadataWriteScope) L.push('【可写路径与约束】');
+        if ((group.pathSpecifications || []).length) {
+            L.push('【字段业务规则】');
+            for (const specification of group.pathSpecifications)
+                L.push(emitRule(specification.text, { group, pathSpecification: specification }, { rulePath: specification.path }));
+        }
+        if ((group.proseChecks || []).length) {
+            L.push('【更新规则】');
+            for (const rule of group.proseChecks) L.push(emitRule(rule, { group }));
+        }
+        if (group.aiReadonly) L.push('本表为模型只读状态，由原卡脚本/前端管理；模型不得新增、修改或删除。脚本仍可正常更新。');
+        const explicitReadonly = (group.columns || []).filter(c => c.aiReadonly);
+        if (!group.aiReadonly && explicitReadonly.length)
+            L.push('模型只读字段：' + explicitReadonly.map(c => c.zh).join('、') + '；由原卡脚本/前端管理，模型不得修改。');
         if (group.scalarType === 'number') {
-            const scriptReadonly = /^[_$]/.test(String(group.name || ''));
+            const scriptReadonly = group.aiReadonly || /^[_$]/.test(String(group.name || ''));
             const rules = [...(group.groupChecks || []), ...(group.wildcardRules || []).flatMap(r => r.checks || [])];
-            L.push('数值表（全表固定一行）：「内容」直接保存一个数字，可含小数；禁止写入对象、数组、布尔值或带引号的 JSON 字符串。禁止新增/删除行。');
+            const valueKind = group.columns[0] && (group.columns[0].integer || group.columns[0].type === 'INTEGER') ? '一个整数，不接受小数' : '一个数字，可含小数';
+            L.push('数值表（全表固定一行）：「内容」直接保存' + valueKind + '；禁止写入对象、数组、布尔值或带引号的 JSON 字符串。禁止新增/删除行。');
             if (rules.length) {
                 L.push('【更新规则】', ...rules.map(rule => '- ' + emitRule(rule, { group })).filter(s => s !== '- '));
                 if (!scriptReadonly) L.push('只在本轮发生相应变化时更新数值；未发生变化则保持原值。');
@@ -57,15 +73,15 @@ function createTablePrompts(deps) {
         // 但 AI 仍能在真实表头/DDL 里看到，因此同样要触发现有只读提示。
         const userReadonlyCols = (group.columns || []).filter(c => isUnderscoreReadonlyColumn(group, c));
         const hasUserReadonly = userReadonlyCols.length > 0;
-        const allReadonly = hasUserReadonly && aiCols.length === 0;
+        const allReadonly = (hasUserReadonly || group.aiReadonly) && aiCols.length === 0;
         if (group.kind === 'json') {
             const wr = group.wildcardRules || [];
             const gc = group.groupChecks || [];
-            if (wr.length || gc.length) {
+            if (!group.aiReadonly && (wr.length || gc.length || group.jsonAiWritable)) {
                 // 规则声明了 AI 可写路径（如 户.<门牌>.妻.好感值）：JSON 表不再一刀切只读，
                 // 而是列出可写路径与约束；SQL 可在单元格内按路径更新。
                 L.push('整组 JSON 存储表（全表固定一行）：本表以 JSON 保存动态结构。AI 可更新「内容」列，只改变【可写路径与约束】中列出的路径，其余字段保持原样；禁止新增/删除行。');
-                L.push('【可写路径与约束】');
+                if (!metadataWriteScope || wr.length || gc.length) L.push('【可写路径与约束】');
                 for (const r of wr) {
                     const parts = [];
                     if (r.range) parts.push(`数值范围 ${r.range[0]}~${r.range[1]}`);
@@ -250,12 +266,13 @@ function createTablePrompts(deps) {
     }
 
     function buildInitNode(group) {
+        if (group.aiReadonly) return '开局数据已由模板初始化；本表由脚本/前端维护，模型禁止再次初始化或修改。';
         if (group.scalarType === 'number') {
             if (/^[_$]/.test(String(group.name || ''))) return '开局已初始化唯一数值记录；不得再次初始化或新增/删除行，后续由脚本/前端维护，自动填表阶段不修改本表。';
             return '开局已初始化唯一数值记录；不得再次初始化或新增/删除行，后续根据正文、设定与 note 按需更新。';
         }
         if (group.kind === 'json') {
-            return ((group.wildcardRules || []).length || (group.groupChecks || []).length)
+            return ((group.wildcardRules || []).length || (group.groupChecks || []).length || group.jsonAiWritable)
                 ? `开局模板已初始化整组数据；自动填表阶段仅按 note 中「可写路径与约束」更新「内容」列，其余由脚本/前端维护。`
                 : `开局模板已初始化整组数据；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
         }
@@ -377,6 +394,36 @@ function createTablePrompts(deps) {
         if (!s) return s;
         const ctx = context || {};
         const col = ctx.column || null;
+        if (ctx.pathSpecification) {
+            const specification = ctx.pathSpecification;
+            let body = specification.readonly
+                ? (specification.jsonPath || specification.recordSpecific ? '模型只读；' : '') + (specification.readonlyDescription || '由脚本/前端维护')
+                : s.replace(/^[^\n]*?\s+/, '');
+            // 普通列的类型由 DDL/列说明给出；JSON 内部类型仍是字段规则的一部分。
+            body = body.replace(/^(?:add|replace|remove|新增|更新|移除)\s*[:：]\s*/i, '');
+            if (!specification.jsonPath && !specification.jsonValue) body = body.replace(/^(string|number|integer|int|boolean|bool|字符串|数字|整数|布尔)(?:[（(]([^()（）\n]*)[）)])?(?=\s|$)/i,
+                (_, type, restriction) => restriction ? (/^(?:number|integer|int|数字|整数)$/i.test(type)
+                    ? '业务数值范围：' + restriction + '；' : '业务取值：' + restriction + '；') : '').trim();
+            s = specification.label + '：' + (body || '遵循本列类型和现有字段规则。');
+            s = s.replace(/\b(add|replace|remove)(?=\s*[:：/]|\b)/gi,
+                (_, op) => ({ add: '新增', replace: '更新', remove: '移除' })[op.toLowerCase()]);
+        }
+        const aliases = ctx.group && ctx.group.proseAliases && ctx.group.proseAliases[String(line || '').trim()];
+        if (aliases) {
+            for (const alias of [...aliases].sort((a, b) => b.path.length - a.path.length)) {
+                const escaped = alias.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                if (alias.objectFields) s = s.replace(new RegExp('(' + escaped + ')\\s+(?:value为对象|为)\\s*(\\{[^{}\\n]*\\})', 'gu'),
+                    (original, path, object) => {
+                        try {
+                            const values = JSON.parse(object);
+                            if (!Object.keys(values).every(k => alias.objectFields[k])) return original;
+                            return path + '，字段值：' + Object.entries(values).map(([k, v]) => `「${alias.objectFields[k]}」=${JSON.stringify(v)}`).join('、');
+                        } catch (_) { return original; }
+                    });
+                s = s.replace(new RegExp('(?:(\\b(?:add|replace|remove))\\s+)?' + escaped + '(?![\\p{L}\\p{N}_$/])', 'giu'),
+                    (_, op) => (op ? ({ add: alias.singleton ? '更新' : '新增', replace: '更新', remove: '移除' })[op.toLowerCase()] + ' ' : '') + alias.label);
+            }
+        }
         const jsonArray = !!(ctx.jsonContainer || (col && col.isObject && col.jsonKind === 'array'));
         const containerOnly = /^(?:【[^】]*(?:警告|防崩|注意)[^】]*】\s*)?(?:更新时必须精确到子字段(?:（如[^（）]*）|\(如[^()]*\))?\s*[，,]\s*)?(?:严禁|不要|避免|请勿|勿)(?:直接)?对整个(?:对象|数组)使用\s*["'“”]?(?:replace|delta)["'“”]?(?:\s*(?:或|和|\/)\s*["'“”]?(?:replace|delta)["'“”]?)?\s*[。！!]?$/i;
         if (containerOnly.test(s)) return '更新时只修改发生变化的字段或元素，保留其他内容。';
@@ -395,6 +442,10 @@ function createTablePrompts(deps) {
         // 只改写完整的结构化措辞，避免误伤普通英文说明中的同名单词。
         s = s.replace(/通过\s*remove\s*旧键\s*\+\s*insert\s*新键\s*修改对应([^，,。；;]+?)的\s*value\s*描述/gi,
             '直接更新对应$1记录的描述');
+        // 命令紧邻显式 JSON Pointer 时有确定的操作语义；路径仍保留作定位，
+        // 不把数组元素的新增/删除猜成整表 INSERT/DELETE。
+        s = s.replace(/\b(add|replace|remove)\s+(?=\/[\p{L}\p{N}_$])/giu,
+            (_, op) => ({ add: '新增 ', replace: '更新 ', remove: '移除 ' })[op.toLowerCase()]);
         const opVerb = { add: '新增对应内容', replace: '更新对应内容', remove: '移除对应内容' };
         s = s.replace(/(?:使用|用|采用)\s*["'“”]?(add|replace|remove)["'“”]?\s*(?:操作|指令)/gi,
             (m, op) => opVerb[String(op).toLowerCase()] || '执行对应变更');
@@ -430,6 +481,7 @@ function createTablePrompts(deps) {
     }
 
     function buildNodeProse(group, kind) {
+        if (group.aiReadonly) return '禁止。由原卡脚本/前端维护，模型不得写入。';
         if (group.scalarType === 'number') {
             if (kind !== 'update') return '禁止。';
             if (/^[_$]/.test(String(group.name || ''))) return '本数值由脚本/前端维护，AI 不应直接修改。';
@@ -440,7 +492,7 @@ function createTablePrompts(deps) {
         }
         if (group.kind === 'json') {
             if (kind === 'update') {
-                if ((group.wildcardRules || []).length || (group.groupChecks || []).length) {
+                if ((group.wildcardRules || []).length || (group.groupChecks || []).length || group.jsonAiWritable) {
                     return '只允许更新现有记录，禁止新增或删除行；正文明确造成字段变化时，按 note 中【可写路径与约束】维护允许的路径（未列出字段一律只读），保留其余字段。';
                 }
                 return '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';

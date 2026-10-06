@@ -14,6 +14,12 @@ function extract(start, end) {
     assert.ok(a >= 0 && b > a, '实际函数边界必须存在');
     return source.slice(a, b);
 }
+function operationDocument() {
+    return { getElementById: () => null, body: { appendChild() {} }, createElement() {
+        const children = { strong: {}, p: {} };
+        return { setAttribute() {}, focus() {}, remove() {}, querySelector: key => children[key] };
+    } };
+}
 function runtime(extra = {}) {
     let chat = 'A', avatar = 'one.png';
     const context = { getContextSafe: () => ({ chatId: chat }), currentCharacter: () => ({ avatar }),
@@ -324,15 +330,16 @@ test('审查：保存 await 期间切换结果仍保存原卡、头像及模板'
     original.meta.sourceCharacter = { name: '源卡', avatar: 'original.png' };
     let release, requestedAvatar;
     const context = { lastResult: original, updateParamsDirty: false, PANEL_ID: 'test',
-        hostDocument: { getElementById: () => null }, Blob, toast() {}, showInfoPopup() {},
+        hostDocument: operationDocument(), hostWindow: { setTimeout }, dbg() {}, Blob, toast() {}, showInfoPopup() {},
         getContextSafe: () => ({ createCharacterData: async (...args) => { created.push(args); return 'saved.png'; } }),
         fetchAvatarBlob: ch => { requestedAvatar = ch.avatar; return new Promise(resolve => { release = resolve; }); },
         getAcuApi: () => ({ importTemplateFromData: async template => { templates.push(template); return { success: true }; } }),
         autoSaveConversionProfile: async () => { throw new Error('不应保存另一转换结果的配置'); } };
     vm.createContext(context);
-    vm.runInContext(extract('    async function saveCardToSillyTavern()', '    // 弹窗：'), context);
+    vm.runInContext(extract('    function sameSavedScriptData(', '    // 弹窗：'), context);
     const pending = context.saveCardToSillyTavern();
     context.lastResult = core.convert({ ...card(), name: '另一张卡' });
+    while (!release) await new Promise(resolve => setTimeout(resolve, 5));
     release(new Blob(['avatar']));
     assert.strictEqual(await pending, true);
     assert.strictEqual(requestedAvatar, 'original.png');
@@ -342,11 +349,12 @@ test('审查：保存 await 期间切换结果仍保存原卡、头像及模板'
 
 test('审查：保存前参数刷新失败不写入旧卡', async () => {
     let calls = 0;
-    const context = { lastResult: core.convert(card()), updateParamsDirty: true, toast() {},
+    const context = { lastResult: core.convert(card()), updateParamsDirty: true, toast() {}, PANEL_ID: 'test',
+        hostDocument: operationDocument(), hostWindow: { setTimeout }, dbg() {},
         refreshConvertedResult() { throw new Error('模拟刷新失败'); },
         getContextSafe() { calls++; return {}; } };
     vm.createContext(context);
-    vm.runInContext(extract('    async function saveCardToSillyTavern()', '    // 弹窗：'), context);
+    vm.runInContext(extract('    function sameSavedScriptData(', '    // 弹窗：'), context);
     assert.strictEqual(await context.saveCardToSillyTavern(), false);
     assert.strictEqual(calls, 0);
 });

@@ -247,6 +247,64 @@ test('前端就绪：完整零值和 false 状态也广播初始化，未物化�
     }
 });
 
+test('变量回放：未加载的 JSON 标量骨架不能被脚本读取并转换写回', async () => {
+    const source = require('./synthetic-card')();
+    source.data.character_book.entries = [{ comment: '[InitVar]', content: '{"主角名":"林验收","状态":{"积分":0}}', enabled: false }];
+    const h = await nativeRuntime(source);
+    const original = JSON.stringify(h.tables);
+    const frame = h.context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame;
+    const realTables = clone(frame.checkpoint.data);
+    h.api.exportTableAsJson = () => ({});
+    h.api.isReady = () => false;
+    for (const partial of [false, true]) {
+        frame.checkpoint.data = partial ? Object.fromEntries(Object.entries(realTables).filter(([, v]) => v?.name !== '主角名表')) : {};
+        const readonly = h.win.getAllVariables();
+        assert.strictEqual(readonly.__mvu2shujukuReadUnavailable, true);
+        assert.strictEqual(Object.keys(readonly).includes('__mvu2shujukuReadUnavailable'), false, '读取标记不得写入 JSON 或模板变量');
+        assert.throws(() => {
+            const data = h.win.Mvu.getMvuData();
+            data.stat_data.主角名 = String(data.stat_data.主角名);
+        }, error => error.code === 'MVU_DATA_NOT_READY');
+        assert.throws(() => h.win.getVariables({ type: 'message' }), error => error.code === 'MVU_DATA_NOT_READY');
+        let called = false;
+        assert.strictEqual(await h.win.updateVariablesWith(data => { called = true; data.stat_data.主角名 = String(data.stat_data.主角名); return data; }, { type: 'message' }), false);
+        assert.strictEqual(called, false, '没有真实基线时不执行业务回调');
+        await h.advance(500);
+        assert.strictEqual(JSON.stringify(h.tables), original, '拒绝骨架读写后物理数据保持原样');
+    }
+    frame.checkpoint.data = realTables;
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.主角名, '林验收', '完整持久化帧仍可在运行时空窗内读取');
+    h.api.exportTableAsJson = () => h.tables;
+    assert.strictEqual(h.win.getVariables({ type: 'message' }).stat_data.主角名, '林验收');
+});
+
+test('变量回放：共享全局初始化等待完整数据，恢复后才启动作者脚本', async () => {
+    let initialized = 0;
+    const h = await nativeRuntime(undefined, ({ win }) => {
+        win.waitGlobalInitialized = () => Promise.resolve('宿主');
+    });
+    const frame = h.context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame;
+    const realTables = clone(frame.checkpoint.data);
+    frame.checkpoint.data = {};
+    h.api.exportTableAsJson = () => ({});
+    const child = { document: { querySelectorAll: () => [] }, closed: false,
+        waitGlobalInitialized: () => Promise.resolve('宿主'), initializeGlobal() { initialized++; },
+        addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
+    };
+    h.win.document.querySelectorAll = selector => selector === 'iframe' ? [{ contentWindow: child }] : [];
+    await h.advance(2500);
+    assert.strictEqual(initialized, 0, '数据空窗不能向新脚本广播已就绪');
+    assert.strictEqual(await child.waitGlobalInitialized('其他'), '宿主');
+    let ready = false;
+    const waiting = child.waitGlobalInitialized('Mvu').then(mvu => { ready = true; return mvu; });
+    await h.advance(300);
+    assert.strictEqual(ready, false);
+    frame.checkpoint.data = realTables;
+    await h.advance(2200);
+    assert.strictEqual((await waiting).getMvuData().stat_data.状态.金币, 10);
+    assert.strictEqual(initialized, 1);
+});
+
 test('运行内存：完整扩展在 iframe 移除后还原接口并释放登记', async () => {
     const h = await nativeRuntime();
     let now = Date.now();

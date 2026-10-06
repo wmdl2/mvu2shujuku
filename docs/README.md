@@ -6,6 +6,7 @@
 
 | 当前问题 | 入口 |
 | --- | --- |
+| 规则迁移、正文分流、模型只读说明与保存进度 | [v0.6.0 验证](validation/2026-10-06-rule-metadata-save.md) |
 | 静态／动态登记入口、回退引擎与大资源扫描 | [入口验证](validation/2026-10-06-script-entrypoints.md) |
 | number／integer／布尔列映射、数组类型保留及 transform 范围 | [类型验证](validation/2026-10-05-type-mapping.md) |
 | 真实 JavaScript/Zod Schema 构造、隔离执行与通用语法修复 | [执行验证](validation/2026-10-05-schema-execution.md) |
