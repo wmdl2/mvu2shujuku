@@ -25,6 +25,7 @@ function createEjsTransform() {
 
     function splitJsTopLevelArgs(argsStr) {
         const source = String(argsStr || '');
+        if (!source.trim()) return [];
         const code = maskJsStringsAndComments(source);
         const parts = [];
         let start = 0;
@@ -44,6 +45,7 @@ function createEjsTransform() {
     function rewriteStatDataCalls(source) {
         let out = String(source || '');
         let count = 0;
+        if (!/\bstat_data\b/i.test(out)) return { text: out, count };
         let code = maskJsStringsAndComments(out);
         const isBareCall = (index, length) => {
             if (!code.slice(index, index + length).trim() || /[\w$]/.test(code[index - 1] || '')) return false;

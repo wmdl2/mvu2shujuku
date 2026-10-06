@@ -1360,6 +1360,7 @@ function createSchemaLayout(dependencies) {
                     const op = mm[1], opRaw = tail.slice(opOpen + 1, opClose), opArgs = splitJsTopLevelArgs(opRaw);
                     if (op === 'min') node.min = Number(literal(opArgs[0]));
                     else if (op === 'max') node.max = Number(literal(opArgs[0]));
+                    else if (op === 'int' && node.kind === 'number') node.integer = true;
                     else if (op === 'nullable' || op === 'optional' || op === 'nullish') {
                         if (op !== 'optional') node.nullable = true;
                         if (op !== 'nullable') node.optional = true;
@@ -1438,7 +1439,7 @@ function createSchemaLayout(dependencies) {
                 if (incoming.value) out.value = mergeZodSchemaNodes(out.value, incoming.value) || incoming.value;
                 if (incoming.keySchema) out.keySchema = mergeZodSchemaNodes(out.keySchema, incoming.keySchema) || incoming.keySchema;
             }
-            for (const key of ['min', 'max', 'enum', 'desc', 'hasDefault', 'defaultValue', 'defaultKind', 'dynamicDefault', 'unresolved', 'passthrough', 'coerce', 'clampTransform', 'nullable', 'optional']) {
+            for (const key of ['min', 'max', 'enum', 'desc', 'integer', 'hasDefault', 'defaultValue', 'defaultKind', 'dynamicDefault', 'unresolved', 'passthrough', 'coerce', 'clampTransform', 'nullable', 'optional']) {
                 if (incoming[key] !== undefined) out[key] = incoming[key];
             }
             return out;
@@ -1850,7 +1851,7 @@ function createSchemaLayout(dependencies) {
                     const values = t.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g).map(token => getMvuYamlLibs().JSON5.parse(token));
                     return { kind: 'text', raw: t, enum: [...new Set(values)] };
                 }
-                if (/^(?:number|integer)\b/i.test(t)) return { kind: 'number', raw: t };
+                if (/^(?:number|integer)\b/i.test(t)) return { kind: 'number', integer: /^integer\b/i.test(t), raw: t };
                 if (/^boolean\b/i.test(t)) return { kind: 'boolean', raw: t };
                 // MVU/Zod 规则既会写具体结构 `{...}` / `T[]`，也常直接写宽类型
                 // `object` / `array`。裸宽类型仍必须作为 JSON 列保存；误判为 text 会让
@@ -2305,8 +2306,12 @@ function createSchemaLayout(dependencies) {
         }
     
     function inferType(value) {
-            if (typeof value === 'number') return 'INTEGER';
-            if (typeof value === 'boolean') return 'INTEGER';
+            return scalarSqlType(typeof value);
+        }
+
+    function scalarSqlType(kind, node) {
+            if (kind === 'number') return node?.integer === true ? 'INTEGER' : 'REAL';
+            if (kind === 'boolean') return 'INTEGER';
             return 'TEXT';
         }
     
@@ -2740,8 +2745,9 @@ function createSchemaLayout(dependencies) {
                 return { zh: name, path, value: '',
                     desc: node && node.desc || (kind === 'number' ? '条目数值' : kind === 'boolean' ? '条目布尔值（1=true，0=false）'
                         : kind === 'mixed' ? '条目值（JSON 标量，保留字符串/数字/布尔/null 类型）' : '条目描述'),
-                    type: kind === 'number' || kind === 'boolean' ? 'INTEGER' : 'TEXT',
-                    logicalType: kind === 'boolean' ? 'boolean' : kind === 'mixed' ? 'jsonScalar' : '',
+                    type: scalarSqlType(kind, node),
+                    integer: node?.integer === true,
+                    logicalType: kind === 'mixed' ? 'jsonScalar' : kind,
                     range: node && Number.isFinite(node.min) && Number.isFinite(node.max) ? [node.min, node.max] : null,
                     ident: toIdent(name, used, 'column') };
             }
@@ -3477,21 +3483,21 @@ function createSchemaLayout(dependencies) {
                             const arr = Array.isArray(ct.value) ? ct.value : [];
                             for (const item of arr) { arrayRows.push({ parentKey: '', item }); values.push(item); }
                         }
-                        const objectItems = values.some(v => v !== null && typeof v === 'object');
-                        const arrayItems = objectItems && values.every(v => Array.isArray(v));
+                        const elementNode = nullableNodeAt(ct.path)?.element;
+                        const elementKind = elementNode && ['object', 'array'].includes(elementNode.kind)
+                            ? 'mixed' : recordScalarKind(elementNode, values) || 'mixed';
                         const au = new Set(['row_id']);
                         const acols = [];
                         const relationEntity = ct.parentRows ? String(g.name || '上级记录') : '';
                         const relationKeyCol = ct.parentRows ? `${relationEntity}_${g.keyCol || '键名'}` : '';
                         if (ct.parentRows) acols.push({ zh: relationKeyCol, path: [g.name], value: '', desc: `关联「${g.tableName}.${g.keyCol}」`, type: 'TEXT', ident: toIdent(relationKeyCol, au, 'column') });
                         acols.push({
-                            zh: '内容', path: [...ct.path], value: '', desc: objectItems ? '数组元素（结构未固定，JSON 存储）' : '数组元素',
-                            type: objectItems ? 'TEXT' : (values.some(v => typeof v === 'number') ? 'INTEGER' : 'TEXT'),
-                            ident: toIdent('内容', au, 'column'), isObject: objectItems, jsonKind: arrayItems ? 'array' : (objectItems ? 'object' : undefined),
+                            ...recordScalarColumn('内容', [...ct.path], elementNode, elementKind, au),
+                            desc: elementKind === 'mixed' ? '数组元素（JSON 存储，保留每项类型）' : '数组元素',
                         });
                         const arows = arrayRows.map((r, i) => {
                             let v = r.item;
-                            if (objectItems) { try { v = JSON.stringify(v); } catch (e) { v = arrayItems ? '[]' : '{}'; } }
+                            if (elementKind === 'mixed') v = JSON.stringify(v);
                             return ct.parentRows ? [i + 1, r.parentKey, v] : [i + 1, v];
                         });
                         ct.tableName = tableName;
@@ -3844,6 +3850,7 @@ function createSchemaLayout(dependencies) {
                     const mergedSchema = c._mergedFixedSchema;
                     delete c._mergedFixedSchema;
                     if (mergedSchema && !c.isObject) {
+                        c.integer = mergedSchema.integer === true;
                         if (Number.isFinite(mergedSchema.min) && Number.isFinite(mergedSchema.max)) c.range = [mergedSchema.min, mergedSchema.max];
                         if (Array.isArray(mergedSchema.enum) && mergedSchema.enum.length) c.enum = mergedSchema.enum.slice();
                         if (mergedSchema.desc && !c.desc) c.desc = mergedSchema.desc;
@@ -3892,6 +3899,22 @@ function createSchemaLayout(dependencies) {
                         }
                     }
                 });
+            }
+            // One physical scalar contract after all declarations and rule hints have merged.
+            // JavaScript/MVU number includes fractions; only an explicit integer contract uses INTEGER.
+            for (const g of attached) for (const c of g.columns) {
+                if (c.isObject || /^json/.test(c.logicalType || '')) { c.type = 'TEXT'; continue; }
+                if (c.zh === g.keyCol
+                    || c.zh === g.parentKeyCol || (g.ancestorKeyCols || []).some(a => a.col === c.zh)) continue;
+                let node = nullableNodeAt(g.kind === 'json' ? [g.name] : c.path);
+                if (['array', 'pathArray', 'nestedArray'].includes(g.kind) && node?.kind === 'array') node = node.element;
+                const kind = node && ['text', 'number', 'boolean'].includes(node.kind) ? node.kind
+                    : c.logicalType === 'boolean' || typeof c.value === 'boolean' ? 'boolean'
+                    : ['INTEGER', 'REAL'].includes(c.type) ? 'number' : 'text';
+                c.type = scalarSqlType(kind, node || c);
+                if (!c.isPair) c.logicalType = kind;
+                if (node && ['text', 'boolean'].includes(node.kind)) c.range = null;
+                if (kind === 'number' && node && Number.isFinite(node.min) && Number.isFinite(node.max)) c.range = [node.min, node.max];
             }
             // VWD 动态说明（实验能力，默认关闭）：单例表中已识别为 pair / jsonPairOptional
             // 的字段，其第二项（说明）可被卡内脚本改写。说明覆盖值单独存一列隐藏 JSON 元数据，

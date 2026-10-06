@@ -16,7 +16,7 @@ test('模板内部列：9.2.5 默认隐藏 $ 列与 _扩展数据，_ 业务列�
         assert.deepStrictEqual(obj.content[0], ['row_id', 'visible', '_state', '$secret', '_扩展数据']);
         assert.deepStrictEqual(obj.sourceData.hiddenPhysicalColumns, ['secret', '_kuozhanshuju']);
         assert.doesNotMatch(obj.sourceData.note, /visible visible/);
-        assert.match(obj.sourceData.ddl, /_state\s+INTEGER/);
+        assert.match(obj.sourceData.ddl, /_state\s+REAL/);
         assert.match(obj.sourceData.ddl, /_kuozhanshuju\s+TEXT/);
         assert.match(obj.sourceData.note, /下划线开头字段.*只读/);
         assert.doesNotMatch(obj.sourceData.note, /_xxx/);
@@ -84,8 +84,8 @@ test('新模板下划线列：中文拼音、普通列和大小写不敏感消�
         assert.strictEqual(byName._ZHUANGTAI, '_zhuangtai_2');
         assert.strictEqual(byName._扩展数据, '_kuozhanshuju');
         assert.deepStrictEqual(obj.content[0], ['row_id', 'visible', '_状态', '_ZHUANGTAI', '_扩展数据']);
-        assert.match(obj.sourceData.ddl, /_zhuangtai\s+INTEGER/);
-        assert.match(obj.sourceData.ddl, /_zhuangtai_2\s+INTEGER/);
+        assert.match(obj.sourceData.ddl, /_zhuangtai\s+REAL/);
+        assert.match(obj.sourceData.ddl, /_zhuangtai_2\s+REAL/);
         assert.deepStrictEqual(obj.sourceData.hiddenPhysicalColumns, ['_kuozhanshuju']);
         assert.strictEqual(obj.content[1][2], 3);
         assert.strictEqual(obj.content[1][3], 4);

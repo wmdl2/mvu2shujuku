@@ -175,7 +175,8 @@ test('VWD数字布尔：新动态布局还原 pair，物理类型和默认静态
     const raw = core.convert({ name: '静态', character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify(stat) }] } });
     const oldLayout = JSON.parse((raw.card.data || raw.card).extensions.mvu2shujuku.layout);
     assert.deepStrictEqual(core.statDataFromTables(oldLayout, raw.template).stat_data, { A: { count: 3, enabled: false } });
-    for (const name of ['count', 'enabled']) assert.match(sheet.sourceData.ddl, new RegExp(name + ' INTEGER'));
+    assert.match(sheet.sourceData.ddl, /count REAL/);
+    assert.match(sheet.sourceData.ddl, /enabled INTEGER/);
 });
 test('VWD数字布尔：值与说明同批、只改说明和清空说明，SQLite 字符串也还原类型', () => withRenderer(async () => {
     let before = { A: { count: [3, '数量说明'], enabled: [false, '开关说明'] } };

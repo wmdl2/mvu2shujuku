@@ -6,6 +6,8 @@
 
 | 当前问题 | 入口 |
 | --- | --- |
+| 静态／动态登记入口、回退引擎与大资源扫描 | [入口验证](validation/2026-10-06-script-entrypoints.md) |
+| number／integer／布尔列映射、数组类型保留及 transform 范围 | [类型验证](validation/2026-10-05-type-mapping.md) |
 | 真实 JavaScript/Zod Schema 构造、隔离执行与通用语法修复 | [执行验证](validation/2026-10-05-schema-execution.md) |
 | 社区语料问题根因、可玩性边界和改造前静态解析缺口 | [根因分析](validation/2026-10-05-conversion-root-causes.md) |
 | 远程 Schema、版本固定、多开场及 0.5.0 验收 | [远程与分支验证](validation/2026-10-05-remote-schema-branches.md) |

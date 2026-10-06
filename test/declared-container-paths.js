@@ -45,7 +45,7 @@ test('声明路径：深层空记录从完整声明取键名、标量类型、�
     assert.strictEqual(texts.scalarValueCol, '描述');
     assert.strictEqual(texts.columns.find(c => c.zh === '描述').desc, '正文');
     assert.strictEqual(stock.keyCol, '货号');
-    assert.strictEqual(stock.columns.find(c => c.zh === '数量').type, 'INTEGER');
+    assert.strictEqual(stock.columns.find(c => c.zh === '数量').type, 'REAL');
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, stat);
     const next = { 数据: { 容器: { 积分: { A: 4 }, 文本: { B: '内容' }, 库存: { C: { 数量: 2, 描述: '物品' } } } } };
     assert.strictEqual((await core.writeStatDiffToDbResult(applyingApi(r.template), r.layout, stat, next)).ok, true);

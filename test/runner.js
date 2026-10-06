@@ -55,6 +55,7 @@ async function runTests(args = {}) {
         console.log('  --verbose/-v    显示通过用例及 VM/数据桥完整日志');
         console.log('  环境变量 TEST_FILTER 等价于 --grep');
         console.log('  环境变量 TEST_VERBOSE=1 等价于 --verbose');
+        console.log('  环境变量 TEST_PROGRESS=1 仅显示当前用例，仍抑制业务日志');
         process.exit(0);
     }
     if (args.list) {
@@ -66,6 +67,7 @@ async function runTests(args = {}) {
         ? `\n运行 ${filtered.length}/${pendingTests.length} 个测试（grep=${grep}）\n`
         : `\n运行全部 ${pendingTests.length} 个测试\n`);
     for (const t of filtered) {
+        if (process.env.TEST_PROGRESS === '1') console.log('RUN', t.name);
         const captured = [];
         const originals = {};
         if (!args.verbose) {
