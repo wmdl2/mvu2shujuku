@@ -15,6 +15,18 @@ const baseTemplate = () => ({
 const ref = (source, uid, name, fingerprint = '') => ({ source: { value: source }, uid, name, fingerprint });
 const tools = readTemplateSource => factory({ core, resultView: createResultView(), readTemplateSource, listSheets: sheets });
 
+test('配置预设：用户指定频率优先于新生成只读表的默认零频率', async () => {
+    const result = core.convert({ name: '只读配置', character_book: { entries: [
+        { comment: '[InitVar]', content: '{"_版本":1}', enabled: false },
+    ] } });
+    const row = sheets(result).find(row => row.sheet.name === '_版本表');
+    assert.strictEqual(row.sheet.updateConfig.updateFrequency, 0);
+    const plan = await tools(async () => null).planProfile({ template: result.template,
+        profile: { tableConfigs: { _版本表: { updateFrequency: 7 } }, externalTables: [] }, name: '用户配置' });
+    assert.strictEqual(plan.template[row.uid].updateConfig.updateFrequency, 7);
+    assert.strictEqual(row.sheet.updateConfig.updateFrequency, 0, '应用配置不修改默认模板');
+});
+
 test('转换配置：保存沿用版本 1 字段、真实视图设置与来源副本', () => {
     const data = baseTemplate();
     const refs = [ref('global', 'sheet_ext', '外部表')];

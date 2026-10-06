@@ -54,6 +54,19 @@ test('角色卡输入解析：无 Buffer 环境支持 UTF8 JSON/PNG 往返', () 
     assert.deepStrictEqual(parser.parseCardPng(png).card, card);
     assert.deepStrictEqual(parser.parseCard(png), card);
 });
+test('角色卡输入解析：大块 Unicode 在浏览器与 Node 编码一致并保留头像', () => {
+    const browser = browserParser(), node = createInputParser();
+    const card = { name: '分块文本', description: '中文😀\u0080\u009f'.repeat(6000) };
+    const base = node.miniPngBuffer();
+    const png = browser.writeCardPng(new Uint8Array(base), card);
+    assert.deepStrictEqual(browser.parseCardPng(png).card, card);
+    assert.deepStrictEqual(node.parseCardPng(png).card, card);
+    assert.strictEqual(browser.btoaSafe(card.description), node.btoaSafe(card.description));
+    assert.strictEqual(browser.atobSafe(node.btoaSafe(card.description)), card.description);
+    const originalImage = node.parseCardPng(node.writeCardPng(base, {})).chunks.find(c => c.type === 'IDAT').data;
+    const image = browser.parseCardPng(png).chunks.find(c => c.type === 'IDAT').data;
+    assert.deepStrictEqual(Buffer.from(image), Buffer.from(originalImage));
+});
 
 test('角色卡输入解析：ccv3 优先于 chara', () => {
     const parser = createInputParser();
@@ -61,6 +74,21 @@ test('角色卡输入解析：ccv3 优先于 chara', () => {
     const newCard = { spec: 'chara_card_v3', data: { name: '新卡' } };
     const png = parser.writeCardPng(parser.miniPngBuffer(), oldCard);
     assert.deepStrictEqual(parser.parseCardPng(withCcv3(png, newCard)).card, newCard);
+});
+test('角色卡输入解析：保存头像只移除原卡载荷，保留像素', () => {
+    const node = createInputParser(), browser = browserParser();
+    const original = node.writeCardPng(node.miniPngBuffer(), { name: '原卡', description: '正文'.repeat(20000) });
+    const twoCards = withCcv3(original, { name: 'v3卡' });
+    const extra = textChunk('author_note', '保留的其他 PNG 信息');
+    const both = Buffer.concat([twoCards.slice(0, -12), extra, twoCards.slice(-12)]);
+    const avatar = browser.extractPngAvatar(new Uint8Array(both));
+    const base = node.miniPngBuffer();
+    const expected = Buffer.concat([base.slice(0, -12), extra, base.slice(-12)]);
+    assert.deepStrictEqual(Buffer.from(avatar), expected);
+    assert.deepStrictEqual(Buffer.from(node.extractPngAvatar(both)), Buffer.from(avatar));
+    assert.ok(avatar.length < both.length / 100);
+    const reimported = browser.writeCardPng(avatar, { name: '新卡' });
+    assert.deepStrictEqual(browser.parseCardPng(reimported).card, { name: '新卡' });
 });
 
 test('角色卡输入解析：工厂实例彼此隔离', () => {

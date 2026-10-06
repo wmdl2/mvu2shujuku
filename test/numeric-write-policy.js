@@ -21,9 +21,9 @@ test('顶层数值：无规则与对象内数值默认可写，私有数值只�
     }
     assert.match(native['counter表'].sourceData.initNode, /根据正文、设定与 note 按需更新/);
     for (const name of ['_counter表', '$counter表']) {
-        assert.match(native[name].sourceData.updateNode, /脚本\/前端维护，AI 不应直接修改/);
+        assert.match(native[name].sourceData.updateNode, /原卡脚本\/前端维护，模型不得写入/);
         assert.doesNotMatch(native[name].sourceData.updateNode, /SQL示例/);
-        assert.match(native[name].sourceData.initNode, /脚本\/前端维护，自动填表阶段不修改/);
+        assert.match(native[name].sourceData.initNode, /脚本\/前端维护，模型禁止再次初始化或修改/);
     }
     assert.strictEqual(native['counter表'].sourceData.note, sqlite['counter表'].sourceData.note.replace(/\nSQL 示例[^\n]*$/, ''));
     assert.strictEqual(native['counter表'].sourceData.updateNode, sqlite['counter表'].sourceData.updateNode.split('\nSQL示例:')[0]);

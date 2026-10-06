@@ -1278,6 +1278,7 @@ function installExtensionRuntime(window) {
     }
 
     function bindAutoInit(context) {
+        worldbookRequestFilter.bind(context);
         installGreetingSwipeWatcher();
         const es = context && (context.eventSource || context.event_source);
         const et = context && (context.event_types || context.eventTypes);
@@ -1401,6 +1402,7 @@ function installExtensionRuntime(window) {
     const runtimeRegistry = (() => {
         let existing = null;
         try { existing = hostWindow.__mvu2shujukuRuntime; } catch (e) {}
+        try { if (existing && existing.worldbookRequestFilter) existing.worldbookRequestFilter.stop(); } catch (e) {}
         const pending = existing && Array.isArray(existing.pending) ? existing.pending.slice() : [];
         const reg = {
             owner: 'extension',
@@ -1437,6 +1439,10 @@ function installExtensionRuntime(window) {
     })();
 
     function getContextSafe(...args) { return stAdapter.getContextSafe(...args); }
+    const worldbookRequestFilter = window.MVU2SHUJUKU_CORE.getWorldbookRequestFilterFactory()({
+        readCharacter: currentCharacter, readExtensions: charExtensions, readWorldbook: charWorldBook,
+    });
+    runtimeRegistry.worldbookRequestFilter = worldbookRequestFilter;
 
     function resolveRuntimeLayout(rawLayout) {
         const parsed = typeof rawLayout === 'string'
@@ -3103,6 +3109,19 @@ function installExtensionRuntime(window) {
         return wrap;
     }
 
+    // 结构骨架只供只读模板兜底，不得作为脚本“读-改-写”的真实快照。
+    // 原生回放期间返回 JSON 容器默认 {}，会被作者的字符串 preprocess
+    // 转成 [object Object] 再写回。标记只存在于本次读取的外层对象，不进变量或存档。
+    function unavailableMvuRead(value) {
+        return Object.defineProperty(Object.assign({}, value), '__mvu2shujukuReadUnavailable', { value: true });
+    }
+    function assertMvuReadReady(value) {
+        if (!value || value.__mvu2shujukuReadUnavailable !== true) return;
+        const error = new Error('数据库变量尚未完成加载，请稍后重试');
+        error.code = 'MVU_DATA_NOT_READY';
+        throw error;
+    }
+
     function installWindowGetAllVariables() {
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.statDataFromTables !== 'function') return;
@@ -3119,7 +3138,7 @@ function installExtensionRuntime(window) {
                 // 仍拿不到才返回空——否则前端空读→schema 默认值→写回会重置数据库。
                 if (!layoutBelongsToCurrentCard(activeLayoutCardKey)) {
                     if (!ensureActiveLayoutLazy()) {
-                        return { stat_data: {}, display_data: {} };
+                        return unavailableMvuRead({ stat_data: {}, display_data: {} });
                     }
                 }
                 // SP 已提交回调后的前端刷新窗口：回调 after 比尚未物化完成的
@@ -3130,9 +3149,9 @@ function installExtensionRuntime(window) {
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     try {
                         const persisted0 = readPersistedTableData();
-                        if (persisted0) return statDataFromTablesCached(activeLayout || [], persisted0);
+                        if (persisted0 && tableSnapshotCoversLayout(persisted0, activeLayout)) return statDataFromTablesCached(activeLayout || [], persisted0);
                     } catch (e) {}
-                    return core.statDataFromTables(activeLayout || [], {});
+                    return unavailableMvuRead(core.statDataFromTables(activeLayout || [], {}));
                 }
                 // 运行时优先：插件就绪后运行时即插件完整回放的权威状态（含全部表与溢出字段）。
                 // 持久化重建只是空/跨卡窗口的兜底。“就绪”必须满足当前 layout 的全部表，
@@ -3152,12 +3171,12 @@ function installExtensionRuntime(window) {
                             return statDataFromTablesCached(activeLayout, persisted2);
                         }
                         dbg(' [切卡隔离] 运行时/持久化帧仍属于旧卡，读取返回空。');
-                        return { stat_data: {}, display_data: {} };
+                        return unavailableMvuRead({ stat_data: {}, display_data: {} });
                     }
                 } catch (e) {}
                 if (!tableSnapshotCoversLayout(cur, activeLayout)) {
                     const persisted = readPersistedTableData();
-                    if (persisted) return statDataFromTablesCached(activeLayout, persisted);
+                    if (persisted && tableSnapshotCoversLayout(persisted, activeLayout)) return statDataFromTablesCached(activeLayout, persisted);
                     // 无存档且尚未物化数据行时，读取卡内初始模板。JSON 可选列的
                     // 空单元格表示字段不存在，不能靠 codec 恢复默认值；已开始的
                     // 聊天仍按当前表读取，避免复活游玩中删除的字段。
@@ -3168,11 +3187,11 @@ function installExtensionRuntime(window) {
                         const initial = cachedTemplateForCurrentCard();
                         if (initial) return statDataFromTablesCached(activeLayout, initial);
                     }
-                    return statDataFromTablesCached(activeLayout, cur);
+                    return unavailableMvuRead(statDataFromTablesCached(activeLayout, persisted || cur));
                 }
                 return statDataFromTablesCached(activeLayout, cur);
             } catch (e) {
-                return { stat_data: {}, display_data: {} };
+                return unavailableMvuRead({ stat_data: {}, display_data: {} });
             }
         };
         window.getAllVariables.__mvu2shujuku = true;
@@ -4046,6 +4065,7 @@ function installExtensionRuntime(window) {
                     return { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
                 }
                 const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                assertMvuReadReady(all);
                 return { stat_data: all.stat_data || {}, display_data: all.display_data || {}, delta_data: {}, initialized_lorebooks: {} };
             };
             windowMvuFake.getMvuVariable = function (mvu_data, path, opts) {
@@ -4194,6 +4214,7 @@ function installExtensionRuntime(window) {
             windowMvuFake.replaceCurrentMvuData = async function (mvu_data) { return sessionMvu.replaceMvuData(mvu_data, { type: 'message', message_id: 'latest' }); };
             windowMvuFake.isDuringExtraAnalysis = function () { return false; };
         }
+        const sessionReadMvu = windowMvuFake;
         const targets = getRuntimeWindows();
         runtimeGlobals.retainWindows(targets);
         for (const w of targets) {
@@ -4245,14 +4266,22 @@ function installExtensionRuntime(window) {
                     }
                 }
                 runtimeGlobals.publishMvu(w, windowMvuFake);
-                // 精确对齐 TavernHelper 的共享全局协议：转换卡的 Mvu 已在此时可用，
-                // 因此只让 waitGlobalInitialized('Mvu') 立即完成。其他全局名称仍调原函数，
-                // 切到非转换卡时也会恢复，避免广泛更改宿主初始化语义。
+                // API 外观存在不等于数据已加载。等待当前聊天的完整快照，
+                // 再让作者脚本开始读改写；其他全局名称仍委派宿主。
                 if (originalRec && originalRec.hasWait) {
                     const waitFn = function (name) {
                         if (String(name) === 'Mvu') {
-                            runtimeGlobals.publishMvu(w, windowMvuFake);
-                            return Promise.resolve(windowMvuFake);
+                            return (async () => {
+                                while (isRuntimeSessionCurrent(shimSession)) {
+                                    const all = window.getAllVariables && window.getAllVariables();
+                                    if (all && all.__mvu2shujukuReadUnavailable !== true) {
+                                        runtimeGlobals.publishMvu(w, sessionReadMvu);
+                                        return sessionReadMvu;
+                                    }
+                                    await new Promise(resolve => hostWindow.setTimeout(resolve, 100));
+                                }
+                                throw new Error('MVU 所属聊天已切换，已取消等待');
+                            })();
                         }
                         return originalRec.wait.apply(w, arguments);
                     };
@@ -4309,9 +4338,13 @@ function installExtensionRuntime(window) {
                             return Object.assign({}, auxiliary, { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} });
                         }
                         const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                        assertMvuReadReady(all);
                         const dbView = all && typeof all === 'object' ? all : { stat_data: all || {} };
                         return Object.assign({}, auxiliary, dbView);
-                    } catch (e) { return { stat_data: {} }; }
+                    } catch (e) {
+                        if (e && e.code === 'MVU_DATA_NOT_READY') throw e;
+                        return { stat_data: {} };
+                    }
                 };
                 const gvFn = function (opts) { return makeGetVariables(opts); };
                 gvFn.__mvu2shujuku = true;
@@ -4347,6 +4380,7 @@ function installExtensionRuntime(window) {
                         }
                         assertRuntimeSession(shimSession);
                         const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+                        if (!pendingStatWrite) assertMvuReadReady(all);
                         const base = (pendingStatWrite && typeof pendingStatWrite === 'object')
                             ? pendingStatWrite
                             : (all.stat_data || {});
@@ -4480,6 +4514,8 @@ function installExtensionRuntime(window) {
         // waitGlobalInitialized('Mvu') 不只检查 window.Mvu：酒馆助手的正式共享协议
         // 需要 initializeGlobal，MVU 原版同时发送 global_Mvu_initialized。
         // 两步都补齐；函数引用去重，避免多个 iframe 包装指向同一总线时重复注册。
+        const readyRead = window.getAllVariables && window.getAllVariables();
+        if (!readyRead || readyRead.__mvu2shujukuReadUnavailable === true) return;
         for (const w of targets) {
             try {
                 const init = w && w.initializeGlobal;
@@ -4679,6 +4715,15 @@ function installExtensionRuntime(window) {
         readApi: getAcuApi,
     });
     async function doConvert(inputBytes, sourceIsPng, sourceCharacter) {
+        const operation = beginConversionOperation('convert');
+        if (!operation) return null;
+        try {
+            await operation.paint();
+            return await performConversion(inputBytes, sourceIsPng, sourceCharacter);
+        } finally { operation.close(); }
+    }
+
+    async function performConversion(inputBytes, sourceIsPng, sourceCharacter) {
         const settings = getSettings();
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.convert !== 'function') {
@@ -4716,7 +4761,7 @@ function installExtensionRuntime(window) {
         }
         lastInput = inputBytes;
         if (result.meta.isPngInput) {
-            result.meta.avatarBytes = inputBytes;
+            result.meta.avatarBytes = core.extractPngAvatar(inputBytes);
             result.meta.avatarMime = 'image/png';
         }
         result.meta.sourceCharacter = sourceCharacter ? { name: characterDisplayName(sourceCharacter), avatar: sourceCharacter.avatar || '' } : null;
@@ -4911,7 +4956,7 @@ function installExtensionRuntime(window) {
             const result = core.refreshConversion(lastResult, opts);
             result.meta.sourceCharacter = lastResult.meta.sourceCharacter || null;
             if (result.meta.isPngInput) {
-                result.meta.avatarBytes = lastInput;
+                result.meta.avatarBytes = lastResult.meta.avatarBytes || core.extractPngAvatar(lastInput);
                 result.meta.avatarMime = 'image/png';
             }
             lastResult = result;
@@ -4952,26 +4997,76 @@ function installExtensionRuntime(window) {
             Object.prototype.hasOwnProperty.call(b, key) && sameSavedScriptData(a[key], b[key]));
     }
 
+    let conversionOperation = null;
+
+    function beginConversionOperation(kind) {
+        if (conversionOperation) return null;
+        const title = kind === 'save' ? '正在保存角色卡…' : '正在转换角色卡…';
+        const panel = hostDocument.getElementById(PANEL_ID);
+        const controls = panel ? [...panel.querySelectorAll('button, input, select, textarea')].map(node => [node, node.disabled]) : [];
+        const overlay = hostDocument.createElement('div');
+        overlay.className = 'mvu2shujuku-operation-overlay';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.setAttribute('aria-label', title);
+        overlay.tabIndex = -1;
+        overlay.innerHTML = '<div class="mvu2shujuku-operation-box"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i><strong></strong><p aria-live="polite"></p></div>';
+        overlay.querySelector('strong').textContent = title;
+        const detail = overlay.querySelector('p');
+        const started = Date.now(), timings = [];
+        const operation = {
+            update(text) { detail.textContent = text; timings.push({ stage: text, ms: Date.now() - started }); },
+            paint() { return new Promise(resolve => hostWindow.setTimeout(resolve, 30)); },
+            close() {
+                if (conversionOperation !== operation) return;
+                overlay.remove();
+                for (const [node, disabled] of controls) node.disabled = disabled;
+                conversionOperation = null;
+                dbg('[界面操作耗时] ' + kind + ' ' + (Date.now() - started) + 'ms ' + JSON.stringify(timings));
+            },
+        };
+        conversionOperation = operation;
+        for (const [node] of controls) node.disabled = true;
+        operation.update(kind === 'save' ? '准备保存，请稍候…' : '分析角色卡并生成表格，请稍候…');
+        hostDocument.body.appendChild(overlay);
+        overlay.focus();
+        return operation;
+    }
+
     async function saveCardToSillyTavern() {
-        if (!lastResult) {
+        if (conversionOperation) return false;
+        if (!lastResult) { toast('请先转换', 'error'); return false; }
+        const result = lastResult;
+        const operation = beginConversionOperation('save');
+        try {
+            await operation.paint();
+            return await saveConvertedCard(operation, result);
+        } finally { operation.close(); }
+    }
+
+    async function saveConvertedCard(operation, result) {
+        if (!result) {
             toast('请先转换', 'error');
             return false;
         }
         // 参数有实时改动时，先按当前模板重新生成角色卡（内嵌 base64 模板），再保存
         if (updateParamsDirty) {
             try {
+                if (lastResult !== result) throw new Error('转换结果已更换，请重新保存');
+                operation.update('更新角色卡与表格模板…');
                 refreshConvertedResult();
+                result = lastResult;
             } catch (e) {
                 toast('保存前刷新参数失败：' + (e && e.message ? e.message : e), 'error');
                 return false;
             }
         }
-        const result = lastResult;
         const panel = hostDocument.getElementById(PANEL_ID);
         const context = getContextSafe();
         const log = [];
         const displayName = String((result.card && (result.card.data || result.card).name) || '').trim() || '角色';
         try {
+            operation.update('准备角色卡与头像…');
             // 统一成 chara_card_v3 包装（服务端按 json_data 整体导入，保留世界书等全部内容）
             let cardData = result.card;
             if (cardData && !cardData.data && cardData.name) {
@@ -4983,11 +5078,16 @@ function installExtensionRuntime(window) {
             } else {
                 avatarBlob = result.meta && result.meta.sourceCharacter
                     ? await fetchAvatarBlob(result.meta.sourceCharacter) : null;
+                if (avatarBlob && avatarBlob.type === 'image/png') {
+                    const coreApi = window.MVU2SHUJUKU_CORE;
+                    avatarBlob = new Blob([coreApi.extractPngAvatar(await avatarBlob.arrayBuffer())], { type: 'image/png' });
+                }
             }
 
             // 优先用新版 API；老版本 createCharacterData 是表单状态对象时走直接接口
             let saved = false;
             let savedAvatar = '';
+            operation.update('写入角色卡…');
             if (typeof context.createCharacterData === 'function') {
                 const created = await context.createCharacterData(undefined, avatarBlob || new Blob(), cardData, false);
                 savedAvatar = typeof created === 'string'
@@ -5052,6 +5152,7 @@ function installExtensionRuntime(window) {
                     let refreshedCharacters;
                     let syncReason = '';
                     try {
+                        operation.update('刷新角色列表…');
                         if (typeof context.getCharacters === 'function') refreshedCharacters = await context.getCharacters();
                         else syncReason = '宿主未提供角色列表刷新接口';
                     } catch (e) {
@@ -5077,6 +5178,7 @@ function installExtensionRuntime(window) {
                         // 字段接口可能吞掉 HTTP 错误，调用完成不能代替读回复核。
                         const tavernHelperCopy = JSON.parse(JSON.stringify(expectedExt.tavern_helper));
                         try {
+                            operation.update('同步酒馆助手脚本…');
                             await writeExtensionField(savedIndex, 'tavern_helper', tavernHelperCopy);
                             synced = true;
                         } catch (e) {
@@ -5091,6 +5193,7 @@ function installExtensionRuntime(window) {
                     // 也可以只读复核该卡。绝不靠同名卡进行补写。
                     const avatar = savedAvatar || (savedIndex >= 0 && charsNow[savedIndex] && charsNow[savedIndex].avatar);
                     const diagnostic = {};
+                    operation.update('读回并核对已保存的脚本…');
                     const persisted = avatar ? await fetchFullCharacter({ avatar }, true, diagnostic) : null;
                     const actualData = persisted && (persisted.data || persisted);
                     const actualExt = actualData && actualData.extensions;
@@ -5122,6 +5225,7 @@ function installExtensionRuntime(window) {
                 if (f.kind === 'card') download(f.name, f.mime, f.data);
             }
             if (lastResult === result) await autoSaveConversionProfile();
+            operation.close();
             showInfoPopup('保存失败', '角色卡保存失败，已回退到下载。\n\n' + msg + '\n\n如需排查请把此日志发给开发者。');
             return false;
         }
@@ -5132,6 +5236,7 @@ function installExtensionRuntime(window) {
         if (acu && result.template) {
             presetName = displayName + '模板';
             try {
+                operation.update('保存数据库模板预设…');
                 const presetResult = await acu.importTemplateFromData(result.template, { scope: 'global', presetName });
                 if (presetResult && presetResult.success === false) {
                     log.push('✗ 表格模板导入插件失败：' + (presetResult.message || '未知原因'));
@@ -5152,8 +5257,10 @@ function installExtensionRuntime(window) {
             : (presetName
                 ? '\n\n进入新聊天且表格为空时会自动建表，无需手动切换；模板已存为插件预设「' + presetName + '」备用，也可在插件模板面板手动切换。'
                 : ''));
-        showInfoPopup(hasError ? '保存完成（有失败项）' : '保存完成', body);
+        operation.update('保存转换配置…');
         if (lastResult === result) await autoSaveConversionProfile();
+        operation.close();
+        showInfoPopup(hasError ? '保存完成（有失败项）' : '保存完成', body);
         return !hasError;
     }
 
@@ -5203,7 +5310,7 @@ function installExtensionRuntime(window) {
         const result = core.refreshConversion(lastResult, opts);
         result.meta.sourceCharacter = lastResult.meta.sourceCharacter || null;
         if (result.meta.isPngInput) {
-            result.meta.avatarBytes = lastInput;
+            result.meta.avatarBytes = lastResult.meta.avatarBytes || core.extractPngAvatar(lastInput);
             result.meta.avatarMime = 'image/png';
         }
         lastResult = result;
@@ -6019,5 +6126,47 @@ function createCandidateBuilderFactory(deps) {
     };
 }
 
+// 酒馆的请求级 lore 列表与数据库直接读取的原世界书互相独立。
+// 工厂同时供真实运行时与无外部作用域的 VM 回归使用。
+function createWorldbookRequestFilterFactory(deps) {
+    'use strict';
+    const { readCharacter, readExtensions = ch => ch && ((ch.data || ch).extensions || ch.extensions),
+        readWorldbook = ch => ch && ((ch.data || ch).character_book || ch.character_book) } = deps;
+    let boundSource = null, boundEvent = '';
+    function filter(lores) {
+        const character = readCharacter();
+        const extensions = readExtensions(character) || {};
+        if (extensions.mvu2shujuku?.converter !== 'mvu2shujuku') return;
+        const book = readWorldbook(character);
+        const primary = typeof extensions.world === 'string' && extensions.world.trim() ? extensions.world : book && book.name;
+        const names = new Set(typeof primary === 'string' && primary ? [primary] : []);
+        if (!names.size || !lores || typeof lores !== 'object') return;
+        for (const key of ['globalLore', 'characterLore', 'chatLore', 'personaLore']) {
+            const entries = lores[key];
+            if (!Array.isArray(entries)) continue;
+            for (let i = entries.length - 1; i >= 0; i--) {
+                const entry = entries[i];
+                if (entry && names.has(entry.world) && /\[mvu_update\]/i.test(String(entry.comment || '')) &&
+                    !/\[mvu_plot\]/i.test(String(entry.comment || ''))) entries.splice(i, 1);
+            }
+        }
+    }
+    function stop() {
+        if (boundSource && typeof boundSource.removeListener === 'function') boundSource.removeListener(boundEvent, filter);
+        else if (boundSource && typeof boundSource.off === 'function') boundSource.off(boundEvent, filter);
+        boundSource = null; boundEvent = '';
+    }
+    function bind(context) {
+        const source = context && (context.eventSource || context.event_source);
+        const types = context && (context.event_types || context.eventTypes);
+        const event = types && types.WORLDINFO_ENTRIES_LOADED || 'worldinfo_entries_loaded';
+        if (!source || typeof source.on !== 'function' || source === boundSource && event === boundEvent) return;
+        stop(); source.on(event, filter); boundSource = source; boundEvent = event;
+    }
+    return { filter, bind, stop };
+}
+
 module.exports = installExtensionRuntime;
 module.exports.createCandidateBuilder = createCandidateBuilderFactory;
+
+module.exports.createWorldbookRequestFilter = createWorldbookRequestFilterFactory;

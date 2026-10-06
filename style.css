@@ -1,3 +1,7 @@
+.mvu2shujuku-operation-overlay { position: fixed; inset: 0; z-index: 2147483647; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }
+.mvu2shujuku-operation-box { max-width: min(420px, 90vw); padding: 24px; border-radius: 12px; background: var(--SmartThemeBlurTintColor, #222); color: var(--SmartThemeBodyColor, #eee); border: 1px solid var(--SmartThemeBorderColor, #555); text-align: center; }
+.mvu2shujuku-operation-box strong { display: block; margin: 12px 0; }
+.mvu2shujuku-operation-box p { margin: 0; }
 #mvu2shujuku-settings .mvu2shujuku-card {
   border: 1px solid var(--SmartThemeBorderColor, #555);
   border-radius: 8px;

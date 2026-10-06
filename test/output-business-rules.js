@@ -8,18 +8,24 @@ function run(content, title = '[本体][变量][mvu_update]变量输出规则') 
     ] } });
 }
 const output = rules => 'variables_update_format:\n  rule:\n' + rules.map(r=>'    - '+JSON.stringify(r)).join('\n') + '\n  format: |-\n' + format.split('\n').map(x=>'    '+x).join('\n');
-test('输出约束：完整输出文档整条移除，不生成正文数据约束替代条目', () => {
+test('输出约束：格式块移除，未知补充规则保留并报告', () => {
     const rules = ['数量不能少于零，清空时保留等级记录', 'When a typed variable requires an empty state, assign a concrete empty value. Do not use null.', 'When updating variables, preserve EVERY piece of information verbatim', '不得把 JSONPatch 阵营的物品移出仓库'];
     const r = run(output(rules));
-    assert.ok(!r.card.character_book.entries.some(e=>/变量输出规则|保留数据约束/.test(e.comment)));
-    assert.ok(!r.card.character_book.entries.some(e=>/<JSONPatch>|数据更新约束|数量不能少于零/.test(e.content)));
-    assert.match(r.reportText, /输出格式由数据库宿主填表协议接管，不再注入正文/);
+    const entry = r.card.character_book.entries.find(e => e.comment.includes('变量输出规则'));
+    assert(entry);
+    for (const rule of rules) assert(entry.content.includes(rule));
+    assert.doesNotMatch(entry.content, /<UpdateVariable>|<JSONPatch>/);
+    assert.match(entry.content, /旧输出语法由数据库填表协议接管/);
+    assert.match(r.reportText, /剩余内容未迁入填表侧/);
 });
-test('输出约束：协议定义短长措辞都按完整文档归属移除，不依赖句子白名单', () => {
+test('输出约束：未知字段不因短长措辞或协议名而整条删除', () => {
     for (const delta of ['update the value of existing number paths by a delta value', 'update the value of existing number paths by a delta value (the delta value MUST be a number without quotes)']) {
         const content = '变量输出格式:\n  rule:\n    - JSON Patch:\n        - delta: '+delta+'\n    - 字段只读要求\n  format: |-\n'+format.split('\n').map(x=>'    '+x).join('\n');
         const r = run(content, '[mvu_update]变量输出格式');
-        assert.ok(!r.card.character_book.entries.some(e=>e.comment.includes('变量输出格式')));
+        const entry = r.card.character_book.entries.find(e=>e.comment.includes('变量输出格式'));
+        assert(entry.content.includes(delta));
+        assert(entry.content.includes('字段只读要求'));
+        assert.doesNotMatch(entry.content, /<UpdateVariable>|<JSONPatch>/);
     }
 });
 test('输出约束：EJS、不可解析或混入格式块的业务内容保守保留', () => {

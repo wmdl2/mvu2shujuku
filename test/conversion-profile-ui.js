@@ -133,7 +133,49 @@ async function main() {
         assert.deepStrictEqual(decisions, []);
         assert.strictEqual(confirmations.length, 2);
         assert.deepStrictEqual(errors, []);
+        // 保存真实实现：创建接口暂停期间验证弹窗、禁用与再次派发事件的门禁。
+        await page.evaluate(() => {
+            const ctx = SillyTavern.getContext();
+            const state = window.__saveProgressTest = { creates: 0, popups: [], stored: null };
+            ctx.POPUP_TYPE = { TEXT: 1 };
+            ctx.callGenericPopup = html => { state.popups.push(html); };
+            ctx.createCharacterData = async (_form, _avatar, card) => {
+                state.creates++;
+                state.stored = structuredClone(card.data || card);
+                await new Promise(resolve => { state.release = resolve; });
+                return 'saved-progress.png';
+            };
+            ctx.getCharacters = async () => [{ ...state.stored, avatar: 'saved-progress.png' }];
+            ctx.writeExtensionField = async (_index, key, value) => { state.stored.extensions[key] = structuredClone(value); };
+            window.fetch = async url => {
+                if (url !== '/api/characters/get') throw new Error('意外请求：' + url);
+                return { ok: true, json: async () => ({ data: structuredClone(state.stored) }) };
+            };
+        });
+        const saveButton = page.locator('#mvu2shujuku-save-card');
+        await saveButton.click();
+        await page.waitForFunction(() => window.__saveProgressTest.creates === 1);
+        assert.strictEqual(await saveButton.isDisabled(), true);
+        assert.strictEqual(await page.locator('#mvu2shujuku-convert-file').isDisabled(), true);
+        await page.locator('.mvu2shujuku-operation-overlay').waitFor({ state: 'visible' });
+        assert.match(await page.locator('.mvu2shujuku-operation-overlay').innerText(), /正在保存角色卡.*写入角色卡/s);
+        await page.evaluate(() => document.querySelector('#mvu2shujuku-save-card').dispatchEvent(new Event('click')));
+        assert.strictEqual(await page.evaluate(() => window.__saveProgressTest.creates), 1);
+        await page.evaluate(() => window.__saveProgressTest.release());
+        await page.waitForFunction(() => window.__saveProgressTest.popups.some(s => s.includes('保存完成')));
+        assert.strictEqual(await page.locator('.mvu2shujuku-operation-overlay').count(), 0);
+        assert.strictEqual(await saveButton.isDisabled(), false);
+        assert.strictEqual(await page.locator('#mvu2shujuku-convert-file').isDisabled(), false);
+        await page.evaluate(() => {
+            SillyTavern.getContext().createCharacterData = async () => { throw new Error('公开 UI 保存失败'); };
+        });
+        await saveButton.click();
+        await page.waitForFunction(() => window.__saveProgressTest.popups.some(s => s.includes('公开 UI 保存失败')));
+        assert.strictEqual(await page.locator('.mvu2shujuku-operation-overlay').count(), 0);
+        assert.strictEqual(await saveButton.isDisabled(), false);
+        assert.deepStrictEqual(errors, []);
         const summary = { scenarios: ['配置自动应用', '异常匹配确认接受', '拒绝保留基础模板及原配置', '手动合表失败保留结果与引用', '手动合表成功保存来源引用'], confirmations: confirmations.length, hostWrites: 0, browserErrors: errors, indexFile: path.basename(indexFile) };
+        summary.saveProgress = { duplicateCreates: 0, successCleanup: true, failureCleanup: true };
         fs.writeFileSync(path.join(work, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
         console.log(JSON.stringify(summary));
     } finally { await browser.close(); }

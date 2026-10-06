@@ -20,9 +20,11 @@ function createInputParser({ clone } = {}) {
     }
     function latin1ToString(bytes) {
         if (typeof Buffer !== 'undefined' && Buffer.isBuffer(bytes)) return bytes.toString('latin1');
-        let out = '';
-        for (let i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
-        return out;
+        const parts = [];
+        // TextDecoder('latin1') 实际使用 Windows-1252；分块保留逐字节语义。
+        for (let i = 0; i < bytes.length; i += 8192)
+            parts.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+        return parts.join('');
     }
     function utf8ToString(bytes) {
         if (typeof Buffer !== 'undefined' && Buffer.isBuffer(bytes)) return bytes.toString('utf8');
@@ -55,15 +57,14 @@ function createInputParser({ clone } = {}) {
     function atobSafe(b64) {
         if (typeof Buffer !== 'undefined') return Buffer.from(b64, 'base64').toString('utf8');
         const bin = atob(b64);
-        const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
         return new TextDecoder('utf-8').decode(bytes);
     }
     function btoaSafe(str) {
         if (typeof Buffer !== 'undefined') return Buffer.from(str, 'utf8').toString('base64');
         const bytes = new TextEncoder().encode(str);
-        let bin = '';
-        bytes.forEach(b => { bin += String.fromCharCode(b); });
-        return btoa(bin);
+        return btoa(latin1ToString(bytes));
     }
     function toBase64(str) {
         return typeof Buffer !== 'undefined' ? Buffer.from(String(str), 'utf8').toString('base64') : btoaSafe(str);
@@ -115,6 +116,20 @@ function createInputParser({ clone } = {}) {
         new DataView(crc.buffer).setUint32(0, crc32(concatBytes(header.slice(4), data)));
         return concatBytes(header, data, crc);
     }
+    function extractPngAvatar(input) {
+        const bytes = input instanceof ArrayBuffer ? new Uint8Array(input) : input;
+        const chunks = readPngChunks(bytes), out = [bytes.slice(0, 8)];
+        for (const chunk of chunks) {
+            if (chunk.type === 'tEXt' || chunk.type === 'iTXt') {
+                const nul = chunk.data.indexOf(0);
+                const keyword = nul < 0 ? '' : latin1ToString(chunk.data.subarray(0, nul)).toLowerCase();
+                if (keyword === 'chara' || keyword === 'ccv3') continue;
+            }
+            out.push(bytes.slice(chunk.offset, chunk.offset + 12 + chunk.data.length));
+        }
+        return concatBytes(...out);
+    }
+
     function writeCardPng(originalBuffer, card) {
         const chunks = readPngChunks(originalBuffer);
         const charaText = btoaSafe(JSON.stringify(card));
@@ -159,7 +174,7 @@ function createInputParser({ clone } = {}) {
         if (json.startsWith('{')) return parseCard(JSON.parse(json));
         throw new Error('输入既不是 JSON 角色卡也不是 PNG 角色卡');
     }
-    return { miniPngBuffer, parseCardPng, writeCardPng, parseCard, toBase64, btoaSafe, atobSafe };
+    return { miniPngBuffer, parseCardPng, writeCardPng, extractPngAvatar, parseCard, toBase64, btoaSafe, atobSafe };
 }
 
 if (typeof module !== 'undefined' && module.exports) module.exports = createInputParser;

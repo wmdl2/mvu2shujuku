@@ -142,8 +142,138 @@ function createSchemaLayout(dependencies) {
             );
         }
 
+    function mvuRuleDocumentEnvelope(content) {
+        const normalize = text => {
+            const lines = String(text || '').replace(/^\uFEFF/, '').replace(/^(?:[ \t]*\r?\n)+|(?:\r?\n[ \t]*)+$/g, '').split('\n');
+            const visible = lines.filter(line => line.trim());
+            const indent = visible.length ? Math.min(...visible.map(line => line.match(/^[ \t]*/)[0].length)) : 0;
+            return lines.map(line => line.slice(indent)).join('\n').trimEnd();
+        };
+        let body = normalize(content);
+        const wrappers = [];
+        // 只剥离整份文档的无属性静态外壳。输出协议、HTML/脚本语义标签
+        // 不参与规则解包；相邻同名标签也不能被误当成一个外壳。
+        for (let depth = 0; depth < 8; depth++) {
+            const xml = /^<([\p{L}_][\p{L}\p{N}_.:-]*)[ \t]*>[ \t]*(?:\r?\n)?([\s\S]*?)\s*<\/\1[ \t]*>$/iu.exec(body);
+            if (xml && !/^(?:script|style|template|html|head|body|Format|UpdateVariable|JSONPatch|initvar|status_current_variables?)$/i.test(xml[1])) {
+                const tag = xml[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                if (!new RegExp('<\\/?' + tag + '(?:\\s|>)', 'iu').test(xml[2])) {
+                    wrappers.push({ open: '<' + xml[1] + '>', close: '</' + xml[1] + '>' });
+                    body = normalize(xml[2]);
+                    continue;
+                }
+            }
+            const fence = /^(`{3,}|~{3,})[ \t]*(yaml|yml|json|json5|text|plaintext)?[ \t]*\r?\n([\s\S]*?)\r?\n\1[ \t]*$/i.exec(body);
+            if (fence && !new RegExp('^' + fence[1] + '[ \\t]*$', 'm').test(fence[3])) {
+                wrappers.push({ open: fence[1] + (fence[2] || ''), close: fence[1] });
+                body = normalize(fence[3]);
+                continue;
+            }
+            break;
+        }
+        return { body, wrappers };
+    }
+
+    function unwrapMvuRuleDocument(content) {
+        return mvuRuleDocumentEnvelope(content).body;
+    }
+
+    function wrapMvuRuleDocument(content, remaining) {
+        let text = remaining;
+        for (const wrapper of mvuRuleDocumentEnvelope(content).wrappers.reverse())
+            text = wrapper.open + '\n' + text.trim() + '\n' + wrapper.close;
+        return text;
+    }
+
+    // 只在已确认的静态输出文档中使用；未知续句或业务条件不能凭标签命中删除。
+    function isMvuOutputProtocolRule(value) {
+        if (typeof value === 'string') {
+            const text = value.replace(/\s+/g, '').replace(/[。.]$/, '');
+            return /^(?:每次回复|每轮(?:回复)?)(?:仅|只)允许一个(?:独立的)?<logic_check>(?:与|和|及)一个(?:独立的)?<UpdateVariable>[；;]二者不得嵌套[，,]<UpdateVariable>必须位于回复末尾$/i.test(text)
+                || /^(?:禁|禁止|不要)输出完整变量(?:JSON\/YAML|JSON|YAML)[；;]?仅输出diff操作于<JSONPatch>$/i.test(text)
+                || /^更新推理仅放<Analysis>[，,；;]变量操作仅放<JSONPatch>$/i.test(text);
+        }
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        const keys = Object.keys(value);
+        if (keys.length !== 1 || !/^更新指令\s*[=：:]\s*JSON\s*Patch\s*(?:\(RFC\s*6902\))?\s*数组\s*支持操作$/i.test(keys[0])) return false;
+        const operations = value[keys[0]];
+        return Array.isArray(operations) && operations.length > 0 && operations.every(op => typeof op === 'string' &&
+            /^(?:replace\s*[:：]\s*替换已有路径值|add\s*[:：]\s*新增对象\/数组项(?:\s*[（(]\s*`?-`?\s*=\s*数组末尾追加\s*[）)])?|remove(?:\s*[:：]\s*(?:移除|删除)(?:已有)?(?:路径值|对象\/数组项))?)\s*[。.]?$/i.test(op));
+    }
+
+    function parseMvuPathSpecifications(content) {
+        try {
+            const outer = /^\s*<Format\s*>\s*([\s\S]*?)\s*<\/Format>\s*$/i.exec(content);
+            const doc = getMvuYamlLibs().YAML.parseDocument(prepareMvuRuleYaml(outer ? outer[1] : content), { merge: true });
+            if (doc.errors.length) return null;
+            const value = doc.toJS(), node = value && value[Object.keys(value)[0]];
+            const prefix = '原输出条目补充说明（未迁移部分；旧输出语法由数据库填表协议接管）：\n';
+            if (typeof node === 'string') return { body: '', sections: [], prefix, outputDocument: true };
+            if (!node || typeof node !== 'object') return null;
+            const pathKeys = new Set(['valid_paths', 'allowed_paths', 'validPaths', 'allowedPaths', '有效路径', '可用路径', '合法路径']);
+            const sections = [], bodies = [];
+            for (const key of Object.keys(node)) {
+                // 整份文档已被调用方证明含完整格式块；只有这些格式字段可以直接移除。
+                if (/^(?:format|output_format|格式)$/i.test(key)) continue;
+                if (!pathKeys.has(key)) {
+                    let remaining = node[key];
+                    if (/^(?:rules?|输出规则|规则)$/i.test(key) && Array.isArray(remaining))
+                        remaining = remaining.filter(rule => !isMvuOutputProtocolRule(rule));
+                    if (Array.isArray(node[key]) && !remaining.length && /^(?:rules?|输出规则|规则)$/i.test(key)) continue;
+                    const text = getMvuYamlLibs().YAML.stringify({ [key]: remaining }, { lineWidth: 0 }).trim();
+                    sections.push({ text, unmapped: true });
+                    continue;
+                }
+                const body = (typeof node[key] === 'string' ? node[key] : getMvuYamlLibs().YAML.stringify(node[key])).trim();
+                bodies.push(body);
+                const starts = [...body.matchAll(/^[ \t]*(\/[^\s]+)[ \t]+([^\n]*)$/gm)];
+                if (!starts.length) {
+                    if (body) sections.push({ text: body, unmapped: true });
+                } else if (body.slice(0, starts[0].index).trim()) sections.push({ text: body.slice(0, starts[0].index), unmapped: true });
+                for (let i = 0; i < starts.length; i++) {
+                    const m = starts[i], end = i + 1 < starts.length ? starts[i + 1].index : body.length;
+                    const declaration = m[2].trim();
+                    const readonlyMatch = /^(?:readonly|只读)(?:\s*[（(]([^()（）\n]*)[）)])?\s*$/i.exec(declaration);
+                    // 括号是人类备注，不是布尔参数、表达式或条件权限。
+                    // 语义不明确时完整保留，不能因前缀命中而禁用整张表。
+                    const ambiguousReadonly = /\breadonly\b|只读/i.test(declaration) && (!readonlyMatch ||
+                        body.slice(m.index + m[0].length, end).trim() ||
+                        /^(?:true|false|null|undefined|[01])$/i.test((readonlyMatch[1] || '').trim()) ||
+                        /^[$A-Za-z_][\w.$]*$/.test((readonlyMatch[1] || '').trim()) ||
+                        /(?:不(?:是|为)?只读|非只读|可写|允许(?:修改|更新)|仅(?:在|当)|只在|如果|除非|直到|期间|开局时|当[^，,。;；]*时|\b(?:if|unless|when|while|only|false)\b|[=?:<>|&+])/i.test(readonlyMatch[1] || ''));
+                    sections.push({ text: body.slice(m.index, end).trim(), declaration,
+                        path: m[1].slice(1).split('/').map(part => part.replace(/~1/g, '/').replace(/~0/g, '~')),
+                        readonly: !!readonlyMatch && !ambiguousReadonly,
+                        readonlyDescription: readonlyMatch && !ambiguousReadonly ? (readonlyMatch[1] || '').trim() : '',
+                        permissionUnresolved: !!ambiguousReadonly, unmapped: false });
+                }
+            }
+            return { body: bodies.join('\n'), sections, prefix, outputDocument: true };
+        } catch (_) { return null; }
+    }
+
+    function parseProseMvuRules(content) {
+        if (/<%|&lt;%/i.test(content)) return null;
+        const body = unwrapMvuRuleDocument(content);
+        if (/^\s*(?:type|check|format|range|enum|note)\s*:/m.test(body)) return null;
+        const headings = [...body.matchAll(/^([ \t]*)([\p{L}\p{N}_$.-]+)[ \t]*:[ \t]*\r?$/gmu)];
+        if (!headings.length) return null;
+        const title = headings[0].index === 0 && /更新规则/.test(headings[0][2]) ? headings.shift() : null;
+        if (!headings.length) return null;
+        const indent = Math.min(...headings.map(m => m[1].length));
+        const groups = headings.filter(m => m[1].length === indent);
+        const sections = groups.map((m, i) => ({
+            heading: m[2], start: m.index, end: i + 1 < groups.length ? groups[i + 1].index : body.length,
+            text: body.slice(m.index + m[0].length, i + 1 < groups.length ? groups[i + 1].index : body.length).trim(),
+        }));
+        if (!sections.every(s => /^[-·•]\s*/m.test(s.text))) return null;
+        const prefix = body.slice(0, groups[0].index);
+        if (prefix.trim() && !title) return null;
+        return { body, prefix, sections };
+    }
+
     function prepareMvuRuleYaml(content) {
-            const lines = protectYamlTemplateScalarValues(content).split('\n');
+            const lines = protectYamlTemplateScalarValues(unwrapMvuRuleDocument(content)).split('\n');
             const visible = maskYamlBlockScalarBodies(lines.join('\n')).split('\n');
             let checkIndent = -1;
             for (let i = 0; i < lines.length; i++) {
@@ -201,7 +331,7 @@ function createSchemaLayout(dependencies) {
                 const wrapper = ['变量更新规则', 'variables_update_rules'].find(k => v[k] && typeof v[k] === 'object' && !Array.isArray(v[k]));
                 if (wrapper) {
                     rules = v[wrapper];
-                } else if (Object.keys(v).some(k => /^[\u4e00-\u9fff$]{1,12}$/.test(k) && v[k] && typeof v[k] === 'object' && !Array.isArray(v[k]))) {
+                } else if (Object.keys(v).some(k => isSchemaFieldName(k) && v[k] && typeof v[k] === 'object' && !Array.isArray(v[k]))) {
                     rules = v; // 没有 变量更新规则 壳，直接是顶层组
                 }
                 if (!rules || typeof rules !== 'object' || Array.isArray(rules)) return false;
@@ -610,11 +740,15 @@ function createSchemaLayout(dependencies) {
             // 记录每条字段级 check 的完整规则路径（组.容器…字段），供“initvar 优先”的
             // 路径化附着：规则分组与 initvar 结构不一致、但路径能对上时也能挂到对应列/表。
             const checkPaths = [];
-            const ruleSources = [], ruleBindings = [];
+            const ruleSources = [], ruleBindings = [], proseRuleDocuments = [];
             for (const e of entries) {
                 const comment = String(e.comment || '');
                 const content = String(e.content || '');
-                if (isMvuOutputDocument(content)) continue;
+                if (isMvuOutputDocument(content)) {
+                    const specs = parseMvuPathSpecifications(content);
+                    if (specs && e.enabled !== false) proseRuleDocuments.push({ source: content, comment, ...specs });
+                    continue;
+                }
                 // 只解析规则条目：明确 [mvu_update]/变量更新规则/变量输出格式，或注释含 mvu 的
                 // 兜底写法；[mvu_plot] 是剧情条目（AI 提示词，保留给角色），绝不能当规则解析——
                 // 否则其正文 YAML（如 战斗系统.说明: |- 一整段战斗判定）会被误当行内枚举/规则。
@@ -622,6 +756,11 @@ function createSchemaLayout(dependencies) {
                 if (!/\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment) && !/变量更新规则|变量输出格式/.test(comment) && !/mvu/i.test(comment)) continue;
                 allContents.push(content);
                 scanDynamicKeyNamesFromRules(content, dynamicKeyNames);
+                const prose = parseProseMvuRules(content);
+                if (prose) {
+                    if (e.enabled !== false) proseRuleDocuments.push({ source: content, comment, ...prose });
+                    continue;
+                }
                 // YAML 优先：规则是作者自定义 YAML，真 YAML 树能覆盖正则盲区
                 // （flow 写法、引号键、深层嵌套）；失败或结构是字符串（zod/散文）回退正则。
                 if (collectRulesFromYaml(content, {
@@ -1097,7 +1236,7 @@ function createSchemaLayout(dependencies) {
             for (const [field, kinds] of Object.entries(globalFieldKindSets)) {
                 if (kinds.size === 1) globalFieldTypes[field] = [...kinds][0];
             }
-            return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, yamlTypePaths, ranges, enums, enumPaths, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, zodDefaultsRoot, zodValidationRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, fixedFieldParents, dynamicKeyNames, checkPaths, ruleSources, ruleBindings };
+            return { shapes, objects, fieldTypes, globalFieldTypes, objectSchemas, yamlTypePaths, ranges, enums, enumPaths, formats, checks, reminders, groupChecks, zodDescs, zodSchemaRoot, zodDefaultsRoot, zodValidationRoot, wildcardFields, wildcardRules, numericFields, dynamicDicts, dynamicPaths, dynamicGroups, fixedFieldParents, dynamicKeyNames, checkPaths, ruleSources, ruleBindings, proseRuleDocuments };
         }
     
     function parseRegisteredZodSchema(source) {
@@ -2369,7 +2508,7 @@ function createSchemaLayout(dependencies) {
     
     function schemaTypeLabel(node) {
             if (!node) return '文本';
-            return ({ number: '数字', boolean: '布尔值', array: '数组', object: '对象', text: '文本' })[node.kind] || '文本';
+            return ({ number: '数字', boolean: '布尔值', array: '数组', object: '对象', text: '文本', unknown: '任意 JSON 值（由原 Schema 在运行时校验）' })[node.kind] || '文本';
         }
     
     function schemaExample(node, depth = 0) {
@@ -4729,7 +4868,7 @@ function createSchemaLayout(dependencies) {
             }
             return entries;
         }
-    return { leafInfo, maskYamlBlockScalarBodies, yamlStripQuotes, parseInlineEnumValues, yamlCheckItems, yamlExpandTemplateKeys, expandYamlTemplateFieldKey, protectYamlTemplateScalarValues, prepareMvuRuleYaml, yamlCollectCheckRanges, collectRulesFromYaml, yamlParseRange, isMvuRulePathKey, registerYamlWildcard, registerWildcardTypeShape, registerYamlField, parseMvuShapes, parseRegisteredZodSchema, mergeZodSchemaNodes, countZodSchemaFlag, mergeRegisteredZodIntoShapeInfo, applyRegisteredZodDefaults, missingRegisteredZodDefaults, scanGreetingShapeVariation, extractListItems, stripRuleQuotes, scanDynamicKeyNamesFromRules, parseZodStyleRules, isSchemaFieldName, mergeShapeMetadata, parseTypeSchema, parseShapeString, extractYamlBlockScalar, cardTextBlobs, scanStatusUsage, isPairLeaf, isLeaf, collectColumns, inferType, jsonColumnFromObject, schemaTypeLabel, schemaExample, describeObjectSchema, fixedObjectFromValue, fixedObjectSchema, flattenFixedObjectColumns, buildSchema, rowFirstValue, attachFieldRules, sanitizeMacroColumnZh, disambiguateColumnSlugs, isVwdMetaColumn, vwdFieldId, columnLayoutType, buildLayout, buildLayoutJson, resolveLayoutMacros };
+    return { unwrapMvuRuleDocument, wrapMvuRuleDocument, parseProseMvuRules, leafInfo, maskYamlBlockScalarBodies, yamlStripQuotes, parseInlineEnumValues, yamlCheckItems, yamlExpandTemplateKeys, expandYamlTemplateFieldKey, protectYamlTemplateScalarValues, prepareMvuRuleYaml, yamlCollectCheckRanges, collectRulesFromYaml, yamlParseRange, isMvuRulePathKey, registerYamlWildcard, registerWildcardTypeShape, registerYamlField, parseMvuShapes, parseRegisteredZodSchema, mergeZodSchemaNodes, countZodSchemaFlag, mergeRegisteredZodIntoShapeInfo, applyRegisteredZodDefaults, missingRegisteredZodDefaults, scanGreetingShapeVariation, extractListItems, stripRuleQuotes, scanDynamicKeyNamesFromRules, parseZodStyleRules, isSchemaFieldName, mergeShapeMetadata, parseTypeSchema, parseShapeString, extractYamlBlockScalar, cardTextBlobs, scanStatusUsage, isPairLeaf, isLeaf, collectColumns, inferType, jsonColumnFromObject, schemaTypeLabel, schemaExample, describeObjectSchema, fixedObjectFromValue, fixedObjectSchema, flattenFixedObjectColumns, buildSchema, rowFirstValue, attachFieldRules, sanitizeMacroColumnZh, disambiguateColumnSlugs, isVwdMetaColumn, vwdFieldId, columnLayoutType, buildLayout, buildLayoutJson, resolveLayoutMacros };
 }
 
 module.exports = createSchemaLayout;

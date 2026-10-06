@@ -192,7 +192,7 @@ node test/conversion-profile-ui.js
 
 ### 表格提示输出对照
 
-`test/table-prompt-cases.js` 提供公开输入，`test/table-prompt-baseline.json` 保存重构前的输出摘要。
+`test/table-prompt-cases.js` 提供公开输入，`test/table-prompt-baseline.json` 保存重构前的输出摘要。v0.6.0 按用户确认的方案收敛说明后，33 个公开样本的完整模板与 v0.5.1 一致，冻结基线保持原内容；新增规则迁移由独立回归覆盖。旧版比较过程不成为公开回归对本机旧源码的依赖。
 `test/table-prompt-output.js` 同时经过 Node 转换核心与无 `require` 的浏览器装配 VM，比较完整模板、
 layout 和逐表 sourceData。模板摘要包含实际字符串，因此说明、空白、SQL 示例及字段内容变化都会被发现。
 
