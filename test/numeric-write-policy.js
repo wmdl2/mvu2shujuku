@@ -9,24 +9,25 @@ function cardWithNumbers() {
 }
 function sheets(mode) {
     const result = core.convert(cardWithNumbers(), { mode });
-    return { result, byName: Object.fromEntries(Object.values(result.template).filter(t => t.content).map(t => [t.name, t])) };
+    const byName = Object.fromEntries(Object.values(result.template).filter(t => t.content).map(t => [t.name, t]));
+    return { result, byName, byGroup: Object.fromEntries(result.schema.map(g => [g.name, byName[g.tableName]])) };
 }
 
 test('顶层数值：无规则与对象内数值默认可写，私有数值只读', () => {
-    const native = sheets('native').byName;
-    const sqlite = sheets('sqlite').byName;
-    for (const name of ['counter表', 'obj表']) {
+    const native = sheets('native').byGroup;
+    const sqlite = sheets('sqlite').byGroup;
+    for (const name of ['counter', 'obj']) {
         assert.match(native[name].sourceData.updateNode, /根据正文、设定与本表规则/);
         assert.match(native[name].sourceData.updateNode, /禁止新增或删除记录/);
     }
-    assert.match(native['counter表'].sourceData.initNode, /根据正文、设定与 note 按需更新/);
-    for (const name of ['_counter表', '$counter表']) {
+    assert.match(native.counter.sourceData.initNode, /根据正文、设定与 note 按需更新/);
+    for (const name of ['_counter', '$counter']) {
         assert.match(native[name].sourceData.updateNode, /原卡脚本\/前端维护，模型不得写入/);
         assert.doesNotMatch(native[name].sourceData.updateNode, /SQL示例/);
         assert.match(native[name].sourceData.initNode, /脚本\/前端维护，模型禁止再次初始化或修改/);
     }
-    assert.strictEqual(native['counter表'].sourceData.note, sqlite['counter表'].sourceData.note.replace(/\nSQL 示例[^\n]*$/, ''));
-    assert.strictEqual(native['counter表'].sourceData.updateNode, sqlite['counter表'].sourceData.updateNode.split('\nSQL示例:')[0]);
+    assert.strictEqual(native.counter.sourceData.note, sqlite.counter.sourceData.note.replace(/\nSQL 示例[^\n]*$/, ''));
+    assert.strictEqual(native.counter.sourceData.updateNode, sqlite.counter.sourceData.updateNode.split('\nSQL示例:')[0]);
 });
 
 test('顶层数值：专用规则保留且仍开放 UPDATE', () => {

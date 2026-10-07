@@ -4,7 +4,7 @@
 function createTablePrompts(deps) {
     'use strict';
     const { describeGroup, isRelationshipKeyColumn, isDollarPrivateColumn,
-        isUnderscoreReadonlyColumn, isAiPromptColumn, sqlQuote, schemaExample, vwdToken } = deps;
+        isUnderscoreReadonlyColumn, isAiPromptColumn, sqlQuote, schemaExample, vwdToken, normalizeUpdateRuleText } = deps;
 
     function aiJsonColumns(group) {
         if (group.scalarType === 'number') return [];
@@ -477,7 +477,7 @@ function createTablePrompts(deps) {
             const b = String(dm[3]).trim();
             s = (prefix ? prefix + '，' : '') + '必须同时完成：' + a + '；' + b + (dm[4] || '');
         }
-        return s.trim();
+        return typeof normalizeUpdateRuleText === 'function' ? normalizeUpdateRuleText(s.trim(), ctx) : s.trim();
     }
 
     function buildNodeProse(group, kind) {

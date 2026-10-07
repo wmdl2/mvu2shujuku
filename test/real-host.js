@@ -101,7 +101,7 @@ async function runtimeTest(page, source = syntheticCard(), convertCore = core, m
         return response.json();
     }, card);
     const avatar = imported.file_name + '.png';
-    if (process.argv.includes('--only=card-api') || process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update'].includes(arg))) await page.evaluate(async avatar => {
+    if (process.argv.includes('--only=card-api') || process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update','--only=opening-schema'].includes(arg))) await page.evaluate(async avatar => {
         const st = await import('/script.js');
         const ctx = window.SillyTavern.getContext(), helper = ctx.extensionSettings.tavern_helper;
         helper.script.enabled.characters = [...new Set([...helper.script.enabled.characters, avatar])];
@@ -110,12 +110,12 @@ async function runtimeTest(page, source = syntheticCard(), convertCore = core, m
     }, avatar);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(avatar => window.SillyTavern?.getContext().characters.some(ch => ch.avatar === avatar), avatar, { timeout: 90000 });
-    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update'].includes(arg))) await page.evaluate(async () => {
+    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update','--only=opening-schema'].includes(arg))) await page.evaluate(async () => {
         const { power_user } = await import('/scripts/power-user.js');
         power_user.world_import_dialog = false;
     });
     await page.evaluate(avatar => { const ctx = window.SillyTavern.getContext(); return ctx.selectCharacterById(ctx.characters.findIndex(ch => ch.avatar === avatar)); }, avatar);
-    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update'].includes(arg))) await page.evaluate(async () => {
+    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update','--only=opening-schema'].includes(arg))) await page.evaluate(async () => {
         const world = await import('/scripts/world-info.js');
         await world.importEmbeddedWorldInfo(true);
     });
@@ -968,6 +968,7 @@ async function main() {
             const only = process.argv.find(arg => arg.startsWith('--only='))?.slice(7);
             const saved = path.join(work, 'state.json');
             if (only === 'worldbook-save') await require(root + '/test/worldbook-save-host')({ page, record, work });
+            else if (only === 'opening-schema') await require('./opening-schema-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, record });
             else if (only === 'card-api') await require('./card-api-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
             else if (only === 'remote-schema') await require('./remote-schema-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
             else if (only === 'community-cards') {

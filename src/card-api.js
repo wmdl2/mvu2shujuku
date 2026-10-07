@@ -87,6 +87,24 @@ function createCardApi(options) {
         if (typeof original.createChatMessages === 'function') set('createChatMessages', wrapCreate(original.createChatMessages, original));
         return out;
     }
+    function patchWorldbookGlobals(w, globals) {
+        const names = ['getWorldbook', 'replaceWorldbook', 'updateWorldbookWith', 'createWorldbookEntries', 'deleteWorldbookEntries', 'getWorldbookNames', 'getCharWorldbookNames'];
+        const original = {}, pending = [];
+        for (const name of names) {
+            if (typeof w[name] !== 'function' || w[name].__mvu2shujukuCardApi === api) continue;
+            const fn = globals.original(w, name);
+            if (typeof fn !== 'function') continue;
+            original[name] = (...args) => fn.apply(w, args);
+            pending.push(name);
+        }
+        const wrapped = facade(original);
+        for (const name of pending) {
+            wrapped[name].__mvu2shujuku = true;
+            wrapped[name].__mvu2shujukuCardApi = api;
+            globals.patch(w, name, wrapped[name]);
+        }
+        return pending.length;
+    }
     function wrapCreate(original, receiver) {
         return async function (messages, ...args) {
             if (!isCurrent()) throw new Error('创建消息所属会话已变化');
@@ -105,6 +123,7 @@ function createCardApi(options) {
             return result;
         };
     }
-    return { registerSchema, ready, validate, proofOf, facade, wrapCreate };
+    const api = { registerSchema, ready, validate, proofOf, facade, patchWorldbookGlobals, wrapCreate };
+    return api;
 }
 module.exports = createCardApi;

@@ -6,6 +6,17 @@ const clone=x=>JSON.parse(JSON.stringify(x));
 const converted=(world='转换书')=>({data:{extensions:{mvu2shujuku:{converter:'mvu2shujuku'},world},character_book:{name:'旧内嵌书'}}});
 const lore=(world,comment,uid)=>({world,comment,uid,enabled:true,content:'原业务内容'});
 
+test('正文分流：M2SJK与旧标记兼容，不扩大到共享、其他书或原始卡',()=>{
+ const inline=vm.runInNewContext('('+factory.toString()+')');
+ let card=converted();const filter=inline({readCharacter:()=>card});
+ const original=[lore('转换书','[M2SJK]事件结算（更新要求）',1),lore('转换书','[mvu_update]旧更新',2),
+  lore('转换书','[M2SJK][mvu_plot]共享',3),lore('其他书','[M2SJK]其他更新',4),lore('转换书','普通正文',5)];
+ const before=JSON.stringify(original),payload={characterLore:original.slice()};filter.filter(payload);
+ assert.deepStrictEqual(payload.characterLore.map(e=>e.uid),[3,4,5]);assert.strictEqual(JSON.stringify(original),before);
+ card={data:{extensions:{world:'转换书'}}};const ordinary={characterLore:original.slice()};filter.filter(ordinary);
+ assert.strictEqual(ordinary.characterLore.length,5);
+});
+
 test('正文分流：内联工厂只过滤当前转换卡主世界书的纯更新标记',()=>{
  const inline=vm.runInNewContext('('+factory.toString()+')');
  const filter=inline({readCharacter:()=>converted()});

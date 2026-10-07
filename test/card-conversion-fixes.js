@@ -53,7 +53,7 @@ test('规则迁移：英文外壳和 TS 字面量联合进入提示词与 CHECK'
     assert.ok(table.sourceData.note.includes('可选值：高 / 中 / 低'));
     assert.match(table.sourceData.ddl, /CHECK\(guanzhudu IN \('高', '中', '低'\)\)/);
     assert.ok(table.sourceData.note.includes('领取奖励后删除'));
-    assert.ok(!(result.card.data || result.card).character_book.entries.some(e => e.comment === '[mvu_update]变量更新规则'));
+    assert.ok(!(result.card.data || result.card).character_book.entries.some(e => /\[M2SJK\]/.test(e.comment)));
 });
 
 test('规则迁移：TS 枚举按路径归属，不污染别组同名字段', () => {
@@ -70,7 +70,7 @@ test('规则迁移：check 行内操作说明按文本解析，完整迁移后�
     assert.deepStrictEqual(shapes.checks.状态.冷却, checks, '解析阶段保留业务原文，不吞掉冒号后的内容');
     const result = core.convert(card);
     const data = result.card.data || result.card;
-    assert.ok(!data.character_book.entries.some(e => e.comment === '[mvu_update]变量更新规则'));
+    assert.ok(!data.character_book.entries.some(e => /\[M2SJK\]/.test(e.comment)));
     assert.ok(!result.report.warnings.some(w => /YAML 解析失败|完整静态规则/.test(w.message)));
     const note = Object.values(result.template).find(t => t.name === '状态表').sourceData.note;
     assert.match(note, /本轮推进时减1/);
@@ -87,7 +87,7 @@ test('规则迁移：行内操作容错不改块文本、不掩盖其他 YAML �
     }
     for (const extra of ['\n    其他:\n      type: [缺少闭合', '\n<% if (condition) { %>额外业务<% } %>']) {
         const result = core.convert(input('变量更新规则:\n  状态:\n    冷却:\n      check:\n        - ' + text + extra, { 状态: { 冷却: 20 } }));
-        assert.ok((result.card.data || result.card).character_book.entries.some(e => e.comment === '[mvu_update]变量更新规则'));
+        assert.ok((result.card.data || result.card).character_book.entries.some(e => /\[M2SJK\]/.test(e.comment)));
     }
 });
 
@@ -226,9 +226,19 @@ test('删除边界：显式更新标记不能删除混合业务，无法完整�
         { comment: '[mvu_update]变量输出格式', content: '<% if (getvar("stat_data.开关")) { %>必须记住誓言。<UpdateVariable>[]</UpdateVariable><% } %>' },
         { comment: '[mvu_plot][mvu_update]剧情', content: '必须记住誓言。<UpdateVariable>[]</UpdateVariable>' },
         { comment: '变量列表中的故事', content: '必须记住誓言。<UpdateVariable>[]</UpdateVariable>' });
+    card.character_book.entries.forEach((entry, index) => { entry.id = index + 1; });
     const result = core.convert(card);
     const entries = (result.card.data || result.card).character_book.entries;
-    for (const e of card.character_book.entries.filter(e => e.comment !== '[InitVar]')) assert.ok(entries.some(x => x.comment === e.comment), e.comment);
+    for (const e of card.character_book.entries.filter(e => e.comment !== '[InitVar]')) {
+        const expected = e.comment === '[mvu_update]变量输出格式'
+            ? '<% if (mvu2shujukuGetMessageVar("stat_data.开关")) { %>必须记住誓言。<UpdateVariable>[]</UpdateVariable><% } %>'
+            : e.content;
+        const retained = entries.find(x => x.id === e.id);
+        assert.ok(retained, e.comment + '：未承接正文必须完整保留');
+        assert.strictEqual(retained.content, expected);
+        if (/\[mvu_update\]/i.test(e.comment) && !/\[mvu_plot\]/i.test(e.comment)) assert.match(retained.comment, /\[M2SJK\]/);
+        else assert.strictEqual(retained.comment, e.comment);
+    }
 });
 
 test('删除边界：专名变量处理指令集含限额业务时保留，纯输出标签仍删除', () => {

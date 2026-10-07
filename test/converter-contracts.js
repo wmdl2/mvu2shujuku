@@ -54,7 +54,7 @@ for (const parentKey of ['甲.乙', '']) test('转换契约：多层关系表字
 });
 function ruleResult(stat, text) {
     const r = core.convert(card(stat, '', text));
-    return { result: r, body: r.card.character_book.entries.find(e => e.comment === '[mvu_update]变量更新规则')?.content || '',
+    return { result: r, body: r.card.character_book.entries.find(e => /\[M2SJK\]/.test(e.comment))?.content || '',
         note: Object.values(r.template).filter(t => t.sourceData).map(t => t.sourceData.note).join('\n') };
 }
 for (const field of ['_只读', '$私有']) test('转换契约：未进入填表说明的规则保留原文 ' + field, () => {
@@ -79,7 +79,7 @@ test('转换契约：自定义模板没有实际承接约束时保留有限绑�
     const template = clone(core.convert(input).template);
     for (const sheet of Object.values(template)) if (sheet.sourceData) sheet.sourceData.note = sheet.sourceData.note.replaceAll('PARTIAL_FINITE_RECEIPT', '用户自定义说明');
     const r = core.convert(input, { template });
-    assert.match(r.card.character_book.entries.find(e => e.comment === '[mvu_update]变量更新规则').content, /PARTIAL_FINITE_RECEIPT/);
+    assert.match(r.card.character_book.entries.find(e => /\[M2SJK\]/.test(e.comment)).content, /PARTIAL_FINITE_RECEIPT/);
 });
 test('转换契约：多层有限绑定的子字段保留原来源路径，承接后整节点清理', () => {
     const { body, note } = ruleResult({ 面板: { 甲: { 值: 1 }, 乙: { 值: 2 } } }, '变量更新规则:\n  面板.${项}:\n    项: [甲, 乙]\n    值:\n      check: NESTED_FINITE_RECEIPT');
@@ -120,9 +120,14 @@ test('转换契约：XML包裹的完整结构输出移除，混合正文与EJS�
     for (const [text, retained] of [[source.replace('  output_rule:\n    - Reply only with the legacy update block.\n', ''), false], ['剧情说明\n' + source, true], [source + '\n<% if (true) { %>业务<% } %>', true]]) {
         const input = card({ 状态: { 数量: 1 } });
         input.character_book.entries.push({ comment: '[mvu_update]output_format', content: text, enabled: true, constant: true });
-        const r = core.convert(input), e = r.card.character_book.entries.find(e => e.comment === '[mvu_update]output_format');
-        assert.strictEqual(!!e, retained);
+        const r = core.convert(input), e = r.card.character_book.entries.find(e => e.comment === '[M2SJK]output_format');
+        assert.strictEqual(r.card.character_book.entries.some(e=>e.comment.includes('output_format')), retained);
         if (!retained) assert.doesNotMatch(r.reportText, /YAML 解析失败/);
-        else assert.match(r.reportText, /无法确认整条仅负责输出协议/);
+        else {
+            const all = r.card.character_book.entries.filter(e=>e.comment.includes('output_format'));
+            assert(all.some(e=>e.content.includes(text.startsWith('剧情说明') ? '剧情说明' : '业务')));
+            assert.doesNotMatch(all.map(e=>e.content).join('\n'), /<\/?JSONPatch>/);
+            assert.match(r.reportText, /完整更新段落保留在世界书填表侧/);
+        }
     }
 });
