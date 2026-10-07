@@ -10,6 +10,71 @@ function openingTemplateBuilder(runtimeCore = core) {
     return require('../src/extension-runtime').createCandidateBuilder({ core: runtimeCore }).buildUpdatedTemplateFromStat;
 }
 
+function greetingSnapshot(runtimeCore, validateCardStat, updateCycle) {
+    const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const start = source.indexOf('    async function computeActiveGreetingSnapshot(');
+    const end = source.indexOf('    async function applyActiveGreetingInitvar(', start);
+    assert.ok(start >= 0 && end > start);
+    return vm.runInNewContext(source.slice(start, end) + '\ncomputeActiveGreetingSnapshot;', {
+        window: { MVU2SHUJUKU_CORE: runtimeCore }, getContextSafe: () => ({}),
+        autoInitChatId: () => 'public-schema-opening', greetingMacroCache: {},
+        validateCardStat, runMvuUpdateCycle: updateCycle,
+        emitMvuEvent: async () => {},
+    });
+}
+
+test('开场 Schema：纯 InitVar 先运行作者预处理，旧名删除、新名和记录保留', async () => {
+    const { zod: z } = require('../src/vendor/schema-engine-libs');
+    const api = require('../src/card-api')({ readMetadata: () => ({ schemaKeys: ['public'] }), isCurrent: () => true });
+    let parses = 0;
+    const declared = z.preprocess(data => {
+        parses++;
+        if (data.旧事件 !== undefined) { data.新事件 = data.旧事件; delete data.旧事件; }
+        return data;
+    }, z.object({ 新事件: z.record(z.string(), z.union([z.boolean(), z.string()])).prefault({}) }));
+    api.registerSchema(declared, 'public');
+    const source = { first: {}, text: '公开开场', m: ['', '{"旧事件":{"待结算":true,"说明":"保留"}}'], updateSource: '', sourceFp: 'one', swipe: 0 };
+    const result = await greetingSnapshot(core, stat => api.validate(stat))({ stat_data: {} }, source);
+    assert.deepStrictEqual(clone(result.finalWrap.stat_data), { 新事件: { 待结算: true, 说明: '保留' } });
+    assert.deepStrictEqual(clone(result.finalWrap.display_data), clone(result.finalWrap.stat_data));
+    assert.strictEqual(parses, 1);
+});
+
+test('开场 Schema：校验失败拒绝快照，无 InitVar 不额外运行变换', async () => {
+    let calls = 0;
+    const compute = greetingSnapshot(core, async () => { calls++; throw new Error('无效原卡 Schema'); });
+    const source = { first: {}, text: '公开开场', updateSource: '', sourceFp: 'one', swipe: 0 };
+    const unchanged = await compute({ stat_data: { 状态: 3 } }, source);
+    assert.deepStrictEqual(clone(unchanged.finalWrap.stat_data), { 状态: 3 });
+    assert.strictEqual(calls, 0);
+    await assert.rejects(compute({ stat_data: {} }, { ...source, m: ['', '{"状态":3}'] }), /无效原卡 Schema/);
+    assert.strictEqual(calls, 1);
+});
+
+test('开场 Schema：首次建表不等待依赖数据就绪的登记，仍保留后续校验任务', async () => {
+    let calls = 0;
+    const compute = greetingSnapshot(core, async stat => { calls++; return { 状态: stat.状态 + 1 }; });
+    const source = { first: {}, text: '公开开场', m: ['', '{"状态":3}'], updateSource: '', sourceFp: 'one', swipe: 0 };
+    const initial = await compute({ stat_data: {} }, source, { deferSchema: true });
+    assert.strictEqual(initial.schemaDeferred, true);
+    assert.strictEqual(calls, 0);
+    assert.deepStrictEqual(clone(initial.finalWrap.stat_data), { 状态: 3 });
+    const settled = await compute({ stat_data: {} }, source);
+    assert.strictEqual(settled.schemaDeferred, false);
+    assert.strictEqual(calls, 1);
+    assert.deepStrictEqual(clone(settled.finalWrap.stat_data), { 状态: 4 });
+});
+
+test('开场 Schema：含更新指令的开场复用原更新周期，不二次执行变换', async () => {
+    let calls = 0;
+    const compute = greetingSnapshot(core, () => { throw new Error('不得重复校验'); }, async (_, wrap) => {
+        calls++; wrap.stat_data.状态++; return wrap;
+    });
+    const result = await compute({ stat_data: {} }, { first: {}, text: '公开开场', m: ['', '{"状态":3}'], updateSource: '<JSONPatch>[]</JSONPatch>', sourceFp: 'one', swipe: 0 });
+    assert.deepStrictEqual(clone(result.finalWrap.stat_data), { 状态: 4 });
+    assert.strictEqual(calls, 1);
+});
+
 test('开场快照：浏览器内联工厂不依赖 Node 模块外部作用域', async () => {
     const factory = require('../src/extension-runtime').createCandidateBuilder;
     const inlineFactory = vm.runInNewContext('(' + factory.toString() + ')');

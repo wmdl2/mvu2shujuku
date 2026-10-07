@@ -69,7 +69,7 @@ test('声明路径：混合文字键、展平容器与固定对象下字典的�
     assert.ok(note('管理_NPC记录表').includes('仅在登记时增加记录'));
     assert.ok(note('管理表').includes('完成后清空详情'));
     assert.ok(note('管理_固定_甲_留言表').includes('留言按时间更新'));
-    assert.ok(!r.card.character_book.entries.some(e => e.comment === '[mvu_update]变量更新规则'));
+    assert.ok(!r.card.character_book.entries.some(e => /\[M2SJK\]/.test(e.comment)));
 });
 
 test('声明路径：无法定位的业务规则保留原条目，不能凭 YAML 可解析而删除', () => {

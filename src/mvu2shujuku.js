@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.7.0';
+    const VERSION = '0.8.0';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -154,9 +154,45 @@
         if (typeof require === 'function') return require('./table-prompts.js');
         throw new Error('表格提示词模块未加载，请使用构建后的 index.js');
     }
+    function getSheetIdentityFactory() {
+        if (typeof root.__MVU2SHUJUKU_SHEET_IDENTITY_FACTORY__ === 'function') return root.__MVU2SHUJUKU_SHEET_IDENTITY_FACTORY__;
+        if (typeof require === 'function') return require('./sheet-identity.js');
+        throw new Error('表名身份模块未加载，请使用构建后的 index.js');
+    }
+    function getUpdateRuleMigrationFactory() {
+        if (typeof root.__MVU2SHUJUKU_UPDATE_RULE_MIGRATION_FACTORY__ === 'function') return root.__MVU2SHUJUKU_UPDATE_RULE_MIGRATION_FACTORY__;
+        if (typeof require === 'function') return require('./update-rule-migration.js');
+        throw new Error('更新规则迁移模块未加载，请使用构建后的 index.js');
+    }
+    let sharedUpdateRuleMigration;
+    function getUpdateRuleMigration() {
+        if (!sharedUpdateRuleMigration) {
+            const libraries = root.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__ || (typeof require === 'function' && require('./vendor/schema-engine-libs.js'));
+            sharedUpdateRuleMigration = getUpdateRuleMigrationFactory()({ parseJs: libraries.acorn.parse });
+        }
+        return sharedUpdateRuleMigration;
+    }
+    function migrateWorldbookUpdateRules(content, options) { return getUpdateRuleMigration().migrate(content, options); }
+    function normalizeUpdateRuleText(text, context) {
+        if (!context.group) return text;
+        const resolver = createMvuRulePathResolver([context.group], {});
+        const result = getUpdateRuleMigration().normalizeRule(text, { resolvePath: resolver.resolve,
+            jsonLocal: !!(context.jsonContainer || context.pathSpecification && context.pathSpecification.jsonPath) });
+        if (result.issues.length) {
+            if (!context.group._unresolvedProtocolRules) Object.defineProperty(context.group, '_unresolvedProtocolRules', { value: new Set(), configurable: true });
+            result.issues.forEach(issue => context.group._unresolvedProtocolRules.add(issue));
+        }
+        return result.text;
+    }
+    let sharedSheetIdentity;
+    function physicalTableName(name) {
+        if (!sharedSheetIdentity) sharedSheetIdentity = getSheetIdentityFactory()();
+        return sharedSheetIdentity.physicalName(name);
+    }
     function getSchemaLayout() {
         if (!sharedSchemaLayout) sharedSchemaLayout = getSchemaLayoutFactory()({
             createJsSource: getJsSourceFactory(), getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf,
+            physicalTableName,
             maskJsStringsAndComments, createStatusUsage: getStatusUsageFactory(), isPromptVisibleColumn, isMvuOutputDocument,
             vwdExperimental: isVwdExperimental,
             canValidateRegisteredSchema: source => connectRegisteredSchema(source).count > 0,
@@ -1005,6 +1041,7 @@
         if (!sharedTablePrompts) sharedTablePrompts = getTablePromptsFactory()({
             describeGroup, isRelationshipKeyColumn, isDollarPrivateColumn,
             isUnderscoreReadonlyColumn, isAiPromptColumn, sqlQuote, schemaExample, vwdToken,
+            normalizeUpdateRuleText,
         });
         return sharedTablePrompts;
     }
@@ -1605,13 +1642,11 @@
         } catch (e) { return false; }
     }
 
-    function attachProseMvuRules(schema, shapeInfo, entries, initvar, scripts = [], report) {
+    function createMvuRulePathResolver(schema, initvar) {
         const layout = buildLayout(schema).entries;
         const prefixOf = entry => entry.kind === 'pathArray' || entry.kind === 'nestedArray'
             ? entry.path : entry.kind === 'nestedRows' ? [...entry.parentPath, entry.childKey] : (entry.writePaths && entry.writePaths[0] || [entry.group]);
         const owners = layout.map(entry => ({ entry, prefix: prefixOf(entry), group: schema.find(g => g.tableName === entry.table) }));
-        if (report) report.note('原变量路径映射（仅供核对，不注入填表说明）：' +
-            owners.map(o => '/' + o.prefix.join('/') + ' → ' + o.group.tableName).join('；') + '。');
         const partMatches = (pattern, part) => part !== undefined && (pattern === part || pattern.includes('*') &&
             new RegExp('^' + pattern.split('*').map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$').test(part));
         const matches = (prefix, path) => prefix.every((part, i) => path[i] !== undefined && partMatches(path[i], part));
@@ -1639,6 +1674,21 @@
             const columnPathOf = c => (owner.entry.cols || []).find(mapped => mapped.zh === c.zh)?.path || c.path;
             const columns = (group.columns || []).filter(c => !c.isOverflow && Array.isArray(columnPathOf(c)) && columnPathOf(c).length);
             const row = owner.entry.kind === 'rows' || owner.entry.kind === 'nestedRows';
+            // An opaque record value is one JSON cell per identity, not a
+            // flattened object field named after the physical value column.
+            if (row && owner.entry.scalarValueCol && suffix.length) {
+                const value = columns.find(c => c.zh === owner.entry.scalarValueCol &&
+                    (c.isObject || c.logicalType === 'jsonObjectOptional'));
+                if (value) {
+                    const record = suffix[0];
+                    if (!record) return null;
+                    const wildcard = /^(?:\{[^{}]+\}|<[^<>]+>|\*)$/.test(record);
+                    return { label: (wildcard ? '对应记录的' : `记录「${record}」的`) + `「${value.zh}」`,
+                        table: group.tableName, json: suffix.length > 1, path: suffix.slice(1),
+                        jsonValue: suffix.length === 1, ...(suffix.length === 1 ? { column: value } : {}),
+                        recordSpecific: wildcard ? '' : record };
+                }
+            }
             let columnPath = row ? path.slice(owner.prefix.length) : path;
             let recordSpecific = '';
             if (row && columnPath.length > 1 && !columns.some(c => matches(columnPathOf(c), columnPath))) {
@@ -1665,6 +1715,22 @@
         };
         const labelOf = (binding, group) => (binding.table === group.tableName ? '' : `「${binding.table}」的`) +
             binding.label + (binding.json ? '内部路径 /' + binding.path.map(p => p.replace(/~/g, '~0').replace(/\//g, '~1')).join('/') : '');
+        function resolve(path) {
+            const candidates = owners.filter(o => matches(o.prefix, path));
+            const depth = Math.max(0, ...candidates.map(o => o.prefix.length));
+            const results = candidates.filter(o => o.prefix.length === depth).map(owner => ({ owner, binding: bind(owner, path) }));
+            if (!depth || results.length !== 1 || !results[0].binding) return null;
+            const { owner, binding } = results[0];
+            return { ...binding, label: `「${owner.group.tableName}」的` + labelOf(binding, owner.group),
+                readonly: !!(owner.group.aiReadonly || binding.column && binding.column.aiReadonly) };
+        }
+        return { owners, partMatches, matches, bind, labelOf, resolve };
+    }
+
+    function attachProseMvuRules(schema, shapeInfo, entries, initvar, scripts = [], report) {
+        const { owners, partMatches, matches, bind, labelOf } = createMvuRulePathResolver(schema, initvar);
+        if (report) report.note('原变量路径映射（仅供核对，不注入填表说明）：' +
+            owners.map(o => '/' + o.prefix.join('/') + ' → ' + o.group.tableName).join('；') + '。');
         for (const owner of owners) if (/^[_$]/.test(String(owner.prefix[0] || ''))) owner.group.aiReadonly = true;
         const specifications = (shapeInfo.proseRuleDocuments || []).flatMap(doc => doc.sections).filter(s => s.path && !s.unmapped);
         const conflicting = new Set();
@@ -2657,6 +2723,8 @@
         // 复用 group 上已经填好插槽的同一计划对象，因此顺序必须是先 generateTemplate
         // 再 buildLayout。布局本身不依赖模板内容，两者仍从同一 schema 派生。
         const template = opts.template || generateTemplate(schema, { mode, report, ddlIncludeCheck: opts.ddlIncludeCheck, targetSpVersion: opts.targetSpVersion });
+        for (const group of schema) for (const issue of group._unresolvedProtocolRules || [])
+            report.warn(`表格「${group.tableName}」的更新说明协议迁移未完成：${issue}；原说明保留，不视为已完整清理。`, 'schema');
         // 复用调用方已有模板时不会有新的 note，用同一规则现算一份插槽计划，避免布局里
         // 存下空计划而运行期无法按字段替换说明。
         if (opts.template) ensureVwdSlotPlans(schema, { template, mode, report, targetSpVersion: opts.targetSpVersion });
@@ -2706,6 +2774,8 @@
 
         // 3. 世界书处理
         const newEntries = [];
+        let generatedEntryId = entries.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1;
+        const rulePathResolver = createMvuRulePathResolver(schema, initvar);
         // MVU 剧情条目宏：{{get_message_variable::路径}} 改写为数据库表引用
         // （剧情条目保留；变量值由插件注入表格数据提供，宏本身在数据库环境无解析器）
         function rewritePlotMacros(text) {
@@ -2730,8 +2800,8 @@
             // [mvu_update] 的剧情/机制文本”。format_message_variable、
             // get_message_variable、getvar(stat_data...) 都只是读取变量，常被业务规则
             // 用作条件或插值；仅凭读取痕迹绝不能整条删除。
-            const explicitUpdateEntry = /\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment);
-            const entryTitle = comment.replace(/\[mvu[ _-]?update\]|\[mvuupdate\]/ig, '').trim();
+            const explicitUpdateEntry = /\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/i.test(comment);
+            const entryTitle = comment.replace(/\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/ig, '').trim();
             // 一部分 Zod 卡没有 [mvu_update] 前缀，只用中文专名区分规则与
             // 输出协议。必须同时校验 comment 和正文结构，避免仅因普通剧情提到
             // “变量更新规则”就删除整个条目。
@@ -2772,15 +2842,24 @@
             if (splitRules) {
                 if (outputDocument) report.note(`输出条目「${comment}」已移除确认的格式块，未识别的补充字段保留并报告；字段名属于支持的作者约定，不是 MVU 标准。`);
                 if (splitRules.removed) report.note(`规则条目「${comment}」已移除 ${splitRules.removed} 项迁入表格说明的规则，仅保留未承接内容。`);
-                report.warn(`规则条目「${comment}」剩余内容未迁入填表侧，保留原条目中的未承接部分，仍按原世界书设置注入；请核对是否保留。`, 'schema');
+                // Remaining sections are offered to the worldbook routing pass
+                // below; a template receipt is never emitted for this second path.
             } else if ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent) {
                 report.warn(`规则条目「${comment}」无法确认为完整静态规则文档，已保留原条目；已提取的规则可能不完整，请核对后决定是否停用原条目。`, 'schema');
             }
-            if (!isPlot && /<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]/i.test(content)) {
-                report.note(`世界书条目「${comment}」含旧变量更新块，无法确认整条仅负责输出协议，已保留；仍按原世界书设置注入，更新块由数据桥在运行时解析。`);
-            }
+            const remaining = splitRules ? splitRules.content : content;
+            const routed = !isPlot ? migrateWorldbookUpdateRules(remaining, {
+                updateOnly: (explicitUpdateEntry || dedicatedRuleEntry) && isPureMvuRuleDocument(remaining) ||
+                    (explicitUpdateEntry || dedicatedOutputEntry) && isMvuOutputDocument(remaining),
+                resolvePath: rulePathResolver.resolve,
+            }) : { body: remaining, fill: '', migrated: 0, issues: [] };
+            for (const issue of routed.issues) report.warn(`条目「${comment}」更新规则迁移未完成：${issue}；未承接内容保留，不视为已完整清理。`, 'schema');
+            if (routed.migrated) report.note(`条目「${comment}」已将 ${routed.migrated} 个完整更新段落保留在世界书填表侧；原条件和触发设置保留，正文侧屏蔽，不重复写入表格说明。`);
+            if (splitRules && !routed.migrated) report.warn(`规则条目「${comment}」剩余内容未迁入填表侧，保留原条目中的未承接部分，仍按原世界书设置注入；请核对是否保留。`, 'schema');
+            if (!isPlot && !routed.migrated && /<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]/i.test(remaining))
+                report.note(`世界书条目「${comment}」含未承接的旧变量更新要求，已保留并报告；转换结果的更新提示尚未完整迁移。`);
             // EJS 重写
-            const rw = rewriteEjsConditions(splitRules ? splitRules.content : content, layout, report, {
+            const rw = rewriteEjsConditions(routed.migrated && !routed.body.trim() ? routed.fill : routed.body, layout, report, {
                 translateSimpleEjs: !!opts.translateSimpleEjs,
             });
             if (rw.items.length) {
@@ -2797,12 +2876,26 @@
                 report.auto(`条目「${comment}」的 MVU 宏 {{get_message_variable::…}} 已改写为数据库表引用（剧情条目保留）。`);
             }
             copy.content = afterMacros;
+            if (!isPlot && (routed.migrated && !routed.body.trim() || !routed.migrated && explicitUpdateEntry)) {
+                copy.comment = getUpdateRuleMigration().fillTitle(comment, copy.id);
+                if (copy.comment !== comment) report.note(`更新专用条目「${comment}」使用标题「${copy.comment}」；原名称保留在此报告，避免数据库配置页按名称隐藏并清除选择。`);
+            } else if (routed.migrated) copy.comment = comment.replace(/\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/ig, '').trim();
             newEntries.push(copy);
+            if (routed.migrated && routed.body.trim()) {
+                const fillEntry = deepClone(e);
+                fillEntry.id = generatedEntryId++;
+                delete fillEntry.uid;
+                fillEntry.comment = getUpdateRuleMigration().fillTitle(comment, fillEntry.id, true);
+                report.note(`原条目「${comment}」的完整更新段落使用标题「${fillEntry.comment}」；原名称保留在此报告。`);
+                const fillRw = rewriteEjsConditions(routed.fill, layout, report, { translateSimpleEjs: !!opts.translateSimpleEjs });
+                fillEntry.content = rewritePlotMacros(rewriteFormatMessageVariableMacros(fillRw.text, report, `条目「${fillEntry.comment}」`));
+                newEntries.push(fillEntry);
+            }
         }
         isolateCrossEntryEjsFallbacks(newEntries, report);
         // 把模板以 base64 写入世界书条目（keys: __ACU_TEMPLATE_DATA__），供插件/开场页按需导入
         const tplB64 = toBase64(JSON.stringify(template));
-        const maxId = entries.reduce((m, e) => Math.max(m, Number(e.id) || 0), 0);
+        const maxId = newEntries.reduce((m, e) => Math.max(m, Number(e.id) || 0), 0);
         newEntries.push({
             id: maxId + 1,
             keys: ['__ACU_TEMPLATE_DATA__'],
@@ -3460,6 +3553,8 @@
             ['__MVU2SHUJUKU_SCHEMA_EXECUTION_FACTORY__', getSchemaExecutionFactory],
             ['__MVU2SHUJUKU_SCHEMA_EXECUTION_BROWSER_FACTORY__', getSchemaExecutionBrowserFactory],
             ['__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__', getSchemaLayoutFactory],
+            ['__MVU2SHUJUKU_SHEET_IDENTITY_FACTORY__', getSheetIdentityFactory],
+            ['__MVU2SHUJUKU_UPDATE_RULE_MIGRATION_FACTORY__', getUpdateRuleMigrationFactory],
             ['__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__', getTablePromptsFactory],
             ['__MVU2SHUJUKU_STATUS_USAGE_FACTORY__', getStatusUsageFactory],
             ['__MVU2SHUJUKU_RUNTIME_SESSION_FACTORY__', getRuntimeSessionFactory],

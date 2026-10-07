@@ -11,7 +11,7 @@ const output = rules => 'variables_update_format:\n  rule:\n' + rules.map(r=>'  
 test('输出约束：格式块移除，未知补充规则保留并报告', () => {
     const rules = ['数量不能少于零，清空时保留等级记录', 'When a typed variable requires an empty state, assign a concrete empty value. Do not use null.', 'When updating variables, preserve EVERY piece of information verbatim', '不得把 JSONPatch 阵营的物品移出仓库'];
     const r = run(output(rules));
-    const entry = r.card.character_book.entries.find(e => e.comment.includes('变量输出规则'));
+    const entry = r.card.character_book.entries.find(e => /\[M2SJK\]/.test(e.comment));
     assert(entry);
     for (const rule of rules) assert(entry.content.includes(rule));
     assert.doesNotMatch(entry.content, /<UpdateVariable>|<JSONPatch>/);
@@ -22,26 +22,36 @@ test('输出约束：未知字段不因短长措辞或协议名而整条删除',
     for (const delta of ['update the value of existing number paths by a delta value', 'update the value of existing number paths by a delta value (the delta value MUST be a number without quotes)']) {
         const content = '变量输出格式:\n  rule:\n    - JSON Patch:\n        - delta: '+delta+'\n    - 字段只读要求\n  format: |-\n'+format.split('\n').map(x=>'    '+x).join('\n');
         const r = run(content, '[mvu_update]变量输出格式');
-        const entry = r.card.character_book.entries.find(e=>e.comment.includes('变量输出格式'));
+        const entry = r.card.character_book.entries.find(e=>/\[M2SJK\]/.test(e.comment));
         assert(entry.content.includes(delta));
         assert(entry.content.includes('字段只读要求'));
         assert.doesNotMatch(entry.content, /<UpdateVariable>|<JSONPatch>/);
     }
 });
-test('输出约束：EJS、不可解析或混入格式块的业务内容保守保留', () => {
-    for (const text of [output(['数量不能少于零'])+'\n<% if (true) { %>业务<% } %>', '每轮必须输出<UpdateVariable>，库存低于零时禁止更新', 'variables_update_format:\n  format: |-\n    库存不得低于零\n    '+format]) {
+test('输出约束：边界明确的EJS格式段落分流，业务正文和条件保留', () => {
+    const text = output(['数量不能少于零'])+'\n<% if (true) { %>业务<% } %>';
+    const r = run(text, '变量输出规则');
+    const body = r.card.character_book.entries.find(e=>e.comment === '变量输出规则');
+    const fill = r.card.character_book.entries.find(e=>/\[M2SJK\]/.test(e.comment));
+    assert.match(body.content, /<% if \(true\) { %>业务<% } %>/);
+    assert.match(fill.content, /数量不能少于零/);
+    assert.doesNotMatch(body.content + fill.content, /JSONPatch/);
+});
+test('输出约束：不可解析或跨段格式块的业务内容保守保留', () => {
+    for (const text of ['每轮必须输出<UpdateVariable>，库存低于零时禁止更新', 'variables_update_format:\n  format: |-\n    库存不得低于零\n    '+format]) {
         assert.ok(run(text, '变量输出规则').card.character_book.entries.some(e=>e.content === text));
     }
 });
 test('输出约束：剧情条目和非输出文档不因名称或关键词删除', () => {
     for (const [text,title] of [[output(['库存不可清空']),'[mvu_plot]变量输出格式'], ['JSONPatch 阵营的商人不出售违禁品','[mvu_update]变量输出格式']]) {
         const r = run(text,title);
-        assert.ok(r.card.character_book.entries.some(e=>e.comment===title && e.content===text));
+        assert.ok(r.card.character_book.entries.some(e=>e.content===text &&
+            (e.comment===title || /\[M2SJK\]/.test(e.comment))));
     }
 });
 
 function ruleEntry(result) {
-    return result.card.character_book.entries.find(e => e.comment === '[mvu_update]变量更新规则');
+    return result.card.character_book.entries.find(e => /\[M2SJK\]/.test(e.comment));
 }
 test('规则拆分：已迁移字段移除，任意未匹配分组及注入设置保留', () => {
     const content = '变量更新规则:\n  状态:\n    数量:\n      type: number\n      range: 0~10\n      check: 数量变化时更新\n  任意分组:\n    # 保留此处的补充说明\n    check: 发现占位值时按设定补全\n';

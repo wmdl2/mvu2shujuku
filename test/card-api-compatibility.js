@@ -4,6 +4,7 @@ const { core, assert, applyingApi } = require('./helpers');
 const vm = require('vm');
 const createCardApi = require('../src/card-api');
 const createJsSource = require('../src/js-source');
+const createRuntimeGlobals = require('../src/runtime-globals');
 const { nativeRuntime } = require('./runtime-native');
 const clone = value => JSON.parse(JSON.stringify(value));
 
@@ -73,6 +74,45 @@ test('转换接入：世界书别名仅路由绑定书，原 API 不变，过期
     assert.strictEqual(facade.getWorldbook('book'), 'book_DB'); facade.replaceWorldbook('other', []);
     assert.deepStrictEqual(calls, ['book_DB', 'other']); assert.deepStrictEqual(original.getWorldbookNames(), ['book_DB', 'other']);
     current = false; assert.throws(() => facade.replaceWorldbook('book', []), /会话已变化/);
+});
+
+test('转换接入：直接世界书函数复用别名、保留接收者、切卡精确还原', () => {
+    for (const factory of [createCardApi, vm.runInNewContext('(' + createCardApi.toString() + ')')]) {
+        const w = { document: {} }, calls = [];
+        for (const name of ['getWorldbook', 'replaceWorldbook', 'updateWorldbookWith', 'createWorldbookEntries', 'deleteWorldbookEntries']) {
+            Object.defineProperty(w, name, { configurable: true, writable: true, enumerable: false,
+                value: function (book, ...args) { assert.strictEqual(this, w); calls.push({ name, book, args }); return book; } });
+        }
+        w.getWorldbookNames = function () { assert.strictEqual(this, w); return ['book_DB', 'other']; };
+        const original = Object.getOwnPropertyDescriptor(w, 'getWorldbook');
+        let current = true;
+        const api = factory({ readMetadata: () => ({ worldbookAliases: { book: 'book_DB' } }), isCurrent: () => current, readMvu: () => ({}) });
+        const shared = { list: [] }, globals = createRuntimeGlobals({ readSharedState: () => shared, isOursShimFn: fn => !!fn?.__mvu2shujuku, readFake: () => null });
+        assert.strictEqual(api.patchWorldbookGlobals(w, globals), 6);
+        assert.strictEqual(api.patchWorldbookGlobals(w, globals), 0);
+        for (const name of ['getWorldbook', 'replaceWorldbook', 'updateWorldbookWith', 'createWorldbookEntries', 'deleteWorldbookEntries']) {
+            assert.strictEqual(w[name]('book', 7), 'book_DB');
+        }
+        assert.deepStrictEqual(Array.from(w.getWorldbookNames()), ['book_DB', 'other', 'book']);
+        assert.ok(calls.every(c => c.book === 'book_DB' && c.args[0] === 7));
+        const saved = w.getWorldbook;
+        current = false;
+        assert.throws(() => saved('book'), /会话已变化/);
+        globals.restoreAll();
+        assert.deepStrictEqual(Object.getOwnPropertyDescriptor(w, 'getWorldbook'), original);
+        assert.strictEqual(w.getWorldbook('book'), 'book');
+        assert.strictEqual(typeof w.getCharWorldbookNames, 'undefined');
+    }
+});
+
+test('转换接入：还原世界书函数时不覆盖其他插件的后续接管', () => {
+    const w = { document: {}, getWorldbook: name => name }, shared = { list: [] };
+    const globals = createRuntimeGlobals({ readSharedState: () => shared, isOursShimFn: fn => !!fn?.__mvu2shujuku, readFake: () => null });
+    const api = createCardApi({ readMetadata: () => ({ worldbookAliases: { book: 'book_DB' } }), isCurrent: () => true, readMvu: () => ({}) });
+    api.patchWorldbookGlobals(w, globals);
+    const foreign = () => 'foreign'; w.getWorldbook = foreign;
+    globals.restoreAll();
+    assert.strictEqual(w.getWorldbook, foreign);
 });
 
 test('转换接入：创建单条档案先校验再落库，失败不报告成功，普通消息原样委派', async () => {

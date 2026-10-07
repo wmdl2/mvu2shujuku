@@ -6,6 +6,7 @@
 
 | 当前问题 | 入口 |
 | --- | --- |
+| 社区 15 卡深层审查、完整段落分流与兼容边界（v0.8.0） | [审查记录](validation/2026-10-07-community-deep-audit.md) |
 | 重转世界书冲突、覆盖/另存与可选 JSON 备份 | [v0.7.0 验证](validation/2026-10-07-worldbook-save.md) |
 | MVU 更新前回调的正文写回与独立保存重试 | [v0.7.0 验证](validation/2026-10-07-mvu-message-update.md) |
 | 当前变量展示保留、回复状态块清理与相邻回调边界 | [v0.7.0 验证](validation/2026-10-07-mvu-status-display.md) |

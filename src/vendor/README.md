@@ -7,6 +7,12 @@ MagVarUpdate `util/common.ts` 的 `parseString` 完全一致（YAML → JSON5 �
 `jsonrepair-lite.js` 是 jsonrepair 单独的 33KB bundle，转换时内联进**卡内桥**，
 让桥对 AI 输出的略畸形 JSONPatch 也能容错解析（与官方 extractCommands 一致）。
 
+`../sheet-identity.js` 的自包含工厂内嵌 pinyin-pro@3.28.2 的原始 UMD 发布文件和 MIT 许可，
+匹配受测龙血玄黄·数据库 1.2.5 的物理表名算法 v1。原始文件为 npm 包的 `dist/index.js`，
+SHA-256 `23b01bfc76de73a041dd2b1600f146f56a02611ae9033f0042d5d9ab19bce9d7`。
+使用完整词组和繁体规则检测表名冲突；不以单字拼音字典近似宿主行为。
+工厂进入插件构建，角色卡只保存分配后的表名，不包含此拼音库。
+
 ## 重新生成
 
 ```powershell

@@ -623,7 +623,8 @@ function installExtensionRuntime(window) {
                             const baseAll = core.statDataFromTables(activeLayout, baseTemplate);
                             const source = activeGreetingSourceSnapshot();
                             if (source) guardGreetingSource(session, source);
-                            const opening = await computeActiveGreetingSnapshot(baseAll, source);
+                            const opening = await computeActiveGreetingSnapshot(baseAll, source,
+                                { deferSchema: !!(readCardApiMetadata().schemaKeys || []).length });
                             if (!isRuntimeSessionCurrent(session)) return;
                             if (opening) {
                                 const finalStat = opening.finalWrap && opening.finalWrap.stat_data
@@ -683,7 +684,7 @@ function installExtensionRuntime(window) {
                 autoInitState.doneSession = session.key;
                 const greetingState = greetingInitState(key);
                 greetingState.ready = true;
-                if (preparedOpening && preparedOpening.opening) {
+                if (preparedOpening && preparedOpening.opening && !preparedOpening.opening.schemaDeferred) {
                     greetingState.appliedFp = preparedOpening.opening.fp;
                     greetingState.appliedSourceFp = preparedOpening.opening.sourceFp || '';
                     greetingState.pendingFp = '';
@@ -1143,7 +1144,7 @@ function installExtensionRuntime(window) {
                 String(msg.mes != null ? msg.mes : (msg.message || '')) === source.text;
         };
     }
-    async function computeActiveGreetingSnapshot(baseAll, sourceSnapshot) {
+    async function computeActiveGreetingSnapshot(baseAll, sourceSnapshot, options = {}) {
         const source = sourceSnapshot || activeGreetingSourceSnapshot();
         if (!source) return null;
         const { first, text, m, updateSource, sourceFp } = source;
@@ -1188,8 +1189,16 @@ function installExtensionRuntime(window) {
             await emitMvuEvent('mag_before_message_update', updateContext);
             finalWrap = updateContext.variables || finalWrap;
             messageContent = updateContext.message_content;
+        } else if (m && !options.deferSchema) {
+            // A pure InitVar swipe still passes through the registered author
+            // Schema. Run it at play time so clock-dependent transforms retain
+            // their real environment rather than freezing conversion-time data.
+            finalWrap.stat_data = await validateCardStat(finalWrap.stat_data);
+            finalWrap.display_data = JSON.parse(JSON.stringify(finalWrap.stat_data));
         }
-        return { first, text, messageContent, swipe: source.swipe, hasInitvar: !!m, updateSource, sourceFp, fp, baseStat: currentAll.stat_data || {}, finalWrap };
+        return { first, text, messageContent, swipe: source.swipe, hasInitvar: !!m,
+            schemaDeferred: !!(m && !updateSource && options.deferSchema),
+            updateSource, sourceFp, fp, baseStat: currentAll.stat_data || {}, finalWrap };
     }
 
     async function applyActiveGreetingInitvar() {
@@ -4419,6 +4428,7 @@ function installExtensionRuntime(window) {
                     Object.defineProperty(helper, '__mvu2shujukuCardApi', { value: currentCardApi });
                     runtimeGlobals.patch(w, 'TavernHelper', helper);
                 }
+                currentCardApi.patchWorldbookGlobals(w, runtimeGlobals);
                 if (typeof w.createChatMessages === 'function' && w.createChatMessages.__mvu2shujukuCardApi !== currentCardApi) {
                     const create = currentCardApi.wrapCreate(runtimeGlobals.original(w, 'createChatMessages'), w);
                     create.__mvu2shujuku = true; create.__mvu2shujukuCardApi = currentCardApi; runtimeGlobals.patch(w, 'createChatMessages', create);
@@ -6373,7 +6383,7 @@ function createWorldbookRequestFilterFactory(deps) {
             if (!Array.isArray(entries)) continue;
             for (let i = entries.length - 1; i >= 0; i--) {
                 const entry = entries[i];
-                if (entry && names.has(entry.world) && /\[mvu_update\]/i.test(String(entry.comment || '')) &&
+                if (entry && names.has(entry.world) && /\[(?:mvu_update|M2SJK)\]/i.test(String(entry.comment || '')) &&
                     !/\[mvu_plot\]/i.test(String(entry.comment || ''))) entries.splice(i, 1);
             }
         }

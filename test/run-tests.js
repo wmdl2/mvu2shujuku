@@ -3383,11 +3383,13 @@ test('转换产物齐全', () => {
     assert.ok(c.extensions.mvu2shujuku, '应有转换标记');
     assert.ok(typeof c.extensions.mvu2shujuku.layout === 'string' && Array.isArray(JSON.parse(c.extensions.mvu2shujuku.layout)), '转换标记应包含布局（供扩展重建 stat_data）');
     assert.ok(!c.character_book.entries.some(e => /\[initvar\]/i.test(String(e.comment || ''))), '初始化应迁移到数据库模板，状态展示不因标题删除');
-    const unconfirmedOutput = c.character_book.entries.find(e => /变量输出格式强调/i.test(String(e.comment || '')));
+    const unconfirmedOutput = c.character_book.entries.find(e => /\[M2SJK\]/.test(String(e.comment || '')) &&
+        /The following must be inserted to the end of reply/.test(e.content));
     assert.ok(unconfirmedOutput, '未确认完整格式文档的条目不得仅凭标题删除');
-    assert.strictEqual(unconfirmedOutput.content, (card.data || card).character_book.entries.find(e => /变量输出格式强调/i.test(String(e.comment || ''))).content);
-    assert.match(r.reportText, /无法确认整条仅负责输出协议，已保留/);
-    const remainingRules = c.character_book.entries.find(e => e.comment === '[mvu_update]');
+    assert.match(unconfirmedOutput.content, /The following must be inserted to the end of reply, and cannot be omitted/);
+    assert.doesNotMatch(unconfirmedOutput.content, /<\/?UpdateVariable>|<\/?JSONPatch>/);
+    assert.match(r.reportText, /完整更新段落保留在世界书填表侧/);
+    const remainingRules = c.character_book.entries.find(e => /\[M2SJK\]/.test(e.comment) && /\$器灵台词/.test(e.content));
     assert.ok(remainingRules, '未进入填表说明的私有字段规则应保留');
     assert.match(remainingRules.content, /\$器灵台词/);
     assert.doesNotMatch(remainingRules.content, /每推进一次剧情\/回合就减1|道侣 —|灵宠 —|人物 —|玉简 —/, '已承接的字段约束和明确归属的提醒应移除');
@@ -5093,7 +5095,8 @@ test("旧桥回归：仅移除 MVU 引擎/纯 Schema 启动脚本，其他外部
     assert.strictEqual(userScript.type, 'script', '保留脚本应补齐酒馆助手要求的 type');
     assert.ok(thScripts.some(s => String(s.name || '') === '外部MVU业务模块'), '仅因未知 import URL 含 mvu 不得删除业务模块');
     assert.ok(thScripts.some(s => String(s.content || '').includes('非 MVU 脚本')), '应保留非 MVU 脚本');
-    assert.ok((d.character_book.entries || []).some(e => String(e.comment || '').includes('用户最新输入')),
+    const inputContext = card.data.character_book.entries.find(e => e.content.includes('lastUserMessage'));
+    assert.ok((d.character_book.entries || []).some(e => /\[M2SJK\]/.test(e.comment || '') && e.content === inputContext.content),
         '标记为 mvu_update 的短条目可能是额外模型上下文，不得仅因正文短就整条删除');
     const front = (d.extensions && d.extensions.regex_scripts || []).find(rx => String(rx.scriptName || '') === '前端');
     assert.ok(front && String(front.replaceString || '').includes('__mvu2shujukuFrontendLoaded'), '整页注入前端应加载守卫');
@@ -10696,6 +10699,8 @@ require('./vwd-prompt');
 require('./relationship-lifecycle');
 require('./numeric-write-policy');
 require('./hidden-columns');
+require('./sheet-identity');
+require('./update-rule-migration');
 require('./sp-version');
 require('./compact-table-prompts');
 require('./sp-business-events');

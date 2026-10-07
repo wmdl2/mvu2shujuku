@@ -2,7 +2,7 @@
 
 // 结构推导与布局生成；解析库、命名及词法服务由调用方注入。
 function createSchemaLayout(dependencies) {
-    const { createJsSource, getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, maskJsStringsAndComments, createStatusUsage, isPromptVisibleColumn, isMvuOutputDocument = () => false, vwdExperimental = () => false, canValidateRegisteredSchema = () => false } = dependencies;
+    const { createJsSource, getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, physicalTableName, maskJsStringsAndComments, createStatusUsage, isPromptVisibleColumn, isMvuOutputDocument = () => false, vwdExperimental = () => false, canValidateRegisteredSchema = () => false } = dependencies;
     function leafInfo(v) {
             if (Array.isArray(v)) {
                 return { value: v.length > 0 ? v[0] : '', desc: v.length > 1 ? String(v[1]) : '' };
@@ -1225,7 +1225,8 @@ function createSchemaLayout(dependencies) {
                         report.manual(`Zod Schema 有 ${catchItems.length} 处 .catch(fallback) 非法输入回退未静态模拟（如 ${samples}${catchItems.length > 6 ? ' 等' : ''}）；字段结构与可声明约束仍已迁移。有本地注册 Schema 的脚本时由运行时校验执行回退，否则非法数据库值由 CHECK/填表重试处理。`);
                     }
                     for (const item of detailed.slice(0, 20)) {
-                        report.manual(`Zod 字段「${item.path || '未知路径'}」含无法静态等价迁移的 ${item.kind}：${item.expression}。数据库结构与读写仍保留；静态数据库层不会执行该自定义校验/转换，有本地注册 Schema 的脚本时由运行时候选校验执行。`);
+                        const expression = item.expression == null || item.expression === '' ? '' : `：${item.expression}`;
+                        report.manual(`Zod 字段「${item.path || '未知路径'}」含无法静态等价迁移的 ${item.kind}${expression}。数据库结构与读写仍保留；静态数据库层不会执行该自定义校验/转换，有本地注册 Schema 的脚本时由运行时候选校验执行。`);
                     }
                     if (detailed.length > 20) {
                         report.manual(`另有 ${detailed.length - 20} 条 Zod 自定义语义未逐条列出，请检查原 Schema 脚本。`);
@@ -2840,18 +2841,27 @@ function createSchemaLayout(dependencies) {
                 return `${normalizeStructuralMacroName(groupName)}表`;
             }
     
-            function claimTopLevelTableName(groupName) {
-                const preferred = makeGroupTableName(groupName);
+            function claimTableName(preferred, path) {
                 let tableName = preferred;
-                if (seenTables.has(tableName)) {
-                    const stem = tableName.endsWith('表') ? tableName.slice(0, -1) : tableName;
+                if (seenTables.has(physicalTableName(tableName))) {
+                    let stem = tableName.endsWith('表') ? tableName.slice(0, -1) : tableName;
                     let n = 2;
-                    while (seenTables.has(`${stem}${n}表`)) n++;
+                    // A suffix beyond the host's 48-character slug is invisible.
+                    // Shorten only the colliding display stem until the number survives.
+                    while (true) {
+                        while (stem && !physicalTableName(`${stem}${n}表`).endsWith(`${n}biao`)) stem = Array.from(stem).slice(0, -1).join('');
+                        if (!seenTables.has(physicalTableName(`${stem}${n}表`))) break;
+                        n++;
+                    }
                     tableName = `${stem}${n}表`;
-                    report.note(`表名「${preferred}」静态规范化后重名（组「${groupName}」），使用「${tableName}」。`);
+                    report.note(`表名「${preferred}」与已有表的数据库物理名称冲突（原变量路径「${path.join('.')}」），使用「${tableName}」；变量路径与数据保持不变。`);
                 }
-                seenTables.add(tableName);
+                seenTables.add(physicalTableName(tableName));
                 return tableName;
+            }
+
+            function claimTopLevelTableName(groupName) {
+                return claimTableName(makeGroupTableName(groupName), [groupName]);
             }
     
             // 从嵌套路径派生的表统一保留完整来源路径。除了避免同名子表碰撞，
@@ -3599,17 +3609,7 @@ function createSchemaLayout(dependencies) {
                     }
                 }
                 for (const ct of g.childTables) {
-                    let tableName = makePathTableName(ct.path, ct.key);
-                    if (seenTables.has(tableName)) {
-                        // 完整路径仍可能因源数据本身重名，保留稳定编号作为最后兜底。
-                        const stem = tableName.endsWith('表') ? tableName.slice(0, -1) : tableName;
-                        let n = 2;
-                        while (seenTables.has(`${stem}${n}表`)) n++;
-                        const alt = `${stem}${n}表`;
-                        report.note(`派生表路径「${(ct.path || [g.name, ct.key]).join('.')}」与其他表重名，使用表名「${alt}」。`);
-                        tableName = alt;
-                    }
-                    seenTables.add(tableName);
+                    const tableName = claimTableName(makePathTableName(ct.path, ct.key), ct.path || [g.name, ct.key]);
                     if (ct.array) {
                         const arrayRows = [];
                         const values = [];
