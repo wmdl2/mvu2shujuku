@@ -101,7 +101,7 @@ async function runtimeTest(page, source = syntheticCard(), convertCore = core, m
         return response.json();
     }, card);
     const avatar = imported.file_name + '.png';
-    if (process.argv.includes('--only=card-api') || process.argv.some(arg=>['--only=community-cards','--only=remote-schema'].includes(arg))) await page.evaluate(async avatar => {
+    if (process.argv.includes('--only=card-api') || process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update'].includes(arg))) await page.evaluate(async avatar => {
         const st = await import('/script.js');
         const ctx = window.SillyTavern.getContext(), helper = ctx.extensionSettings.tavern_helper;
         helper.script.enabled.characters = [...new Set([...helper.script.enabled.characters, avatar])];
@@ -110,16 +110,23 @@ async function runtimeTest(page, source = syntheticCard(), convertCore = core, m
     }, avatar);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(avatar => window.SillyTavern?.getContext().characters.some(ch => ch.avatar === avatar), avatar, { timeout: 90000 });
-    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema'].includes(arg))) await page.evaluate(async () => {
+    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update'].includes(arg))) await page.evaluate(async () => {
         const { power_user } = await import('/scripts/power-user.js');
         power_user.world_import_dialog = false;
     });
     await page.evaluate(avatar => { const ctx = window.SillyTavern.getContext(); return ctx.selectCharacterById(ctx.characters.findIndex(ch => ch.avatar === avatar)); }, avatar);
-    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema'].includes(arg))) await page.evaluate(async () => {
+    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update'].includes(arg))) await page.evaluate(async () => {
         const world = await import('/scripts/world-info.js');
         await world.importEmbeddedWorldInfo(true);
     });
-    await page.waitForFunction(() => window.Mvu?.getMvuData?.()?.stat_data?.背包?.length === 4 && window.SillyTavern.getContext().chat.some(m => m.TavernDB_ACU_IsolatedData), {}, { timeout: Number(process.env.MVU_INIT_TEST_TIMEOUT || 90000) });
+    await page.waitForFunction(() => {
+        try {
+            return window.Mvu?.getMvuData?.()?.stat_data?.背包?.length === 4 && window.SillyTavern.getContext().chat.some(m => m.TavernDB_ACU_IsolatedData);
+        } catch (error) {
+            if (error?.code === 'MVU_DATA_NOT_READY') return false;
+            throw error;
+        }
+    }, {}, { timeout: Number(process.env.MVU_INIT_TEST_TIMEOUT || 90000) });
     await waitCommittedGold(page, 10);
     const state = { avatar, chat: await page.evaluate(() => window.SillyTavern.getContext().chatId) };
     record('new-chat' + (modeLabel ? '-' + modeLabel : ''), await page.evaluate(() => window.Mvu.getMvuData().stat_data));
@@ -960,7 +967,8 @@ async function main() {
         try {
             const only = process.argv.find(arg => arg.startsWith('--only='))?.slice(7);
             const saved = path.join(work, 'state.json');
-            if (only === 'card-api') await require('./card-api-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
+            if (only === 'worldbook-save') await require(root + '/test/worldbook-save-host')({ page, record, work });
+            else if (only === 'card-api') await require('./card-api-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
             else if (only === 'remote-schema') await require('./remote-schema-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
             else if (only === 'community-cards') {
                 const harness = { page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record };
@@ -968,6 +976,8 @@ async function main() {
                 await require('./remote-schema-host')(harness);
             }
             else if (only === 'rollback') await require('./rollback-host')({ page, runtimeTest, vwdCard, setStorageMode, assertStorageMode, openState, waitCommittedGold, replaceMvuDataWhenIdle, record, work, runId });
+            else if (only === 'message-update') await require(root + '/test/message-update-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
+            else if (only === 'reply-status') await require(root + '/test/reply-status-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, record });
             else if (only === 'compat-probe') await require('./compatibility-probe')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'vwd-prompt') await require('./vwd-prompt-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, captureFill, waitCommittedGold, record, work, runId });
             else if (only === 'nullable-record') await require('./nullable-record-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });

@@ -161,7 +161,7 @@ async function nativeRuntime(source = require('./synthetic-card')(), configure) 
         SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: api,
     };
     win.window = win; win.parent = win; win.top = win; win.globalThis = win;
-    if (configure) configure({ win, context, tables, api });
+    if (configure) configure({ win, context, tables, api, now: () => now });
     vm.createContext(win);
     vm.runInContext(core.assembleExtension({ coreSource: fs.readFileSync(require.resolve('../src/mvu2shujuku'), 'utf8') })['index.js'], win);
     await advance(100);
@@ -702,3 +702,292 @@ test('可空动态记录：实际扩展 replace 立即读回和宿主回调保�
 });
 
 module.exports = { nativeRuntime };
+
+function replyStatusOptions({ win, context }) {
+    context.event_types = { CHAT_CHANGED: 'chat_changed', MESSAGE_RECEIVED: 'received', GENERATION_ENDED: 'ended', CHARACTER_MESSAGE_RENDERED: 'rendered' };
+}
+function reply(text) { return { is_user: false, mes: text, swipe_id: 0 }; }
+
+test('回复状态清理：单数复数完整块、多个块及多行按原 MVU 去除，块外正文保留', async () => {
+    const h = await nativeRuntime(undefined, replyStatusOptions);
+    let calls = 0;
+    const before = JSON.stringify(h.tables);
+    h.context.setChatMessages = async messages => { calls++; h.context.chat[messages[0].message_id].mes = messages[0].message; };
+    const content = '正文前\n<status_current_variable>状态:\n  生命: 8\n</status_current_variable>\n正文中<status_current_variables>第二份\n状态</status_current_variables>正文后';
+    h.context.chat.push(reply(content));
+    await h.context.eventSource.emit('received', 1);
+    await h.context.eventSource.emit('received', 1);
+    await h.context.eventSource.emit('ended');
+    await h.advance(1300);
+    assert.strictEqual(h.context.chat[1].mes, '正文前\n\n正文中正文后');
+    assert.strictEqual(calls, 1, '重复完成事件不能重复保存');
+    await h.context.eventSource.emit('received', 1); await h.advance(1300);
+    assert.strictEqual(calls, 1, '已清理的消息不再保存');
+    assert.strictEqual(JSON.stringify(h.tables), before, '回复展示处理不写变量和业务表');
+});
+test('回复状态清理：残缺、嵌套、属性及不配对的状态块不猜测删除', async () => {
+    const h = await nativeRuntime(undefined, replyStatusOptions);
+    let calls = 0; h.context.setChatMessages = async () => { calls++; };
+    for (const text of ['前<status_current_variable>未闭合', '前</status_current_variable>后',
+        '<status_current_variable><status_current_variables>嵌套</status_current_variables></status_current_variable>',
+        '<status_current_variable class="作者扩展">内容</status_current_variable>',
+        '<status_current_variable>内容</status_current_variables>']) {
+        const id = h.context.chat.length; h.context.chat.push(reply(text));
+        await h.context.eventSource.emit('received', id); await h.advance(1300);
+        assert.strictEqual(h.context.chat[id].mes, text);
+    }
+    assert.strictEqual(calls, 0);
+});
+test('回复状态清理：流式期间保留，完成后清理；补占位符与清理只保存一次', async () => {
+    const h = await nativeRuntime(placeholderCard(), replyStatusOptions);
+    let calls = 0; h.context.setChatMessages = async messages => { calls++; h.context.chat[messages[0].message_id].mes = messages[0].message; };
+    const text = '故事<status_current_variable>变量</status_current_variable>';
+    h.context.chat[0].mes += '\n<StatusPlaceHolderImpl/>';
+    h.context.chat.push(reply(text)); h.context.generating = true; h.context.isStreaming = true;
+    await h.context.eventSource.emit('received', 1); await h.advance(1300);
+    assert.strictEqual(calls, 0); assert.strictEqual(h.context.chat[1].mes, text);
+    h.context.generating = false; h.context.isStreaming = false;
+    await h.context.eventSource.emit('ended'); await h.advance(1300);
+    assert.strictEqual(h.context.chat[1].mes, '故事\n\n<StatusPlaceHolderImpl/>');
+    assert.strictEqual(calls, 1);
+});
+test('回复状态清理：不遍历旧聊天，用户、系统和普通卡保持完整', async () => {
+    const h = await nativeRuntime(undefined, replyStatusOptions);
+    const text = '故事<status_current_variable>变量</status_current_variable>';
+    h.context.chat[0].mes = text;
+    let calls = 0; h.context.setChatMessages = async () => { calls++; };
+    await h.context.eventSource.emit('chat_changed'); await h.context.eventSource.emit('ended'); await h.advance(2000);
+    assert.strictEqual(h.context.chat[0].mes, text, '进入旧聊天或结束事件不能自行扫描旧楼');
+    for (const msg of [{ is_user: true, mes: text }, { is_system: true, mes: text }, { role: 'system', mes: text }, { name: 'System', mes: text }]) {
+        const id = h.context.chat.length; h.context.chat.push(msg);
+        await h.context.eventSource.emit('received', id); await h.advance(1300);
+        assert.strictEqual(msg.mes, text);
+    }
+    delete h.context.characters[0].extensions.mvu2shujuku;
+    h.context.chat.push(reply(text)); await h.context.eventSource.emit('received', h.context.chat.length - 1); await h.advance(1300);
+    assert.strictEqual(h.context.chat.at(-1).mes, text); assert.strictEqual(calls, 0);
+});
+test('回复状态清理：延迟期间切聊天、替换楼层或换 swipe 取消旧任务', async () => {
+    for (const change of ['chat', 'message', 'swipe']) {
+        const h = await nativeRuntime(undefined, replyStatusOptions);
+        let calls = 0; h.context.setChatMessages = async () => { calls++; };
+        const text = '故事<status_current_variable>变量</status_current_variable>';
+        h.context.chat.push(reply(text)); await h.context.eventSource.emit('received', 1);
+        if (change === 'chat') { h.context.chatId = 'native-B'; h.context.chat = [reply('新聊天')]; await h.context.eventSource.emit('chat_changed'); }
+        else if (change === 'message') h.context.chat[1] = reply('替换后的消息');
+        else { h.context.chat[1].swipe_id = 1; h.context.chat[1].mes = '另一分支'; }
+        await h.advance(2500); assert.strictEqual(calls, 0);
+    }
+});
+test('回复状态清理：保存拒绝后重试；保存中重复事件与切聊天不刷新其他楼', async () => {
+    const h = await nativeRuntime(undefined, replyStatusOptions);
+    let calls = 0, renders = 0, release;
+    const text = '故事<status_current_variable>变量</status_current_variable>';
+    h.context.chat.push(reply(text));
+    h.context.setChatMessages = async messages => {
+        calls++; if (calls === 1) throw new Error('公开夹具保存拒绝');
+        h.context.chat[messages[0].message_id].mes = messages[0].message;
+    };
+    await h.context.eventSource.emit('received', 1); await h.advance(2500);
+    assert.strictEqual(calls, 2); assert.strictEqual(h.context.chat[1].mes, '故事');
+    h.win.__TAURITAVERN__ = { api: { chatSurface: { isManagedOwnershipRequired: () => false } } };
+    h.context.updateMessageBlock = () => { renders++; };
+    h.context.setChatMessages = async messages => {
+        calls++; const msg = h.context.chat[messages[0].message_id];
+        await new Promise(resolve => { release = resolve; }); msg.mes = messages[0].message;
+    };
+    h.context.chat.push(reply(text)); await h.context.eventSource.emit('received', 2); await h.advance(1300);
+    await h.context.eventSource.emit('received', 2); await h.context.eventSource.emit('ended'); await h.advance(1300);
+    assert.strictEqual(calls, 3, '保存中不重复调用 setter');
+    h.context.chatId = 'native-B'; h.context.chat = [reply('新聊天')]; await h.context.eventSource.emit('chat_changed');
+    release(); await h.advance(0);
+    assert.strictEqual(h.context.chat[0].mes, '新聊天'); assert.strictEqual(renders, 0);
+});
+
+
+async function beforeMessageRuntime(hook, source, configure) {
+    let hooks = 0, saves = 0;
+    const h = await nativeRuntime(source, env => {
+        replyStatusOptions(env);
+        env.win.__MVU2SHUJUKU_YAML_LIBS__ = require('../src/vendor/mvu-yaml-libs');
+        const clockStart = Date.now();
+        env.win.Date = class extends Date { static now() { return clockStart + env.now(); } };
+        env.win.eventEmit = async (name, context) => {
+            if (name === 'mag_before_message_update') { hooks++; await hook(context, env); }
+        };
+        env.context.setChatMessages = async messages => {
+            saves++;
+            env.context.chat[messages[0].message_id].mes = messages[0].message;
+        };
+        if (configure) configure(env);
+    });
+    observeHostWrites(h);
+    await h.advance(2500);
+    return Object.assign(h, { counts: () => ({ hooks, saves }) });
+}
+function addUpdateReply(h, text = '原正文<UpdateVariable>_.add("状态.金币", 1);</UpdateVariable>') {
+    addReplyWithFrame(h); h.context.chat[2].mes = text; h.context.chat[2].swipe_id = 0;
+    return h.context.chat[2];
+}
+test('MVU正文回调：更新后的变量与正文一同采用，重复事件不重放增量命令', async () => {
+    const h = await beforeMessageRuntime(context => {
+        context.variables.stat_data.状态.金币 += 2;
+        context.message_content = '金币：' + context.variables.stat_data.状态.金币;
+    });
+    const message = addUpdateReply(h);
+    await h.context.eventSource.emit('received', 2); await h.advance(6000);
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 13);
+    assert.strictEqual(message.mes, '金币：13');
+    assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 1 });
+    await h.context.eventSource.emit('received', 2); await h.context.eventSource.emit('ended'); await h.advance(6000);
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 13);
+    assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 1 });
+});
+test('MVU正文回调：变量不变也保存正文，改写后的更新块登记为已处理', async () => {
+    const h = await beforeMessageRuntime(context => {
+        context.message_content = '改写正文<UpdateVariable>_.add("状态.金币", 5);</UpdateVariable>';
+    });
+    const message = addUpdateReply(h, '原正文<UpdateVariable>_.set("状态.金币", 10);</UpdateVariable>');
+    await h.context.eventSource.emit('received', 2); await h.advance(6000);
+    assert.match(message.mes, /^改写正文/);
+    await h.context.eventSource.emit('received', 2); await h.advance(6000);
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 10);
+    assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 1 });
+});
+test('MVU正文回调：保存失败只重试正文，不重复变量命令和作者回调', async () => {
+    const h = await beforeMessageRuntime(context => { context.message_content = '改写后正文'; });
+    let attempts = 0;
+    h.context.setChatMessages = async messages => {
+        attempts++;
+        if (attempts === 1) throw new Error('模拟保存失败');
+        h.context.chat[messages[0].message_id].mes = messages[0].message;
+    };
+    const message = addUpdateReply(h);
+    await h.context.eventSource.emit('received', 2); await h.advance(6000);
+    assert.strictEqual(message.mes, '改写后正文');
+    assert.strictEqual(attempts, 2);
+    assert.strictEqual(h.counts().hooks, 1);
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
+});
+test('MVU正文回调：回调等待期间切聊天、替换消息、编辑或换 swipe 均放弃旧写入', async () => {
+    for (const change of ['chat', 'message', 'edit', 'swipe']) {
+        let release, entered = false;
+        const h = await beforeMessageRuntime(async context => {
+            entered = true; await new Promise(resolve => { release = resolve; }); context.message_content = '旧回调正文';
+        });
+        const original = addUpdateReply(h);
+        await h.context.eventSource.emit('received', 2); await h.advance(1500); assert.ok(entered);
+        if (change === 'chat') { h.context.chatId = 'native-B'; h.context.chat = [reply('新聊天')]; await h.context.eventSource.emit('chat_changed'); }
+        else if (change === 'message') h.context.chat[2] = reply('替换后的消息');
+        else if (change === 'edit') original.mes = '用户编辑';
+        else { original.swipe_id = 1; original.mes = '另一分支'; }
+        release(); await h.advance(6000);
+        assert.strictEqual(h.counts().saves, 0, change);
+        assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 10, change);
+    }
+});
+test('MVU正文回调：生成结束才执行回调，状态清理与补占位符合并保存', async () => {
+    const h = await beforeMessageRuntime(context => { context.message_content += '\n回调正文'; }, placeholderCard());
+    h.context.chat[0].mes += '\n<StatusPlaceHolderImpl/>';
+    const message = addUpdateReply(h, '原正文<status_current_variable>旧状态</status_current_variable><UpdateVariable>_.add("状态.金币", 1);</UpdateVariable>');
+    h.context.generating = true; h.context.isStreaming = true;
+    await h.context.eventSource.emit('received', 2); await h.advance(2000);
+    assert.strictEqual(h.counts().hooks, 0);
+    h.context.generating = false; h.context.isStreaming = false;
+    await h.context.eventSource.emit('ended'); await h.advance(6000);
+    assert.ok(!message.mes.includes('status_current_variable'));
+    assert.ok(message.mes.includes('回调正文'));
+    assert.ok(message.mes.endsWith('<StatusPlaceHolderImpl/>'), JSON.stringify({ text: message.mes, counts: h.counts() }));
+    assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 1 });
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
+});
+test('MVU正文回调：首楼更新采用正文，修改来源后轮询不重放初始化', async () => {
+    const h = await beforeMessageRuntime(context => {
+        context.message_content = '<initvar>{"状态":{"生命":100,"金币":10},"背包":["钥匙",0,false,null]}</initvar>改写开场<UpdateVariable>_.add("状态.金币", 5);</UpdateVariable>';
+    }, undefined, ({ context }) => { context.chat[0].mes = require('./synthetic-card')().data.first_mes; });
+    h.context.chat[0].mes = '<initvar>{"状态":{"生命":100,"金币":10},"背包":["钥匙",0,false,null]}</initvar>原开场<UpdateVariable>_.add("状态.金币", 1);</UpdateVariable>';
+    await h.advance(6000);
+    assert.match(h.context.chat[0].mes, /改写开场/, JSON.stringify({ counts: h.counts(), gold: h.win.Mvu.getMvuData().stat_data.状态.金币 }));
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
+    await h.advance(6000);
+    assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 1 });
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
+});
+
+test('MVU正文回调：正文重试前编辑、删除或换分支取消；变量保持单次提交', async () => {
+    for (const change of ['edit', 'delete', 'swipe']) {
+        const h = await beforeMessageRuntime(context => { context.message_content = '回调正文'; });
+        let attempts = 0; h.context.setChatMessages = async () => { attempts++; throw new Error('模拟保存失败'); };
+        const message = addUpdateReply(h);
+        await h.context.eventSource.emit('received', 2); await h.advance(1500);
+        assert.strictEqual(attempts, 1, change);
+        if (change === 'delete') h.context.chat.splice(2, 1);
+        else { message.mes = '用户新正文'; if (change === 'swipe') message.swipe_id = 1; }
+        await h.advance(5000);
+        assert.strictEqual(attempts, 1, change);
+        assert.strictEqual(h.counts().hooks, 1, change);
+        assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11, change);
+        if (change !== 'delete') assert.strictEqual(message.mes, '用户新正文');
+    }
+});
+test('MVU正文回调：未修改正文或返回非字符串，不生成额外正文保存', async () => {
+    for (const invalid of [false, true]) {
+        const h = await beforeMessageRuntime(context => { if (invalid) context.message_content = undefined; });
+        const message = addUpdateReply(h), original = message.mes;
+        await h.context.eventSource.emit('received', 2); await h.advance(5000);
+        assert.strictEqual(message.mes, original);
+        assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 0 });
+        assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
+    }
+});
+
+test('MVU正文回调：新聊天首楼合并初始化成功后保存正文，首轮增量只执行一次', async () => {
+    const source = require('./synthetic-card')();
+    source.data.first_mes += '<UpdateVariable>_.add("状态.金币", 1);</UpdateVariable>';
+    const h = await beforeMessageRuntime(context => { context.message_content = '新聊天回调正文'; }, source, ({ context, api, tables }) => {
+        context.chat[0].mes = source.data.first_mes;
+        delete context.chat[0].TavernDB_ACU_IsolatedData;
+        for (const key of Object.keys(tables)) delete tables[key];
+        api.initGameSession = async (_, options) => {
+            await api.importTableAsJson(JSON.stringify(options.templateData));
+            context.chat[0].TavernDB_ACU_IsolatedData = { test: { storageFrame: { version: 2, checkpoint: { kind: 'full', data: clone(tables) }, logEntries: [] } } };
+            return { success: true };
+        };
+    });
+    await h.advance(6000);
+    assert.strictEqual(h.context.chat[0].mes, '新聊天回调正文');
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
+    assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 1 });
+});
+test('MVU正文回调：首楼回调等待期间编辑或换分支，变量与正文都不覆盖新来源', async () => {
+    for (const change of ['edit', 'swipe']) {
+        let release;
+        const h = await beforeMessageRuntime(async context => {
+            await new Promise(resolve => { release = resolve; }); context.message_content = '旧开场回调正文';
+        }, undefined, ({ context }) => { context.chat[0].mes = require('./synthetic-card')().data.first_mes; });
+        h.context.chat[0].mes += '<UpdateVariable>_.add("状态.金币", 1);</UpdateVariable>';
+        await h.advance(2000); assert.strictEqual(typeof release, 'function');
+        h.context.chat[0].mes = '新的首楼正文'; if (change === 'swipe') h.context.chat[0].swipe_id = 1;
+        release(); await h.advance(6000);
+        assert.strictEqual(h.context.chat[0].mes, '新的首楼正文');
+        assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 10);
+        assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 0 });
+    }
+});
+
+test('MVU正文回调：接口改内存后报错仍重试保存，改写的命令不能再执行', async () => {
+    const h = await beforeMessageRuntime(context => {
+        context.message_content = '回调正文<UpdateVariable>_.add("状态.金币", 5);</UpdateVariable>';
+    });
+    let attempts = 0;
+    h.context.setChatMessages = async messages => {
+        attempts++; h.context.chat[messages[0].message_id].mes = messages[0].message;
+        if (attempts === 1) throw new Error('模拟刷新在改内存后失败');
+    };
+    addUpdateReply(h);
+    await h.context.eventSource.emit('received', 2); await h.advance(5000);
+    assert.strictEqual(attempts, 2);
+    await h.context.eventSource.emit('received', 2); await h.advance(5000);
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
+    assert.strictEqual(h.counts().hooks, 1);
+});

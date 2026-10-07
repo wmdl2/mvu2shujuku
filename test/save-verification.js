@@ -17,6 +17,11 @@ async function save(options = {}) {
         tavern_helper: { scripts: [{ name: '数据桥', content: 'bridge();', enabled: true }], variables: {} },
     } };
     const before = JSON.stringify(expected), writes = [], reads = [], messages = [];
+    if (options.worldbook) {
+        expected.character_book = { name: '保存公开书', entries: [{ id: 0, content: '新内容', enabled: true }] };
+        expected.extensions.world = '保存公开书';
+    }
+    const expectedBefore = JSON.stringify(expected), createdCards = [], downloads = [];
     let persisted = copy(expected), creates = 0;
     const overlays = [];
     const document = {
@@ -29,8 +34,10 @@ async function save(options = {}) {
         },
     };
     const st = { characters: options.noList ? [] : [{ ...copy(expected), avatar: 'new.png' }],
-        createCharacterData: async () => {
+        createCharacterData: async (_name, _avatar, cardData) => {
             creates++;
+            createdCards.push(copy(cardData));
+            if (options.worldbook) assert.ok(options.worldbook.committed, '世界书必须先成功提交');
             assert.strictEqual(overlays.length, 1, '创建接口调用期间必须显示保存弹窗');
             if (options.onCreate) await options.onCreate(context, overlays);
             if (options.createFailure) throw new Error('公开保存失败');
@@ -49,7 +56,7 @@ async function save(options = {}) {
         lastResult: { card: { spec: 'chara_card_v3', data: expected }, meta: { avatarBytes: new Uint8Array([1]) }, files: [] },
         updateParamsDirty: false, PANEL_ID: 'test', hostDocument: document, hostWindow: { setTimeout }, Blob,
         getContextSafe: () => st, window: { MVU2SHUJUKU_CORE: core },
-        charWorldBook: ch => ch.character_book, dbg() {}, dbgWarn() {}, toast() {}, download() {},
+        charWorldBook: ch => ch.character_book, dbg() {}, dbgWarn() {}, toast() {}, download: (...args) => downloads.push(args),
         getAcuApi: () => null, autoSaveConversionProfile: async () => {},
         showInfoPopup: (title, text) => messages.push(text),
         fetch: async (url, request) => {
@@ -60,11 +67,47 @@ async function save(options = {}) {
         },
     };
     vm.createContext(context); vm.runInContext(implementation, context);
-    assert.strictEqual(await context.saveCardToSillyTavern(), !options.createFailure, '复核失败不能伪装成创建失败');
+    if (options.worldbook) {
+        context.testSaver = require('../src/worldbook-save')(options.worldbook.deps);
+        vm.runInContext('worldbookSaver = testSaver', context);
+    }
+    assert.strictEqual(await context.saveCardToSillyTavern(), !options.createFailure && !options.cancelled && !options.worldFailure, '保存结果应反映创建、取消或世界书失败');
     assert.strictEqual(overlays.length, 0, '结束后不能遗留保存弹窗');
-    assert.strictEqual(JSON.stringify(expected), before, '宿主参数不能反向修改转换结果');
-    return { writes, reads, text: messages.join('\n'), context, creates };
+    assert.strictEqual(JSON.stringify(expected), options.worldbook ? expectedBefore : before, '宿主参数不能反向修改转换结果');
+    return { writes, reads, text: messages.join('\n'), context, creates, createdCards, downloads };
 }
+
+function worldbookFixture(action, backup = false) {
+    const state = { committed: false, books: { '保存公开书': { entries: { 0: { content: '旧内容' } } } }, backups: [] };
+    state.deps = {
+        convertBook: book => ({ entries: { 0: { content: book.entries[0].content } }, originalData: copy(book) }),
+        listNames: async () => Object.keys(state.books), read: async name => copy(state.books[name]),
+        chooseConflict: async () => ({ action, backup }),
+        write: async (name, data) => { state.books[name] = copy(data); state.committed = true; },
+        refresh: async () => {}, backup: async (name, data) => state.backups.push({ name, data }),
+    };
+    return state;
+}
+test('世界书保存入口：取消不创建卡、不下载回退文件并关闭进度', async () => {
+    const r = await save({ worldbook: worldbookFixture('cancel'), cancelled: true });
+    assert.strictEqual(r.creates, 0); assert.deepStrictEqual(r.downloads, []);
+});
+test('世界书保存入口：另存名称必须进入实际创建接口，不改转换结果', async () => {
+    const state = worldbookFixture('copy'), r = await save({ worldbook: state });
+    assert.strictEqual(r.createdCards[0].data.extensions.world, '保存公开书 (1)');
+    assert.strictEqual(r.createdCards[0].data.character_book.name, '保存公开书 (1)');
+    assert.strictEqual(state.books['保存公开书'].entries[0].content, '旧内容');
+});
+test('世界书保存入口：更新可选备份，卡创建失败明确报告世界书已写入', async () => {
+    const state = worldbookFixture('update', true), r = await save({ worldbook: state, createFailure: true });
+    assert.strictEqual(state.backups.length, 1); assert.strictEqual(r.creates, 1);
+    assert.match(r.text, /世界书已尝试写入并收到成功响应/);
+});
+test('世界书保存入口：世界书写入失败不创建卡', async () => {
+    const state = worldbookFixture('update'); state.deps.write = async () => { throw new Error('世界书接口失败'); };
+    const r = await save({ worldbook: state, worldFailure: true });
+    assert.strictEqual(r.creates, 0); assert.match(r.text, /结果尚未确认/);
+});
 
 test('保存复核：字段同步后必须实际读回，再确认一致', async () => {
     const r = await save();

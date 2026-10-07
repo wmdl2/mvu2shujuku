@@ -621,7 +621,9 @@ function installExtensionRuntime(window) {
                         const core = window.MVU2SHUJUKU_CORE;
                         if (core && typeof core.statDataFromTables === 'function') {
                             const baseAll = core.statDataFromTables(activeLayout, baseTemplate);
-                            const opening = await computeActiveGreetingSnapshot(baseAll);
+                            const source = activeGreetingSourceSnapshot();
+                            if (source) guardGreetingSource(session, source);
+                            const opening = await computeActiveGreetingSnapshot(baseAll, source);
                             if (!isRuntimeSessionCurrent(session)) return;
                             if (opening) {
                                 const finalStat = opening.finalWrap && opening.finalWrap.stat_data
@@ -687,6 +689,7 @@ function installExtensionRuntime(window) {
                     greetingState.pendingFp = '';
                     greetingState.pendingSourceFp = '';
                     greetingState.pendingAt = 0;
+                    scheduleGreetingMessageWrite(preparedOpening.opening, greetingState);
                 }
                 if (hadHistoricalCheckpointBeforeInit && !greetingState.appliedFp && !greetingState.pendingFp) {
                     greetingState.baselineNext = true;
@@ -758,37 +761,12 @@ function installExtensionRuntime(window) {
         }
         return null;
     }
-    async function ensureWindowStatusPlaceholder() {
-        if (!activePlaceholderNeeded) return;
+    const statusMessageWrites = new WeakSet();
+    async function saveRuntimeMessage(context, msg, messageId, text, next, session) {
+        if (!isRuntimeSessionCurrent(session) || context.chat[messageId] !== msg ||
+            String(msg.mes != null ? msg.mes : (msg.message || '')) !== text || statusMessageWrites.has(msg)) return false;
+        statusMessageWrites.add(msg);
         try {
-            const context = getContextSafe();
-            if (!context || !Array.isArray(context.chat) || !context.chat.length) {
-                return;
-            }
-            // 生成/流式过程中不追加，避免每次流更新都把占位符覆盖后再补（反复注入）；
-            // 若事件触发时 generating 仍为 true 导致错过，1 秒后补一次（最多 10 次），保证收尾必补（MVU 同款语义）
-            if (context.generating === true || context.isStreaming === true) {
-                if (!placeholderRetryTimer && placeholderRetryCount < 10) {
-                    placeholderRetryTimer = hostWindow.setTimeout(() => {
-                        placeholderRetryTimer = null;
-                        placeholderRetryCount += 1;
-                        ensureWindowStatusPlaceholder();
-                    }, 1000);
-                }
-                return;
-            }
-            placeholderRetryCount = 0;
-            const msg = context.chat[context.chat.length - 1];
-            if (!msg) return;
-            if (msg.is_user || String(msg.name || '') === 'System') return;
-            const text = String(msg.mes != null ? msg.mes : (msg.message || ''));
-            if (text.indexOf('<StatusPlaceHolderImpl/>') !== -1) return;
-            const session = captureRuntimeSession();
-            const messageId = msg.message_id != null ? msg.message_id : (context.chat.length - 1);
-            const msgKey = session.key + ':' + messageId + ':' + text.length;
-            const now = Date.now();
-            if (msgKey === lastPlaceholderMsgKey && now - lastPlaceholderAt < 5000) return;
-            const next = text + '\n\n<StatusPlaceHolderImpl/>';
             const setter = findSetChatMessages();
             if (setter) {
                 const es = context.eventSource || context.event_source;
@@ -813,13 +791,14 @@ function installExtensionRuntime(window) {
                 }
                 await setter([{ message_id: messageId, message: next, mes: next }], { refresh: useHostRender ? 'none' : 'affected' });
                 // 保存可能异步完成；不得随后用旧聊天的任务刷新新聊天。
-                if (!isRuntimeSessionCurrent(session)) return;
+                const current = getContextSafe();
+                if (!isRuntimeSessionCurrent(session) || !current || current.chat[messageId] !== msg) return false;
                 if (useHostRender && !sameDisplay && context.chat[messageId] === msg && msg.mes === next) {
                     await context.updateMessageBlock(messageId, msg);
-                    if (!isRuntimeSessionCurrent(session)) return;
+                    if (!isRuntimeSessionCurrent(session)) return false;
                     await es.emit(renderedEvent, messageId);
                 }
-                dbg('[占位符] 已追加到消息 id=' + (msg.message_id != null ? msg.message_id : (context.chat.length - 1)));
+                dbg('[状态显示] 已更新消息 id=' + messageId);
             } else {
                 // 找不到 setChatMessages：只改内存，不调 saveChat（避免每次保存超时形成风暴）；
                 // 落盘依赖酒馆自身保存，显示刷新依赖酒馆重渲染
@@ -829,6 +808,187 @@ function installExtensionRuntime(window) {
                     dbgWarn('[占位符] 未找到 setChatMessages，已直接写入内存消息（依赖酒馆下次保存落盘；若前端未刷新请升级酒馆）');
                 }
             }
+            return true;
+        } finally { statusMessageWrites.delete(msg); }
+    }
+
+    // 复刻 MVU 的回复后清理，扩展到单数/复数完整块；不猜残缺、嵌套或带属性的块。
+    function stripReplyStatusBlocks(text) {
+        const tokens = /<(\/?)(status_current_variables?)\b([^<>]*)>/gi;
+        const stack = [], ranges = [];
+        let start = -1, nested = false, invalid = false, match;
+        while ((match = tokens.exec(text))) {
+            const closing = !!match[1], name = match[2].toLowerCase();
+            if (!closing) {
+                if (!stack.length) { start = match.index; nested = false; invalid = false; }
+                else nested = true;
+                if (match[3] !== '') invalid = true;
+                stack.push(name);
+            } else if (stack.length) {
+                if (match[3] !== '' || stack.pop() !== name) invalid = true;
+                if (!stack.length) {
+                    if (!nested && !invalid) ranges.push([start, tokens.lastIndex]);
+                    start = -1;
+                }
+            }
+        }
+        for (let i = ranges.length - 1; i >= 0; i--) text = text.slice(0, ranges[i][0]) + text.slice(ranges[i][1]);
+        return text;
+    }
+    // 变量提交与正文保存分别去重：正文失败重试不能重新执行增量命令或作者回调。
+    const mvuMessageWrites = new Map();
+    const messageUpdatesInProgress = new WeakSet();
+    function messageUpdateBusy(msg, messageId) {
+        if (messageUpdatesInProgress.has(msg) || mvuMessageWrites.has(msg) ||
+            (messageId === 0 && autoInitState.running)) return true;
+        if (messageId > 0 && msg && !msg.is_user && !msg.is_system && msg.role !== 'system' && msg.role !== 'user') {
+            const key = autoInitChatId(), state = messageUpdateState(key), fp = messageUpdateFingerprint(msg, messageId);
+            return !!fp && greetingInitState(key).ready && state.baselined && !state.processed.has(fp);
+        }
+        return false;
+    }
+    function cancelMvuMessageWrites() {
+        for (const job of mvuMessageWrites.values()) if (job.timer != null) hostWindow.clearTimeout(job.timer);
+        mvuMessageWrites.clear();
+    }
+    function armMvuMessageWrite(job, delay = 0) {
+        if (job.timer != null || job.running) return;
+        job.timer = hostWindow.setTimeout(() => { job.timer = null; finishMvuMessageWrite(job); }, delay);
+    }
+    async function finishMvuMessageWrite(job) {
+        if (mvuMessageWrites.get(job.msg) !== job || job.running) return;
+        const retire = () => { if (mvuMessageWrites.get(job.msg) === job) mvuMessageWrites.delete(job.msg); };
+        let repeat = false;
+        job.running = true;
+        try {
+            const ctx = getContextSafe(), msg = ctx && ctx.chat && ctx.chat[job.messageId];
+            const currentText = msg && String(msg.mes != null ? msg.mes : (msg.message || ''));
+            if (!isRuntimeSessionCurrent(job.session) || msg !== job.msg ||
+                Number(msg.swipe_id || 0) !== job.swipe || (currentText !== job.text && currentText !== job.attemptedText)) {
+                retire(); return;
+            }
+            if (ctx.generating === true || ctx.isStreaming === true) { repeat = true; return; }
+            let next = stripReplyStatusBlocks(job.next);
+            if (detectPlaceholderFor(currentCharacter()) && !next.includes('<StatusPlaceHolderImpl/>')) next += '\n\n<StatusPlaceHolderImpl/>';
+            // 助手可能先改内存再在刷新/保存阶段报错；这种情况下仍提交相同正文，
+            // 不将自己的改写视为用户编辑，也不重新执行变量命令。
+            const unchanged = next === currentText && job.attemptedText == null;
+            job.attemptedText = next;
+            if (unchanged || await saveRuntimeMessage(ctx, msg, job.messageId, currentText, next, job.session)) {
+                if (job.onSaved) job.onSaved(next);
+                retire();
+            } else repeat = true;
+        } catch (e) { dbgWarn('[MVU正文] 回调正文保存失败:', e); repeat = true; }
+        finally {
+            job.running = false;
+            if (repeat) {
+                if (++job.retries <= 10 && mvuMessageWrites.get(job.msg) === job) armMvuMessageWrite(job, 1000);
+                else { retire(); dbgWarn('[MVU正文] 回调正文保存未完成，已停止重试。'); }
+            }
+        }
+    }
+    function scheduleMvuMessageWrite(msg, messageId, text, next, swipe, onSaved) {
+        if (typeof next !== 'string') { dbgWarn('[MVU正文] message_content 必须是字符串，保留原正文。'); return; }
+        if (next === text) return;
+        const ctx = getContextSafe();
+        if (!ctx || ctx.chat[messageId] !== msg || Number(msg.swipe_id || 0) !== swipe ||
+            String(msg.mes != null ? msg.mes : (msg.message || '')) !== text) return;
+        const session = captureRuntimeSession(() => {
+            const current = getContextSafe();
+            return !!current && current.chat[messageId] === msg && Number(msg.swipe_id || 0) === swipe;
+        });
+        const old = mvuMessageWrites.get(msg);
+        if (old && old.timer != null) hostWindow.clearTimeout(old.timer);
+        const job = { msg, messageId, text, next, swipe, session, onSaved, retries: 0, timer: null, running: false };
+        mvuMessageWrites.set(msg, job);
+        armMvuMessageWrite(job);
+    }
+    function scheduleGreetingMessageWrite(prepared, state) {
+        scheduleMvuMessageWrite(prepared.first, 0, prepared.text, prepared.messageContent, prepared.swipe, () => {
+            const source = activeGreetingSourceSnapshot();
+            // 回调可以移除或更改更新块；将修改后的来源登记为已完成，不能重新初始化。
+            if (source && source.first === prepared.first) state.appliedSourceFp = source.sourceFp;
+        });
+    }
+    const replyStatusCleanups = new Map();
+    function cancelReplyStatusCleanups() {
+        for (const job of replyStatusCleanups.values()) if (job.timer != null) hostWindow.clearTimeout(job.timer);
+        replyStatusCleanups.clear();
+    }
+    function armReplyStatusCleanup(job, delay = 1200) {
+        if (job.timer != null || job.running) return;
+        job.timer = hostWindow.setTimeout(() => { job.timer = null; finishReplyStatusCleanup(job); }, delay);
+    }
+    async function finishReplyStatusCleanup(job) {
+        if (replyStatusCleanups.get(job.key) !== job || job.running) return;
+        const retire = () => { if (replyStatusCleanups.get(job.key) === job) replyStatusCleanups.delete(job.key); };
+        const retry = () => { if (++job.retries <= 10 && replyStatusCleanups.get(job.key) === job) armReplyStatusCleanup(job, 1000); else retire(); };
+        let repeat = false;
+        job.running = true;
+        try {
+            const context = getContextSafe(), msg = context && context.chat && context.chat[job.messageId];
+            if (!isRuntimeSessionCurrent(job.session) || !isConvertedMvuCard(currentCharacter()) || msg !== job.msg ||
+                Number(msg.swipe_id || 0) !== job.swipe || msg.is_user || msg.is_system ||
+                msg.role === 'user' || msg.role === 'system' || String(msg.name || '') === 'System') { retire(); return; }
+            if (context.generating === true || context.isStreaming === true || messageUpdateBusy(msg, job.messageId)) { repeat = true; return; }
+            const text = String(msg.mes != null ? msg.mes : (msg.message || ''));
+            let next = stripReplyStatusBlocks(text);
+            if (next === text) { retire(); return; }
+            if (detectPlaceholderFor(currentCharacter()) && !next.includes('<StatusPlaceHolderImpl/>')) next += '\n\n<StatusPlaceHolderImpl/>';
+            if (await saveRuntimeMessage(context, msg, job.messageId, text, next, job.session)) retire();
+            else repeat = true;
+        } catch (e) { dbgWarn('[状态显示] 回复清理失败:', e); repeat = true; }
+        finally { job.running = false; if (repeat) retry(); }
+    }
+    function scheduleReplyStatusCleanup(messageId) {
+        const context = getContextSafe();
+        if (!isConvertedMvuCard(currentCharacter()) || !context || !Array.isArray(context.chat)) return;
+        const id = Number.isInteger(messageId) ? messageId : context.chat.length - 1;
+        const msg = context.chat[id];
+        if (!msg || msg.is_user || msg.is_system || msg.role === 'user' || msg.role === 'system' || String(msg.name || '') === 'System') return;
+        const session = captureRuntimeSession(), swipe = Number(msg.swipe_id || 0), key = session.key + ':' + id + ':' + swipe;
+        let job = replyStatusCleanups.get(key);
+        if (!job || job.msg !== msg) {
+            if (job && job.timer != null) hostWindow.clearTimeout(job.timer);
+            job = { key, session, messageId: id, msg, swipe, retries: 0, timer: null, running: false };
+            replyStatusCleanups.set(key, job);
+        }
+        armReplyStatusCleanup(job);
+    }
+
+    async function ensureWindowStatusPlaceholder() {
+        if (!activePlaceholderNeeded) return;
+        try {
+            const context = getContextSafe();
+            if (!context || !Array.isArray(context.chat) || !context.chat.length) {
+                return;
+            }
+            // 生成/流式过程中不追加，避免每次流更新都把占位符覆盖后再补（反复注入）；
+            // 若事件触发时 generating 仍为 true 导致错过，1 秒后补一次（最多 10 次），保证收尾必补（MVU 同款语义）
+            if (context.generating === true || context.isStreaming === true ||
+                messageUpdateBusy(context.chat[context.chat.length - 1], context.chat.length - 1)) {
+                if (!placeholderRetryTimer && placeholderRetryCount < 10) {
+                    placeholderRetryTimer = hostWindow.setTimeout(() => {
+                        placeholderRetryTimer = null;
+                        placeholderRetryCount += 1;
+                        ensureWindowStatusPlaceholder();
+                    }, 1000);
+                }
+                return;
+            }
+            placeholderRetryCount = 0;
+            const msg = context.chat[context.chat.length - 1];
+            if (!msg) return;
+            if (msg.is_user || String(msg.name || '') === 'System') return;
+            const text = String(msg.mes != null ? msg.mes : (msg.message || ''));
+            if (text.indexOf('<StatusPlaceHolderImpl/>') !== -1) return;
+            const session = captureRuntimeSession();
+            const messageId = msg.message_id != null ? msg.message_id : (context.chat.length - 1);
+            const msgKey = session.key + ':' + messageId + ':' + text.length;
+            const now = Date.now();
+            if (msgKey === lastPlaceholderMsgKey && now - lastPlaceholderAt < 5000) return;
+            const next = text + '\n\n<StatusPlaceHolderImpl/>';
+            if (!await saveRuntimeMessage(context, msg, messageId, text, next, session)) return;
             lastPlaceholderMsgKey = msgKey;
             lastPlaceholderAt = now;
         } catch (e) {
@@ -971,9 +1131,17 @@ function installExtensionRuntime(window) {
         const sourceText = (m ? String(m[1]) : 'no-initvar') + '\n' + String(updateSource || '');
         const core = window.MVU2SHUJUKU_CORE;
         const sourceFp = core && typeof core.stableHash === 'function' ? core.stableHash(sourceText) : sourceText;
-        const snap = { first, text, m, updateSource, sourceFp: String(sourceFp || '') };
+        const snap = { first, text, m, updateSource, swipe: Number(first.swipe_id || 0), sourceFp: String(sourceFp || '') };
         greetingSourceSnapCache = { first, text, swipeId, snap };
         return snap;
+    }
+    function guardGreetingSource(session, source) {
+        const previous = session.validate;
+        session.validate = () => {
+            const ctx = getContextSafe(), msg = ctx && ctx.chat && ctx.chat[0];
+            return (!previous || previous()) && msg === source.first && Number(msg.swipe_id || 0) === source.swipe &&
+                String(msg.mes != null ? msg.mes : (msg.message || '')) === source.text;
+        };
     }
     async function computeActiveGreetingSnapshot(baseAll, sourceSnapshot) {
         const source = sourceSnapshot || activeGreetingSourceSnapshot();
@@ -1013,13 +1181,15 @@ function installExtensionRuntime(window) {
             display_data: JSON.parse(JSON.stringify(currentAll.display_data || {})),
             delta_data: JSON.parse(JSON.stringify(currentAll.delta_data || {})),
         };
+        let messageContent = text;
         if (updateSource) {
             finalWrap = await runMvuUpdateCycle(text, finalWrap);
             const updateContext = { variables: finalWrap, message_content: text };
             await emitMvuEvent('mag_before_message_update', updateContext);
             finalWrap = updateContext.variables || finalWrap;
+            messageContent = updateContext.message_content;
         }
-        return { first, text, hasInitvar: !!m, updateSource, sourceFp, fp, baseStat: currentAll.stat_data || {}, finalWrap };
+        return { first, text, messageContent, swipe: source.swipe, hasInitvar: !!m, updateSource, sourceFp, fp, baseStat: currentAll.stat_data || {}, finalWrap };
     }
 
     async function applyActiveGreetingInitvar() {
@@ -1034,13 +1204,14 @@ function installExtensionRuntime(window) {
             // mag_before_message_update 之前去重；否则即使最终快照指纹相同，
             // 每 2 秒仍会执行卡脚本并保存聊天，恰好会打断 SP 的自动填表窗口。
             const sourceSnapshot = activeGreetingSourceSnapshot();
-            if (!sourceSnapshot) return;
+            if (!sourceSnapshot || mvuMessageWrites.has(sourceSnapshot.first)) return;
             const sourceFp = sourceSnapshot.sourceFp;
             if (sourceFp && sourceFp === greetingState.appliedSourceFp) return;
             if (sourceFp && sourceFp === greetingState.pendingSourceFp && Date.now() - greetingState.pendingAt < 60000) return;
             greetingState.pendingSourceFp = sourceFp;
             greetingState.pendingAt = Date.now();
             activePendingState = greetingState;
+            guardGreetingSource(session, sourceSnapshot);
             const prepared = await computeActiveGreetingSnapshot(undefined, sourceSnapshot);
             if (!isRuntimeSessionCurrent(session)) {
                 greetingState.pendingSourceFp = '';
@@ -1081,6 +1252,7 @@ function installExtensionRuntime(window) {
                 if (ok) {
                     greetingState.appliedFp = fp;
                     greetingState.appliedSourceFp = sourceFp;
+                    scheduleGreetingMessageWrite(prepared, greetingState);
                 }
                 else dbgWarn(' 开场分支初始化/更新块注入未落定（写入被丢弃或失败），保留指纹待轮询重试。');
             }, false, true, chatKey, session);
@@ -1173,11 +1345,13 @@ function installExtensionRuntime(window) {
         try {
             const ctx = getContextSafe();
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            if (ctx.generating === true || ctx.isStreaming === true) return;
             // 首楼由 applyActiveGreetingInitvar 合并为一次初始化；这里只处理后续楼层。
             for (let i = 1; i < chat.length; i++) {
                 if (!isRuntimeSessionCurrent(session)) break;
                 const message = chat[i];
-                if (!message || message.is_user) continue;
+                if (!message || message.is_user || message.is_system || message.role === 'user' || message.role === 'system' ||
+                    String(message.name || '') === 'System' || mvuMessageWrites.has(message)) continue;
                 const fp = messageUpdateFingerprint(message, i);
                 if (!fp || st.processed.has(fp) || st.pending.has(fp)) continue;
                 // 任务不能只绑定聊天：删除、编辑或切换来源消息后，旧更新块也必须失效。
@@ -1191,6 +1365,8 @@ function installExtensionRuntime(window) {
                 messageSession.businessEventEmitted = true;
                 const text = String(message.mes != null ? message.mes : (message.message || ''));
                 st.pending.add(fp);
+                messageUpdatesInProgress.add(message);
+                const swipe = Number(message.swipe_id || 0);
                 let settled = false;
                 try {
                     const current = window.getAllVariables ? window.getAllVariables() : { stat_data: {}, display_data: {}, delta_data: {} };
@@ -1209,9 +1385,16 @@ function installExtensionRuntime(window) {
                             scheduleWindowStatOverlay(finalWrap.stat_data || {}, (ok) => resolve(!!ok), false, false, chatKey, messageSession);
                         });
                     }
+                    if (settled && isRuntimeSessionCurrent(messageSession)) {
+                        scheduleMvuMessageWrite(message, i, text, updateContext.message_content, swipe, () => {
+                            const rewrittenFp = messageUpdateFingerprint(message, i);
+                            if (rewrittenFp) st.processed.add(rewrittenFp);
+                        });
+                    }
                 } catch (e) {
                     dbgWarn('[消息更新块] 第 ' + i + ' 楼执行失败:', e);
                 }
+                messageUpdatesInProgress.delete(message);
                 st.pending.delete(fp);
                 if (settled) st.processed.add(fp);
                 else break; // 数据库尚未落定，保留后续顺序并等待下次事件重试
@@ -1286,6 +1469,8 @@ function installExtensionRuntime(window) {
         try {
             if (!autoInitState.inited) {
                 es.on(et.CHAT_CHANGED, () => {
+                    cancelReplyStatusCleanups();
+                    cancelMvuMessageWrites();
                     const session = captureRuntimeSession();
                     if (autoInitState.session && !isRuntimeSessionCurrent(autoInitState.session)) {
                         autoInitState.running = false;
@@ -1327,7 +1512,8 @@ function installExtensionRuntime(window) {
                     const p = hostDocument.getElementById(PANEL_ID);
                     if (p) populateMergeSource(p);
                 });
-                es.on(et.MESSAGE_RECEIVED, () => {
+                es.on(et.MESSAGE_RECEIVED, messageId => {
+                    scheduleReplyStatusCleanup(messageId);
                     hostWindow.setTimeout(autoInitDatabase, 600);
                     hostWindow.setTimeout(applyPendingMessageUpdateBlocks, 900);
                     scheduleOpeningContinuityRecovery('MESSAGE_RECEIVED');
@@ -1369,6 +1555,8 @@ function installExtensionRuntime(window) {
                 }
                 if (et.GENERATION_ENDED) {
                     es.on(et.GENERATION_ENDED, () => {
+                        for (const job of replyStatusCleanups.values()) armReplyStatusCleanup(job);
+                        for (const job of mvuMessageWrites.values()) armMvuMessageWrite(job);
                         hostWindow.setTimeout(ensureWindowStatusPlaceholder, 1200);
                         hostWindow.setTimeout(autoInitDatabase, 100);
                         hostWindow.setTimeout(applyPendingMessageUpdateBlocks, 300);
@@ -1403,6 +1591,8 @@ function installExtensionRuntime(window) {
         let existing = null;
         try { existing = hostWindow.__mvu2shujukuRuntime; } catch (e) {}
         try { if (existing && existing.worldbookRequestFilter) existing.worldbookRequestFilter.stop(); } catch (e) {}
+        try { if (existing && existing.cancelReplyStatusCleanups) existing.cancelReplyStatusCleanups(); } catch (e) {}
+        try { if (existing && existing.cancelMvuMessageWrites) existing.cancelMvuMessageWrites(); } catch (e) {}
         const pending = existing && Array.isArray(existing.pending) ? existing.pending.slice() : [];
         const reg = {
             owner: 'extension',
@@ -1443,6 +1633,8 @@ function installExtensionRuntime(window) {
         readCharacter: currentCharacter, readExtensions: charExtensions, readWorldbook: charWorldBook,
     });
     runtimeRegistry.worldbookRequestFilter = worldbookRequestFilter;
+    runtimeRegistry.cancelReplyStatusCleanups = cancelReplyStatusCleanups;
+    runtimeRegistry.cancelMvuMessageWrites = cancelMvuMessageWrites;
 
     function resolveRuntimeLayout(rawLayout) {
         const parsed = typeof rawLayout === 'string'
@@ -5033,6 +5225,25 @@ function installExtensionRuntime(window) {
         return operation;
     }
 
+    let worldbookSaver = null;
+    function getWorldbookSaver() {
+        if (!worldbookSaver) {
+            const coreApi = window.MVU2SHUJUKU_CORE;
+            const storage = coreApi.getWorldbookStorageFactory()({
+                document: hostDocument, fetch: (...args) => fetch(...args), download,
+                loadModule: () => import('/scripts/world-info.js'),
+                getContext: getContextSafe,
+                async getHeaders() {
+                    const context = getContextSafe();
+                    if (typeof context.getRequestHeaders === 'function') return context.getRequestHeaders();
+                    return (await import('/script.js')).getRequestHeaders();
+                },
+            });
+            worldbookSaver = coreApi.getWorldbookSaveFactory()(storage);
+        }
+        return worldbookSaver;
+    }
+
     async function saveCardToSillyTavern() {
         if (conversionOperation) return false;
         if (!lastResult) { toast('请先转换', 'error'); return false; }
@@ -5064,6 +5275,7 @@ function installExtensionRuntime(window) {
         const panel = hostDocument.getElementById(PANEL_ID);
         const context = getContextSafe();
         const log = [];
+        let worldbookPlan;
         const displayName = String((result.card && (result.card.data || result.card).name) || '').trim() || '角色';
         try {
             operation.update('准备角色卡与头像…');
@@ -5072,6 +5284,11 @@ function installExtensionRuntime(window) {
             if (cardData && !cardData.data && cardData.name) {
                 cardData = { spec: 'chara_card_v3', spec_version: '3.0', data: cardData };
             }
+            operation.update('检查本地世界书…');
+            const saver = getWorldbookSaver();
+            worldbookPlan = await saver.prepare(cardData);
+            if (worldbookPlan.cancelled) { toast('已取消保存', 'info'); return false; }
+            cardData = worldbookPlan.card;
             let avatarBlob = null;
             if (result.meta && result.meta.avatarBytes) {
                 avatarBlob = new Blob([result.meta.avatarBytes], { type: result.meta.avatarMime || 'application/json' });
@@ -5082,6 +5299,13 @@ function installExtensionRuntime(window) {
                     const coreApi = window.MVU2SHUJUKU_CORE;
                     avatarBlob = new Blob([coreApi.extractPngAvatar(await avatarBlob.arrayBuffer())], { type: 'image/png' });
                 }
+            }
+
+            operation.update('同步本地世界书…');
+            await saver.commit(worldbookPlan);
+            if (worldbookPlan.action !== 'skip') {
+                log.push('✓ 世界书已' + (worldbookPlan.action === 'reuse' ? '复用' : worldbookPlan.action === 'update' ? '更新' : '创建') + '：' + worldbookPlan.name);
+                if (worldbookPlan.backup) log.push('✓ 已发起旧世界书 JSON 备份下载（请确认浏览器下载结果）');
             }
 
             // 优先用新版 API；老版本 createCharacterData 是表单状态对象时走直接接口
@@ -5220,13 +5444,16 @@ function installExtensionRuntime(window) {
             }
         } catch (e) {
             const msg = (e && e.message ? e.message : e);
+            const bookNotice = worldbookPlan && worldbookPlan.writeAttempted
+                ? '\n\n世界书已尝试写入' + (worldbookPlan.written ? '并收到成功响应' : '，结果尚未确认') + '：' + worldbookPlan.name + '。世界书与角色卡无法作为同一事务保存；请检查本地世界书，必要时用备份恢复。'
+                : '';
             toast('保存失败，已回退到下载：' + msg, 'error');
             for (const f of result.files) {
                 if (f.kind === 'card') download(f.name, f.mime, f.data);
             }
             if (lastResult === result) await autoSaveConversionProfile();
             operation.close();
-            showInfoPopup('保存失败', '角色卡保存失败，已回退到下载。\n\n' + msg + '\n\n如需排查请把此日志发给开发者。');
+            showInfoPopup('保存失败', '角色卡保存失败，已回退到下载。\n\n' + msg + bookNotice + '\n\n如需排查请把此日志发给开发者。');
             return false;
         }
 

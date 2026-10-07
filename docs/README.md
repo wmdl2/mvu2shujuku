@@ -6,6 +6,9 @@
 
 | 当前问题 | 入口 |
 | --- | --- |
+| 重转世界书冲突、覆盖/另存与可选 JSON 备份 | [v0.7.0 验证](validation/2026-10-07-worldbook-save.md) |
+| MVU 更新前回调的正文写回与独立保存重试 | [v0.7.0 验证](validation/2026-10-07-mvu-message-update.md) |
+| 当前变量展示保留、回复状态块清理与相邻回调边界 | [v0.7.0 验证](validation/2026-10-07-mvu-status-display.md) |
 | 规则迁移、正文分流、模型只读说明与保存进度 | [v0.6.0 验证](validation/2026-10-06-rule-metadata-save.md) |
 | 静态／动态登记入口、回退引擎与大资源扫描 | [入口验证](validation/2026-10-06-script-entrypoints.md) |
 | number／integer／布尔列映射、数组类型保留及 transform 范围 | [类型验证](validation/2026-10-05-type-mapping.md) |

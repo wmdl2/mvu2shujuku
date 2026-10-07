@@ -1,5 +1,9 @@
 # 开发、验证与排查
 
+世界书冲突弹窗布局单独用 `node test/worldbook-conflict-layout.js`，加载实际 `worldbook-save` 工厂、扩展样式和宿主完整 CSS，验证宽屏/窄屏/大字体、按钮文字单行且不溢出、等宽同排、真实鼠标操作和键盘取消。纯排版修改不重启酒馆或重复全量保存验收；此前只有鼠标能点的交互验收不足以证明按钮排版正常。
+
+世界书保存的公开回归入口为 `node test/run-tests.js --grep '世界书保存|世界书存储|保存复核|保存进度|保存后复核'`；宿主验收为 `node test/real-host.js --only=worldbook-save`。这批改变宿主持久化语义，需检查实际保存按钮、可选备份下载、覆盖/另存绑定和刷新后读回；无需因此重复模型填表或完整成本基准。
+
 [文档索引](README.md) · [运行时契约](runtime.md)
 
 本文维护稳定的开发流程；具体测试数量与版本证据见日期验收记录。文中的仓库路径均相对仓库根目录。
@@ -50,6 +54,10 @@ node test/run-tests.js --verbose
 - `test/real-host.js` 将源码构建到隔离扩展目录；交付时另行构建根目录并比较文件内容，不依赖硬链接。环境与固定版本证据见[实机记录](validation/2026-09-11-host.md)。
 
 ## 验证范围
+
+状态展示与回复清理使用 `node test/real-host.js --only=reply-status`，可用 `--reply-modes=sqlite` 只补验未通过的存储模式。夹具启用角色脚本并导入内嵌世界书；就绪轮询仅吞掉预期的 `MVU_DATA_NOT_READY`，其他异常继续上抛。助手消息接口返回后仍可能等待宿主防抖保存，重开验证必须先等待对应 `/api/chats/save` 成功响应，不能把即时内存变化当作落盘。
+
+正文回调使用 `node test/real-host.js --only=message-update`；同样支持 `--reply-modes=sqlite` 增量验收。公开运行时夹具需装入实际解析库；涉及稳定时间窗的虚拟定时器同时推进 `Date.now()`，数据库替身必须更新真实持久化帧，不能只修改内存表。
 
 本地 Schema 接入、缺失根组、世界书别名、创角档案和助手入口恢复的公开回归在 `test/card-api-compatibility.js`。完整宿主入口为 `node test/real-host.js --only=card-api`，固定 DB/TH/ST 版本，覆盖 native 与实际 SQLite 的解析、一次业务变换、档案保存和重载。夹具必须开启酒馆助手对该角色的脚本功能，且导入内嵌世界书；单个脚本标为 enabled 不能证明它已运行。
 

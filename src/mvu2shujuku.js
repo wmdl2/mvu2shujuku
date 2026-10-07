@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.6.0';
+    const VERSION = '0.7.0';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -1584,8 +1584,8 @@
     }
 
     function isPureMvuOutputMarkup(content) {
-        if (/<%|&lt;%/i.test(content)) return false;
-        const text = String(content).replace(/<status_current_variables?>[\s\S]*?<\/status_current_variables?>|<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gi, '');
+        if (/<%|&lt;%|<\/?status_current_variables?\b/i.test(content)) return false;
+        const text = String(content).replace(/<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gi, '');
         return text !== content && text.split('\n').every(line => !line.trim() || /^(?:---|每轮必须输出变量更新[。.!]?)$/u.test(line.trim()));
     }
 
@@ -2710,6 +2710,7 @@
         // （剧情条目保留；变量值由插件注入表格数据提供，宏本身在数据库环境无解析器）
         function rewritePlotMacros(text) {
             return String(text || '').replace(/\{\{?\s*get_message_variable\s*::\s*([^}\s]+)\s*\}\}?/gi, (m, path) => {
+                if (path === 'stat_data') return formatMessageVariableEjs('stat_data');
                 const p = String(path).replace(/^stat_data\./, '').replace(/^stat\./, '').replace(/\[0\]/g, '');
                 const parts = p.split('.').filter(Boolean);
                 if (!parts.length) return m;
@@ -2720,7 +2721,7 @@
         }
         for (const e of entries) {
             const comment = String(e.comment || '');
-            const content = String(e.content || '');
+            let content = String(e.content || '');
             const isInit = /\[initvar\]/i.test(comment);
             // [mvu_plot] 是 MVU 的“剧情 AI 专用”标记：内容是剧情/人设/地点等提示，
             // 不属于变量更新规则，一律保留（内部 MVU 宏单独改写）。
@@ -2738,27 +2739,32 @@
             const dedicatedProtocolEntry = /^变量(?:处理|更新|输出)(?:指令集|指令|协议)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(entryTitle);
             const dedicatedOutputEntry = /^(?:variables?|output_format)(?:\s*\([^)]*\))?$/i.test(entryTitle) ||
                 /^(?:变量列表|变量(?:更新|输出)格式(?:强调)?|变量输出规则)(?:\s*\([^)]*\))?$/i.test(entryTitle) || dedicatedProtocolEntry;
+            // 状态展示是模型输入，不是模型的更新输出。只拆去专名条目中
+            // 独立可确认的旧更新协议，完整保留状态块（包括块内业务说明）。
+            const hasStatusMarkup = /<\/?status_current_variables?\b/i.test(content);
+            if (!isPlot && dedicatedOutputEntry && hasStatusMarkup) {
+                const statusBlocks = [];
+                const remainder = content.replace(/<(status_current_variables?)>(?:(?!<\/?status_current_variables?\b)[\s\S])*?<\/\1>/gi,
+                    block => { statusBlocks.push(block); return ''; });
+                if (statusBlocks.length && isPureMvuOutputMarkup(remainder)) content = statusBlocks.join('\n');
+            }
             const ruleDocumentContent = /(?:^|\n)\s*(?:变量更新规则|variables_update_rules)\s*:|(?:^|\n)[ \t]+(?:type|range|check|format)\s*:/mi.test(content)
                 || (shapeInfo.proseRuleDocuments || []).some(doc => doc.source === content)
                 || ((dedicatedRuleEntry || explicitUpdateEntry) && isPureMvuRuleDocument(content));
             const outputProtocolContent = /<status_current_variables?|get_message_variable\s*::\s*stat_data|<UpdateVariable|<JSONPatch|json\s*patch|每轮[^\n]{0,40}(?:必须)?输出|^\s*格式:\s*_\.set\s*\(/i.test(content);
-            const pureStatusOutput = /^\s*<status_current_variables?>[\s\S]*<\/status_current_variables?>\s*$/i.test(content) &&
-                /get_message_variable|stat_data/i.test(content);
             // 某些卡用单个箭头/图标作为变量管线的起止占位。只识别这种
             // 纯符号 marker；不再用“少于 60 字”猜测，避免删掉 lastUserMessage 等短上下文。
             const purePipelineMarker = explicitUpdateEntry && /变量|更新|输出/i.test(comment) &&
                 /^\s*[🔻🔺▼▲↓↑⬇⬆⏬⏫─━—_=*#.:;\-]+\s*$/u.test(content);
-            const outputDocument = !isPlot && (explicitUpdateEntry || dedicatedOutputEntry) && outputProtocolContent && isMvuOutputDocument(content);
-            const splitRules = !isPlot && (dedicatedRuleEntry || dedicatedOutputEntry || explicitUpdateEntry) && ruleDocumentContent
+            const outputDocument = !isPlot && !hasStatusMarkup && (explicitUpdateEntry || dedicatedOutputEntry) && outputProtocolContent && isMvuOutputDocument(content);
+            const splitRules = !isPlot && !hasStatusMarkup && (dedicatedRuleEntry || dedicatedOutputEntry || explicitUpdateEntry) && ruleDocumentContent
                 ? splitMigratedMvuRules(content, schema, shapeInfo, template) : null;
             const isMvuUpdate = !isPlot && (
                 (explicitUpdateEntry && (!String(content).trim() || purePipelineMarker)) ||
                 (splitRules && !splitRules.content) ||
                 // 输出文档必须是完整专名；有 EJS 的混合业务不能凭名称删除。
                 (outputDocument && splitRules && !splitRules.content) ||
-                (dedicatedOutputEntry && isPureMvuOutputMarkup(content)) ||
-                // 教程中 comment 可任意命名；整个正文只有变量快照标签时仍是纯输出管线。
-                pureStatusOutput);
+                (dedicatedOutputEntry && isPureMvuOutputMarkup(content)));
             if (isInit || isMvuUpdate) {
                 report.note(`已删除 MVU 世界书条目「${comment}」（${isInit ? '初始变量已迁移为数据库模板' : outputDocument ? '输出格式由数据库宿主填表协议接管，不再注入正文' : '更新规则已迁移为数据库模板/规则'}）。`);
                 continue;
@@ -3284,6 +3290,14 @@
             '.mvu2shujuku-operation-box { max-width: min(420px, 90vw); padding: 24px; border-radius: 12px; background: var(--SmartThemeBlurTintColor, #222); color: var(--SmartThemeBodyColor, #eee); border: 1px solid var(--SmartThemeBorderColor, #555); text-align: center; }',
             '.mvu2shujuku-operation-box strong { display: block; margin: 12px 0; }',
             '.mvu2shujuku-operation-box p { margin: 0; }',
+            '.mvu2shujuku-worldbook-conflict .mvu2shujuku-operation-box { width: min(540px, calc(100vw - 32px)); max-width: none; box-sizing: border-box; padding: clamp(16px, 4vw, 24px); max-height: calc(100dvh - 32px); overflow-y: auto; text-align: left; }',
+            '.mvu2shujuku-worldbook-conflict h3 { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }',
+            '.mvu2shujuku-worldbook-conflict .mvu2shujuku-operation-box p { margin-top: 14px; line-height: 1.5; }',
+            '.mvu2shujuku-worldbook-backup { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; line-height: 1.5; cursor: pointer; }',
+            '.mvu2shujuku-worldbook-backup input { flex: 0 0 auto; width: 1.1em; height: 1.1em; margin: .2em 0 0; }',
+            '.mvu2shujuku-worldbook-backup span { min-width: 0; }',
+            '.mvu2shujuku-worldbook-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }',
+            '.mvu2shujuku-worldbook-actions .menu_button { flex: 1 0 9em; width: auto; min-width: 0; max-width: 100%; box-sizing: border-box; margin: 0; padding: 10px 12px; min-height: 44px; height: auto; font: inherit; line-height: 1.4; white-space: nowrap; word-break: normal; }',
             '#mvu2shujuku-settings .mvu2shujuku-card {',
             '  border: 1px solid var(--SmartThemeBorderColor, #555);',
             '  border-radius: 8px;',
@@ -3403,6 +3417,17 @@
         throw new Error('正文世界书过滤模块缺失');
     }
 
+    function getWorldbookSaveFactory() {
+        if (typeof root.__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__;
+        if (typeof require === 'function') return require('./worldbook-save.js');
+        throw new Error('世界书保存模块缺失');
+    }
+    function getWorldbookStorageFactory() {
+        if (typeof root.__MVU2SHUJUKU_WORLDBOOK_STORAGE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_WORLDBOOK_STORAGE_FACTORY__;
+        if (typeof require === 'function') return require('./worldbook-storage.js');
+        throw new Error('世界书存储模块缺失');
+    }
+
     function getCandidateBuilderFactory() {
         if (typeof root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__;
         if (typeof require === 'function') {
@@ -3450,6 +3475,8 @@
             ['__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__', getExtensionRuntimeInstaller],
             ['__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__', getCandidateBuilderFactory],
             ['__MVU2SHUJUKU_WORLDBOOK_REQUEST_FILTER_FACTORY__', getWorldbookRequestFilterFactory],
+            ['__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__', getWorldbookSaveFactory],
+            ['__MVU2SHUJUKU_WORLDBOOK_STORAGE_FACTORY__', getWorldbookStorageFactory],
             ['__MVU2SHUJUKU_CARD_BRIDGE_INSTALLER__', getCardBridgeInstaller],
             ['__MVU2SHUJUKU_TABLE_WRITER_FACTORY__', getTableWriterFactory],
             ['__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__', getBridgeLifecycleFactory],
@@ -3539,6 +3566,8 @@
         vwdDescriptionDelta,
         getCandidateBuilderFactory,
         getWorldbookRequestFilterFactory,
+        getWorldbookSaveFactory,
+        getWorldbookStorageFactory,
         setVwdExperimental,
         isVwdExperimental,
         writeStatDiffToDbResult,
