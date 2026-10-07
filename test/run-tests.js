@@ -1995,7 +1995,7 @@ test('[mvu_plot] 剧情条目全部保留，内部 MVU 宏改写为数据库引�
     const entries = out.character_book.entries;
     const plotHits = entries.filter(e => /\[mvu_plot\]/.test(String(e.comment || '')));
     assert.strictEqual(plotHits.length, 2, '两个 [mvu_plot] 条目都应保留');
-    assert.ok(!entries.some(e => e.comment === '变量列表'), '变量列表条目应删除');
+    assert.ok(entries.some(e => e.comment === '变量列表' && e.content.includes('<status_current_variable>')), '变量列表是给模型看的当前状态，应保留');
     const timeEntry = plotHits.find(e => e.comment.includes('时间和地点提醒'));
     assert.ok(timeEntry.content.includes('（数据库表「系统表」的「当前时间」）'), 'get_message_variable 应改写为数据库表引用');
     assert.ok(timeEntry.content.includes('（数据库表「系统表」的「主角可疑度」）'), '应去掉 stat_data. 前缀与 [0]');
@@ -3351,18 +3351,18 @@ test("旧桥回归：问候语 <UpdateVariable> 覆盖初始值 + display 镜像
     }, 500);
 }));
 
-test('status_current_variable 单数条目也应识别为 MVU 并删除', () => {
-    const card = requireFixture();
-    // 模拟教程“蓝灯 D1”：comment 为任意名字，content 用单数 status_current_variable + get_message_variable
-    const data = JSON.parse(JSON.stringify(card.data || card));
-    data.character_book.entries.push({
-        comment: '蓝灯 D1',
-        content: '<status_current_variable>//do not output following content\n{{get_message_variable::stat_data}}\n</status_current_variable>',
+test('status_current_variable 单数展示保留并接入数据库宏', () => {
+    const card = require('./synthetic-card')();
+    card.data.character_book.entries.push({
+        comment: '公开状态展示',
+        content: '<status_current_variable>//do not output following content\n{{format_message_variable::stat_data}}\n</status_current_variable>',
         enabled: true,
     });
-    const r = core.convert({ spec: 'chara_card_v3', data }, { mode: 'both' });
-    const out = r.card.data || r.card;
-    assert.ok(!out.character_book.entries.some(e => e.comment === '蓝灯 D1'), 'MVU 变量输出条目（任意 comment + status_current_variable）应被删除');
+    const r = core.convert(card, { mode: 'both' });
+    const entry = (r.card.data || r.card).character_book.entries.find(e => e.comment === '公开状态展示');
+    assert.ok(entry);
+    assert.match(entry.content, /mvu2shujukuFormatMessageVariable\("stat_data"\)/);
+    assert.match(entry.content, /do not output following content/);
 });
 
 /* ---------------- convert 输出 ---------------- */
@@ -3382,7 +3382,7 @@ test('转换产物齐全', () => {
     assert.ok((c.extensions.regex_scripts || []).some(rx => rx.scriptName === 'XML状态栏'), '非 MVU 显示正则应保留');
     assert.ok(c.extensions.mvu2shujuku, '应有转换标记');
     assert.ok(typeof c.extensions.mvu2shujuku.layout === 'string' && Array.isArray(JSON.parse(c.extensions.mvu2shujuku.layout)), '转换标记应包含布局（供扩展重建 stat_data）');
-    assert.ok(!c.character_book.entries.some(e => /\[initvar\]|变量列表/i.test(String(e.comment || ''))), '初始化和明确的变量列表应被删除');
+    assert.ok(!c.character_book.entries.some(e => /\[initvar\]/i.test(String(e.comment || ''))), '初始化应迁移到数据库模板，状态展示不因标题删除');
     const unconfirmedOutput = c.character_book.entries.find(e => /变量输出格式强调/i.test(String(e.comment || '')));
     assert.ok(unconfirmedOutput, '未确认完整格式文档的条目不得仅凭标题删除');
     assert.strictEqual(unconfirmedOutput.content, (card.data || card).character_book.entries.find(e => /变量输出格式强调/i.test(String(e.comment || ''))).content);
@@ -4010,7 +4010,9 @@ test('无 MVU 前缀的专用变量规则/处理指令条目被迁移删除，�
     const data = result.card.data || result.card;
     const comments = data.character_book.entries.map(entry => entry.comment);
     assert.ok(!comments.includes('变量更新规则'), '已迁移进表备注的专用规则条目不应继续注入提示词');
-    assert.ok(!comments.includes('变量处理指令集'), '专用 JSONPatch 输出协议不应继续要求模型输出旧 MVU 块');
+    const display = data.character_book.entries.find(e => e.comment === '变量处理指令集');
+    assert.match(display.content, /status_current_variables/);
+    assert.doesNotMatch(display.content, /UpdateVariable|JSONPatch|每轮必须输出变量更新/);
     assert.ok(comments.includes('系统主控脚本[EJS]'), '包含业务逻辑的混合 EJS 条目必须保留');
     const worldSheet = Object.values(result.template).find(sheet => sheet && sheet.name === '世界表');
     assert.ok(worldSheet && worldSheet.sourceData.note.includes('时间流逝后更新'), '删除世界书规则前必须先把约束迁移进数据库表备注');
@@ -10685,6 +10687,7 @@ require('./full-json-containers');
 require('./result-view');
 require('./conversion-profiles');
 require('./save-verification');
+require('./worldbook-save');
 require('./prose-update-rules');
 require('./worldbook-request-filter');
 require('./nested-wildcard-rules');

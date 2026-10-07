@@ -23,12 +23,16 @@ function operationDocument() {
 function runtime(extra = {}) {
     let chat = 'A', avatar = 'one.png';
     const context = { getContextSafe: () => ({ chatId: chat }), currentCharacter: () => ({ avatar }),
-        autoInitChatId: () => chat, characterDisplayName: () => '同名', cardCacheKey: ch => ch.avatar, ...extra };
+        autoInitChatId: () => chat, characterDisplayName: () => '同名', cardCacheKey: ch => ch.avatar,
+        mvuMessageWrites: new Map(), messageUpdatesInProgress: new WeakSet(), ...extra };
     vm.createContext(context);
     const sessions = require('../src/runtime-session')(() => ({ characterKey: 'avatar:' + avatar, groupKey: '', chatKey: chat, cardKey: avatar }));
     Object.assign(context, { captureRuntimeSession: sessions.capture, isRuntimeSessionCurrent: sessions.isCurrent,
         bindWriteTarget: session => sessions.bindWriteTarget(session, () => context.getContextSafe().chat),
         assertRuntimeSession: sessions.assertCurrent, runtimeApiForSession: sessions.apiForSession, runtimeScopedChatKey: sessions.scopedChatKey });
+    // 新增正文路径的依赖仍取产品实际函数；本组不模拟正文保存，相关完整链见runtime-native。
+    vm.runInContext(extract('    function scheduleMvuMessageWrite(', '    function scheduleGreetingMessageWrite('), context);
+    vm.runInContext(extract('    function guardGreetingSource(', '    async function computeActiveGreetingSnapshot('), context);
     return { context, switchChat: value => { chat = value; }, switchCard: value => { avatar = value; } };
 }
 
@@ -328,18 +332,26 @@ test('审查：桥注册拒绝名称前缀、过期转换标识和篡改布局',
 test('审查：保存 await 期间切换结果仍保存原卡、头像及模板', async () => {
     const original = core.convert(card()), created = [], templates = [];
     original.meta.sourceCharacter = { name: '源卡', avatar: 'original.png' };
-    let release, requestedAvatar;
+    let release, requestedAvatar, avatarReady;
+    const avatarRequested = new Promise(resolve => { avatarReady = resolve; });
+    const books = new Map();
+    const saver = require('../src/worldbook-save')({
+        convertBook: book => ({ entries: book.entries }), listNames: async () => [...books.keys()],
+        read: async name => books.get(name), write: async (name, value) => books.set(name, value), refresh: async () => {},
+    });
     const context = { lastResult: original, updateParamsDirty: false, PANEL_ID: 'test',
-        hostDocument: operationDocument(), hostWindow: { setTimeout }, dbg() {}, Blob, toast() {}, showInfoPopup() {},
+        hostDocument: operationDocument(), hostWindow: { setTimeout }, window: { MVU2SHUJUKU_CORE: core }, testSaver: saver,
+        dbg() {}, Blob, toast() {}, showInfoPopup() {}, download() { throw new Error('本场景不应下载回退'); },
         getContextSafe: () => ({ createCharacterData: async (...args) => { created.push(args); return 'saved.png'; } }),
-        fetchAvatarBlob: ch => { requestedAvatar = ch.avatar; return new Promise(resolve => { release = resolve; }); },
+        fetchAvatarBlob: ch => { requestedAvatar = ch.avatar; return new Promise(resolve => { release = resolve; avatarReady(); }); },
         getAcuApi: () => ({ importTemplateFromData: async template => { templates.push(template); return { success: true }; } }),
         autoSaveConversionProfile: async () => { throw new Error('不应保存另一转换结果的配置'); } };
     vm.createContext(context);
     vm.runInContext(extract('    function sameSavedScriptData(', '    // 弹窗：'), context);
+    vm.runInContext('worldbookSaver = testSaver', context);
     const pending = context.saveCardToSillyTavern();
     context.lastResult = core.convert({ ...card(), name: '另一张卡' });
-    while (!release) await new Promise(resolve => setTimeout(resolve, 5));
+    await Promise.race([avatarRequested, pending.then(() => { throw new Error('头像请求前保存提前结束'); })]);
     release(new Blob(['avatar']));
     assert.strictEqual(await pending, true);
     assert.strictEqual(requestedAvatar, 'original.png');

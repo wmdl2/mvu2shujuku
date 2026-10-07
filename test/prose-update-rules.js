@@ -301,3 +301,34 @@ test('复杂权限：JSON 叶子说明完整迁移，条件不能推导整表只
     const onlyConditional=core.convert({...source,character_book:{entries:[source.character_book.entries[0],{...source.character_book.entries[1],content:pathFormat(['/自由/{全名}/称呼冻结 readonly(仅在开局时由玩家界面管理)'])}]}});
     assert.ok(!onlyConditional.schema.find(g=>g.tableName==='自由表').jsonAiWritable,'复杂权限自身不能自动开放整个 JSON');
 });
+
+test('状态展示：完整快照和未知附加说明均保留，不用标签内 stat_data 判断整条删除', () => {
+    for (const tag of ['status_current_variable', 'status_current_variables']) {
+        for (const suffix of ['', '\n//以上内容不直接输出', '\n这里是未识别的作者说明。']) {
+            const text = '<' + tag + '>\n{{format_message_variable::stat_data}}\n生命低于20时必须描述伤势。\n</' + tag + '>' + suffix;
+            const r = convert(text);
+            const e = retained(r);
+            assert.ok(e, '状态和附加说明不能被当成更新协议整条删除');
+            assert.strictEqual(e.content, text.replace('{{format_message_variable::stat_data}}', '<%- mvu2shujukuFormatMessageVariable("stat_data") %>'));
+            assert.strictEqual(JSON.stringify(r.template), JSON.stringify(convert('').template), '保留展示不改变表格模板');
+        }
+    }
+});
+test('状态展示：变量列表专名、原生 EJS 和不完整外壳不能触发输出协议删除', () => {
+    for (const content of ['<status_current_variable>\n{{format_message_variable::stat_data}}',
+        '<status_current_variables>\n<%- mvu2shujukuFormatMessageVariable("stat_data") %>\n</status_current_variables>']) {
+        const r = core.convert({ name: '公开状态边界', character_book: { entries: [
+            { comment: '[InitVar]', content: '{"状态":{"生命":10}}' },
+            { comment: '变量列表', content, enabled: true },
+        ] } });
+        assert.ok((r.card.data || r.card).character_book.entries.some(e => e.comment === '变量列表'));
+    }
+});
+
+
+test('状态展示：整份 get_message_variable 读取当前快照，不引用不存在的 stat_data表', () => {
+    const text = '<status_current_variable>\n{{get_message_variable::stat_data}}\n生命低于20时描述伤势。\n</status_current_variable>';
+    const r = convert(text);
+    assert.strictEqual(retained(r).content, text.replace('{{get_message_variable::stat_data}}', '<%- mvu2shujukuFormatMessageVariable("stat_data") %>'));
+    assert.doesNotMatch(retained(r).content, /stat_data表/);
+});

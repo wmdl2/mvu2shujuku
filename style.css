@@ -2,6 +2,14 @@
 .mvu2shujuku-operation-box { max-width: min(420px, 90vw); padding: 24px; border-radius: 12px; background: var(--SmartThemeBlurTintColor, #222); color: var(--SmartThemeBodyColor, #eee); border: 1px solid var(--SmartThemeBorderColor, #555); text-align: center; }
 .mvu2shujuku-operation-box strong { display: block; margin: 12px 0; }
 .mvu2shujuku-operation-box p { margin: 0; }
+.mvu2shujuku-worldbook-conflict .mvu2shujuku-operation-box { width: min(540px, calc(100vw - 32px)); max-width: none; box-sizing: border-box; padding: clamp(16px, 4vw, 24px); max-height: calc(100dvh - 32px); overflow-y: auto; text-align: left; }
+.mvu2shujuku-worldbook-conflict h3 { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.mvu2shujuku-worldbook-conflict .mvu2shujuku-operation-box p { margin-top: 14px; line-height: 1.5; }
+.mvu2shujuku-worldbook-backup { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; line-height: 1.5; cursor: pointer; }
+.mvu2shujuku-worldbook-backup input { flex: 0 0 auto; width: 1.1em; height: 1.1em; margin: .2em 0 0; }
+.mvu2shujuku-worldbook-backup span { min-width: 0; }
+.mvu2shujuku-worldbook-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+.mvu2shujuku-worldbook-actions .menu_button { flex: 1 0 9em; width: auto; min-width: 0; max-width: 100%; box-sizing: border-box; margin: 0; padding: 10px 12px; min-height: 44px; height: auto; font: inherit; line-height: 1.4; white-space: nowrap; word-break: normal; }
 #mvu2shujuku-settings .mvu2shujuku-card {
   border: 1px solid var(--SmartThemeBorderColor, #555);
   border-radius: 8px;
