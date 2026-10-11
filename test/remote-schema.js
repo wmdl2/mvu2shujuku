@@ -12,6 +12,48 @@ function fixture(content = `import '${url}';`, enabled = true) {
         extensions:{tavern_helper:{scripts:[{name:'变量结构',enabled,content}]}} };
 }
 const response = text => ({ok:true, headers:{get(){return null;}}, text:async()=>text});
+function remoteRuntimeProbe({ late = false, changeOwner = false, missing = false } = {}) {
+    const vm = require('vm'), calls = [], schemaA = {shape:{stat_data:{name:'A'}}}, schemaB = {shape:{stat_data:{name:'B'}}};
+    const context = {characters:[{avatar:'public.png'}],characterId:0,chatId:'public-chat'};
+    const api = {__mvu2shujukuFake:true,registerSchema(schema,key){calls.push(['bridge',schema.name,key]);return true;}};
+    const parent = {SillyTavern:{getContext:()=>context}};
+    if (!late && !missing) parent.Mvu = api;
+    let timers = 0;
+    const window = {parent,registerVariableSchema(schema,options){
+        assert.strictEqual(this,window);assert.strictEqual(options.type,'message');
+        calls.push(['native',schema.shape.stat_data.name]);return 42;
+    }};
+    const adapter = createService().runtimeAdapter({url,runtimeUrl:url,source,index:0},`import '${url}';`);
+    const script = adapter.content.replace('await import('+JSON.stringify(url)+');','await importOriginal();');
+    assert.notStrictEqual(script,adapter.content,'Run the product-generated adapter with only its network import substituted');
+    const sandbox = vm.createContext({window,console:{error:e=>calls.push(['error',e.message])},
+        waitGlobalInitialized(){throw new Error('Module import must not wait for initialized data');},
+        setTimeout(resolve){timers++;if(changeOwner)context.chatId='other-chat';if(late)parent.Mvu=api;resolve();},
+        async importOriginal(){calls.push(['import']);
+            assert.strictEqual(window.registerVariableSchema(schemaA,{type:'message'}),42);
+            assert.strictEqual(window.registerVariableSchema(schemaB,{type:'message'}),42);
+        }});
+    return {calls,get timers(){return timers;},run:()=>vm.runInContext('(async()=>{'+script+'})()',sandbox)};
+}
+test('远程结构运行时：模块直接导入，原登记返回值与 Schema 顺序保持',async()=>{
+    const probe=remoteRuntimeProbe();await probe.run();
+    assert.deepStrictEqual(probe.calls.map(c=>c.slice(0,2)),[['import'],['native','A'],['native','B'],['bridge','A'],['bridge','B']]);
+    assert.strictEqual(probe.timers,0);
+});
+test('远程结构运行时：只延后数据桥登记，不延后原模块与原登记',async()=>{
+    const probe=remoteRuntimeProbe({late:true});await probe.run();
+    assert.deepStrictEqual(probe.calls.map(c=>c.slice(0,2)),[['import'],['native','A'],['native','B'],['bridge','A'],['bridge','B']]);
+    assert.strictEqual(probe.timers,1);
+});
+test('远程结构运行时：桥不可用时有界失败，不重新导入或执行 Schema',async()=>{
+    const probe=remoteRuntimeProbe({missing:true});await assert.rejects(probe.run(),/登记未接入/);
+    assert.strictEqual(probe.timers,200);assert.strictEqual(probe.calls.filter(c=>c[0]==='import').length,1);
+    assert.strictEqual(probe.calls.filter(c=>c[0]==='bridge').length,0);
+});
+test('远程结构运行时：聊天切换取消旧 iframe 的待登记 Schema',async()=>{
+    const probe=remoteRuntimeProbe({late:true,changeOwner:true});await assert.rejects(probe.run(),/所属聊天已切换/);
+    assert.strictEqual(probe.calls.filter(c=>c[0]==='bridge').length,0);
+});
 test('远程结构：仅转换时获取，缓存复用且卡不包含下载正文', async () => {
     const service=createService(); let calls=0;
     const options={fetch:async()=>{calls++;return response(source);},preserveRemoteSchemaUrls:true};
@@ -98,7 +140,8 @@ test('多开场结构：删除前行后动态字段仍更新到原业务键',asy
 test('远程结构：HTTP 浏览器无 SubtleCrypto 时仍生成正确 SHA-256',async()=>{
     const vm=require('vm'),crypto=require('crypto');
     const sandbox=vm.createContext({TextEncoder,URL,AbortController,setTimeout,clearTimeout,crypto:{}});
-    vm.runInContext('var createRemote='+require('../src/remote-schema').toString()+';var createJs='+require('../src/js-source').toString()+';var service=createRemote({createJsSource:createJs});',sandbox);
+    sandbox.acorn = require('../src/vendor/schema-engine-libs').acorn;
+    vm.runInContext('var createRemote='+require('../src/remote-schema').toString()+';var createJs='+require('../src/js-source').toString()+';var service=createRemote({createJsSource:()=>createJs({acorn})});',sandbox);
     for(const value of ['', 'abc', '中文🧪'.repeat(100)]) {
         sandbox.input=fixture();sandbox.options={remoteSchemaSources:[{url,source:value}],preserveRemoteSchemaUrls:true};
         const result=await vm.runInContext('service.resolve(input,options)',sandbox);

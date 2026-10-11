@@ -10,18 +10,87 @@ function openingTemplateBuilder(runtimeCore = core) {
     return require('../src/extension-runtime').createCandidateBuilder({ core: runtimeCore }).buildUpdatedTemplateFromStat;
 }
 
-function greetingSnapshot(runtimeCore, validateCardStat, updateCycle) {
+function greetingSnapshot(runtimeCore, validateCardStat, updateCycle, storedAll) {
     const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
     const start = source.indexOf('    async function computeActiveGreetingSnapshot(');
     const end = source.indexOf('    async function applyActiveGreetingInitvar(', start);
     assert.ok(start >= 0 && end > start);
     return vm.runInNewContext(source.slice(start, end) + '\ncomputeActiveGreetingSnapshot;', {
-        window: { MVU2SHUJUKU_CORE: runtimeCore }, getContextSafe: () => ({}),
+        window: { MVU2SHUJUKU_CORE: runtimeCore, getAllVariables: () => clone(storedAll || {}) }, getContextSafe: () => ({}),
         autoInitChatId: () => 'public-schema-opening', greetingMacroCache: {},
         validateCardStat, runMvuUpdateCycle: updateCycle,
         emitMvuEvent: async () => {},
     });
 }
+
+function plainGreetingSource(metadata) {
+    const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const start = source.indexOf('    function messageUpdateBlocks(');
+    const end = source.indexOf('    function guardGreetingSource(', start);
+    assert.ok(start >= 0 && end > start);
+    const first = { mes: '公开开场。', is_user: false };
+    return vm.runInNewContext(source.slice(start, end) + '\nactiveGreetingSourceSnapshot;', {
+        window: { MVU2SHUJUKU_CORE: core }, getContextSafe: () => ({ chat: [first] }),
+        readCardApiMetadata: () => metadata,
+    });
+}
+
+test('开场 Schema：世界书初值没有内联块也校验，首次建表可延后', async () => {
+    const { zod: z } = require('../src/vendor/schema-engine-libs');
+    const metadata = { schemaKeys: ['public'] };
+    const api = require('../src/card-api')({ readMetadata: () => metadata, isCurrent: () => true });
+    let parses = 0;
+    api.registerSchema(z.object({ 账户: z.object({ 等级: z.number().transform(value => {
+        parses++; return Math.max(1, Math.min(100, value));
+    }) }) }), 'public');
+    const source = plainGreetingSource(metadata)();
+    assert.strictEqual(source.schemaOnly, true);
+    assert.strictEqual(source.m, null);
+    const compute = greetingSnapshot(core, stat => api.validate(stat));
+    const initial = { stat_data: { 账户: { 等级: 0 } } };
+    const deferred = await compute(initial, source, { deferSchema: true });
+    assert.strictEqual(deferred.schemaDeferred, true);
+    assert.strictEqual(parses, 0);
+    const settled = await compute(initial, source);
+    assert.strictEqual(settled.schemaDeferred, false);
+    assert.deepStrictEqual(clone(settled.finalWrap.stat_data), { 账户: { 等级: 1 } });
+    assert.strictEqual(parses, 1);
+});
+
+test('开场 Schema：无任务缓存不阻止晚到的Schema元数据，普通卡仍无任务', () => {
+    const metadata = { schemaKeys: [] }, capture = plainGreetingSource(metadata);
+    assert.strictEqual(capture(), null);
+    metadata.schemaKeys = ['public'];
+    const source = capture();
+    assert.strictEqual(source.schemaOnly, true);
+    assert.strictEqual(capture(), source);
+    metadata.schemaKeys = [];
+    assert.strictEqual(capture(), null);
+});
+
+test('开场 Schema：已有世界书初值存档只建基线，不重放Schema', async () => {
+    const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const start = source.indexOf('    async function applyActiveGreetingInitvar(');
+    const end = source.indexOf('    // 扩展成为唯一 runtime owner', start);
+    assert.ok(start >= 0 && end > start);
+    const metadata = { schemaKeys: ['public'] }, snapshot = plainGreetingSource(metadata)();
+    const state = { ready: true, baselineNext: true }, stored = { stat_data: { 账户: { 等级: 23 } } };
+    let parses = 0;
+    const apply = vm.runInNewContext(source.slice(start, end) + '\napplyActiveGreetingInitvar;', {
+        captureRuntimeSession: () => ({}), autoInitChatId: () => 'stored', greetingInitState: () => state,
+        activeGreetingSourceSnapshot: () => snapshot, mvuMessageWrites: new Map(), guardGreetingSource: () => {},
+        isRuntimeSessionCurrent: () => true,
+        computeActiveGreetingSnapshot: greetingSnapshot(core, () => { parses++; throw new Error('不得重放'); }, undefined, stored),
+        scheduleWindowStatOverlay: () => { throw new Error('不得重写存档'); },
+        dbg: () => {}, dbgWarn: (...args) => { throw args.find(value => value instanceof Error) || new Error('unexpected failure'); },
+    });
+    await apply();
+    assert.strictEqual(parses, 0);
+    assert.strictEqual(state.baselineNext, false);
+    assert.strictEqual(state.appliedSourceFp, snapshot.sourceFp);
+    assert.strictEqual(state.pendingSourceFp, '');
+    assert.deepStrictEqual(stored.stat_data, { 账户: { 等级: 23 } });
+});
 
 test('开场 Schema：纯 InitVar 先运行作者预处理，旧名删除、新名和记录保留', async () => {
     const { zod: z } = require('../src/vendor/schema-engine-libs');
@@ -185,9 +254,12 @@ async function nativeRuntime(source = require('./synthetic-card')(), configure) 
     const tables = clone(result.template), api = applyingApi(tables);
     const tableCallbacks = [];
     api.registerTableUpdateCallback = callback => { tableCallbacks.push(callback); return true; };
-    // SP 9.2.5 的 getter 在 native 模式一直返回 undefined，不是加载中。
+    // This runtime harness uses a CRUD substitute. New conversions require a
+    // published SQL read capability; these getters simulate readiness only.
+    // configure can withdraw it to test loading/native refusal explicitly.
     Object.defineProperties(api, {
-        querySql: { get: () => undefined }, executeSqlQuery: { get: () => undefined },
+        querySql: { configurable: true, get: () => () => ({ columns: ['ready'], rows: [[1]] }) },
+        executeSqlQuery: { configurable: true, get: () => () => ({ columns: ['ready'], rows: [[1]] }) },
     });
     let now = 0, id = 0;
     const timers = new Map();
@@ -231,8 +303,41 @@ async function nativeRuntime(source = require('./synthetic-card')(), configure) 
     vm.runInContext(core.assembleExtension({ coreSource: fs.readFileSync(require.resolve('../src/mvu2shujuku'), 'utf8') })['index.js'], win);
     await advance(100);
     assert.strictEqual(typeof win.Mvu?.replaceMvuData, 'function');
-    return { win, context, tables, api, advance, tableCallbacks };
+    return { win, context, tables, api, advance, tableCallbacks, handlers };
 }
+
+test('开场恢复：内部Schema提交后丢失载体仍恢复已提交值，不回退模板占位值', async () => {
+    const source = { name: '公开开场提交缓存', first_mes: '开场', character_book: { entries: [{ comment: '[InitVar]', enabled: false, content: JSON.stringify({组:{时间:'待初始化',备注:'保留'}}) }] },
+        extensions: { tavern_helper: { scripts: [{enabled:true,content:'import {registerMvuSchema} from "https://example.test/mvu_zod.js";const S=z.object({组:z.object({时间:z.enum(["白天","夜晚"]).catch(""),备注:z.string()})});registerMvuSchema(S);'}] } } };
+    const h = await nativeRuntime({spec:'chara_card_v3',spec_version:'3.0',data:source}, ({win,context,api,tables,now}) => {
+        const clockStart = Date.now();
+        win.Date = class extends Date { static now() { return clockStart + now(); } };
+        context.event_types.MESSAGE_RECEIVED = 'received';
+        context.chat[0].mes = '开场'; delete context.chat[0].TavernDB_ACU_IsolatedData;
+        for (const key of Object.keys(tables)) delete tables[key];
+        const importTables = api.importTableAsJson;
+        api.importTableAsJson = async (...args) => {
+            const result = await importTables(...args);
+            context.chat[0].TavernDB_ACU_IsolatedData = {test:{storageFrame:{version:2,checkpoint:{kind:'full',data:clone(tables)},logEntries:[]}}};
+            return result;
+        };
+        api.initGameSession = async (_, options) => {
+            await api.importTableAsJson(JSON.stringify(options.templateData));
+            context.chat[0].TavernDB_ACU_IsolatedData = {test:{storageFrame:{version:2,checkpoint:{kind:'full',data:clone(tables)},logEntries:[]}}};
+            return {success:true};
+        };
+    });
+    const z = require('../src/vendor/schema-engine-libs').zod;
+    const key = h.context.characters[0].extensions.mvu2shujuku.schemaKeys[0];
+    assert.strictEqual(h.win.Mvu.registerSchema(z.object({组:z.object({时间:z.enum(['白天','夜晚']).catch(''),备注:z.string()})}), key), true);
+    await h.advance(8000);
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.组.时间, '');
+    const layout = JSON.parse(h.context.characters[0].extensions.mvu2shujuku.layout);
+    assert.strictEqual(core.statDataFromTables(layout,h.context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame.checkpoint.data).stat_data.组.时间, '', '先证明提交完成，不能以待写覆盖值充当存档');
+    delete h.context.chat[0].TavernDB_ACU_IsolatedData;
+    await h.context.eventSource.emit('received', 0); await h.advance(8000);
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.组.时间, '', '恢复必须使用已提交Schema输出');
+});
 
 function placeholderCard() {
     const source = require('./synthetic-card')();
@@ -482,7 +587,7 @@ for (const recover of [true, false]) test('写入结果：真实运行时按本�
         get() { throw new Error('不得读取旧失败标记'); },
     });
     assert.strictEqual(await settleGold(h, 37), recover);
-    assert.ok(calls > 1 && calls <= 6, '失败须重试且次数有界：' + calls);
+    assert.ok(calls > 1 && calls <= 7, '初次尝试加最多6次重试：' + calls);
     const status = Object.values(h.tables).find(sheet => sheet?.name === '状态表');
     assert.strictEqual(Number(status.content[1][status.content[0].indexOf('金币')]), recover ? 37 : Number(beforeGold));
 });
@@ -647,6 +752,28 @@ test('当前楼批次：混合扣金币与新增道具只提交一次完整快�
     assert.strictEqual(JSON.stringify(h.context.chat[0]), opening);
 });
 
+test('旧卡首楼批次：缺少 statStorage 元数据时混合写入仍只提交一次', async () => {
+    const h = await nativeRuntime(undefined, ({ context }) => {
+        delete context.characters[0].extensions.mvu2shujuku.statStorage;
+        context.characters[0].extensions.mvu2shujuku.version = '0.4.0';
+    });
+    const calls = observeHostWrites(h);
+    assert.strictEqual(await settleMutation(h, stat => { stat.状态.金币 = 2; stat.背包.push('药'); }), true);
+    assert.deepStrictEqual(calls, ['importTableAsJson']);
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 2);
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.背包.at(-1), '药');
+});
+
+test('旧卡首楼批次：整批提交被拒绝时不能留下先写成功的字段', async () => {
+    const h = await nativeRuntime(undefined, ({ context }) => {
+        delete context.characters[0].extensions.mvu2shujuku.statStorage;
+    });
+    const before = JSON.stringify(h.tables), calls = observeHostWrites(h, true);
+    assert.strictEqual(await settleMutation(h, stat => { stat.状态.金币 = 2; stat.背包.push('药'); }), false);
+    assert.strictEqual(JSON.stringify(h.tables), before);
+    assert.ok(calls.length > 0 && calls.every(method => method === 'importTableAsJson'));
+});
+
 test('当前楼批次：混合写入被拒绝时不留下先完成的道具变更', async () => {
     const h = await nativeRuntime(); addReplyWithFrame(h);
     const before = JSON.stringify(h.tables), frame = JSON.stringify(h.context.chat[2]);
@@ -701,7 +828,7 @@ test('当前楼批次：宿主整批落库后返回失败，不回写旧快照�
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.背包.filter(x => x === '药').length, 1);
 });
 
-test('当前楼批次：序列化工厂的数组多步和标量合成同一候选，保留未登记表', async () => {
+test('当前楼批次：序列化工厂的完整数组JSON和标量合成同一候选，保留未登记表', async () => {
     const inlineFactory = vm.runInNewContext('(' + core.getCandidateBuilderFactory().toString() + ')');
     const result = core.convert(require('./synthetic-card')());
     const layout = JSON.parse(result.card.data.extensions.mvu2shujuku.layout);
@@ -714,7 +841,9 @@ test('当前楼批次：序列化工厂的数组多步和标量合成同一候�
     assert.strictEqual(JSON.stringify(tables), original, '规划不得触碰真实表引用');
     assert.deepStrictEqual(clone(core.statDataFromTables(layout, plan.tables).stat_data), after);
     assert.deepStrictEqual(clone(plan.tables.sheet_other), tables.sheet_other);
-    assert.ok(plan.operations.some(op => op.method === 'importTableAsJson'));
+    assert.equal(plan.operations.filter(op => op.method === 'updateCell').length, 2,
+        '数组完整JSON和金币分别规划一个单元格更新，最终候选由宿主整批提交');
+    assert.deepStrictEqual(clone(plan.tables.sheet_other), tables.sheet_other);
     assert.ok(plan.operations.length > 1, '数组内部导入仍须与外层标量合并提交');
 });
 
@@ -1055,4 +1184,108 @@ test('MVU正文回调：接口改内存后报错仍重试保存，改写的命�
     await h.context.eventSource.emit('received', 2); await h.advance(5000);
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
     assert.strictEqual(h.counts().hooks, 1);
+});
+
+test('统一变量入口实装：MVU与TH历史读取限定消息边界，历史写入不动当前表', async () => {
+    const h = await nativeRuntime();
+    const original = clone(h.tables);
+    const historical = h.win.Mvu.getMvuData();
+    h.context.chat.push({ is_user: true, mes: '历史读取测试' }, { is_user: false, mes: '当前AI回复', swipe_id: 0 });
+    const sheet = Object.values(h.tables).find(value => value && value.name === '状态表');
+    const column = sheet.content[0].indexOf('金币'); assert(column > 0);
+    sheet.content[1][column] = 44;
+    for (const callback of h.tableCallbacks) await callback(clone(h.tables), { persisted: true });
+    assert.strictEqual(h.win.Mvu.getMvuData({ type: 'message', message_id: 0 }).stat_data.状态.金币, 10);
+    assert.strictEqual(h.win.getVariables({ type: 'message', message_id: -3 }).stat_data.状态.金币, 10);
+    assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 44);
+    const snapshot = JSON.stringify(h.tables);
+    historical.stat_data.状态.金币 = 49;
+    assert.strictEqual(await h.win.Mvu.replaceMvuData(historical, { type: 'message', message_id: 0 }), false);
+    let called = false;
+    assert.strictEqual(await h.win.updateVariablesWith(value => { called = true; return value; }, { type: 'message', message_id: 0 }), false);
+    assert.strictEqual(called, false); assert.strictEqual(JSON.stringify(h.tables), snapshot);
+    assert.deepStrictEqual(clone(h.context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame.checkpoint.data), original);
+});
+
+test('统一变量入口实装：MVU显式chat/global作用域仍调用宿主公开接口', async () => {
+    const calls = [];
+    const h = await nativeRuntime(undefined, ({ win }) => {
+        win.getVariables = options => { calls.push(['read', options]); return { native: options.type }; };
+        win.replaceVariables = async (value, options) => { calls.push(['write', value, options]); return true; };
+    });
+    for (const type of ['chat', 'global', 'character']) {
+        const options = { type };
+        assert.strictEqual(h.win.Mvu.getMvuData(options).native, type);
+        assert.strictEqual(calls.at(-1)[1], options);
+        assert.strictEqual(await h.win.Mvu.replaceMvuData({ native: type }, options), true);
+        assert.strictEqual(calls.at(-1)[2], options);
+    }
+});
+
+
+async function hostSeededSchemaRuntime() {
+    const source = require('./synthetic-card')();
+    source.data.first_mes = '公开开场。'; source.data.alternate_greetings = [];
+    source.data.extensions.tavern_helper.scripts.push({type:'script',name:'公开非幂等初始化',enabled:true,
+        content: `import {registerMvuSchema} from 'https://example.org/mvu_zod.js';
+        const Schema=z.object({状态:z.object({生命:z.number(),金币:z.number().transform(v=>v+1)}),背包:z.array(z.any())});
+        registerMvuSchema(Schema);`});
+    const h = await nativeRuntime(source, ({win,context,api,tables}) => {
+        win.TavernHelper = {};
+        context.event_types = {CHAT_CHANGED:'chat_changed',CHAT_CREATED:'chat_created'};
+        const importTables=api.importTableAsJson;
+        api.importTableAsJson=async (...args) => {
+            const result=await importTables(...args);
+            // The public CRUD substitute normally updates only its runtime view.
+            // Explicit initialization also verifies the persisted full checkpoint.
+            context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame.checkpoint.data=clone(tables);
+            return result;
+        };
+    });
+    const {zod:z} = require('../src/vendor/schema-engine-libs');
+    let calls=0;
+    const key=h.context.characters[0].extensions.mvu2shujuku.schemaKeys[0];
+    assert(key);
+    const schema=z.object({状态:z.object({生命:z.number(),金币:z.number().transform(value=>{calls++;return value+1;})}),背包:z.array(z.any())});
+    assert.equal(h.win.TavernHelper.__mvu2shujukuCardApi.registerSchema(schema,key),true);
+    await h.advance(15000);
+    return {...h,calls:()=>calls};
+}
+
+test('宿主先建表：真实新聊天事件补齐 Schema 初始化且只执行一次', async () => {
+    const h=await hostSeededSchemaRuntime(), before=h.win.Mvu.getMvuData().stat_data.状态.金币;
+    assert(h.handlers.has('chat_created'), 'actual runtime subscribes to the host lifecycle event');
+    assert.equal(h.calls(),0,'existing checkpoint alone must not replay author transforms');
+    await h.context.eventSource.emit('chat_created'); await h.advance(15000);
+    assert.equal(h.calls(),1,'a genuinely new chat must complete deferred initialization');
+    assert.equal(h.win.Mvu.getMvuData().stat_data.状态.金币,before+1);
+    await h.context.eventSource.emit('chat_created'); await h.advance(15000);
+    assert.equal(h.calls(),1,'duplicate notifications must not repeat non-idempotent transforms');
+});
+
+test('宿主先建表：已有聊天只换页不重跑 Schema 初始化', async () => {
+    const h=await hostSeededSchemaRuntime(), before=h.win.Mvu.getMvuData().stat_data;
+    await h.context.eventSource.emit('chat_changed'); await h.advance(15000);
+    assert.equal(h.calls(),0);
+    assert.deepEqual(clone(h.win.Mvu.getMvuData().stat_data),clone(before));
+});
+
+
+test('开场完整 JSON：Schema 删除未声明子字段后不恢复模板旧值', async () => {
+    const source=require('./synthetic-card')(), entry=source.data.character_book.entries.find(e=>/initvar/i.test(e.comment));
+    const initial=core.parseInitVar(entry.content); initial.状态.身份=[]; entry.content=JSON.stringify(initial);
+    source.data.first_mes='公开开场。'; source.data.alternate_greetings=[];
+    source.data.extensions.tavern_helper.scripts.push({type:'script',name:'公开对象规范化',enabled:true,
+        content:`import {registerMvuSchema} from 'https://example.org/mvu_zod.js';
+        const Schema=z.object({状态:z.object({生命:z.number(),金币:z.number()}).transform(v=>v),背包:z.array(z.any())});registerMvuSchema(Schema);`});
+    assert.equal(core.convert(source).schema.find(group=>group.name==='状态').valueCol,'内容');
+    const h=await nativeRuntime(source,({win,context,api,tables})=>{
+        win.TavernHelper={};context.event_types={CHAT_CHANGED:'chat_changed',CHAT_CREATED:'chat_created'};
+        const original=api.importTableAsJson;api.importTableAsJson=async (...args)=>{const result=await original(...args);context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame.checkpoint.data=clone(tables);return result;};
+    });
+    const {zod:z}=require('../src/vendor/schema-engine-libs'), key=h.context.characters[0].extensions.mvu2shujuku.schemaKeys[0];
+    h.win.TavernHelper.__mvu2shujukuCardApi.registerSchema(z.object({状态:z.object({生命:z.number(),金币:z.number()}).transform(v=>v),背包:z.array(z.any())}),key);
+    await h.advance(15000);assert.deepEqual(clone(h.win.Mvu.getMvuData().stat_data.状态.身份),[]);
+    await h.context.eventSource.emit('chat_created');await h.advance(15000);
+    assert.equal(Object.hasOwn(h.win.Mvu.getMvuData().stat_data.状态,'身份'),false);
 });

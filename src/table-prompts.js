@@ -4,7 +4,7 @@
 function createTablePrompts(deps) {
     'use strict';
     const { describeGroup, isRelationshipKeyColumn, isDollarPrivateColumn,
-        isUnderscoreReadonlyColumn, isAiPromptColumn, sqlQuote, schemaExample, vwdToken, normalizeUpdateRuleText } = deps;
+        isUnderscoreReadonlyColumn, isAiPromptColumn, sqlTextLiteral, schemaExample, vwdToken, normalizeUpdateRuleText } = deps;
 
     function aiJsonColumns(group) {
         if (group.scalarType === 'number') return [];
@@ -20,26 +20,34 @@ function createTablePrompts(deps) {
         const cols = aiJsonColumns(group);
         if (!cols.length) return '';
         const label = group.kind === 'json' ? '内容列' : cols.map(c => `「${c.zh}」`).join('、');
-        if (mode === 'native') return `${label}以 JSON 存储；更新单元格时提供完整的新 JSON，保留未改动的字段和元素。`;
         return `${label}以 JSON 存储。`
-            + (mode === 'both' ? '本次要求原生行操作时，提供完整的新单元格 JSON，保留未改内容。' : '')
-            + `本次要求 SQL 脚本时，优先用 json_set(列, '$."键"', 新值)、json_replace 或 json_remove 局部更新，仅操作规则允许的路径；对象/数组/布尔/null 新值用 json('...')，字符串用 SQL 字符串。数组从 0 索引，末尾追加用 [#]，中间插入/移动需重建受影响数组。空单元格或 JSON null 容器先按规则初始化，保留未改字段；json_patch 的 null 会删键，不作路径更新替代。`;
+            + `对象/数组优先用 json_set(列, '$."键"', 新值)、json_replace 或 json_remove 局部更新，仅操作规则允许的路径；标量按原类型整体更新。对象/数组/布尔/null 新值用 json('...')，字符串用 SQL 字符串。数组从 0 索引，末尾追加用 [#]，中间插入/移动需重建受影响数组。空单元格或 JSON null 容器先按规则初始化，保留未改字段；json_patch 的 null 会删键，不作路径更新替代。`;
     }
 
     function buildNote(group, opts = {}) {
-        const mode = opts.mode || 'both';
+        const mode = 'sqlite';
         const L = [];
         const emitRule = (rule, context, scope = {}) => {
             const rendered = sanitizeCheckRule(rule, context);
             if (rendered && typeof opts.onRule === 'function') opts.onRule({ text: rule, rendered, ...scope });
             return rendered;
         };
-        const metadataWriteScope = group.kind === 'json' && !group.aiReadonly && group.jsonAiWritable;
+        const metadataWriteScope = group.kind === 'json' && group.scalarType !== 'number' && !group.aiReadonly && group.jsonAiWritable;
         if (metadataWriteScope) L.push('【可写路径与约束】');
         if ((group.pathSpecifications || []).length) {
             L.push('【字段业务规则】');
-            for (const specification of group.pathSpecifications)
-                L.push(emitRule(specification.text, { group, pathSpecification: specification }, { rulePath: specification.path }));
+            let previousJsonScope = '';
+            for (const specification of group.pathSpecifications) {
+                const preserveJsonSpecification = !!(group.rootContainer || specification.jsonPath || specification.jsonValue);
+                if (preserveJsonSpecification && !group.rootContainer) {
+                    const path = (specification.jsonRelativePath || []).map(k => String(k).replace(/~/g, '~0').replace(/\//g, '~1'));
+                    const label = specification.jsonBindingLabel || specification.label;
+                    const scope = label === '本表' && !path.length ? '' : label + (path.length ? '内 /' + path.join('/') : '');
+                    if (scope && scope !== previousJsonScope) L.push(scope + '：');
+                    previousJsonScope = scope;
+                } else previousJsonScope = '';
+                L.push(emitRule(specification.text, { group, pathSpecification: specification, preserveJsonSpecification }, { rulePath: specification.path }));
+            }
         }
         if ((group.proseChecks || []).length) {
             L.push('【更新规则】');
@@ -50,7 +58,7 @@ function createTablePrompts(deps) {
         if (!group.aiReadonly && explicitReadonly.length)
             L.push('模型只读字段：' + explicitReadonly.map(c => c.zh).join('、') + '；由原卡脚本/前端管理，模型不得修改。');
         if (group.scalarType === 'number') {
-            const scriptReadonly = group.aiReadonly || /^[_$]/.test(String(group.name || ''));
+            const scriptReadonly = !!group.aiReadonly;
             const rules = [...(group.groupChecks || []), ...(group.wildcardRules || []).flatMap(r => r.checks || [])];
             const valueKind = group.columns[0] && (group.columns[0].integer || group.columns[0].type === 'INTEGER') ? '一个整数，不接受小数' : '一个数字，可含小数';
             L.push('数值表（全表固定一行）：「内容」直接保存' + valueKind + '；禁止写入对象、数组、布尔值或带引号的 JSON 字符串。禁止新增/删除行。');
@@ -64,14 +72,13 @@ function createTablePrompts(deps) {
         }
         const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => isAiPromptColumn(group, c));
         if (group.kind === 'singleton' && group.valueCol && aiCols.length) {
-            L.push(`「${group.valueCol}」直接保存整个「${group.name}」变量；空单元格表示该变量不存在，JSON null 表示空值，{} / [] 表示相应空容器。状态切换也只更新此单元格，不能删除身份行。JSON 路径从内容内部开始，不再重复外层组名；内部以 _ 开头的字段由脚本维护，不主动修改。`);
+            L.push(`「${group.valueCol}」直接保存整个「${group.name}」变量；空单元格表示该变量不存在，JSON null 表示空值，{} / [] 表示相应空容器。状态切换也只更新此单元格，不能删除身份行。JSON 路径从内容内部开始，不再重复外层组名。`);
         }
         if (group.scalarValueCol && group.containerSchema && aiCols.length) {
-            L.push(`「${group.scalarValueCol}」保存当前键名对应的完整记录；JSON null 表示该记录为空值，{} / [] 表示空容器，删除行表示该键不存在（空单元格读回也视为缺失）。JSON 路径从记录内部开始，不重复键名或关联列。修改内部字段须保留其他字段；内部以 _ 开头的字段由脚本维护。`);
+            L.push(`「${group.scalarValueCol}」保存当前键名对应的完整记录；JSON null 表示该记录为空值，{} / [] 表示空容器，删除行表示该键不存在（空单元格读回也视为缺失）。JSON 路径从记录内部开始，不重复键名或关联列。修改内部字段须保留其他字段，并遵守原变量规则。`);
         }
-        // 所有下划线前缀列都是只读状态；内部溢出列 _扩展数据虽不进列定义/写入示例，
-        // 但 AI 仍能在真实表头/DDL 里看到，因此同样要触发现有只读提示。
-        const userReadonlyCols = (group.columns || []).filter(c => isUnderscoreReadonlyColumn(group, c));
+        // 只读约束来自原卡明确声明，不从字段前缀推断。
+        const userReadonlyCols = (group.columns || []).filter(c => c.aiReadonly);
         const hasUserReadonly = userReadonlyCols.length > 0;
         const allReadonly = (hasUserReadonly || group.aiReadonly) && aiCols.length === 0;
         if (group.kind === 'json') {
@@ -80,7 +87,9 @@ function createTablePrompts(deps) {
             if (!group.aiReadonly && (wr.length || gc.length || group.jsonAiWritable)) {
                 // 规则声明了 AI 可写路径（如 户.<门牌>.妻.好感值）：JSON 表不再一刀切只读，
                 // 而是列出可写路径与约束；SQL 可在单元格内按路径更新。
-                L.push('整组 JSON 存储表（全表固定一行）：本表以 JSON 保存动态结构。AI 可更新「内容」列，只改变【可写路径与约束】中列出的路径，其余字段保持原样；禁止新增/删除行。');
+                L.push(group.jsonAiWritable
+                    ? '整组 JSON 存储表（全表固定一行）：AI 可更新「内容」列中的公开变量；遵守原变量规则，按本轮变化更新，未变化字段保持原值；禁止新增/删除行。'
+                    : '整组 JSON 存储表（全表固定一行）：本表以 JSON 保存动态结构。AI 可更新「内容」列，只改变【可写路径与约束】中列出的路径，其余字段保持原样；禁止新增/删除行。');
                 if (!metadataWriteScope || wr.length || gc.length) L.push('【可写路径与约束】');
                 for (const r of wr) {
                     const parts = [];
@@ -94,7 +103,9 @@ function createTablePrompts(deps) {
                 // 且不是所有卡都用 <>（也有纯点分路径）。规则原文已在上方【可写路径与约束】保留。
                 // 守卫统一放宽：只限制“未声明路径”，不堵死“规则声明可 insert/初始化/新增”
                 // 的路径（否则空 JSON 表永远无法初始化，如大荒 宗门表）。不做关键词检测。
-                L.push('- 只更新【可写路径与约束】中列出的路径；未列出的字段一律只读（它们仍存在于同一 JSON 中，由脚本/系统维护，AI 不得改动）。规则要求 insert/初始化/新增 的路径允许创建对应字段、对象或记录；严禁新增未声明的字段、对象或记录');
+                L.push(group.jsonAiWritable
+                    ? '- 原变量规则约束取值、结构及新增/删除；明确声明只读的字段不得修改，不从字段名或缺少逐字段说明推断只读'
+                    : '- 只更新【可写路径与约束】中列出的路径；未列出的字段一律只读（它们仍存在于同一 JSON 中，由脚本/系统维护，AI 不得改动）。规则要求 insert/初始化/新增 的路径允许创建对应字段、对象或记录；严禁新增未声明的字段、对象或记录');
                 L.push('- 只更新本轮剧情中明确出现并被影响到的对象；其余对象的数据保持原样');
                 L.push('- 更新后必须保留 JSON 中其余全部字段及其原有类型');
             } else {
@@ -149,7 +160,7 @@ function createTablePrompts(deps) {
             // 三种模式共用逻辑字段例子；SQL 列名以实际 DDL 和操作示例为准。
             // 注意：只声明“不列入填表字段/严禁更新”，不要声称“更新会被回滚”——
             // 转换器没有回滚机制（下划线字段只是不进填表规则，AI 若硬写 SQL 不会被回滚）。
-            L.push('下划线开头字段（如 _扩展数据）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。');
+            L.push('原卡声明的只读字段保留原约束，不列入更新示例。');
             // 展平后表头可能丢失开头的下划线，必须用实际列名说明只读范围。
             const flattenedReadonly = userReadonlyCols.filter(c => !String(c.zh || '').startsWith('_') && !isDollarPrivateColumn(group, c));
             if (flattenedReadonly.length) L.push(`只读列：${flattenedReadonly.map(c => `「${c.zh}」`).join('、')}；AI 只能读取、严禁更新。`);
@@ -165,8 +176,12 @@ function createTablePrompts(deps) {
             const nullableCols = aiCols.filter(c => (c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional'));
             if (nullableCols.length) L.push(`- ${nullableCols.map(c => c.zh).join('、')}：按 JSON 标量填值；null 表示空值，字符串保留 JSON 双引号（空字符串为 ""），空单元格表示缺失字段。`);
             const encodedCols = aiCols.filter(c => c.logicalType === 'jsonScalar');
-            if (encodedCols.length) L.push(`- ${encodedCols.map(c => `「${c.zh}」`).join('、')}：单元格保存完整 JSON 值，遵守原字段/数组元素的类型；字符串保留 JSON 双引号（如 \"文字\"），数字、布尔、null 不加 JSON 引号，对象/数组保存完整 JSON。` + (mode === 'native' ? '' : '本次要求 SQL 脚本时，SQL 字符串外围的单引号不属于单元格内容。'));
-            const nullableContainers = aiCols.filter(c => c.logicalType === 'jsonObjectOptional');
+            if (encodedCols.length) L.push(`- ${encodedCols.map(c => `「${c.zh}」`).join('、')}：单元格保存完整 JSON 值，遵守原字段/数组元素的类型；字符串保留 JSON 双引号（如 \"文字\"），数字、布尔、null 不加 JSON 引号，对象/数组保存完整 JSON。SQL 字符串外围的单引号不属于单元格内容。`);
+            const anyJsonValues = aiCols.filter(c => c.logicalType === 'jsonObjectOptional' && c.jsonKind === 'any');
+            if (anyJsonValues.length) L.push(`- ${anyJsonValues.map(c => c.zh).join('、')}：保存完整 JSON 值，类型遵循原字段规则；数字、布尔、null 不加 JSON 引号，字符串保留 JSON 双引号，对象/数组保持完整结构；空单元格表示缺失字段。`);
+            const nullableContainers = aiCols.filter(c => c.logicalType === 'jsonObjectOptional' && c.jsonKind !== 'any'
+                && !(group.kind === 'singleton' && c.zh === group.valueCol)
+                && !(group.containerSchema && c.zh === group.scalarValueCol));
             if (nullableContainers.length) L.push(`- ${nullableContainers.map(c => c.zh).join('、')}：保存 JSON 对象/数组；JSON null 表示空值，空单元格表示缺失字段。`);
             if (group.kind === 'nestedRows') {
                 const entity = group.relationEntity || String(group.parentKeyCol || '').replace(/_键名$/, '') || '关联记录';
@@ -177,7 +192,6 @@ function createTablePrompts(deps) {
                 if (c.range) parts.push(`数值范围 ${c.range[0]}~${c.range[1]}`);
                 if (c.enum) parts.push(`可选值：${c.enum.join(' / ')}`);
                 if (c.format) parts.push(`格式要求：${String(c.format).replace(/\n/g, ' ')}`);
-                if (c.isObject) parts.push('对象以 JSON 存储，读取时还原');
                 const checks = (c.check || []).map(rule => emitRule(rule, { group, column: c }, { columnPath: c.path })).filter(Boolean);
                 return { parts, checks };
             };
@@ -213,7 +227,13 @@ function createTablePrompts(deps) {
             };
             for (const c of aiCols) {
                 const view = columnRuleView(c);
-                const desc = c.desc ? String(c.desc).trim() : '';
+                let desc = c.desc ? String(c.desc).trim() : '';
+                if (group.source === 'full-json-container' && c.zh === group.valueCol) {
+                    const generatedIntro = '完整保存 ' + group.name + ' 的 JSON 数据；字段名和嵌套结构保持原样。'
+                        + '\n缺失用空单元格，null 用 JSON null，空容器用 {} 或 []。';
+                    if (desc === generatedIntro) desc = '';
+                    else if (desc.startsWith(generatedIntro + '\n')) desc = desc.slice(generatedIntro.length + 1);
+                }
                 const generic = desc === '唯一标识' || desc === '对象（JSON 存储，读取时还原）';
                 const generatedRelation = (group.ancestorKeyCols || []).some(a => c.zh === a.col
                     && desc === `关联「${a.parentTable}.${a.parentKeyCol}」`);
@@ -268,11 +288,11 @@ function createTablePrompts(deps) {
     function buildInitNode(group) {
         if (group.aiReadonly) return '开局数据已由模板初始化；本表由脚本/前端维护，模型禁止再次初始化或修改。';
         if (group.scalarType === 'number') {
-            if (/^[_$]/.test(String(group.name || ''))) return '开局已初始化唯一数值记录；不得再次初始化或新增/删除行，后续由脚本/前端维护，自动填表阶段不修改本表。';
             return '开局已初始化唯一数值记录；不得再次初始化或新增/删除行，后续根据正文、设定与 note 按需更新。';
         }
         if (group.kind === 'json') {
-            return ((group.wildcardRules || []).length || (group.groupChecks || []).length || group.jsonAiWritable)
+            if (group.jsonAiWritable) return '开局模板已初始化整组数据；自动填表阶段按原变量规则更新「内容」列中的公开变量，未变化字段保持原值。';
+            return ((group.wildcardRules || []).length || (group.groupChecks || []).length)
                 ? `开局模板已初始化整组数据；自动填表阶段仅按 note 中「可写路径与约束」更新「内容」列，其余由脚本/前端维护。`
                 : `开局模板已初始化整组数据；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
         }
@@ -298,7 +318,7 @@ function createTablePrompts(deps) {
     // INSERT 只按声明类型和约束生成短示例，不复制初值或默认载荷。
     // 标识和业务值均需按本轮替换。
     function exampleCellValue(col) {
-        const quote = v => `'${sqlQuote(v)}'`;
+        const quote = sqlTextLiteral;
         if (['jsonScalarOptional', 'jsonPairOptional', 'jsonObjectOptional', 'jsonScalar'].includes(col.logicalType)) return quote('null');
         if (col.isObject) {
             return quote(JSON.stringify(col.objectSchema ? schemaExample(col.objectSchema) : col.jsonKind === 'array' ? [] : {}));
@@ -346,14 +366,16 @@ function createTablePrompts(deps) {
         // jsonScalar 也能承载数组/对象元素，不用字符串示例替换它们。
         if (col.logicalType === 'jsonScalar' && current && typeof current === 'object') return null;
         const value = exampleScalarValue(col, current);
-        if (['jsonScalar', 'jsonScalarOptional', 'jsonPairOptional'].includes(col.logicalType)) return `'${sqlQuote(JSON.stringify(value))}'`;
+        if (['jsonScalar', 'jsonScalarOptional', 'jsonPairOptional'].includes(col.logicalType)) return sqlTextLiteral(JSON.stringify(value));
         if (typeof value === 'boolean') return value ? '1' : '0';
-        return typeof value === 'number' && Number.isFinite(value) ? String(value) : `'${sqlQuote(value)}'`;
+        return typeof value === 'number' && Number.isFinite(value) ? String(value) : sqlTextLiteral(value);
     }
 
     // SQL 专用模板的示例从实际 JSON 单元格选一条已有公开路径，避免教模型
     // 用残缺对象覆盖整格。整组 JSON 的可写范围另由规则决定，不猜示例路径。
     function exampleUpdateAssignment(group, col) {
+        // 私有根的写入结构公开，当前值不作示例采样；不能通过示例泄漏隐藏数据。
+        if (group.privateRoot) return null;
         if (!aiJsonColumns(group).includes(col) || group.kind === 'json') {
             const value = exampleUpdateValue(col, group);
             return value === null ? null : `${col.ident} = ${value}`;
@@ -381,7 +403,7 @@ function createTablePrompts(deps) {
             const newValue = typeof leaf.value === 'string' ? "'新值'"
                 : typeof leaf.value === 'number' && Number.isFinite(leaf.value) ? String(leaf.value)
                     : `json('${leaf.value === null ? 'null' : JSON.stringify(leaf.value)}')`;
-            return `${col.ident} = json_replace(${col.ident}, '${sqlQuote(leaf.path)}', ${newValue})`;
+            return `${col.ident} = json_replace(${col.ident}, ${sqlTextLiteral(leaf.path)}, ${newValue})`;
         }
         // 缺失、null、空对象或仅含私有字段时没有可证明的局部路径，不编造键。
         return null;
@@ -394,7 +416,7 @@ function createTablePrompts(deps) {
         if (!s) return s;
         const ctx = context || {};
         const col = ctx.column || null;
-        if (ctx.pathSpecification) {
+        if (ctx.pathSpecification && !ctx.preserveJsonSpecification) {
             const specification = ctx.pathSpecification;
             let body = specification.readonly
                 ? (specification.jsonPath || specification.recordSpecific ? '模型只读；' : '') + (specification.readonlyDescription || '由脚本/前端维护')
@@ -421,7 +443,7 @@ function createTablePrompts(deps) {
                         } catch (_) { return original; }
                     });
                 s = s.replace(new RegExp('(?:(\\b(?:add|replace|remove))\\s+)?' + escaped + '(?![\\p{L}\\p{N}_$/])', 'giu'),
-                    (_, op) => (op ? ({ add: alias.singleton ? '更新' : '新增', replace: '更新', remove: '移除' })[op.toLowerCase()] + ' ' : '') + alias.label);
+                    (_, op) => (op ? ({ add: alias.singleton && !alias.jsonPath ? '更新' : '新增', replace: '更新', remove: '移除' })[op.toLowerCase()] + ' ' : '') + alias.label);
             }
         }
         const jsonArray = !!(ctx.jsonContainer || (col && col.isObject && col.jsonKind === 'array'));
@@ -484,7 +506,6 @@ function createTablePrompts(deps) {
         if (group.aiReadonly) return '禁止。由原卡脚本/前端维护，模型不得写入。';
         if (group.scalarType === 'number') {
             if (kind !== 'update') return '禁止。';
-            if (/^[_$]/.test(String(group.name || ''))) return '本数值由脚本/前端维护，AI 不应直接修改。';
             const col = group.columns[0];
             const hasRules = (group.groupChecks || []).length || (group.wildcardRules || []).length;
             const basis = hasRules ? '根据 note 中的更新规则' : '根据正文、设定与本表规则';
@@ -492,7 +513,8 @@ function createTablePrompts(deps) {
         }
         if (group.kind === 'json') {
             if (kind === 'update') {
-                if ((group.wildcardRules || []).length || (group.groupChecks || []).length || group.jsonAiWritable) {
+                if (group.jsonAiWritable) return '只允许更新现有记录，禁止新增或删除行；按本轮变化和原变量规则更新公开字段，明确声明只读的字段不得修改，保留未变化字段。';
+                if ((group.wildcardRules || []).length || (group.groupChecks || []).length) {
                     return '只允许更新现有记录，禁止新增或删除行；正文明确造成字段变化时，按 note 中【可写路径与约束】维护允许的路径（未列出字段一律只读），保留其余字段。';
                 }
                 return '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
@@ -520,7 +542,7 @@ function createTablePrompts(deps) {
             const parentValues = parents.map(c => {
                 const index = group.columns.indexOf(c) + 1;
                 const value = group.rows && group.rows[0] && group.rows[0][index];
-                return `'${sqlQuote(value === undefined ? '所属记录标识' : value)}'`;
+                return sqlTextLiteral(value === undefined ? '所属记录标识' : value);
             });
             const where = [...parents.map((c, i) => `${c.ident} = ${parentValues[i]}`), 'row_id = 1'].join(' AND ');
             const value = exampleUpdateValue(col, group);
@@ -571,7 +593,7 @@ function createTablePrompts(deps) {
         // UPDATE/DELETE 定位示例沿用已有记录；INSERT 使用新键占位和声明类型短示例。
         const sampleRow = group.rows && group.rows[0] ? group.rows[0] : null;
         const keyValue = (sampleRow && sampleRow[1] !== undefined && String(sampleRow[1]) !== '')
-            ? `'${sqlQuote(sampleRow[1])}'`
+            ? sqlTextLiteral(sampleRow[1])
             : "'键名'";
         // 示例列排除内部溢出列（_扩展数据）与下划线只读字段：AI 不应直接修改
         const exampleCols = group.columns.filter(c => isAiPromptColumn(group, c));

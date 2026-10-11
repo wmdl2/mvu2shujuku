@@ -1,16 +1,41 @@
 # 文档与维护入口
 
+v0.8.0 的完整改动见[更新日志](../CHANGELOG.md)，本次[发布验证](validation/2026-10-11-release-v0.8.0.md)记录最终包与受测范围。
+
+状态档案、完整聊天备份、四向迁移及旧布局／声明隐藏字段续修的实现和验收状态见[2026-10-11 状态迁移](validation/2026-10-11-state-transfer.md)。
+
+H01 嵌套对象展开、扩展数据与 JSON 标量说明复核见[提示词与布局检查](validation/2026-10-11-h01-table-prompts.md)；复杂对象布局已按用户确认实施，续验状态见记录。
+
+开放根合为一张 JSON 表的依据、数据核对和 Zod 追加校验后的元数据修复见[布局续核对](validation/2026-10-10-root-layout-review.md)。
+
+独立新卡首次测试、Zod 回退输出与 SQLite 约束修复见[最终样本验证](validation/2026-10-10-final-holdout.md)。
+
+历史接口之外的待办分类、发送窗口上游草案与历史写入边界见[兼容续核对](validation/2026-10-10-compatibility-follow-up.md)；草案尚未接入，不代表边界已全部消除。
+
+社区关键流程续验、SQL 发送视图与测试集边界见[2026-10-10 记录](validation/2026-10-10-community-acceptance.md)。当前混合存储、显式根对象映射及隐藏数据归属见[2026-10-09 验证](validation/2026-10-09-hybrid-storage.md)。
+
+动态变量入口、历史读取、缓存边界和 MIT 适配范围见[最新验证](validation/2026-10-08-variable-adapter.md)。
+
+EJS、JavaScript 词法与 Lodash 复用的最新实现及范围见[2026-10-08 验证](validation/2026-10-08-upstream-reuse.md)。
+
+本轮源码契约、十五张卡旧问题复核与未闭合接口见[2026-10-08 记录](validation/2026-10-08-source-contract-review.md)。
+
 远程 Schema、多开场分支及 0.5.0 最终验收见 [验证记录](validation/2026-10-05-remote-schema-branches.md)。注册 Schema、创角档案、世界书别名及 3.2 MVU 卡缺口的前序修复见 [v0.4.11 验证](validation/2026-10-05-card-api-compatibility.md)。
 
 按当前问题选择资料，不需要每次全文读取所有文档。
 
 | 当前问题 | 入口 |
 | --- | --- |
+| 脚本JSON兜底表、频率0与手动重填/追平保护 | [手动路径核对](validation/2026-10-09-manual-fill-script-data.md) |
+| 转换器职责、独立填表对标与自然语言/执行边界 | [目标与维护边界](architecture.md#转换器职责与独立填表基线) |
+| 统一填表条目、源业务保留、旧格式请求副本与 EJS 上下文 | [统一适配验证](validation/2026-10-08-fill-adaptation.md) |
+| 更新迁移路径边界、占位示例、只读 EJS 与动态记录（前序方案） | [补齐验证](validation/2026-10-07-update-rule-boundaries.md) |
 | 社区 15 卡深层审查、完整段落分流与兼容边界（v0.8.0） | [审查记录](validation/2026-10-07-community-deep-audit.md) |
 | 重转世界书冲突、覆盖/另存与可选 JSON 备份 | [v0.7.0 验证](validation/2026-10-07-worldbook-save.md) |
 | MVU 更新前回调的正文写回与独立保存重试 | [v0.7.0 验证](validation/2026-10-07-mvu-message-update.md) |
 | 当前变量展示保留、回复状态块清理与相邻回调边界 | [v0.7.0 验证](validation/2026-10-07-mvu-status-display.md) |
 | 规则迁移、正文分流、模型只读说明与保存进度 | [v0.6.0 验证](validation/2026-10-06-rule-metadata-save.md) |
+| 独立填表与新正文生成的并发边界 | [当前兼容清单](../COMPATIBILITY.md) |
 | 静态／动态登记入口、回退引擎与大资源扫描 | [入口验证](validation/2026-10-06-script-entrypoints.md) |
 | number／integer／布尔列映射、数组类型保留及 transform 范围 | [类型验证](validation/2026-10-05-type-mapping.md) |
 | 真实 JavaScript/Zod Schema 构造、隔离执行与通用语法修复 | [执行验证](validation/2026-10-05-schema-execution.md) |

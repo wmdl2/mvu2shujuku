@@ -14,7 +14,11 @@ const work = process.env.MVU_HOST_TEST_DIR || path.join(root, '.tools/real-host'
 const data = path.join(work, 'data');
 const port = Number(process.env.MVU_HOST_TEST_PORT || 18173);
 const url = 'http://127.0.0.1:' + port;
-const spCommit = process.env.MVU_SP_TEST_COMMIT || 'fd91407f84d7968473e82b90d93f22822cb3b259';
+const spCommit = process.env.MVU_SP_TEST_COMMIT || (process.argv.some(arg => /^--only=state-transfer(?:-failure)?$/.test(arg))
+    ? '33757c141f6e3df768efc50f7eef372ceaedf50a' : 'fd91407f84d7968473e82b90d93f22822cb3b259');
+const spPackage = process.env.MVU_SP_TEST_PACKAGE;
+const spIdentity = spPackage ? 'package-sha256:' + require('crypto').createHash('sha256')
+    .update(fs.readFileSync(path.join(spPackage, 'index.js'))).update(fs.readFileSync(path.join(spPackage, 'manifest.json'))).digest('hex') : spCommit;
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= path.join(refs, '测试工具/browsers');
 const { chromium } = require(path.join(refs, '测试工具/node_modules/playwright'));
 const core = require('../src/mvu2shujuku');
@@ -27,7 +31,7 @@ let storageMode = 'native';
 function record(name, detail) {
     results.push({ name, storageMode, detail });
     console.log('PASS', name, JSON.stringify(detail || {}));
-    const report = JSON.stringify({ runId, spCommit, results }, null, 2);
+    const report = JSON.stringify({ runId, spCommit: spPackage ? null : spCommit, spIdentity, results }, null, 2);
     fs.writeFileSync(path.join(work, 'results.json'), report);
     fs.writeFileSync(path.join(work, 'results-' + runId + '.json'), report);
 }
@@ -57,10 +61,17 @@ function install() {
     }
     const sp = path.join(extensions, 'sp-database');
     fs.mkdirSync(sp, { recursive: true });
-    if (installed.sp !== spCommit || !fs.existsSync(path.join(sp, 'index.js'))) {
-        const archive = cp.execFileSync('git', ['-C', path.join(refs, 'shujuku'), 'archive', spCommit, 'index.js', 'manifest.json', 'dist'], { maxBuffer: 128 * 1024 * 1024 });
-        cp.execFileSync('tar', ['-xf', '-', '-C', sp], { input: archive });
-        installed.sp = spCommit;
+    if (installed.sp !== spIdentity || !fs.existsSync(path.join(sp, 'index.js'))) {
+        if (spPackage) {
+            for (const item of ['index.js', 'manifest.json', 'dist']) {
+                const source = path.join(spPackage, item);
+                if (fs.existsSync(source)) fs.cpSync(source, path.join(sp, item), { recursive: true });
+            }
+        } else {
+            const archive = cp.execFileSync('git', ['-C', path.join(refs, 'shujuku'), 'archive', spCommit, 'index.js', 'manifest.json', 'dist'], { maxBuffer: 128 * 1024 * 1024 });
+            cp.execFileSync('tar', ['-xf', '-', '-C', sp], { input: archive });
+        }
+        installed.sp = spIdentity;
     }
     fs.writeFileSync(stampFile, JSON.stringify(installed, null, 2));
     cp.execFileSync(process.execPath, [path.join(root, 'build-extension.js'), path.join(extensions, 'mvu2shujuku')]);
@@ -76,12 +87,20 @@ async function waitGold(page, gold) {
     await page.waitForFunction(value => window.Mvu?.getMvuData?.()?.stat_data?.状态?.金币 === value, gold, { timeout: 45000 });
 }
 async function waitCommittedGold(page, gold) {
-    await page.waitForFunction(value => Object.values(window.AutoCardUpdaterAPI.exportTableAsJson()).some(table =>
-        table?.name === '状态表' && Number(table.content?.[1]?.[table.content?.[0]?.indexOf('金币')]) === value), gold, { timeout: 45000 });
+    await page.waitForFunction(value => {
+        const ctx = SillyTavern.getContext(), card = ctx.characters[ctx.characterId];
+        const marker = (card?.extensions || card?.data?.extensions)?.mvu2shujuku;
+        if (!marker?.layout) return false;
+        const core = window.MVU2SHUJUKU_CORE;
+        const layout = core.resolveLayoutMacros(JSON.parse(marker.layout), ctx.substituteParams.bind(ctx));
+        const wrap = core.statDataFromTables(layout, window.AutoCardUpdaterAPI.exportTableAsJson());
+        return wrap?.stat_data?.状态?.金币 === value;
+    }, gold, { timeout: 45000 });
     await waitGold(page, gold);
     await page.waitForTimeout(2000);
 }
 async function openState(page, state) {
+    await page.locator('.splash-message').waitFor({ state: 'hidden', timeout: 120000 });
     await page.waitForFunction(avatar => window.SillyTavern?.getContext().characters?.some(ch => ch.avatar === avatar), state.avatar, { timeout: 90000 });
     await page.evaluate(async state => {
         const ctx = window.SillyTavern.getContext();
@@ -101,7 +120,7 @@ async function runtimeTest(page, source = syntheticCard(), convertCore = core, m
         return response.json();
     }, card);
     const avatar = imported.file_name + '.png';
-    if (process.argv.includes('--only=card-api') || process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update','--only=opening-schema'].includes(arg))) await page.evaluate(async avatar => {
+    if (process.argv.includes('--only=card-api') || process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update','--only=opening-schema','--only=fill-adaptation','--only=state-transfer-failure'].includes(arg))) await page.evaluate(async avatar => {
         const st = await import('/script.js');
         const ctx = window.SillyTavern.getContext(), helper = ctx.extensionSettings.tavern_helper;
         helper.script.enabled.characters = [...new Set([...helper.script.enabled.characters, avatar])];
@@ -109,13 +128,14 @@ async function runtimeTest(page, source = syntheticCard(), convertCore = core, m
         await st.saveSettings();
     }, avatar);
     await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.locator('.splash-message').waitFor({ state: 'hidden', timeout: 120000 });
     await page.waitForFunction(avatar => window.SillyTavern?.getContext().characters.some(ch => ch.avatar === avatar), avatar, { timeout: 90000 });
-    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update','--only=opening-schema'].includes(arg))) await page.evaluate(async () => {
+    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update','--only=opening-schema','--only=fill-adaptation','--only=state-transfer-failure'].includes(arg))) await page.evaluate(async () => {
         const { power_user } = await import('/scripts/power-user.js');
         power_user.world_import_dialog = false;
     });
     await page.evaluate(avatar => { const ctx = window.SillyTavern.getContext(); return ctx.selectCharacterById(ctx.characters.findIndex(ch => ch.avatar === avatar)); }, avatar);
-    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update','--only=opening-schema'].includes(arg))) await page.evaluate(async () => {
+    if (process.argv.some(arg=>['--only=community-cards','--only=remote-schema','--only=reply-status','--only=message-update','--only=opening-schema','--only=fill-adaptation','--only=state-transfer-failure'].includes(arg))) await page.evaluate(async () => {
         const world = await import('/scripts/world-info.js');
         await world.importEmbeddedWorldInfo(true);
     });
@@ -901,6 +921,12 @@ async function businessEventTest(page, state) {
 }
 async function main() {
     install();
+    // 固定 tag 未必等于发布包 manifest 的版本；在启动宿主前检查本批预期身份。
+    if (process.env.MVU_SP_EXPECTED_VERSION) {
+        const manifest = JSON.parse(fs.readFileSync(path.join(data, 'default-user/extensions/sp-database/manifest.json')));
+        const version = (/^龙血玄黄/.test(manifest.display_name) ? 'naiv' : '') + manifest.version;
+        assert.strictEqual(version, process.env.MVU_SP_EXPECTED_VERSION, '发布包版本身份与本批预期不符');
+    }
     const reuseServer = process.argv.includes('--reuse-server');
     const keepServer = process.argv.includes('--keep-server');
     const running = await reachable();
@@ -909,7 +935,8 @@ async function main() {
     const log = fs.openSync(path.join(work, 'server.log'), 'a');
     const server = running ? null : cp.spawn(process.execPath, ['server.js', '--port', String(port), '--browserLaunchEnabled', 'false', '--dataRoot', data, '--configPath', path.join(work, 'config.yaml')], { cwd: path.join(refs, 'SillyTavern'), stdio: ['ignore', log, log], detached: keepServer });
     if (server) fs.writeFileSync(path.join(work, 'server.pid'), String(server.pid));
-    let browser;
+    let browser, testPage, closingRequests = false;
+    const interceptedErrors = [];
     try {
         const start = Date.now(); let lastNotice = start;
         while (!await reachable()) {
@@ -920,6 +947,7 @@ async function main() {
         }
         browser = await chromium.launch({ headless: true, args: ['--no-sandbox'], ...(process.env.MVU_TEST_BROWSER ? { executablePath: process.env.MVU_TEST_BROWSER } : {}) });
         const page = await browser.newPage(), errors = [];
+        testPage = page;
         if (process.argv.includes('--sp-warnings')) await page.addInitScript(() => {
             let state;
             try { state = JSON.parse(localStorage.getItem('acu_v2_ui_state') || '{}'); } catch (_) { state = {}; }
@@ -931,7 +959,16 @@ async function main() {
         page.on('console', message => { if (message.type() === 'error' || (process.argv.includes('--sp-warnings') && message.type() === 'warning')) console.log('BROWSER_' + message.type().toUpperCase(), message.text().slice(0, 700)); });
         page.on('response', response => { if (response.status() >= 400) console.log('HTTP_ERROR', response.status(), response.url()); });
         page.on('dialog', dialog => dialog.accept(dialog.type() === 'prompt' ? dialog.defaultValue() : undefined));
-        await page.route('**/api/settings/get', async route => { const response = await route.fetch(); const settings = await response.json(); settings.enable_extensions_auto_update = false; await route.fulfill({ response, json: settings }); });
+        await page.route('**/api/settings/get', async route => {
+            try {
+                const response = await route.fetch(), settings = await response.json();
+                settings.enable_extensions_auto_update = false;
+                await route.fulfill({ response, json: settings });
+            } catch (error) {
+                if (!closingRequests && !page.isClosed()) interceptedErrors.push(error.message);
+                await route.abort().catch(() => {});
+            }
+        });
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
         let onboardingDone = false;
         const onboarding = (async () => {
@@ -953,6 +990,7 @@ async function main() {
         if (await page.locator('.popup-input:visible').count()) { await page.locator('.popup-input:visible').fill('公开验收用户'); await page.locator('.popup-button-ok:visible').click(); }
         await page.locator('.popup-input:visible').waitFor({ state: 'hidden', timeout: 30000 });
         await page.waitForFunction(() => window.SillyTavern.getContext().characters.length > 0, {}, { timeout: 60000 });
+        await page.locator('.splash-message').waitFor({ state: 'hidden', timeout: 120000 });
         console.log('HOST_READY', await page.evaluate(() => document.body.innerText.slice(0, 90)));
         const recognizedVersion = await page.evaluate(async () => {
             const read = window.__MVU2SHUJUKU_SP_VERSION_FACTORY__({
@@ -967,7 +1005,12 @@ async function main() {
         try {
             const only = process.argv.find(arg => arg.startsWith('--only='))?.slice(7);
             const saved = path.join(work, 'state.json');
-            if (only === 'worldbook-save') await require(root + '/test/worldbook-save-host')({ page, record, work });
+            if (process.env.MVU_HOST_SCENARIO_FILE) await require(path.resolve(process.env.MVU_HOST_SCENARIO_FILE))({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record, work });
+            else if (only === 'state-transfer') await require('./state-transfer-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record, work });
+            else if (only === 'state-transfer-failure') await require('./state-transfer-failure-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, record, work });
+            else if (only === 'stat-storage') await require('./stat-storage-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
+            else if (only === 'fill-adaptation') await require('./fill-adaptation-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record, work });
+            else if (only === 'worldbook-save') await require(root + '/test/worldbook-save-host')({ page, record, work });
             else if (only === 'opening-schema') await require('./opening-schema-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, record });
             else if (only === 'card-api') await require('./card-api-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
             else if (only === 'remote-schema') await require('./remote-schema-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
@@ -1001,13 +1044,22 @@ async function main() {
                 if (!only || only === 'sqlite') await sqliteTest(page);
             }
             assert.deepStrictEqual(errors, []);
+            assert.deepStrictEqual(interceptedErrors, [], '请求拦截异常交回主流程');
             record('browser-errors', errors);
         } catch (error) {
-            fs.writeFileSync(path.join(work, 'failure.json'), JSON.stringify(await page.evaluate(() => ({ text: document.body.innerText.slice(0, 2500), stat: window.Mvu?.getMvuData?.()?.stat_data, chat: window.SillyTavern?.getContext().chat })), null, 2));
-            await page.screenshot({ path: path.join(work, 'failure.png') });
+            const evidence = await page.evaluate(() => {
+                let stat;
+                try { stat = window.Mvu?.getMvuData?.()?.stat_data; } catch (_) {}
+                return { text: document.body.innerText.slice(0, 2500), stat, chat: window.SillyTavern?.getContext().chat,
+                    metadata: window.SillyTavern?.getContext().chatMetadata, tables: window.AutoCardUpdaterAPI?.exportTableAsJson?.() };
+            }).catch(captureError => ({ captureError: captureError.message }));
+            fs.writeFileSync(path.join(work, 'failure.json'), JSON.stringify(evidence, null, 2));
+            await page.screenshot({ path: path.join(work, 'failure.png') }).catch(() => {});
             throw error;
         }
     } finally {
+        closingRequests = true;
+        if (testPage && !testPage.isClosed()) await testPage.unrouteAll({ behavior: 'wait' }).catch(() => {});
         if (browser) await browser.close();
         if (server) {
             if (keepServer) { server.unref(); console.log('保留隔离测试服务器 PID', server.pid); }

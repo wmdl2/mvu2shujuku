@@ -14,11 +14,12 @@ function card(bag = { "O'Brien": { text: '旧', keep: 7 } }) {
 }
 const stateSheet = result => Object.values(result.template).find(s => s.name === '状态表');
 
-test('JSON局部更新：双模式和 SQL 提供路径说明，native 保留整格契约，布局数据不变', () => {
+test('JSON局部更新：停用模式参数统一使用 SQL 路径说明，布局数据不变', () => {
     const results = Object.fromEntries(['native', 'both', 'sqlite'].map(mode => [mode, core.convert(card(), { mode })]));
     for (const mode of ['both', 'sqlite']) {
         const sheet = stateSheet(results[mode]);
-        assert.match(sheet.sourceData.note, /本次要求 SQL 脚本时，优先用 json_set/);
+        assert.match(sheet.sourceData.note, /对象\/数组优先用 json_set/);
+        assert.doesNotMatch(sheet.sourceData.note, /本次要求 SQL 脚本时/);
         assert.match(sheet.sourceData.note, /json_remove/);
         assert.match(sheet.sourceData.note, /json_patch 的 null 会删键/);
         assert.match(sheet.sourceData.note, /空单元格或 JSON null 容器先按规则初始化/);
@@ -28,10 +29,10 @@ test('JSON局部更新：双模式和 SQL 提供路径说明，native 保留整�
         assert.strictEqual((results[mode].card.data || results[mode].card).extensions.mvu2shujuku.layout,
             (results.native.card.data || results.native.card).extensions.mvu2shujuku.layout);
     }
-    assert.match(stateSheet(results.both).sourceData.note, /本次要求原生行操作时，提供完整的新单元格 JSON/);
-    assert.doesNotMatch(stateSheet(results.native).sourceData.note, /json_set|json_replace|json_remove/);
+    assert.doesNotMatch(stateSheet(results.both).sourceData.note, /本次要求原生行操作时/);
+    assert.match(stateSheet(results.native).sourceData.note, /json_set/);
     assert.match(stateSheet(results.both).sourceData.updateNode, /SQL示例: UPDATE.*json_replace/);
-    assert.match(stateSheet(results.both).sourceData.note, /SQL 示例仅在本次输出要求 SQL 脚本时适用/);
+    assert.doesNotMatch(stateSheet(results.both).sourceData.note, /SQL 示例仅在本次输出要求 SQL 脚本时适用/);
     assert.match(stateSheet(results.sqlite).sourceData.updateNode, /json_replace/);
 });
 
@@ -66,17 +67,21 @@ test('JSON局部更新：空容器和无安全公开路径不虚构 SQL 键，�
     }
 });
 
-test('JSON局部更新：整组 JSON 保留路径守卫，纯只读或普通表不增加 SQL JSON 说明', () => {
+test('JSON局部更新：整组 JSON 保留路径守卫，无可写路径不增加 SQL JSON 说明，普通表扩展数据可写', () => {
     const result = core.convert({ name: '整组JSON', first_mes: '', character_book: { entries: [{
         comment: '[InitVar]', content: JSON.stringify({ 自由: {}, 普通: { n: 1 } }),
     }] } });
     const json = result.schema.find(g => g.kind === 'json');
     let templates = core.generateTemplate(result.schema, { mode: 'sqlite' });
-    assert.ok(Object.values(templates).every(s => !s.sourceData || !/json_set/.test(s.sourceData.note)));
+    assert.doesNotMatch(Object.values(templates).find(s => s.name === json.tableName).sourceData.note, /json_set/);
+    const ordinary = Object.values(templates).find(s => s.name === '普通表');
+    assert.match(ordinary.sourceData.note, /扩展数据/);
+    assert.match(ordinary.sourceData.note, /json_set/, '可写的扩展数据使用 JSON 局部更新说明');
     json.wildcardRules = [{ path: '自由.<项>.值', checks: ['正文变化时维护'] }];
     templates = core.generateTemplate(result.schema, { mode: 'sqlite' });
     const sheet = Object.values(templates).find(s => s.name === json.tableName);
-    assert.match(sheet.sourceData.note, /未列出的字段一律只读/);
+    assert.doesNotMatch(sheet.sourceData.note, /未列出的字段一律只读/);
+    assert.match(sheet.sourceData.note, /原变量规则/);
     assert.match(sheet.sourceData.note, /json_set/);
     assert.doesNotMatch(sheet.sourceData.updateNode, /可写键名|SQL示例/);
 });

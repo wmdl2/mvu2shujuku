@@ -21,8 +21,8 @@ function initial() {
         列表记录: { 空值: null, 空数组: [], 有值: [1, 2, 3] }, 状态: { 记录: { 甲: null } },
         角色: { 甲: actor(1), 乙: actor(2) }, 背包: ['钥匙', 0, false, null], 普通: { 文本: '不变' } };
 }
-function fixture(stat = initial()) {
-    const result = core.convert(source(stat), { mode: 'both' });
+function fixture(stat = initial(), convert = core.convert) {
+    const result = convert(source(stat), { mode: 'sqlite' });
     return { result, template: result.template, layout: JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout) };
 }
 function rowsFixture(layout, template) {
@@ -32,10 +32,11 @@ test('可空动态记录：根、单例内与多层关联记录初值无损，�
     const before = initial(), { layout, template } = fixture(before);
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, before);
     const projected = rowsFixture(layout, template);
-    assert.strictEqual(projected.length, 5);
+    assert.deepStrictEqual(projected.map(x => x.e.table), ['记录表', '列表记录表']);
+    for (const root of ['状态', '角色']) assert.strictEqual(layout.find(e => e.group === root).valueCol, '内容');
     for (const { e, sheet } of projected) {
         assert.strictEqual(e.cols.find(c => c[0] === e.scalarValueCol)[1], 'jsonObjectOptional');
-        assert.strictEqual(e.cols.length, 2 + (e.ancestorKeyCols || []).length);
+        assert.strictEqual(e.cols.length, 2 + (e.ancestorKeyCols || []).length, '标量JSON记录只需身份与值列，不生成隐藏兜底列');
         assert.match(sheet.sourceData.note, /JSON null/);
         assert.match(sheet.sourceData.note, /删除行表示/);
         assert.match(sheet.sourceData.note, /json_set/);
@@ -145,12 +146,12 @@ print('sqlite-ok')
     assert.match(output.stdout, /sqlite-ok/);
 });
 
-test('可空动态记录：持久化重放守卫区分完整关联键，只拦截同一记录', async () => {
+test('旧布局可空动态记录：持久化重放守卫区分完整关联键，只拦截同一记录', async () => {
     for (const sameAncestor of [false, true]) {
         const before = initial(); delete before.角色.甲.背包.同名;
-        const { layout, template } = fixture(before), snapshot = clone(template);
+        const { layout, template } = fixture(before, require('./legacy-layout-fixture')), snapshot = clone(template);
         if (sameAncestor) {
-            const { template: persisted } = fixture(initial());
+            const { template: persisted } = fixture(initial(), require('./legacy-layout-fixture'));
             for (const [key, sheet] of Object.entries(persisted)) if (sheet.name === '角色_背包表') snapshot[key] = sheet;
         }
         const next = clone(before); next.角色.甲.背包.同名 = { 数量: 3 };

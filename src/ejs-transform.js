@@ -1,17 +1,8 @@
 'use strict';
 
-function createEjsTransform() {
-    /* ================================================================
-     * EJS 数据源重写（rewriteEjsConditions）
-     *
-     * 世界书条目里的 EJS 结构整体保留，只把 MVU 的数据读取位置改为扩展注册的函数：
-     *   getvar('stat_data.组.字段')        → mvu2shujukuGetMessageVar('stat_data.组.字段')
-     *   getvar("stat_data").组["字段"][0]  → mvu2shujukuGetAllVariables().stat_data.组["字段"][0]
-     *   _.has(getvar("stat_data"), '路径') → _.has(mvu2shujukuGetAllVariables().stat_data, '路径')
-     * 扩展启动时把 mvu2shujukuGetAllVariables 注册进 st-prompt-template 模板上下文
-     * （EjsTemplate.defines），并用卡内布局 + 插件表格惰性重建 stat_data（window.getAllVariables），
-     * 不依赖卡内桥是否运行。
-     * ================================================================ */
+function createEjsTransform(deps = {}) {
+    // EJS keeps native variable calls intact. The runtime context selects the
+    // database backend after JavaScript resolves paths, options and bindings.
     function findJsCallEnd(source, openIndex) {
         const code = maskJsStringsAndComments(source);
         let depth = 0;
@@ -45,7 +36,7 @@ function createEjsTransform() {
     function rewriteStatDataCalls(source) {
         let out = String(source || '');
         let count = 0;
-        if (!/\bstat_data\b/i.test(out)) return { text: out, count };
+        if (!/\b(?:stat_data|getvar|getMessageVar|setMessageVar|setvar)\b/i.test(out)) return { text: out, count };
         let code = maskJsStringsAndComments(out);
         const isBareCall = (index, length) => {
             if (!code.slice(index, index + length).trim() || /[\w$]/.test(code[index - 1] || '')) return false;
@@ -53,84 +44,6 @@ function createEjsTransform() {
             while (previous >= 0 && /\s/.test(code[previous])) previous--;
             return code[previous] !== '.';
         };
-        const getvarRe = /\bgetvar\s*\(/gi;
-        let m;
-        while ((m = getvarRe.exec(out))) {
-            if (!isBareCall(m.index, 6)) continue;
-            const open = out.indexOf('(', m.index);
-            const end = findJsCallEnd(out, open);
-            if (end < 0) break;
-            const args = out.slice(open + 1, end);
-            const first = args.match(/^\s*(["'])(stat_data(?:\.[^"']*)?)\1(?:\s*,[\s\S]*)?$/i);
-            if (!first) { getvarRe.lastIndex = end + 1; continue; }
-            const path = first[2];
-            const suffix = path.slice('stat_data'.length).replace(/^\./, '');
-            const topArgs = splitJsTopLevelArgs(args);
-            // 完整字面路径必须保留 TavernHelper getvar 的安全取值语义：任意中间层
-            // 缺失时返回 undefined/defaults，而不是生成 a.b.c 连续访问并在 b 缺失时抛错。
-            // 只读取 stat_data 根对象的官方教程写法仍返回整个对象，供后续属性链/_.has 使用。
-            const replacement = suffix
-                ? `mvu2shujukuGetMessageVar(${topArgs[0]}${topArgs[1] ? ', ' + topArgs[1] : ''})`
-                : 'mvu2shujukuGetAllVariables().stat_data';
-            out = out.slice(0, m.index) + replacement + out.slice(end + 1);
-            code = maskJsStringsAndComments(out);
-            count++;
-            getvarRe.lastIndex = m.index + replacement.length;
-        }
-
-        // 酒馆助手的 MessageVar 不属于 Mvu.* 公开 API，但部分 MVU 卡会用它
-        // 直接读写 stat_data。只改写首参数明确为 stat_data 字面量的调用，
-        // getLocalVar/setLocalVar 及其他 MessageVar 保持酒馆助手原语义。
-        for (const spec of [
-            { name: 'getMessageVar', replacement: 'mvu2shujukuGetMessageVar' },
-            { name: 'setMessageVar', replacement: 'mvu2shujukuSetMessageVar' },
-        ]) {
-            const callRe = new RegExp('\\b' + spec.name + '\\s*\\(', 'gi');
-            let cm;
-            while ((cm = callRe.exec(out))) {
-                if (!isBareCall(cm.index, spec.name.length)) continue;
-                const open = out.indexOf('(', cm.index);
-                const end = findJsCallEnd(out, open);
-                if (end < 0) break;
-                const args = out.slice(open + 1, end);
-                if (!/^\s*(["'])stat_data(?:\.[^"']*)?\1(?:\s*,|\s*$)/i.test(args)) {
-                    callRe.lastIndex = end + 1;
-                    continue;
-                }
-                out = out.slice(0, cm.index) + spec.replacement + out.slice(open, end + 1) + out.slice(end + 1);
-                code = maskJsStringsAndComments(out);
-                count++;
-                callRe.lastIndex = cm.index + spec.replacement.length + (end - open + 1);
-            }
-        }
-
-        // 通用 setvar 只有在静态可证明写入“当前消息变量”、且没有条件写入/历史楼层/
-        // 特殊返回值语义时才等价于数据库 setter。其余形式保持原文，交给人工核对。
-        const setvarRe = /\bsetvar\s*\(/gi;
-        let sm;
-        while ((sm = setvarRe.exec(out))) {
-            if (!isBareCall(sm.index, 6)) continue;
-            const open = out.indexOf('(', sm.index);
-            const end = findJsCallEnd(out, open);
-            if (end < 0) break;
-            const argsText = out.slice(open + 1, end);
-            const args = splitJsTopLevelArgs(argsText);
-            const pathMatch = args[0] && args[0].match(/^\s*(["'])(stat_data(?:\.[^"']*)?)\1\s*$/i);
-            const options = args[2] && args[2].trim();
-            // 目前只接受仅含 outscope:'message' 的对象；加入任何其它选项都可能改变
-            // flags/results/楼层选择等行为，宁可保留也不声称等价。
-            const messageScopeOnly = options && /^\{\s*(?:outscope|["']outscope["'])\s*:\s*(["'])message\1\s*,?\s*\}$/i.test(options);
-            if (!pathMatch || args.length !== 3 || !messageScopeOnly) {
-                setvarRe.lastIndex = end + 1;
-                continue;
-            }
-            const replacement = 'mvu2shujukuSetMessageVar(' + args[0] + ', ' + args[1] + ')';
-            out = out.slice(0, sm.index) + replacement + out.slice(end + 1);
-            code = maskJsStringsAndComments(out);
-            count++;
-            setvarRe.lastIndex = sm.index + replacement.length;
-        }
-
         // 这些入口在不同版本的 MVU/提示词模板教程中都出现过。只改写明确读取
         // `.stat_data` 的形式；不碰普通 getVariables()，以免改变非 MVU 变量语义。
         const directReaders = [
@@ -159,83 +72,69 @@ function createEjsTransform() {
         return { text: out, count };
     }
 
-    function ejsScriptBlocks(text) {
-        const blocks = [];
-        const re = /<%([_#=-]?)([\s\S]*?)(?:[_-]?%>)/g;
-        let m;
-        while ((m = re.exec(String(text || '')))) {
-            if (m[1] !== '#') blocks.push(m[2]);
-        }
-        return blocks;
+    function parserLibrary() {
+        if (deps.ejs) return deps.ejs;
+        if (typeof globalThis !== 'undefined' && globalThis.__MVU2SHUJUKU_EJS_PARSER_FACTORY__)
+            return deps.ejs = globalThis.__MVU2SHUJUKU_EJS_PARSER_FACTORY__();
+        if (typeof require === 'function') return deps.ejs = require('./vendor/ejs-parser')();
+        throw new Error('EJS parser library missing');
+    }
+    function acornLibrary() {
+        if (deps.acorn) return deps.acorn;
+        if (typeof globalThis !== 'undefined' && globalThis.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__)
+            return deps.acorn = globalThis.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.acorn;
+        if (typeof require === 'function') return deps.acorn = require('./vendor/schema-engine-libs').acorn;
+        throw new Error('Acorn tokenizer missing');
     }
 
-    // 保留源码偏移的词法视图。字符串/注释/正则字面量遮蔽，模板字符串中的
-    // ${...} 仍是可执行表达式，必须递归扫描；不能把字符串示例当作真正调用。
-    function maskJsStringsAndComments(source) {
-        const s = String(source || '');
-        const out = s.split('');
-        const blank = (a, b) => { for (let n = a; n < b; n++) if (s[n] !== '\n' && s[n] !== '\r') out[n] = ' '; };
-        let i = 0;
-        const scan = (templateExpression = false) => {
-            let braces = 0, expressionStart = true, lastWord = '';
-            const parens = [];
-            while (i < s.length) {
-                const ch = s[i], next = s[i + 1], start = i;
-                if (/\s/.test(ch)) { i++; continue; }
-                if (ch === '/' && next === '/') {
-                    i += 2; while (i < s.length && s[i] !== '\n' && s[i] !== '\r') i++;
-                    blank(start, i); continue;
-                }
-                if (ch === '/' && next === '*') {
-                    const end = s.indexOf('*/', i + 2); i = end < 0 ? s.length : end + 2;
-                    blank(start, i); continue;
-                }
-                if (ch === '"' || ch === "'") {
-                    i++;
-                    while (i < s.length) { if (s[i] === '\\') i += 2; else if (s[i++] === ch) break; }
-                    blank(start, Math.min(i, s.length)); expressionStart = false; continue;
-                }
-                if (ch === '`') {
-                    blank(i, ++i);
-                    while (i < s.length) {
-                        if (s[i] === '\\') { blank(i, Math.min(i + 2, s.length)); i += 2; continue; }
-                        if (s[i] === '`') { blank(i, i + 1); i++; break; }
-                        if (s[i] === '$' && s[i + 1] === '{') {
-                            // 保留一对括号阻止参数/语句扫描把插值里的逗号当作外层分隔符。
-                            out[i] = ' '; out[i + 1] = '('; i += 2;
-                            scan(true); continue;
-                        }
-                        blank(i, i + 1); i++;
-                    }
-                    expressionStart = false; continue;
-                }
-                if (ch === '/' && expressionStart) {
-                    let j = i + 1, charClass = false, closed = false;
-                    for (; j < s.length && s[j] !== '\n' && s[j] !== '\r'; j++) {
-                        if (s[j] === '\\') { j++; continue; }
-                        if (s[j] === '[') charClass = true;
-                        else if (s[j] === ']') charClass = false;
-                        else if (s[j] === '/' && !charClass) { j++; closed = true; break; }
-                    }
-                    if (closed) { while (/[a-z]/i.test(s[j] || '') && j < s.length) j++; blank(i, j); i = j; expressionStart = false; continue; }
-                }
-                if (/[\w$\u3400-\u9fff]/.test(ch)) {
-                    i++; while (i < s.length && /[\w$\u3400-\u9fff]/.test(s[i])) i++;
-                    lastWord = s.slice(start, i);
-                    expressionStart = /^(?:return|throw|case|delete|void|typeof|instanceof|in|of|yield|await|else|do)$/.test(lastWord);
-                    continue;
-                }
-                if (ch === '(') { parens.push(/^(?:if|while|for|with|switch|catch)$/.test(lastWord)); expressionStart = true; }
-                else if (ch === ')') expressionStart = !!parens.pop();
-                else if (ch === '{') { braces++; expressionStart = true; }
-                else if (ch === '}') {
-                    if (templateExpression && braces === 0) { out[i++] = ')'; return; }
-                    braces--; expressionStart = true;
-                } else expressionStart = !/[\].]/.test(ch) && !(ch === '+' && next === '+') && !(ch === '-' && next === '-');
-                lastWord = ''; i++;
-            }
+    // Let the actual engine classify tags, escaped delimiters and nested tokens.
+    // generateSource parses without running author JavaScript. scanLine is observed,
+    // not replaced by a second delimiter/state machine; edits retain original spans.
+    function ejsScriptRanges(text) {
+        const source = String(text || '');
+        if (!source.includes('<%')) return { ranges: [], error: null };
+        const ejs = parserLibrary(), ranges = [];
+        const template = new ejs.Template(source, { rmWhitespace: false });
+        const scan = template.scanLine, executable = new Set([
+            ejs.Template.modes.EVAL, ejs.Template.modes.ESCAPED, ejs.Template.modes.RAW,
+        ]);
+        let cursor = 0;
+        template.scanLine = function (line) {
+            const start = source.indexOf(line, cursor), previous = this.mode;
+            if (start < 0) throw new Error('EJS 解析范围无法对应原文，保留源代码');
+            scan.call(this, line);
+            if (line && executable.has(previous) && this.mode === previous)
+                ranges.push({ start, end: start + line.length });
+            cursor = start + line.length;
         };
-        scan();
+        try { template.generateSource(); return { ranges, error: null }; }
+        catch (error) { return { ranges: [], error: error.message }; }
+    }
+    function ejsScriptBlocks(text) {
+        const source = String(text || '');
+        return ejsScriptRanges(source).ranges.map(range => source.slice(range.start, range.end));
+    }
+
+    // Acorn supplies string/comment/regexp/template token boundaries. Keeping offsets
+    // permits source edits without executing code or guessing JavaScript lexing rules.
+    function maskJsStringsAndComments(source) {
+        const s = String(source || ''), out = s.split('');
+        const blank = (a, b) => { for (let n = a; n < b; n++) if (s[n] !== '\n' && s[n] !== '\r') out[n] = ' '; };
+        const lexer = acornLibrary().tokenizer(s, {
+            ecmaVersion: 'latest', allowHashBang: true,
+            onComment: (_block, _text, start, end) => blank(start, end),
+        });
+        try {
+            for (;;) {
+                const token = lexer.getToken(), label = token.type.label;
+                if (label === 'eof') break;
+                if (['string', 'regexp', 'template', '`'].includes(label)) blank(token.start, token.end);
+                if (label === '${') out[token.start] = ' ';
+            }
+        } catch (_) {
+            // Invalid/incomplete lexical input must not become an unsafe positive match.
+            blank(0, s.length);
+        }
         return out.join('');
     }
 
@@ -286,20 +185,16 @@ function createEjsTransform() {
 
     function unresolvedEjsDataReads(text) {
         const found = [];
-        const blocks = String(text || '').match(/<%[\s\S]*?%>/g) || [];
+        const blocks = ejsScriptBlocks(text);
         for (const block of blocks) {
-            // 只报告仍直接访问 stat_data 的旧入口。一个 EJS 块中可能同时含已改写的
-            // stat_data 读取与普通 getvar/动态 MessageVar；后者应继续走酒馆助手原语义，
-            // 不能仅因同块出现 stat_data 字样就误报为“漏接管”。
+            // getvar/MessageVar/setvar arguments are resolved by the execution
+            // context adapter, including dynamic paths. Only unbridged direct
+            // object readers remain a static conversion warning.
             const suspicious =
-                /\b(?:getvar|getMessageVar|setMessageVar)\s*\(\s*(["'])stat_data(?:\.[^"']*)?\1/i.test(block) ||
                 /\b(?:getAllVariables|getVariables|allVariables)\s*\(\s*\)\s*\.\s*stat_data\b/i.test(block) ||
                 /\ball_variables\s*\.\s*stat_data\b/i.test(block) ||
                 /(^|[^\w$.])variables\s*\.\s*stat_data\b/i.test(block) ||
-                /\bTavernHelper\s*\.\s*getVariables\s*\(\s*\)\s*\.\s*stat_data\b/i.test(block) ||
-                /\bsetvar\s*\([\s\S]*?["']stat_data(?:\.|["'])/i.test(block) ||
-                // 动态 getvar 无法静态确认；仅当同块明确把变量设为 stat_data 时报告。
-                (/\bgetvar\s*\(\s*(?!["'])[^)]*\)/i.test(block) && /["']stat_data(?:\.|["'])/i.test(block));
+                /\bTavernHelper\s*\.\s*getVariables\s*\(\s*\)\s*\.\s*stat_data\b/i.test(block);
             if (!suspicious) continue;
             const oneLine = block.replace(/\s+/g, ' ').trim();
             if (!found.includes(oneLine)) found.push(oneLine.slice(0, 240));
@@ -377,12 +272,19 @@ function createEjsTransform() {
         const items = [];
         let out = String(text || '');
         if (options.translateSimpleEjs) out = translateSimpleEjsConditions(out, layout, report).text;
-        const rewritten = rewriteStatDataCalls(out);
-        out = rewritten.text;
-        if (rewritten.count) {
-            const count = rewritten.count;
-            items.push({ original: 'getvar(\'stat_data…\')', rewritten: 'mvu2shujukuGetMessageVar(...) / mvu2shujukuGetAllVariables().stat_data', status: 'auto' });
-            report.auto(`已把 ${count} 处 MVU/EJS 数据读取入口改为数据库安全取值函数（完整路径保留缺失返回/defaults 语义；stat_data 根读取保留对象访问；函数由扩展或卡内桥注册进模板上下文）。`);
+        const parsed = ejsScriptRanges(out);
+        if (parsed.error) report.manual(`EJS 模板解析未完成：${parsed.error}`);
+        let count = 0, cursor = 0, rewrittenText = '';
+        for (const range of parsed.ranges) {
+            const rewritten = rewriteStatDataCalls(out.slice(range.start, range.end));
+            count += rewritten.count;
+            rewrittenText += out.slice(cursor, range.start) + rewritten.text;
+            cursor = range.end;
+        }
+        out = rewrittenText + out.slice(cursor);
+        if (count) {
+            items.push({ original: '直接读取 stat_data 的入口', rewritten: 'mvu2shujukuGetAllVariables().stat_data', status: 'auto' });
+            report.auto(`已把 ${count} 处 MVU/EJS 数据读取入口改为数据库安全取值函数（变量函数调用保持原文，由运行时上下文适配数据库；兼容函数由扩展或卡内桥注册进模板上下文）。`);
         }
         // 非 MVU 的 getwi 等引用：保留并提示
         const orphanRe = /<%[-=]\s*await\s+getwi[\s\S]*?-?%>/g;
@@ -402,6 +304,7 @@ function createEjsTransform() {
             splitJsTopLevelArgs,
             rewriteStatDataCalls,
             ejsScriptBlocks,
+            ejsScriptRanges,
             maskJsStringsAndComments,
             ejsLexicalDeclarationNames,
             ejsFallbackVarNames,

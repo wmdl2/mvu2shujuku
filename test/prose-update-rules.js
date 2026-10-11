@@ -14,7 +14,7 @@ function retained(r) { return (r.card.data || r.card).character_book.entries.fin
 
 test('散文规则：XML 包裹与自然语言续行完整迁移，宏迁移后仍有凭证', () => {
     const r = convert('<UpdateRules>\n通用更新规则:\n  世界:\n    - 行动/任务推进后 replace /世界/时间，{{user}}可主动推进。\n（冻结时禁止推进时间）\n    - replace /世界/冻结 为false，仅按正文判定\n</UpdateRules>');
-    assert.strictEqual(retained(r), undefined);
+    assert.ok(retained(r), "作者规则源条目保留");
     const note = sheet(r, '世界表').sourceData.note;
     assert.match(note, /冻结时禁止推进时间/);
     assert.match(note, /行动\/任务推进后 更新 「时间」/);
@@ -24,28 +24,29 @@ test('散文规则：XML 包裹与自然语言续行完整迁移，宏迁移后�
 });
 test('散文规则：组标题不同但显式路径唯一时按实际路径迁移', () => {
     const r = convert('通用更新规则:\n  支线:\n    - 场景结束时 add /任务/当前/- 新记录，保留旧记录');
-    assert.strictEqual(retained(r), undefined);
-    const s = Object.values(r.template).find(s => /任务.*当前/.test(s?.name));
-    assert.match(s.sourceData.note, /场景结束时 新增 本表的新记录/);
+    assert.ok(retained(r), "作者规则源条目保留");
+    const s = sheet(r, '任务表');
+    assert.match(s.sourceData.note, /场景结束时 新增 「内容」内部路径 \/当前\/-/);
 });
 test('散文规则：没有操作路径时只接受准确的组标题', () => {
     const r = convert('世界:\n  - 冻结期间保持原时间\n不省略这条续行');
-    assert.strictEqual(retained(r), undefined);
+    assert.ok(retained(r), "作者规则源条目保留");
     assert.match(sheet(r, '世界表').sourceData.note, /不省略这条续行/);
 });
 test('散文规则：整组 JSON 的业务条件位于实际可写路径范围内', () => {
     const r = convert('自由:\n  - add /自由/甲/值 为正文明确的数字', { 自由: {} });
     const note = sheet(r, '自由表').sourceData.note;
-    assert.strictEqual(retained(r), undefined);
+    assert.ok(retained(r), "作者规则源条目保留");
     assert(note.indexOf('【可写路径与约束】') < note.indexOf('新增 「内容」内部路径 /甲/值'));
-    assert.match(note, /未列出的字段一律只读/);
+    assert.match(note, /遵守原变量规则/);
+    assert.doesNotMatch(note, /未列出的字段一律只读/);
     assert.doesNotMatch(note, /【可写路径与约束】\n【更新守卫】/);
 });
-test('散文规则：未知组完整保留，已迁移部分按实际说明拆分', () => {
+test('散文规则：未知组与已映射业务均保留原文，表格说明仍按真实布局生成', () => {
     const r = convert('<UpdateRules>\n通用更新规则:\n  世界:\n    - replace /世界/时间 为当前时间\n  未知:\n    - replace /未知/状态 为已发生\n</UpdateRules>');
     assert.ok(retained(r)); assert.match(retained(r).content, /未知\/状态/);
-    assert.doesNotMatch(retained(r).content, /世界\/时间/);
-    assert.match(r.reportText, /剩余内容未迁入填表侧/);
+    assert.match(retained(r).content, /世界\/时间/);
+    assert.match(r.reportText, /保留业务原文/);
 });
 test('散文规则：禁用条目和动态 EJS 不能变为启用的模板规则', () => {
     const text = '<UpdateRules>\n世界:\n  - 必须每轮倒退时间\n</UpdateRules>';
@@ -58,7 +59,7 @@ test('结构化规则：XML 与代码围栏中的 YAML 使用同一解析和迁�
     const body = '变量更新规则:\n  世界:\n    时间:\n      type: string\n      check:\n        - 冻结期间禁止变化';
     const direct = convert(body), wrapped = convert('<UpdateRules>\n```yaml\n' + body + '\n```\n</UpdateRules>');
     assert.deepStrictEqual(wrapped.template, direct.template);
-    assert.strictEqual(retained(wrapped), undefined);
+    assert.ok(retained(wrapped), "作者规则源条目保留");
 });
 test('规则包裹：完整静态自定义标签与常见围栏可嵌套，类型和说明不丢失', () => {
     const body = '变量更新规则:\n  世界:\n    时间:\n      type: string\n      check:\n        - 只按当前场景推进';
@@ -66,17 +67,17 @@ test('规则包裹：完整静态自定义标签与常见围栏可嵌套，类�
     for (const [open, close] of [['<custom-rule_pack>', '</custom-rule_pack>'], ['<变量规则>', '</变量规则>'], ['~~~yml', '~~~'], ['````yaml', '````'], ['```', '```']]) {
         const r = convert(open + '\n' + body + '\n' + close);
         assert.deepStrictEqual(r.template, expected, open);
-        assert.strictEqual(retained(r), undefined, open);
+        assert.ok(retained(r), "作者规则源条目保留");
     }
     const nested = convert('<Rules>\n<custom_rules>\n```yaml\n' + body + '\n```\n</custom_rules>\n</Rules>');
     assert.deepStrictEqual(nested.template, expected);
-    assert.strictEqual(retained(nested), undefined);
+    assert.ok(retained(nested), "作者规则源条目保留");
     const indented = convert('<Rules>\r\n    ```yaml\r\n' + body.split('\n').map(line => '        ' + line).join('\r\n') + '\r\n    ```\r\n</Rules>');
     assert.deepStrictEqual(indented.template, expected);
-    assert.strictEqual(retained(indented), undefined);
+    assert.ok(retained(indented), "作者规则源条目保留");
     const json = convert('<Rules>\n```json\n' + JSON.stringify({ 变量更新规则: { 世界: { 时间: { type: 'string', check: ['只按当前场景推进'] } } } }) + '\n```\n</Rules>');
     assert.deepStrictEqual(json.template, expected);
-    assert.strictEqual(retained(json), undefined);
+    assert.ok(retained(json), "作者规则源条目保留");
 });
 test('规则包裹：属性、相邻标签、脚本和混合正文不被当作完整规则删除', () => {
     const body = '变量更新规则:\n  世界:\n    时间:\n      check:\n        - 仅按正文推进';
@@ -90,7 +91,7 @@ function pathFormat(lines) {
 test('输出格式：字段业务定义、只读权限与通配根不得随旧协议删除', () => {
     const r = convert(pathFormat(['/名字 readonly(前端管理，显示人物姓名)', '/世界/冻结 readonly(玩家开关)', '/世界/时间 replace:string 仅按正文时间', '/actor_* readonly(前端管理，线路主角模式)']),
         { 名字: '', 世界: { 时间: '', 冻结: false }, actor_a: '', actor_b: '' });
-    assert.strictEqual(retained(r), undefined);
+    assert.ok(retained(r), "作者规则源条目保留");
     for (const name of ['actor_a表', 'actor_b表', '名字表']) {
         assert.match(sheet(r, name).sourceData.note, /模型只读/);
         assert.match(sheet(r, name).sourceData.updateNode, /禁止/);
@@ -100,39 +101,40 @@ test('输出格式：字段业务定义、只读权限与通配根不得随旧�
     assert.match(sheet(r, '世界表').sourceData.note, /模型只读字段：冻结/);
     assert.doesNotMatch(sheet(r, '世界表').sourceData.updateNode, /dongjie|冻结/);
 });
-test('输出格式：未知业务路径保留说明而不恢复旧输出协议', () => {
+test('输出格式：未知业务路径源说明保留，纯输出协议仅从请求视图排除', () => {
     const r = convert(pathFormat(['/世界/时间 replace:string 当前时刻', '/未映射/值 replace:string 特定条件']));
     assert.ok(retained(r)); assert.match(retained(r).content, /未映射\/值/);
-    assert.doesNotMatch(retained(r).content, /UpdateVariable|JSONPatch/);
+    assert.doesNotMatch(core.fillEntryRequestView(retained(r)), /UpdateVariable|JSONPatch/);
     assert.match(sheet(r, '世界表').sourceData.note, /当前时刻/);
 });
 test('输出格式：任意自定义键保留，不能套用已知路径字段的含义', () => {
     const r = convert(pathFormat(['/名字 readonly(人物姓名)']).replace('valid_paths:', 'author_custom_policy:'));
     assert.match(retained(r).content, /author_custom_policy/);
     assert.match(retained(r).content, /\/名字 readonly\(人物姓名\)/);
-    assert.doesNotMatch(retained(r).content, /<UpdateVariable>|<JSONPatch>/);
+    assert.doesNotMatch(core.fillEntryRequestView(retained(r)), /<UpdateVariable>|<JSONPatch>/);
     assert.doesNotMatch(sheet(r, '名字表').sourceData.note, /本表为模型只读状态/);
-    assert.match(r.reportText, /未迁入填表侧/);
+    assert.match(r.reportText, /填表适配说明/);
 });
-test('输出格式：已知路径迁移不能吞掉同文档的未知补充键', () => {
+test('输出格式：已知路径保留，不能吞掉同文档的未知补充键', () => {
     const content = pathFormat(['/名字 readonly(姓名显示)']).replace('  format:', '  author_note: 不得忘记尚未结算的约定\n  format:');
     const r = convert(content);
     assert.match(sheet(r, '名字表').sourceData.note, /姓名显示/);
     assert.match(retained(r).content, /author_note: 不得忘记尚未结算的约定/);
-    assert.doesNotMatch(retained(r).content, /\/名字|<UpdateVariable>|<JSONPatch>/);
+    assert.match(retained(r).content, /\/名字/);
+    assert.doesNotMatch(core.fillEntryRequestView(retained(r)), /<UpdateVariable>|<JSONPatch>/);
 });
 test('输出格式：无法解析的路径说明仍保留，不能静默随协议删除', () => {
     const r = convert(pathFormat(['这段是业务说明，尚未使用完整路径。']));
     assert.ok(retained(r)); assert.match(retained(r).content, /这段是业务说明/);
-    assert.doesNotMatch(retained(r).content, /UpdateVariable|JSONPatch/);
+    assert.doesNotMatch(core.fillEntryRequestView(retained(r)), /UpdateVariable|JSONPatch/);
 });
-test('原变量说明：下划线根为模型只读，显式整数说明不得接受小数', () => {
+test('原变量说明：下划线根保持公开，显式整数说明不得接受小数', () => {
     const card = { name: '公开元数据说明测试', character_book: { entries: [{ id: 1, comment: '[InitVar]', content: '{"_schema_version":2}' }] },
         extensions: { tavern_helper: { scripts: [{ name: '结构迁移', enabled: true,
             content: "import { registerMvuSchema } from 'https://example.test/mvu_zod.js';const S=z.object({_schema_version:z.number().int()});registerMvuSchema(S);" }] } } };
     const r = core.convert(card), s = sheet(r, '_schema_version表');
-    assert.match(s.sourceData.note, /本表为模型只读状态/);
-    assert.strictEqual(s.updateConfig.updateFrequency, 0);
+    assert.doesNotMatch(s.sourceData.note, /本表为模型只读状态/);
+    assert.notStrictEqual(s.updateConfig.updateFrequency, 0);
     assert.doesNotMatch(s.sourceData.note, /原变量路径|结构迁移/);
     assert.match(s.sourceData.note, /一个整数，不接受小数/);
     assert.match(s.sourceData.updateNode, /禁止/);
@@ -148,7 +150,7 @@ test('只读声明：完整肯定语法才关闭自动更新，复杂说明迁�
         const r = convert(pathFormat(['/名字 ' + declaration]));
         assert.strictEqual(sheet(r, '名字表').updateConfig.updateFrequency, 0, declaration);
         assert.match(sheet(r, '名字表').sourceData.updateNode, /禁止/);
-        assert.strictEqual(retained(r), undefined);
+        assert.ok(retained(r), "作者规则源条目保留");
     }
     for (const declaration of ['readonly(false)', 'readonly: false', 'readonly = true', 'readonly(0)',
         'readonly(enabled)', 'readonly(count > 0)', 'readonly(a && b)', '只读（当玩家打开开关时）',
@@ -157,7 +159,7 @@ test('只读声明：完整肯定语法才关闭自动更新，复杂说明迁�
         const r = convert(pathFormat(['/名字 ' + declaration]));
         assert.notStrictEqual(sheet(r, '名字表').updateConfig.updateFrequency, 0, declaration);
         assert.doesNotMatch(sheet(r, '名字表').sourceData.note, /本表为模型只读状态/);
-        assert.strictEqual(retained(r), undefined, declaration);
+        assert.ok(retained(r), "作者规则源条目保留");
         for (const line of declaration.split('\n')) assert.ok(sheet(r, '名字表').sourceData.note.includes(line.trim()), declaration);
         assert.match(r.reportText, /未据此自动设置只读或更新频率/);
     }
@@ -191,11 +193,11 @@ test('JSON 字段规则：相对内容列定位，叶子只读不能锁整个 JS
     const r = convert(pathFormat(['/自由/支线/已发现 replace:boolean 正文确认发现后更新',
         '/自由/主线/阶段 readonly(脚本维护)']), { 自由: {} });
     const note = sheet(r, '自由表').sourceData.note;
-    assert.match(note, /「内容」内部路径 \/支线\/已发现：boolean 正文确认发现后更新/);
-    assert.match(note, /「内容」内部路径 \/主线\/阶段：模型只读；脚本维护/);
-    assert.doesNotMatch(note, /\/自由|原变量路径/);
+    assert.match(note, /「内容」内 \/支线\/已发现：\n\/自由\/支线\/已发现 replace:boolean 正文确认发现后更新/);
+    assert.match(note, /「内容」内 \/主线\/阶段：\n\/自由\/主线\/阶段 readonly\(脚本维护\)/);
+    assert.doesNotMatch(note, /内部路径|原变量路径/);
     assert.notStrictEqual(sheet(r, '自由表').updateConfig.updateFrequency, 0);
-    assert.strictEqual(retained(r), undefined);
+    assert.ok(retained(r), "作者规则源条目保留");
 });
 
 test('字段规则：已拆列中的未知叶子保留报告，不能自动开放整个表', () => {
@@ -213,7 +215,7 @@ test('行表规则：占位记录名映射实际列，具体记录的只读不�
     assert.match(s.sourceData.note, /记录「甲」的「备注」：模型只读；脚本维护/);
     assert.doesNotMatch(s.sourceData.note, /\/成员|number\(0~100\)|模型只读字段：备注/);
     assert.notStrictEqual(s.updateConfig.updateFrequency, 0);
-    assert.strictEqual(retained(r), undefined);
+    assert.ok(retained(r), "作者规则源条目保留");
 });
 
 test('只读冲突：父只读与子可写声明不能自动禁用整表', () => {
@@ -249,7 +251,7 @@ test('散文规则：展平对象改写为实际列，清空值和条件不能�
     assert.match(note, /非空时 更新 「支线_名称」、「支线_进度」/);
     assert.match(note, /「支线_名称」=""、?「支线_进度」=""/);
     assert.doesNotMatch(note, /\/任务\/支线|为 \{"名称"/);
-    assert.strictEqual(retained(r), undefined);
+    assert.ok(retained(r), "作者规则源条目保留");
 });
 
 test('JSON 数组规则：元素记录的内部字段路径相对于实际内容列', () => {
@@ -259,9 +261,9 @@ test('JSON 数组规则：元素记录的内部字段路径相对于实际内容
     ] }, extensions: { tavern_helper: { scripts: [{ enabled: true, name: '结构', content:
         "import {registerMvuSchema} from 'https://example.test/mvu_zod.js';registerMvuSchema(z.object({事件:z.array(z.any())}));" }] } } };
     const r = core.convert(card);
-    assert.match(sheet(r, '事件表').sourceData.note, /对应元素记录的「内容」内部路径 \/阶段/);
+    assert.match(sheet(r, '事件表').sourceData.note, /「内容」内部路径 \/\{i\}\/阶段/);
     assert.doesNotMatch(sheet(r, '事件表').sourceData.note, /\/事件\/\{i\}/);
-    assert.strictEqual(retained(r), undefined);
+    assert.ok(retained(r), "作者规则源条目保留");
 });
 
 const protocolRules = `  rule:
@@ -275,10 +277,10 @@ const protocolRules = `  rule:
 `;
 test('输出协议：已确认文档中的完整协议规则逐项清理，业务续句保留', () => {
     const content = pathFormat(['/名字 readonly(人物姓名)']).replace('  format:', protocolRules + '  format:');
-    assert.strictEqual(retained(convert(content)), undefined);
+    assert.ok(retained(convert(content)));
     const mixed = content.replace('    - 更新推理仅放', '    - 不得忘记尚未结算的约定\n    - 更新推理仅放');
     const r = convert(mixed);assert.match(retained(r).content, /不得忘记尚未结算的约定/);
-    assert.doesNotMatch(retained(r).content, /logic_check|UpdateVariable|JSONPatch|RFC6902/);
+    assert.doesNotMatch(core.fillEntryRequestView(retained(r)), /logic_check|UpdateVariable|JSONPatch|RFC6902/);
     const conditional = content.replace('<UpdateVariable>必须位于回复末尾', '<UpdateVariable>必须位于回复末尾，任务结束时保留未支付债务');
     assert.match(retained(convert(conditional)).content, /任务结束时保留未支付债务/);
 });
@@ -290,8 +292,8 @@ test('复杂权限：JSON 叶子说明完整迁移，条件不能推导整表只
             '/自由/{全名}/好感 replace:number(0~100)']).replace('  format:', protocolRules + '  format:') }
     ] }, extensions: { tavern_helper: { scripts: [{ name: '结构', content: "const S=z.object({自由:z.any()});registerMvuSchema(S);" }] } } };
     const result=core.convert(source), table=sheet(result,'自由表');
-    assert.strictEqual(retained(result), undefined);
-    assert.match(table.sourceData.note,/内部路径 \/\{全名\}\/称呼冻结/);
+    assert.ok(retained(result), "作者规则源条目保留");
+    assert.match(table.sourceData.note,/「内容」内 \/\{全名\}\/称呼冻结/);
     for(const text of ['玩家界面管理 boolean','缺失视为false','禁模型新增、修改或删除','为true时对玩家称呼禁改'])assert.ok(table.sourceData.note.includes(text));
     assert.doesNotMatch(table.sourceData.note,/本表为模型只读状态|UpdateVariable|JSONPatch|原变量路径/);
     assert.notStrictEqual(table.updateConfig.updateFrequency,0);
@@ -330,5 +332,5 @@ test('状态展示：整份 get_message_variable 读取当前快照，不引用�
     const text = '<status_current_variable>\n{{get_message_variable::stat_data}}\n生命低于20时描述伤势。\n</status_current_variable>';
     const r = convert(text);
     assert.strictEqual(retained(r).content, text.replace('{{get_message_variable::stat_data}}', '<%- mvu2shujukuFormatMessageVariable("stat_data") %>'));
-    assert.doesNotMatch(retained(r).content, /stat_data表/);
+    assert.doesNotMatch(core.fillEntryRequestView(retained(r)), /stat_data表/);
 });

@@ -47,7 +47,110 @@ function createCardApi(options) {
         if (reusable) proofs.set(result, { owner: proofOwner, revision, keys: keySignature, value: JSON.stringify(result) });
         return result;
     }
-    function facade(original) {
+    // 状态恢复只借用无业务副作用的原 Zod 检查，不重新运行 transform/provider。
+    async function stateImportRules() {
+        await ready();
+        const registered = (readMetadata().schemaKeys || []).map(key => schemas.get(key)), capturedRevision = revision;
+        const assertCurrent = () => { if (!isCurrent() || revision !== capturedRevision) throw new Error('目标 Schema 已更新，请重新导入'); };
+        const unwrap = schema => {
+            while (['optional', 'nonoptional', 'nullable', 'readonly', 'default', 'prefault'].includes(schema?._zod?.def?.type)) schema = schema._zod.def.innerType;
+            return schema;
+        };
+        const safeChecks = def => (def.checks || []).every(check => {
+            const kind = check?._zod?.def?.check;
+            if (typeof check?._zod?.def?.fn === 'function') return false;
+            return ['greater_than', 'less_than', 'multiple_of', 'number_format', 'string_format', 'min_length', 'max_length', 'length_equals', 'min_size', 'max_size', 'size_equals', 'mime_type'].includes(kind);
+        });
+        function inert(schema, depth = 0) {
+            const def = schema?._zod?.def;
+            if (!def || depth > 48 || !safeChecks(def)) return false;
+            if (['optional', 'nonoptional', 'nullable', 'readonly'].includes(def.type)) return inert(def.innerType, depth + 1);
+            if (def.type === 'object') return Object.values(def.shape).every(child => inert(child, depth + 1)) && (!def.catchall || inert(def.catchall, depth + 1));
+            if (def.type === 'record') return inert(def.keyType, depth + 1) && inert(def.valueType, depth + 1);
+            if (def.type === 'array') return inert(def.element, depth + 1);
+            return ['string', 'number', 'boolean', 'enum', 'literal', 'null', 'undefined', 'any', 'unknown', 'never', 'nan'].includes(def.type);
+        }
+        function pure(schema, value, depth = 0) {
+            if (depth > 48) return false;
+            const def = schema?._zod?.def;
+            if (!def || !safeChecks(def)) return false;
+            if (['optional', 'nonoptional', 'nullable', 'readonly'].includes(def.type)) return value === undefined && def.type === 'optional' ? inert(def.innerType, depth + 1) : value === null && def.type === 'nullable' || pure(def.innerType, value, depth + 1);
+            // 值存在时 Zod 不调用默认函数；缺失时不能为了恢复进度生成默认值。
+            if (['default', 'prefault'].includes(def.type)) return value !== undefined && pure(def.innerType, value, depth + 1);
+            if (def.type === 'object') return value !== null && typeof value === 'object' && !Array.isArray(value)
+                && Object.entries(def.shape).every(([k, child]) => pure(child, value[k], depth + 1))
+                && (!def.catchall || Object.keys(value).every(k => Object.hasOwn(def.shape, k) || pure(def.catchall, value[k], depth + 1)));
+            if (def.type === 'record') return value !== null && typeof value === 'object' && !Array.isArray(value)
+                && Object.entries(value).every(([k, v]) => pure(def.keyType, k, depth + 1) && pure(def.valueType, v, depth + 1));
+            if (def.type === 'array') return Array.isArray(value) && value.every(v => pure(def.element, v, depth + 1));
+            return ['string', 'number', 'boolean', 'enum', 'literal', 'null', 'undefined', 'any', 'unknown', 'never', 'nan'].includes(def.type);
+        }
+        function shape(schema, depth = 0) {
+            if (depth > 48) return { type: 'any' };
+            let nullable = false, optional, hasDefault = false, wrapper = schema;
+            while (['optional', 'nonoptional', 'nullable', 'readonly', 'default', 'prefault'].includes(wrapper?._zod?.def?.type)) {
+                const def = wrapper._zod.def;
+                nullable ||= def.type === 'nullable';
+                if (optional === undefined && ['optional', 'nonoptional'].includes(def.type)) optional = def.type === 'optional';
+                hasDefault ||= ['default', 'prefault'].includes(def.type);
+                wrapper = def.innerType;
+            }
+            const unwrapped = unwrap(schema), def = unwrapped?._zod?.def;
+            if (!def) return null;
+            let node;
+            if (def.type === 'object') {
+                const properties = {};
+                for (const [key, child] of Object.entries(def.shape)) Object.defineProperty(properties, key, { value: shape(child, depth + 1) || { type: 'any' }, enumerable: true });
+                node = { type: 'object', properties, extensible: !!def.catchall && def.catchall._zod?.def?.type !== 'never' };
+            } else if (def.type === 'record') node = { type: 'object', properties: {}, extensible: true, record: true };
+            else if (def.type === 'array') node = { type: 'array', elementType: shape(def.element, depth + 1) || { type: 'any' } };
+            else node = { type: ['string', 'number', 'boolean', 'null'].includes(def.type) ? def.type : 'any' };
+            if (nullable) node.nullable = true;
+            if (optional && !hasDefault) node.optional = true;
+            return node;
+        }
+        function locate(schema, path) {
+            for (const key of path) {
+                while (['optional', 'nonoptional', 'nullable', 'readonly', 'default', 'prefault'].includes(schema?._zod?.def?.type)) {
+                    if (!safeChecks(schema._zod.def)) return null;
+                    schema = schema._zod.def.innerType;
+                }
+                const def = schema?._zod?.def;
+                if (!def || !safeChecks(def)) return null;
+                if (def.type === 'object') schema = Object.hasOwn(def.shape, key) ? def.shape[key] : def.catchall;
+                else if (def.type === 'record') schema = def.valueType;
+                else return null;
+            }
+            return schema;
+        }
+        const canonical = value => value && typeof value === 'object' ? Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']' : '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}' : JSON.stringify(value);
+        return {
+            assertCurrent,
+            schema: registered.map(s => shape(s)).find(Boolean),
+            async validateComplete(value) {
+                assertCurrent();
+                for (const root of registered) {
+                    if (typeof root === 'function' || !pure(root, value)) return 'opaque';
+                    const parsed = typeof root.safeParseAsync === 'function' ? await root.safeParseAsync(clone(value)) : root.safeParse(clone(value));
+                    assertCurrent();
+                    if (!parsed.success) return 'invalid';
+                }
+                return 'valid';
+            },
+            async accept(path, value) {
+                assertCurrent();
+                for (const root of registered) {
+                    const node = typeof root === 'function' ? null : locate(root, path);
+                    if (!node || !pure(node, value)) return '目标 Schema 含无法安全独立校验的规则，保留目标值';
+                    const parsed = typeof node.safeParseAsync === 'function' ? await node.safeParseAsync(clone(value)) : node.safeParse(clone(value));
+                    assertCurrent();
+                    if (!parsed.success || canonical(parsed.data) !== canonical(value)) return '值不符合目标 Schema 或需要变换，保留目标值';
+                }
+                return '';
+            },
+        };
+    }
+    function facade(original, facadeOptions = {}) {
         if (!original || typeof original !== 'object') return original;
         const out = Object.create(original);
         const set = (name, value) => Object.defineProperty(out, name, { value, writable: true, configurable: true, enumerable: true });
@@ -72,10 +175,12 @@ function createCardApi(options) {
             return result && typeof result.then === 'function' ? result.then(apply) : apply(result);
         };
         if (typeof original.getWorldbookNames === 'function') set('getWorldbookNames', function (...args) {
-            return decorateNames(original.getWorldbookNames.apply(original, args));
+            const result = original.getWorldbookNames.apply(original, args);
+            return facadeOptions.includeAliases === false ? result : decorateNames(result);
         });
         if (typeof original.getCharWorldbookNames === 'function') set('getCharWorldbookNames', function (...args) {
             const result = original.getCharWorldbookNames.apply(original, args);
+            if (facadeOptions.includeAliases === false) return result;
             const apply = info => {
                 if (!info || typeof info !== 'object') return info;
                 const aliases = metadata().worldbookAliases || {}, names = [info.primary, ...(info.additional || [])], additional = [...(info.additional || [])];
@@ -87,7 +192,7 @@ function createCardApi(options) {
         if (typeof original.createChatMessages === 'function') set('createChatMessages', wrapCreate(original.createChatMessages, original));
         return out;
     }
-    function patchWorldbookGlobals(w, globals) {
+    function patchWorldbookGlobals(w, globals, facadeOptions) {
         const names = ['getWorldbook', 'replaceWorldbook', 'updateWorldbookWith', 'createWorldbookEntries', 'deleteWorldbookEntries', 'getWorldbookNames', 'getCharWorldbookNames'];
         const original = {}, pending = [];
         for (const name of names) {
@@ -97,7 +202,7 @@ function createCardApi(options) {
             original[name] = (...args) => fn.apply(w, args);
             pending.push(name);
         }
-        const wrapped = facade(original);
+        const wrapped = facade(original, facadeOptions);
         for (const name of pending) {
             wrapped[name].__mvu2shujuku = true;
             wrapped[name].__mvu2shujukuCardApi = api;
@@ -123,7 +228,7 @@ function createCardApi(options) {
             return result;
         };
     }
-    const api = { registerSchema, ready, validate, proofOf, facade, patchWorldbookGlobals, wrapCreate };
+    const api = { registerSchema, ready, validate, stateImportRules, proofOf, facade, patchWorldbookGlobals, wrapCreate };
     return api;
 }
 module.exports = createCardApi;

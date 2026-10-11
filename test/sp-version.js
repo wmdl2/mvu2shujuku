@@ -13,17 +13,19 @@ function extension(version, disabled = false, displayName = 'SP·数据库 9.2.5
     return { extensionNames: ['third-party/sp'], extension_settings: { disabledExtensions: disabled ? ['third-party/sp'] : [] },
         getExtensionManifest: () => ({ display_name: displayName, version }) };
 }
-test('SP版本识别：龙血玄黄重新编号与旧版本分开，真实转换保留隐藏列', async () => {
+test('SP版本识别：龙血玄黄重新编号与旧版本分开，真实转换保留完整说明JSON', async () => {
     const targetSpVersion = await reader({ extensions: extension('1.0.0', false, '龙血玄黄·数据库 1.0.0') })();
     assert.strictEqual(targetSpVersion, 'naiv1.0.0');
     const card = { name: '新版数据库', character_book: { entries: [
-        { comment: '[InitVar]', content: JSON.stringify({ 状态: { 可见: 1, '$私有': 2 } }) },
+        { comment: '[InitVar]', content: JSON.stringify({ 状态: { 可见: [1, '数值说明'], '$私有': 2 } }) },
     ] } };
-    const converted = core.convert(card, { targetSpVersion });
+    const converted = core.convert(card, { targetSpVersion, vwdDescriptions: true });
     const sheet = Object.values(converted.template).find(s => s.name === '状态表');
-    assert.ok(sheet.sourceData.hiddenPhysicalColumns.length > 0);
+    assert(!(sheet.sourceData.hiddenPhysicalColumns || []).length);
+    assert(sheet.updateConfig.sendRowsSqlTemplate);
+    assert.equal(sheet.content[0][1], '内容');
     assert.doesNotMatch(converted.reportText, /无法识别目标|低于官方标准版本/);
-    assert.match(core.convert(card, { targetSpVersion: '1.0.0' }).reportText, /低于官方标准版本/);
+    assert(core.convert(card, { targetSpVersion: '1.0.0', vwdDescriptions: true }).template, '结构转换不冒用已移除的隐藏列版本门槛');
     const mixed = { extensionNames: ['old', 'new'], getExtensionManifest: name => ({
         display_name: name === 'old' ? 'SP·数据库' : '龙血玄黄·数据库', version: '1.0.0',
     }) };
@@ -67,16 +69,18 @@ test('SP版本识别：无固定标签、非官方资源、下载请求和版本
     const extensions = { extensionNames: ['a', 'b'], getExtensionManifest: name => ({ display_name: 'SP·数据库', version: name === 'a' ? '9.2.3' : '9.2.5' }) };
     assert.strictEqual(await reader({ extensions })(), 'unknown');
 });
-test('SP版本识别：脚本识别结果进入实际转换后保留隐藏列与准确报告', async () => {
+test('SP版本识别：脚本识别结果进入实际转换后保留完整说明JSON', async () => {
     const targetSpVersion = await reader({ windows: [windowWith([resource('9.2.5.1')])] })();
     const card = { name: '脚本版SP', first_mes: '开场', character_book: { entries: [
-        { comment: '[InitVar]', content: JSON.stringify({ 状态: { 可见: 1, '$私有': 2 } }) },
+        { comment: '[InitVar]', content: JSON.stringify({ 状态: { 可见: [1, '数值说明'], '$私有': 2 } }) },
     ] } };
-    const converted = core.convert(card, { targetSpVersion });
+    const converted = core.convert(card, { targetSpVersion, vwdDescriptions: true });
     const sheet = Object.values(converted.template).find(s => s.name === '状态表');
-    assert.ok(sheet.sourceData.hiddenPhysicalColumns.length > 0);
+    assert(!(sheet.sourceData.hiddenPhysicalColumns || []).length);
+    assert(sheet.updateConfig.sendRowsSqlTemplate);
+    assert.equal(sheet.content[0][1], '内容');
     assert.doesNotMatch(converted.reportText, /无法识别目标|低于官方标准版本/);
-    const unknown = core.convert(card, { targetSpVersion: 'unknown' });
-    assert.match(unknown.reportText, /无法识别目标龙血玄黄·数据库/);
+    const unknown = core.convert(card, { targetSpVersion: 'unknown', vwdDescriptions: true });
+    assert(Object.values(unknown.template).some(s => s?.updateConfig?.sendRowsSqlTemplate));
     assert.doesNotMatch(unknown.reportText, /请升级至/);
 });

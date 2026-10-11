@@ -6,7 +6,7 @@ return module.exports;};root.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__=createLibraries(
 // 生成自 src/mvu2shujuku.js 与表格共用模块（0.8.0），源码内联如下
 // @ts-nocheck
 (function (root) {
-root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson) {
+root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson, statStorage) {
     const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
     const assignOwn = (obj, key, value) => Object.defineProperty(obj, key, { value, enumerable: true, configurable: true, writable: true });
     function parseObject(v) {
@@ -174,6 +174,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
     function statDataFromTables(layoutEntries, tables) {
         const data = { stat_data: {} };
         const sd = data.stat_data;
+        const publicExtras = [];
         const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
         const tbl = tables && typeof tables === 'object' ? tables : {};
         // 一次读快照只建一次表名索引；重复表名沿用旧扫描的“首次匹配”语义。
@@ -201,7 +202,9 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                 const row = rows && rows.slice(1).find(r => r && String(r[0]) === '1');
                 const raw = rows ? (row && ci >= 0 ? row[ci] : undefined) : (c[6] === true ? undefined : c[2]);
                 const value = convertCell(c[1], raw, c[2], c[5], c[7]);
-                if (value !== undefined) sd[L.group] = value;
+                if (L.rootContainer && value && typeof value === 'object' && !Array.isArray(value)) {
+                    for (const key of Object.keys(value)) assignOwn(sd, key, value[key]);
+                } else if (value !== undefined) sd[L.group] = value;
                 continue;
             }
             if (!s || !Array.isArray(s.content) || !s.content.length) {
@@ -211,7 +214,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                     // stat_data.世界运转.场景 在加载窗口因中间组 undefined 直接抛错。
                     sd[L.group] = {};
                     for (const c of L.cols || []) {
-                        if (c[0] === '_扩展数据' || isMetaCol(c)) continue;
+                        if (c[0] === (L.overflowCol || '_扩展数据') || isMetaCol(c)) continue;
                         const cp = Array.isArray(c[3]) && c[3].length ? c[3] : [L.group, c[0]];
                         setPath(sd, cp, ((c[1] === 'jsonScalarOptional' || c[1] === 'jsonPairOptional') || c[1] === 'jsonObjectOptional') ? (c[6] === true ? undefined : convertCell(c[1], c[1] === 'jsonObjectOptional' ? c[2] : JSON.stringify(c[2]), c[2], c[5], c[7])) : convertCell(c[1], undefined, c[2], c[5], c[7]), (L.omitMissingParents || []).includes(c[0]));
                     }
@@ -221,7 +224,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                 else if (L.kind === 'pathArray') { setPath(sd, L.path || [L.group], []); }
                 else if (L.kind === 'nestedArray') { /* 同上，不虚构关联键 */ }
                 else if (L.kind === 'array') { sd[L.group] = []; for (const m of L.mirrors || []) setPath(sd, m.path, ''); }
-                else if (L.kind === 'json') { sd[L.group] = L.scalarType === 'number' ? ((L.cols || [])[0] || [])[2] ?? 0 : {}; }
+                else if (L.kind === 'json' && !L.publicFallback) { sd[L.group] = L.scalarType === 'number' ? ((L.cols || [])[0] || [])[2] ?? 0 : {}; }
                 if (L.kind === 'singleton' && vwdMetaCol) vwdPending.push({ entry: L, header: [], row: [] });
                 continue;
             }
@@ -236,7 +239,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                 sd[L.group] = {};
                 for (let j = 0; j < (L.cols || []).length; j++) {
                     const c = L.cols[j];
-                    if (c[0] === '_扩展数据' || isMetaCol(c)) continue;
+                    if (c[0] === (L.overflowCol || '_扩展数据') || isMetaCol(c)) continue;
                     const vj = idxs[j] >= 0 ? row[idxs[j]] : undefined;
                     const cp = c.length > 3 && c[3] && c[3].length ? c[3] : [L.group, c[0]];
                     // 兼容旧布局里值为空的容器列（如 主角.资产）：它只是“该对象已拆
@@ -247,7 +250,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                     setPath(sd, cp, convertCell(c[1], vj, c[2], c[5], c[7]), (L.omitMissingParents || []).includes(c[0]));
                 }
                 if (vwdMetaCol) vwdPending.push({ entry: L, header, row });
-                const sovIdx = header.indexOf('_扩展数据');
+                const sovIdx = header.indexOf(L.overflowCol || '_扩展数据');
                 if (sovIdx >= 0 && row[sovIdx]) {
                     const sov = parseObject(row[sovIdx]);
                     mergeMissing(sd[L.group], sov);
@@ -300,7 +303,10 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                 const fallback = ((L.cols || [])[0] || [])[2] ?? 0;
                 const n = (typeof jv === 'number' || (typeof jv === 'string' && jv.trim())) ? Number(jv) : NaN;
                 const jparsed = numeric ? (Number.isFinite(n) ? n : fallback) : parseObject(jv);
-                sd[L.group] = jparsed === undefined ? {} : jparsed;
+                if (L.publicFallback) {
+                    if (!statStorage) throw new Error('动态变量编解码模块未加载');
+                    publicExtras.push(jparsed || {});
+                } else sd[L.group] = jparsed === undefined ? {} : jparsed;
                 for (const m of L.mirrors || []) setPath(sd, m.path, m.mode === 'first' ? (jparsed && typeof jparsed === 'object' && !Array.isArray(jparsed) ? jparsed : '') : jparsed);
             } else if (L.kind === 'nestedRows') {
                 const ancestorCols = Array.isArray(L.ancestorKeyCols) && L.ancestorKeyCols.length ? L.ancestorKeyCols : [L.parentKeyCol];
@@ -353,12 +359,12 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                     const item = {};
                     for (let j2 = 0; j2 < (L.cols || []).length; j2++) {
                         const c2 = L.cols[j2];
-                        if (ancestorCols.includes(c2[0]) || c2[0] === L.keyCol || c2[0] === '_扩展数据') continue;
+                        if (ancestorCols.includes(c2[0]) || c2[0] === L.keyCol || c2[0] === (L.overflowCol || '_扩展数据')) continue;
                         const vj2 = idxs[j2] >= 0 ? rw2[idxs[j2]] : undefined;
                         const cp2 = c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : [c2[0]];
                         setPath(item, cp2, convertCell(c2[1], vj2, c2[2], c2[5], c2[7]), (L.omitMissingParents || []).includes(c2[0]));
                     }
-                    const ovIdx = header.indexOf('_扩展数据');
+                    const ovIdx = header.indexOf(L.overflowCol || '_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) mergeMissing(item, parseObject(rw2[ovIdx]) || {});
                     assignOwn(childDict, text(kv), item);
                 }
@@ -382,7 +388,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                     const item = {};
                     for (let j2 = 0; j2 < (L.cols || []).length; j2++) {
                         const c2 = L.cols[j2];
-                        if (c2[0] === '_扩展数据' || c2[0] === L.keyCol) continue;
+                        if (c2[0] === (L.overflowCol || '_扩展数据') || c2[0] === L.keyCol) continue;
                         const vj2 = idxs[j2] >= 0 ? rw2[idxs[j2]] : undefined;
                         // 条目对象键优先用列 path 末尾的原始中文：列名因拼音冲突被
                         // 消歧改名（山西→山西2）时，读回仍还原 stat_data.<组>.<山西>，
@@ -390,7 +396,7 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
                         const cp2 = c2 && c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : null;
                         setPath(item, cp2 || [c2[0]], convertCell(c2[1], vj2, c2[2], c2[5], c2[7]), (L.omitMissingParents || []).includes(c2[0]));
                     }
-                    const ovIdx = header.indexOf('_扩展数据');
+                    const ovIdx = header.indexOf(L.overflowCol || '_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) {
                         const ov = parseObject(rw2[ovIdx]);
                         mergeMissing(item, ov);
@@ -407,7 +413,8 @@ root.__MVU2SHUJUKU_TABLE_CODEC_FACTORY__ = function createTableCodec(repairJson)
             const overrides = vwdOverridesFromRow(item.entry, item.header, item.row);
             applyVwdDescriptions(item.entry, overrides, sd);
         }
-        try { data.display_data = JSON.parse(JSON.stringify(sd)); } catch (e) {}
+        for (const extra of publicExtras) data.stat_data = statStorage.combine(data.stat_data, extra);
+        try { data.display_data = JSON.parse(JSON.stringify(data.stat_data)); } catch (e) {}
         return data;
     }
 
@@ -757,18 +764,9 @@ root.__MVU2SHUJUKU_INPUT_PARSER_FACTORY__ = function createInputParser({ clone }
     }
     return { miniPngBuffer, parseCardPng, writeCardPng, extractPngAvatar, parseCard, toBase64, btoaSafe, atobSafe };
 };
-root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = function createEjsTransform() {
-    /* ================================================================
-     * EJS 数据源重写（rewriteEjsConditions）
-     *
-     * 世界书条目里的 EJS 结构整体保留，只把 MVU 的数据读取位置改为扩展注册的函数：
-     *   getvar('stat_data.组.字段')        → mvu2shujukuGetMessageVar('stat_data.组.字段')
-     *   getvar("stat_data").组["字段"][0]  → mvu2shujukuGetAllVariables().stat_data.组["字段"][0]
-     *   _.has(getvar("stat_data"), '路径') → _.has(mvu2shujukuGetAllVariables().stat_data, '路径')
-     * 扩展启动时把 mvu2shujukuGetAllVariables 注册进 st-prompt-template 模板上下文
-     * （EjsTemplate.defines），并用卡内布局 + 插件表格惰性重建 stat_data（window.getAllVariables），
-     * 不依赖卡内桥是否运行。
-     * ================================================================ */
+root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = function createEjsTransform(deps = {}) {
+    // EJS keeps native variable calls intact. The runtime context selects the
+    // database backend after JavaScript resolves paths, options and bindings.
     function findJsCallEnd(source, openIndex) {
         const code = maskJsStringsAndComments(source);
         let depth = 0;
@@ -802,7 +800,7 @@ root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = function createEjsTransform() {
     function rewriteStatDataCalls(source) {
         let out = String(source || '');
         let count = 0;
-        if (!/\bstat_data\b/i.test(out)) return { text: out, count };
+        if (!/\b(?:stat_data|getvar|getMessageVar|setMessageVar|setvar)\b/i.test(out)) return { text: out, count };
         let code = maskJsStringsAndComments(out);
         const isBareCall = (index, length) => {
             if (!code.slice(index, index + length).trim() || /[\w$]/.test(code[index - 1] || '')) return false;
@@ -810,84 +808,6 @@ root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = function createEjsTransform() {
             while (previous >= 0 && /\s/.test(code[previous])) previous--;
             return code[previous] !== '.';
         };
-        const getvarRe = /\bgetvar\s*\(/gi;
-        let m;
-        while ((m = getvarRe.exec(out))) {
-            if (!isBareCall(m.index, 6)) continue;
-            const open = out.indexOf('(', m.index);
-            const end = findJsCallEnd(out, open);
-            if (end < 0) break;
-            const args = out.slice(open + 1, end);
-            const first = args.match(/^\s*(["'])(stat_data(?:\.[^"']*)?)\1(?:\s*,[\s\S]*)?$/i);
-            if (!first) { getvarRe.lastIndex = end + 1; continue; }
-            const path = first[2];
-            const suffix = path.slice('stat_data'.length).replace(/^\./, '');
-            const topArgs = splitJsTopLevelArgs(args);
-            // 完整字面路径必须保留 TavernHelper getvar 的安全取值语义：任意中间层
-            // 缺失时返回 undefined/defaults，而不是生成 a.b.c 连续访问并在 b 缺失时抛错。
-            // 只读取 stat_data 根对象的官方教程写法仍返回整个对象，供后续属性链/_.has 使用。
-            const replacement = suffix
-                ? `mvu2shujukuGetMessageVar(${topArgs[0]}${topArgs[1] ? ', ' + topArgs[1] : ''})`
-                : 'mvu2shujukuGetAllVariables().stat_data';
-            out = out.slice(0, m.index) + replacement + out.slice(end + 1);
-            code = maskJsStringsAndComments(out);
-            count++;
-            getvarRe.lastIndex = m.index + replacement.length;
-        }
-
-        // 酒馆助手的 MessageVar 不属于 Mvu.* 公开 API，但部分 MVU 卡会用它
-        // 直接读写 stat_data。只改写首参数明确为 stat_data 字面量的调用，
-        // getLocalVar/setLocalVar 及其他 MessageVar 保持酒馆助手原语义。
-        for (const spec of [
-            { name: 'getMessageVar', replacement: 'mvu2shujukuGetMessageVar' },
-            { name: 'setMessageVar', replacement: 'mvu2shujukuSetMessageVar' },
-        ]) {
-            const callRe = new RegExp('\\b' + spec.name + '\\s*\\(', 'gi');
-            let cm;
-            while ((cm = callRe.exec(out))) {
-                if (!isBareCall(cm.index, spec.name.length)) continue;
-                const open = out.indexOf('(', cm.index);
-                const end = findJsCallEnd(out, open);
-                if (end < 0) break;
-                const args = out.slice(open + 1, end);
-                if (!/^\s*(["'])stat_data(?:\.[^"']*)?\1(?:\s*,|\s*$)/i.test(args)) {
-                    callRe.lastIndex = end + 1;
-                    continue;
-                }
-                out = out.slice(0, cm.index) + spec.replacement + out.slice(open, end + 1) + out.slice(end + 1);
-                code = maskJsStringsAndComments(out);
-                count++;
-                callRe.lastIndex = cm.index + spec.replacement.length + (end - open + 1);
-            }
-        }
-
-        // 通用 setvar 只有在静态可证明写入“当前消息变量”、且没有条件写入/历史楼层/
-        // 特殊返回值语义时才等价于数据库 setter。其余形式保持原文，交给人工核对。
-        const setvarRe = /\bsetvar\s*\(/gi;
-        let sm;
-        while ((sm = setvarRe.exec(out))) {
-            if (!isBareCall(sm.index, 6)) continue;
-            const open = out.indexOf('(', sm.index);
-            const end = findJsCallEnd(out, open);
-            if (end < 0) break;
-            const argsText = out.slice(open + 1, end);
-            const args = splitJsTopLevelArgs(argsText);
-            const pathMatch = args[0] && args[0].match(/^\s*(["'])(stat_data(?:\.[^"']*)?)\1\s*$/i);
-            const options = args[2] && args[2].trim();
-            // 目前只接受仅含 outscope:'message' 的对象；加入任何其它选项都可能改变
-            // flags/results/楼层选择等行为，宁可保留也不声称等价。
-            const messageScopeOnly = options && /^\{\s*(?:outscope|["']outscope["'])\s*:\s*(["'])message\1\s*,?\s*\}$/i.test(options);
-            if (!pathMatch || args.length !== 3 || !messageScopeOnly) {
-                setvarRe.lastIndex = end + 1;
-                continue;
-            }
-            const replacement = 'mvu2shujukuSetMessageVar(' + args[0] + ', ' + args[1] + ')';
-            out = out.slice(0, sm.index) + replacement + out.slice(end + 1);
-            code = maskJsStringsAndComments(out);
-            count++;
-            setvarRe.lastIndex = sm.index + replacement.length;
-        }
-
         // 这些入口在不同版本的 MVU/提示词模板教程中都出现过。只改写明确读取
         // `.stat_data` 的形式；不碰普通 getVariables()，以免改变非 MVU 变量语义。
         const directReaders = [
@@ -916,83 +836,69 @@ root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = function createEjsTransform() {
         return { text: out, count };
     }
 
-    function ejsScriptBlocks(text) {
-        const blocks = [];
-        const re = /<%([_#=-]?)([\s\S]*?)(?:[_-]?%>)/g;
-        let m;
-        while ((m = re.exec(String(text || '')))) {
-            if (m[1] !== '#') blocks.push(m[2]);
-        }
-        return blocks;
+    function parserLibrary() {
+        if (deps.ejs) return deps.ejs;
+        if (typeof globalThis !== 'undefined' && globalThis.__MVU2SHUJUKU_EJS_PARSER_FACTORY__)
+            return deps.ejs = globalThis.__MVU2SHUJUKU_EJS_PARSER_FACTORY__();
+        if (typeof require === 'function') return deps.ejs = require('./vendor/ejs-parser')();
+        throw new Error('EJS parser library missing');
+    }
+    function acornLibrary() {
+        if (deps.acorn) return deps.acorn;
+        if (typeof globalThis !== 'undefined' && globalThis.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__)
+            return deps.acorn = globalThis.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.acorn;
+        if (typeof require === 'function') return deps.acorn = require('./vendor/schema-engine-libs').acorn;
+        throw new Error('Acorn tokenizer missing');
     }
 
-    // 保留源码偏移的词法视图。字符串/注释/正则字面量遮蔽，模板字符串中的
-    // ${...} 仍是可执行表达式，必须递归扫描；不能把字符串示例当作真正调用。
-    function maskJsStringsAndComments(source) {
-        const s = String(source || '');
-        const out = s.split('');
-        const blank = (a, b) => { for (let n = a; n < b; n++) if (s[n] !== '\n' && s[n] !== '\r') out[n] = ' '; };
-        let i = 0;
-        const scan = (templateExpression = false) => {
-            let braces = 0, expressionStart = true, lastWord = '';
-            const parens = [];
-            while (i < s.length) {
-                const ch = s[i], next = s[i + 1], start = i;
-                if (/\s/.test(ch)) { i++; continue; }
-                if (ch === '/' && next === '/') {
-                    i += 2; while (i < s.length && s[i] !== '\n' && s[i] !== '\r') i++;
-                    blank(start, i); continue;
-                }
-                if (ch === '/' && next === '*') {
-                    const end = s.indexOf('*/', i + 2); i = end < 0 ? s.length : end + 2;
-                    blank(start, i); continue;
-                }
-                if (ch === '"' || ch === "'") {
-                    i++;
-                    while (i < s.length) { if (s[i] === '\\') i += 2; else if (s[i++] === ch) break; }
-                    blank(start, Math.min(i, s.length)); expressionStart = false; continue;
-                }
-                if (ch === '`') {
-                    blank(i, ++i);
-                    while (i < s.length) {
-                        if (s[i] === '\\') { blank(i, Math.min(i + 2, s.length)); i += 2; continue; }
-                        if (s[i] === '`') { blank(i, i + 1); i++; break; }
-                        if (s[i] === '$' && s[i + 1] === '{') {
-                            // 保留一对括号阻止参数/语句扫描把插值里的逗号当作外层分隔符。
-                            out[i] = ' '; out[i + 1] = '('; i += 2;
-                            scan(true); continue;
-                        }
-                        blank(i, i + 1); i++;
-                    }
-                    expressionStart = false; continue;
-                }
-                if (ch === '/' && expressionStart) {
-                    let j = i + 1, charClass = false, closed = false;
-                    for (; j < s.length && s[j] !== '\n' && s[j] !== '\r'; j++) {
-                        if (s[j] === '\\') { j++; continue; }
-                        if (s[j] === '[') charClass = true;
-                        else if (s[j] === ']') charClass = false;
-                        else if (s[j] === '/' && !charClass) { j++; closed = true; break; }
-                    }
-                    if (closed) { while (/[a-z]/i.test(s[j] || '') && j < s.length) j++; blank(i, j); i = j; expressionStart = false; continue; }
-                }
-                if (/[\w$\u3400-\u9fff]/.test(ch)) {
-                    i++; while (i < s.length && /[\w$\u3400-\u9fff]/.test(s[i])) i++;
-                    lastWord = s.slice(start, i);
-                    expressionStart = /^(?:return|throw|case|delete|void|typeof|instanceof|in|of|yield|await|else|do)$/.test(lastWord);
-                    continue;
-                }
-                if (ch === '(') { parens.push(/^(?:if|while|for|with|switch|catch)$/.test(lastWord)); expressionStart = true; }
-                else if (ch === ')') expressionStart = !!parens.pop();
-                else if (ch === '{') { braces++; expressionStart = true; }
-                else if (ch === '}') {
-                    if (templateExpression && braces === 0) { out[i++] = ')'; return; }
-                    braces--; expressionStart = true;
-                } else expressionStart = !/[\].]/.test(ch) && !(ch === '+' && next === '+') && !(ch === '-' && next === '-');
-                lastWord = ''; i++;
-            }
+    // Let the actual engine classify tags, escaped delimiters and nested tokens.
+    // generateSource parses without running author JavaScript. scanLine is observed,
+    // not replaced by a second delimiter/state machine; edits retain original spans.
+    function ejsScriptRanges(text) {
+        const source = String(text || '');
+        if (!source.includes('<%')) return { ranges: [], error: null };
+        const ejs = parserLibrary(), ranges = [];
+        const template = new ejs.Template(source, { rmWhitespace: false });
+        const scan = template.scanLine, executable = new Set([
+            ejs.Template.modes.EVAL, ejs.Template.modes.ESCAPED, ejs.Template.modes.RAW,
+        ]);
+        let cursor = 0;
+        template.scanLine = function (line) {
+            const start = source.indexOf(line, cursor), previous = this.mode;
+            if (start < 0) throw new Error('EJS 解析范围无法对应原文，保留源代码');
+            scan.call(this, line);
+            if (line && executable.has(previous) && this.mode === previous)
+                ranges.push({ start, end: start + line.length });
+            cursor = start + line.length;
         };
-        scan();
+        try { template.generateSource(); return { ranges, error: null }; }
+        catch (error) { return { ranges: [], error: error.message }; }
+    }
+    function ejsScriptBlocks(text) {
+        const source = String(text || '');
+        return ejsScriptRanges(source).ranges.map(range => source.slice(range.start, range.end));
+    }
+
+    // Acorn supplies string/comment/regexp/template token boundaries. Keeping offsets
+    // permits source edits without executing code or guessing JavaScript lexing rules.
+    function maskJsStringsAndComments(source) {
+        const s = String(source || ''), out = s.split('');
+        const blank = (a, b) => { for (let n = a; n < b; n++) if (s[n] !== '\n' && s[n] !== '\r') out[n] = ' '; };
+        const lexer = acornLibrary().tokenizer(s, {
+            ecmaVersion: 'latest', allowHashBang: true,
+            onComment: (_block, _text, start, end) => blank(start, end),
+        });
+        try {
+            for (;;) {
+                const token = lexer.getToken(), label = token.type.label;
+                if (label === 'eof') break;
+                if (['string', 'regexp', 'template', '`'].includes(label)) blank(token.start, token.end);
+                if (label === '${') out[token.start] = ' ';
+            }
+        } catch (_) {
+            // Invalid/incomplete lexical input must not become an unsafe positive match.
+            blank(0, s.length);
+        }
         return out.join('');
     }
 
@@ -1043,20 +949,16 @@ root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = function createEjsTransform() {
 
     function unresolvedEjsDataReads(text) {
         const found = [];
-        const blocks = String(text || '').match(/<%[\s\S]*?%>/g) || [];
+        const blocks = ejsScriptBlocks(text);
         for (const block of blocks) {
-            // 只报告仍直接访问 stat_data 的旧入口。一个 EJS 块中可能同时含已改写的
-            // stat_data 读取与普通 getvar/动态 MessageVar；后者应继续走酒馆助手原语义，
-            // 不能仅因同块出现 stat_data 字样就误报为“漏接管”。
+            // getvar/MessageVar/setvar arguments are resolved by the execution
+            // context adapter, including dynamic paths. Only unbridged direct
+            // object readers remain a static conversion warning.
             const suspicious =
-                /\b(?:getvar|getMessageVar|setMessageVar)\s*\(\s*(["'])stat_data(?:\.[^"']*)?\1/i.test(block) ||
                 /\b(?:getAllVariables|getVariables|allVariables)\s*\(\s*\)\s*\.\s*stat_data\b/i.test(block) ||
                 /\ball_variables\s*\.\s*stat_data\b/i.test(block) ||
                 /(^|[^\w$.])variables\s*\.\s*stat_data\b/i.test(block) ||
-                /\bTavernHelper\s*\.\s*getVariables\s*\(\s*\)\s*\.\s*stat_data\b/i.test(block) ||
-                /\bsetvar\s*\([\s\S]*?["']stat_data(?:\.|["'])/i.test(block) ||
-                // 动态 getvar 无法静态确认；仅当同块明确把变量设为 stat_data 时报告。
-                (/\bgetvar\s*\(\s*(?!["'])[^)]*\)/i.test(block) && /["']stat_data(?:\.|["'])/i.test(block));
+                /\bTavernHelper\s*\.\s*getVariables\s*\(\s*\)\s*\.\s*stat_data\b/i.test(block);
             if (!suspicious) continue;
             const oneLine = block.replace(/\s+/g, ' ').trim();
             if (!found.includes(oneLine)) found.push(oneLine.slice(0, 240));
@@ -1134,12 +1036,19 @@ root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = function createEjsTransform() {
         const items = [];
         let out = String(text || '');
         if (options.translateSimpleEjs) out = translateSimpleEjsConditions(out, layout, report).text;
-        const rewritten = rewriteStatDataCalls(out);
-        out = rewritten.text;
-        if (rewritten.count) {
-            const count = rewritten.count;
-            items.push({ original: 'getvar(\'stat_data…\')', rewritten: 'mvu2shujukuGetMessageVar(...) / mvu2shujukuGetAllVariables().stat_data', status: 'auto' });
-            report.auto(`已把 ${count} 处 MVU/EJS 数据读取入口改为数据库安全取值函数（完整路径保留缺失返回/defaults 语义；stat_data 根读取保留对象访问；函数由扩展或卡内桥注册进模板上下文）。`);
+        const parsed = ejsScriptRanges(out);
+        if (parsed.error) report.manual(`EJS 模板解析未完成：${parsed.error}`);
+        let count = 0, cursor = 0, rewrittenText = '';
+        for (const range of parsed.ranges) {
+            const rewritten = rewriteStatDataCalls(out.slice(range.start, range.end));
+            count += rewritten.count;
+            rewrittenText += out.slice(cursor, range.start) + rewritten.text;
+            cursor = range.end;
+        }
+        out = rewrittenText + out.slice(cursor);
+        if (count) {
+            items.push({ original: '直接读取 stat_data 的入口', rewritten: 'mvu2shujukuGetAllVariables().stat_data', status: 'auto' });
+            report.auto(`已把 ${count} 处 MVU/EJS 数据读取入口改为数据库安全取值函数（变量函数调用保持原文，由运行时上下文适配数据库；兼容函数由扩展或卡内桥注册进模板上下文）。`);
         }
         // 非 MVU 的 getwi 等引用：保留并提示
         const orphanRe = /<%[-=]\s*await\s+getwi[\s\S]*?-?%>/g;
@@ -1159,6 +1068,7 @@ root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = function createEjsTransform() {
             splitJsTopLevelArgs,
             rewriteStatDataCalls,
             ejsScriptBlocks,
+            ejsScriptRanges,
             maskJsStringsAndComments,
             ejsLexicalDeclarationNames,
             ejsFallbackVarNames,
@@ -1170,6 +1080,2008 @@ root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ = function createEjsTransform() {
             rewriteEjsConditions,
         };
     };
+root.__MVU2SHUJUKU_EJS_PARSER_FACTORY__ = function createEjsParserLibrary() {
+/*
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+*/
+var module = { exports: {} }, exports = module.exports;
+(function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.ejs = f()}})(function(){var define,module,exports;return (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
+    /*
+     * EJS Embedded JavaScript templates
+     * Copyright 2112 Matthew Eernisse (mde@fleegix.org)
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *         http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     *
+    */
+    
+    'use strict';
+    
+    /**
+     * @file Embedded JavaScript templating engine. {@link http://ejs.co}
+     * @author Matthew Eernisse <mde@fleegix.org>
+     * @author Tiancheng "Timothy" Gu <timothygu99@gmail.com>
+     * @project EJS
+     * @license {@link http://www.apache.org/licenses/LICENSE-2.0 Apache License, Version 2.0}
+     */
+    
+    /**
+     * EJS internal functions.
+     *
+     * Technically this "module" lies in the same file as {@link module:ejs}, for
+     * the sake of organization all the private functions re grouped into this
+     * module.
+     *
+     * @module ejs-internal
+     * @private
+     */
+    
+    /**
+     * Embedded JavaScript templating engine.
+     *
+     * @module ejs
+     * @public
+     */
+    
+    
+    var fs = require('fs');
+    var path = require('path');
+    var utils = require('./utils');
+    
+    var scopeOptionWarned = false;
+    /** @type {string} */
+    var _VERSION_STRING = require('../package.json').version;
+    var _DEFAULT_OPEN_DELIMITER = '<';
+    var _DEFAULT_CLOSE_DELIMITER = '>';
+    var _DEFAULT_DELIMITER = '%';
+    var _DEFAULT_LOCALS_NAME = 'locals';
+    var _NAME = 'ejs';
+    var _REGEX_STRING = '(<%%|%%>|<%=|<%-|<%_|<%#|<%|%>|-%>|_%>)';
+    var _OPTS_PASSABLE_WITH_DATA = ['delimiter', 'scope', 'context', 'debug', 'compileDebug',
+        'client', '_with', 'rmWhitespace', 'strict', 'filename', 'async'];
+    // We don't allow 'cache' option to be passed in the data obj for
+    // the normal `render` call, but this is where Express 2 & 3 put it
+    // so we make an exception for `renderFile`
+    var _OPTS_PASSABLE_WITH_DATA_EXPRESS = _OPTS_PASSABLE_WITH_DATA.concat('cache');
+    var _BOM = /^\uFEFF/;
+    var _JS_IDENTIFIER = /^[\p{ID_Start}$_][\p{ID_Continue}$_]*$/u;
+    
+    /**
+     * EJS template function cache. This can be a LRU object from lru-cache NPM
+     * module. By default, it is {@link module:utils.cache}, a simple in-process
+     * cache that grows continuously.
+     *
+     * @type {Cache}
+     */
+    
+    exports.cache = utils.cache;
+    
+    /**
+     * Custom file loader. Useful for template preprocessing or restricting access
+     * to a certain part of the filesystem.
+     *
+     * @type {fileLoader}
+     */
+    
+    exports.fileLoader = fs.readFileSync;
+    
+    /**
+     * Name of the object containing the locals.
+     *
+     * This variable is overridden by {@link Options}`.localsName` if it is not
+     * `undefined`.
+     *
+     * @type {String}
+     * @public
+     */
+    
+    exports.localsName = _DEFAULT_LOCALS_NAME;
+    
+    /**
+     * Promise implementation -- defaults to the native implementation if available
+     * This is mostly just for testability
+     *
+     * @type {PromiseConstructorLike}
+     * @public
+     */
+    
+    exports.promiseImpl = (new Function('return this;'))().Promise;
+    
+    /**
+     * Get the path to the included file from the parent file path and the
+     * specified path.
+     *
+     * @param {String}  name     specified path
+     * @param {String}  filename parent file path
+     * @param {Boolean} [isDir=false] whether the parent file path is a directory
+     * @return {String}
+     */
+    exports.resolveInclude = function(name, filename, isDir) {
+        var dirname = path.dirname;
+        var extname = path.extname;
+        var resolve = path.resolve;
+        var includePath = resolve(isDir ? filename : dirname(filename), name);
+        var ext = extname(name);
+        if (!ext) {
+            includePath += '.ejs';
+        }
+        return includePath;
+    };
+    
+    /**
+     * Try to resolve file path on multiple directories
+     *
+     * @param  {String}        name  specified path
+     * @param  {Array<String>} paths list of possible parent directory paths
+     * @return {String}
+     */
+    function resolvePaths(name, paths) {
+        var filePath;
+        if (paths.some(function (v) {
+            filePath = exports.resolveInclude(name, v, true);
+            return fs.existsSync(filePath);
+        })) {
+            return filePath;
+        }
+    }
+    
+    /**
+     * Get the path to the included file by Options
+     *
+     * @param  {String}  path    specified path
+     * @param  {Options} options compilation options
+     * @return {String}
+     */
+    function getIncludePath(path, options) {
+        var includePath;
+        var filePath;
+        var views = options.views;
+        var match = /^[A-Za-z]+:\\|^\//.exec(path);
+    
+        // Abs path
+        if (match && match.length) {
+            path = path.replace(/^\/*/, '');
+            if (Array.isArray(options.root)) {
+                includePath = resolvePaths(path, options.root);
+            } else {
+                includePath = exports.resolveInclude(path, options.root || '/', true);
+            }
+        }
+        // Relative paths
+        else {
+            // Look relative to a passed filename first
+            if (options.filename) {
+                filePath = exports.resolveInclude(path, options.filename);
+                if (fs.existsSync(filePath)) {
+                    includePath = filePath;
+                }
+            }
+            // Then look in any views directories
+            if (!includePath && Array.isArray(views)) {
+                includePath = resolvePaths(path, views);
+            }
+            if (!includePath && typeof options.includer !== 'function') {
+                throw new Error('Could not find the include file "' +
+                        options.escapeFunction(path) + '"');
+            }
+        }
+        return includePath;
+    }
+    
+    /**
+     * Get the template from a string or a file, either compiled on-the-fly or
+     * read from cache (if enabled), and cache the template if needed.
+     *
+     * If `template` is not set, the file specified in `options.filename` will be
+     * read.
+     *
+     * If `options.cache` is true, this function reads the file from
+     * `options.filename` so it must be set prior to calling this function.
+     *
+     * @memberof module:ejs-internal
+     * @param {Options} options   compilation options
+     * @param {String} [template] template source
+     * @return {(TemplateFunction|ClientFunction)}
+     * Depending on the value of `options.client`, either type might be returned.
+     * @static
+     */
+    
+    function handleCache(options, template) {
+        var func;
+        var filename = options.filename;
+        var hasTemplate = arguments.length > 1;
+    
+        if (options.cache) {
+            if (!filename) {
+                throw new Error('cache option requires a filename');
+            }
+            func = exports.cache.get(filename);
+            if (func) {
+                return func;
+            }
+            if (!hasTemplate) {
+                template = fileLoader(filename).toString().replace(_BOM, '');
+            }
+        }
+        else if (!hasTemplate) {
+            // istanbul ignore if: should not happen at all
+            if (!filename) {
+                throw new Error('Internal EJS error: no file name or template '
+                                            + 'provided');
+            }
+            template = fileLoader(filename).toString().replace(_BOM, '');
+        }
+        func = exports.compile(template, options);
+        if (options.cache) {
+            exports.cache.set(filename, func);
+        }
+        return func;
+    }
+    
+    /**
+     * Try calling handleCache with the given options and data and call the
+     * callback with the result. If an error occurs, call the callback with
+     * the error. Used by renderFile().
+     *
+     * @memberof module:ejs-internal
+     * @param {Options} options    compilation options
+     * @param {Object} data        template data
+     * @param {RenderFileCallback} cb callback
+     * @static
+     */
+    
+    function tryHandleCache(options, data, cb) {
+        var result;
+        if (!cb) {
+            if (typeof exports.promiseImpl == 'function') {
+                return new exports.promiseImpl(function (resolve, reject) {
+                    try {
+                        result = handleCache(options)(data);
+                        resolve(result);
+                    }
+                    catch (err) {
+                        reject(err);
+                    }
+                });
+            }
+            else {
+                throw new Error('Please provide a callback function');
+            }
+        }
+        else {
+            try {
+                result = handleCache(options)(data);
+            }
+            catch (err) {
+                return cb(err);
+            }
+    
+            cb(null, result);
+        }
+    }
+    
+    /**
+     * fileLoader is independent
+     *
+     * @param {String} filePath ejs file path.
+     * @return {String} The contents of the specified file.
+     * @static
+     */
+    
+    function fileLoader(filePath){
+        return exports.fileLoader(filePath);
+    }
+    
+    /**
+     * Get the template function.
+     *
+     * If `options.cache` is `true`, then the template is cached.
+     *
+     * @memberof module:ejs-internal
+     * @param {String}  path    path for the specified file
+     * @param {Options} options compilation options
+     * @return {(TemplateFunction|ClientFunction)}
+     * Depending on the value of `options.client`, either type might be returned
+     * @static
+     */
+    
+    function includeFile(path, options) {
+        var opts = utils.shallowCopy(utils.createNullProtoObjWherePossible(), options);
+        opts.filename = getIncludePath(path, opts);
+        if (typeof options.includer === 'function') {
+            var includerResult = options.includer(path, opts.filename);
+            if (includerResult) {
+                if (includerResult.filename) {
+                    opts.filename = includerResult.filename;
+                }
+                if (includerResult.template) {
+                    return handleCache(opts, includerResult.template);
+                }
+            }
+        }
+        return handleCache(opts);
+    }
+    
+    /**
+     * Re-throw the given `err` in context to the `str` of ejs, `filename`, and
+     * `lineno`.
+     *
+     * @implements {RethrowCallback}
+     * @memberof module:ejs-internal
+     * @param {Error}  err      Error object
+     * @param {String} str      EJS source
+     * @param {String} flnm     file name of the EJS file
+     * @param {Number} lineno   line number of the error
+     * @param {EscapeCallback} esc
+     * @static
+     */
+    
+    function rethrow(err, str, flnm, lineno, esc) {
+        var lines = str.split('\n');
+        var start = Math.max(lineno - 3, 0);
+        var end = Math.min(lines.length, lineno + 3);
+        var filename = esc(flnm);
+        // Error context
+        var context = lines.slice(start, end).map(function (line, i){
+            var curr = i + start + 1;
+            return (curr == lineno ? ' >> ' : '    ')
+                + curr
+                + '| '
+                + line;
+        }).join('\n');
+    
+        // Alter exception message
+        err.path = filename;
+        err.message = (filename || 'ejs') + ':'
+            + lineno + '\n'
+            + context + '\n\n'
+            + err.message;
+    
+        throw err;
+    }
+    
+    function stripSemi(str){
+        return str.replace(/;(\s*$)/, '$1');
+    }
+    
+    /**
+     * Compile the given `str` of ejs into a template function.
+     *
+     * @param {String}  template EJS template
+     *
+     * @param {Options} [opts] compilation options
+     *
+     * @return {(TemplateFunction|ClientFunction)}
+     * Depending on the value of `opts.client`, either type might be returned.
+     * Note that the return type of the function also depends on the value of `opts.async`.
+     * @public
+     */
+    
+    exports.compile = function compile(template, opts) {
+        var templ;
+    
+        // v1 compat
+        // 'scope' is 'context'
+        // FIXME: Remove this in a future version
+        if (opts && opts.scope) {
+            if (!scopeOptionWarned){
+                console.warn('`scope` option is deprecated and will be removed in EJS 3');
+                scopeOptionWarned = true;
+            }
+            if (!opts.context) {
+                opts.context = opts.scope;
+            }
+            delete opts.scope;
+        }
+        templ = new Template(template, opts);
+        return templ.compile();
+    };
+    
+    /**
+     * Render the given `template` of ejs.
+     *
+     * If you would like to include options but not data, you need to explicitly
+     * call this function with `data` being an empty object or `null`.
+     *
+     * @param {String}   template EJS template
+     * @param {Object}  [data={}] template data
+     * @param {Options} [opts={}] compilation and rendering options
+     * @return {(String|Promise<String>)}
+     * Return value type depends on `opts.async`.
+     * @public
+     */
+    
+    exports.render = function (template, d, o) {
+        var data = d || utils.createNullProtoObjWherePossible();
+        var opts = o || utils.createNullProtoObjWherePossible();
+    
+        // No options object -- if there are optiony names
+        // in the data, copy them to options
+        if (arguments.length == 2) {
+            utils.shallowCopyFromList(opts, data, _OPTS_PASSABLE_WITH_DATA);
+        }
+    
+        return handleCache(opts, template)(data);
+    };
+    
+    /**
+     * Render an EJS file at the given `path` and callback `cb(err, str)`.
+     *
+     * If you would like to include options but not data, you need to explicitly
+     * call this function with `data` being an empty object or `null`.
+     *
+     * @param {String}             path     path to the EJS file
+     * @param {Object}            [data={}] template data
+     * @param {Options}           [opts={}] compilation and rendering options
+     * @param {RenderFileCallback} cb callback
+     * @public
+     */
+    
+    exports.renderFile = function () {
+        var args = Array.prototype.slice.call(arguments);
+        var filename = args.shift();
+        var cb;
+        var opts = {filename: filename};
+        var data;
+        var viewOpts;
+    
+        // Do we have a callback?
+        if (typeof arguments[arguments.length - 1] == 'function') {
+            cb = args.pop();
+        }
+        // Do we have data/opts?
+        if (args.length) {
+            // Should always have data obj
+            data = args.shift();
+            // Normal passed opts (data obj + opts obj)
+            if (args.length) {
+                // Use shallowCopy so we don't pollute passed in opts obj with new vals
+                utils.shallowCopy(opts, args.pop());
+            }
+            // Special casing for Express (settings + opts-in-data)
+            else {
+                // Express 3 and 4
+                if (data.settings) {
+                    // Pull a few things from known locations
+                    if (data.settings.views) {
+                        opts.views = data.settings.views;
+                    }
+                    if (data.settings['view cache']) {
+                        opts.cache = true;
+                    }
+                    // Undocumented after Express 2, but still usable, esp. for
+                    // items that are unsafe to be passed along with data, like `root`
+                    viewOpts = data.settings['view options'];
+                    if (viewOpts) {
+                        utils.shallowCopy(opts, viewOpts);
+                    }
+                }
+                // Express 2 and lower, values set in app.locals, or people who just
+                // want to pass options in their data. NOTE: These values will override
+                // anything previously set in settings  or settings['view options']
+                utils.shallowCopyFromList(opts, data, _OPTS_PASSABLE_WITH_DATA_EXPRESS);
+            }
+            opts.filename = filename;
+        }
+        else {
+            data = utils.createNullProtoObjWherePossible();
+        }
+    
+        return tryHandleCache(opts, data, cb);
+    };
+    
+    /**
+     * Clear intermediate JavaScript cache. Calls {@link Cache#reset}.
+     * @public
+     */
+    
+    /**
+     * EJS template class
+     * @public
+     */
+    exports.Template = Template;
+    
+    exports.clearCache = function () {
+        exports.cache.reset();
+    };
+    
+    function Template(text, optsParam) {
+        var opts = utils.hasOwnOnlyObject(optsParam);
+        var options = utils.createNullProtoObjWherePossible();
+        this.templateText = text;
+        /** @type {string | null} */
+        this.mode = null;
+        this.truncate = false;
+        this.currentLine = 1;
+        this.source = '';
+        options.client = opts.client || false;
+        options.escapeFunction = opts.escape || opts.escapeFunction || utils.escapeXML;
+        options.compileDebug = opts.compileDebug !== false;
+        options.debug = !!opts.debug;
+        options.filename = opts.filename;
+        options.openDelimiter = opts.openDelimiter || exports.openDelimiter || _DEFAULT_OPEN_DELIMITER;
+        options.closeDelimiter = opts.closeDelimiter || exports.closeDelimiter || _DEFAULT_CLOSE_DELIMITER;
+        options.delimiter = opts.delimiter || exports.delimiter || _DEFAULT_DELIMITER;
+        options.strict = opts.strict || false;
+        options.context = opts.context;
+        options.cache = opts.cache || false;
+        options.rmWhitespace = opts.rmWhitespace;
+        options.root = opts.root;
+        options.includer = opts.includer;
+        options.outputFunctionName = opts.outputFunctionName;
+        options.localsName = opts.localsName || exports.localsName || _DEFAULT_LOCALS_NAME;
+        options.views = opts.views;
+        options.async = opts.async;
+        options.destructuredLocals = opts.destructuredLocals;
+        options.legacyInclude = typeof opts.legacyInclude != 'undefined' ? !!opts.legacyInclude : true;
+    
+        if (options.strict) {
+            options._with = false;
+        }
+        else {
+            options._with = typeof opts._with != 'undefined' ? opts._with : true;
+        }
+    
+        this.opts = options;
+    
+        this.regex = this.createRegex();
+    }
+    
+    Template.modes = {
+        EVAL: 'eval',
+        ESCAPED: 'escaped',
+        RAW: 'raw',
+        COMMENT: 'comment',
+        LITERAL: 'literal'
+    };
+    
+    Template.prototype = {
+        createRegex: function () {
+            var str = _REGEX_STRING;
+            var delim = utils.escapeRegExpChars(this.opts.delimiter);
+            var open = utils.escapeRegExpChars(this.opts.openDelimiter);
+            var close = utils.escapeRegExpChars(this.opts.closeDelimiter);
+            str = str.replace(/%/g, delim)
+                .replace(/</g, open)
+                .replace(/>/g, close);
+            return new RegExp(str);
+        },
+    
+        compile: function () {
+            /** @type {string} */
+            var src;
+            /** @type {ClientFunction} */
+            var fn;
+            var opts = this.opts;
+            var prepended = '';
+            var appended = '';
+            /** @type {EscapeCallback} */
+            var escapeFn = opts.escapeFunction;
+            /** @type {FunctionConstructor} */
+            var ctor;
+            /** @type {string} */
+            var sanitizedFilename = opts.filename ? JSON.stringify(opts.filename) : 'undefined';
+    
+            if (!this.source) {
+                this.generateSource();
+                prepended +=
+                    '  var __output = "";\n' +
+                    '  function __append(...args) { args.filter(x => x !== undefined && x !== null).forEach(s => __output += s) }\n';
+                if (opts.outputFunctionName) {
+                    if (!_JS_IDENTIFIER.test(opts.outputFunctionName)) {
+                        throw new Error('outputFunctionName is not a valid JS identifier.');
+                    }
+                    prepended += '  const ' + opts.outputFunctionName + ' = __append;' + '\n';
+                }
+                if (opts.localsName && !_JS_IDENTIFIER.test(opts.localsName)) {
+                    throw new Error('localsName is not a valid JS identifier.');
+                }
+                if (opts.destructuredLocals && opts.destructuredLocals.length) {
+                    var destructuring = ' {\n  const __locals = (' + opts.localsName + ' || {}),\n  ';
+                    for (var i = 0; i < opts.destructuredLocals.length; i++) {
+                        var name = opts.destructuredLocals[i];
+                        if (!_JS_IDENTIFIER.test(name)) {
+                            throw new Error('destructuredLocals[' + i + '] is not a valid JS identifier.');
+                        }
+                        if (i > 0) {
+                            destructuring += ',\n  ';
+                        }
+                        destructuring += name + ' = __locals.' + name;
+                    }
+                    prepended += destructuring + ';\n';
+                }
+                if (opts._with !== false) {
+                    prepended +=  '  with (' + opts.localsName + ' || {}) ';
+                }
+                prepended +=  ' {' + '\n';
+                appended += '  }' + '\n';
+                if (opts.destructuredLocals && opts.destructuredLocals.length)
+                    appended += '  }\n';
+                
+                appended += '  return __output;' + '\n';
+                this.source = prepended + this.source + appended;
+            }
+    
+            if (opts.compileDebug) {
+                src = 'var __line = 1' + '\n'
+                    + '  , __lines = ' + JSON.stringify(this.templateText) + '\n'
+                    + '  , __filename = ' + sanitizedFilename + ';' + '\n'
+                    + 'try {' + '\n'
+                    + this.source
+                    + '} catch (e) {' + '\n'
+                    + '  rethrow(e, __lines, __filename, __line, escapeFn);' + '\n'
+                    + '}' + '\n';
+            }
+            else {
+                src = this.source;
+            }
+    
+            if (opts.client) {
+                src = 'escapeFn = escapeFn || ' + escapeFn.toString() + ';' + '\n' + src;
+                if (opts.compileDebug) {
+                    src = 'rethrow = rethrow || ' + rethrow.toString() + ';' + '\n' + src;
+                }
+            }
+    
+            if (opts.strict) {
+                src = '"use strict";\n' + src;
+            }
+            if (opts.debug) {
+                console.log(src);
+            }
+            if (opts.compileDebug && opts.filename) {
+                src = src + '\n'
+                    + '//# sourceURL=' + sanitizedFilename + '\n';
+            }
+    
+            try {
+                if (opts.async) {
+                    // Have to use generated function for this, since in envs without support,
+                    // it breaks in parsing
+                    try {
+                        ctor = (new Function('return (async function(){}).constructor;'))();
+                    }
+                    catch(e) {
+                        if (e instanceof SyntaxError) {
+                            throw new Error('This environment does not support async/await');
+                        }
+                        else {
+                            throw e;
+                        }
+                    }
+                }
+                else {
+                    ctor = Function;
+                }
+                fn = new ctor(opts.localsName + ', escapeFn, include, rethrow', src);
+            }
+            catch(e) {
+                e.src = src;
+                // istanbul ignore else
+                if (e instanceof SyntaxError) {
+                    if (opts.filename) {
+                        e.message += ' in ' + opts.filename;
+                    }
+                    e.message += ' while compiling ejs\n\n';
+                    /*
+                    e.message += 'If the above error is not helpful, you may want to try EJS-Lint:\n';
+                    e.message += 'https://github.com/RyanZim/EJS-Lint';
+                    if (!opts.async) {
+                        e.message += '\n';
+                        e.message += 'Or, if you meant to create an async function, pass `async: true` as an option.';
+                    }
+                    */
+                }
+                throw e;
+            }
+    
+            // Return a callable function which will execute the function
+            // created by the source-code, with the passed data as locals
+            // Adds a local `include` function which allows full recursive include
+            var returnedFn = opts.client ? fn : function anonymous(data) {
+                var include = function (path, includeData) {
+                    var d = utils.shallowCopy(utils.createNullProtoObjWherePossible(), data);
+                    if (includeData) {
+                        d = utils.shallowCopy(d, includeData);
+                    }
+                    return includeFile(path, opts)(d);
+                };
+                return fn.apply(opts.context,
+                    [data || utils.createNullProtoObjWherePossible(), escapeFn, include, rethrow]);
+            };
+            if (opts.filename && typeof Object.defineProperty === 'function') {
+                var filename = opts.filename;
+                var basename = path.basename(filename, path.extname(filename));
+                try {
+                    Object.defineProperty(returnedFn, 'name', {
+                        value: basename,
+                        writable: false,
+                        enumerable: false,
+                        configurable: true
+                    });
+                } catch (e) {/* ignore */}
+            }
+            return returnedFn;
+        },
+    
+        generateSource: function() {
+            var opts = this.opts;
+            var d = this.opts.delimiter;
+            var o = this.opts.openDelimiter;
+            var c = this.opts.closeDelimiter;
+        
+            if (opts.rmWhitespace) {
+                this.templateText =
+                    this.templateText.replace(/[\r\n]+/g, '\n').replace(/^\s+|\s+$/gm, '');
+            }
+            this.templateText =
+                this.templateText.replace(/[ \t]*<%_/gm, '<%_').replace(/_%>[ \t]*/gm, '_%>');
+            
+        
+            var allTokens = this.parseTemplateText();
+            var processedTokens = [];
+            var i = 0;
+        
+            while (i < allTokens.length) {
+                var token = allTokens[i];
+        
+                if (token.startsWith(o + d) && token !== o + d + d) {
+                    var nestingLevel = 1;
+                    var contentBuffer = [];
+                    var j = i + 1;
+        
+                    while (j < allTokens.length) {
+                        var innerToken = allTokens[j];
+        
+                        if (innerToken.startsWith(o + d) && innerToken !== o + d + d) {
+                            nestingLevel++;
+                        } else if (innerToken.endsWith(d + c) && innerToken !== d + d + c) {
+                            nestingLevel--;
+        
+                            if (nestingLevel === 0) {
+                                processedTokens.push(token);
+                                processedTokens.push(contentBuffer.join(''));
+                                processedTokens.push(innerToken);
+                                
+                                i = j; 
+                                break; 
+                            }
+                        }
+                        
+                        contentBuffer.push(innerToken);
+                        j++;
+                    }
+                    
+                    if (nestingLevel !== 0) {
+                         throw new Error('Could not find matching close tag for "' + token + '".');
+                    }
+        
+                } else {
+                    processedTokens.push(token);
+                }
+        
+                i++;
+            }
+        
+            var self = this;
+            if (processedTokens.length) {
+                processedTokens.forEach(function (line) {
+                    self.scanLine(line);
+                });
+            }
+        },
+        
+        parseTemplateText: function () {
+            var str = this.templateText;
+            var pat = this.regex;
+            var result = pat.exec(str);
+            var arr = [];
+            var firstPos;
+    
+            while (result) {
+                firstPos = result.index;
+    
+                if (firstPos !== 0) {
+                    arr.push(str.substring(0, firstPos));
+                    str = str.slice(firstPos);
+                }
+    
+                arr.push(result[0]);
+                str = str.slice(result[0].length);
+                result = pat.exec(str);
+            }
+    
+            if (str) {
+                arr.push(str);
+            }
+    
+            return arr;
+        },
+    
+        _addOutput: function (line) {
+            if (this.truncate) {
+                // Only replace single leading linebreak in the line after
+                // -%> tag -- this is the single, trailing linebreak
+                // after the tag that the truncation mode replaces
+                // Handle Win / Unix / old Mac linebreaks -- do the \r\n
+                // combo first in the regex-or
+                line = line.replace(/^(?:\r\n|\r|\n)/, '');
+                this.truncate = false;
+            }
+            if (!line) {
+                return line;
+            }
+    
+            // Preserve literal slashes
+            line = line.replace(/\\/g, '\\\\');
+    
+            // Convert linebreaks
+            line = line.replace(/\n/g, '\\n');
+            line = line.replace(/\r/g, '\\r');
+    
+            // Escape double-quotes
+            // - this will be the delimiter during execution
+            line = line.replace(/"/g, '\\"');
+            this.source += '    ; __append("' + line + '")' + '\n';
+        },
+    
+        scanLine: function (line) {
+            var self = this;
+            var d = this.opts.delimiter;
+            var o = this.opts.openDelimiter;
+            var c = this.opts.closeDelimiter;
+            var newLineCount = 0;
+    
+            newLineCount = (line.split('\n').length - 1);
+    
+            switch (line) {
+            case o + d:
+            case o + d + '_':
+                this.mode = Template.modes.EVAL;
+                break;
+            case o + d + '=':
+                this.mode = Template.modes.ESCAPED;
+                break;
+            case o + d + '-':
+                this.mode = Template.modes.RAW;
+                break;
+            case o + d + '#':
+                this.mode = Template.modes.COMMENT;
+                break;
+            case o + d + d:
+                this.mode = Template.modes.LITERAL;
+                this.source += '    ; __append("' + line.replace(o + d + d, o + d) + '")' + '\n';
+                break;
+            case d + d + c:
+                this.mode = Template.modes.LITERAL;
+                this.source += '    ; __append("' + line.replace(d + d + c, d + c) + '")' + '\n';
+                break;
+            case d + c:
+            case '-' + d + c:
+            case '_' + d + c:
+                if (this.mode == Template.modes.LITERAL) {
+                    this._addOutput(line);
+                }
+    
+                this.mode = null;
+                this.truncate = line.indexOf('-') === 0 || line.indexOf('_') === 0;
+                break;
+            default:
+                // In script mode, depends on type of tag
+                if (this.mode) {
+                    // If '//' is found without a line break, add a line break.
+                    switch (this.mode) {
+                    case Template.modes.EVAL:
+                    case Template.modes.ESCAPED:
+                    case Template.modes.RAW:
+                        if (line.lastIndexOf('//') > line.lastIndexOf('\n')) {
+                            line += '\n';
+                        }
+                    }
+                    switch (this.mode) {
+                    // Just executing code
+                    case Template.modes.EVAL:
+                        this.source += '    ; ' + line + '\n';
+                        break;
+                        // Exec, esc, and output
+                    case Template.modes.ESCAPED:
+                        this.source += '    ; __append(escapeFn(' + stripSemi(line) + '))' + '\n';
+                        break;
+                        // Exec and output
+                    case Template.modes.RAW:
+                        this.source += '    ; __append(' + stripSemi(line) + ')' + '\n';
+                        break;
+                    case Template.modes.COMMENT:
+                        // Do nothing
+                        break;
+                        // Literal <%% mode, append as raw output
+                    case Template.modes.LITERAL:
+                        this._addOutput(line);
+                        break;
+                    }
+                }
+                // In string mode, just add the output
+                else {
+                    this._addOutput(line);
+                }
+            }
+    
+            if (self.opts.compileDebug && newLineCount) {
+                this.currentLine += newLineCount;
+                this.source += '    ; __line = ' + this.currentLine + '\n';
+            }
+        }
+    };
+    
+    /**
+     * Escape characters reserved in XML.
+     *
+     * This is simply an export of {@link module:utils.escapeXML}.
+     *
+     * If `markup` is `undefined` or `null`, the empty string is returned.
+     *
+     * @param {String} markup Input string
+     * @return {String} Escaped string
+     * @public
+     * @func
+     * */
+    exports.escapeXML = utils.escapeXML;
+    
+    /**
+     * Express.js support.
+     *
+     * This is an alias for {@link module:ejs.renderFile}, in order to support
+     * Express.js out-of-the-box.
+     *
+     * @func
+     */
+    
+    exports.__express = exports.renderFile;
+    
+    /**
+     * Version of EJS.
+     *
+     * @readonly
+     * @type {String}
+     * @public
+     */
+    
+    exports.VERSION = _VERSION_STRING;
+    
+    /**
+     * Name for detection of EJS.
+     *
+     * @readonly
+     * @type {String}
+     * @public
+     */
+    
+    exports.name = _NAME;
+    
+    /* istanbul ignore if */
+    if (typeof window != 'undefined') {
+        window.ejs = exports;
+    }
+    
+    
+    },{"../package.json":6,"./utils":2,"fs":3,"path":4}],2:[function(require,module,exports){
+    /*
+     * EJS Embedded JavaScript templates
+     * Copyright 2112 Matthew Eernisse (mde@fleegix.org)
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *         http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     *
+    */
+    
+    /**
+     * Private utility functions
+     * @module utils
+     * @private
+     */
+    
+    'use strict';
+    
+    var regExpChars = /[|\\{}()[\]^$+*?.]/g;
+    var hasOwnProperty = Object.prototype.hasOwnProperty;
+    var hasOwn = function (obj, key) { return hasOwnProperty.apply(obj, [key]); };
+    
+    /**
+     * Escape characters reserved in regular expressions.
+     *
+     * If `string` is `undefined` or `null`, the empty string is returned.
+     *
+     * @param {String} string Input string
+     * @return {String} Escaped string
+     * @static
+     * @private
+     */
+    exports.escapeRegExpChars = function (string) {
+        // istanbul ignore if
+        if (!string) {
+            return '';
+        }
+        return String(string).replace(regExpChars, '\\$&');
+    };
+    
+    var _ENCODE_HTML_RULES = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&#34;',
+        "'": '&#39;'
+    };
+    var _MATCH_HTML = /[&<>'"]/g;
+    
+    function encode_char(c) {
+        return _ENCODE_HTML_RULES[c] || c;
+    }
+    
+    /**
+     * Stringified version of constants used by {@link module:utils.escapeXML}.
+     *
+     * It is used in the process of generating {@link ClientFunction}s.
+     *
+     * @readonly
+     * @type {String}
+     */
+    
+    var escapeFuncStr =
+        'var _ENCODE_HTML_RULES = {\n'
+    + '      "&": "&amp;"\n'
+    + '    , "<": "&lt;"\n'
+    + '    , ">": "&gt;"\n'
+    + '    , \'"\': "&#34;"\n'
+    + '    , "\'": "&#39;"\n'
+    + '    }\n'
+    + '  , _MATCH_HTML = /[&<>\'"]/g;\n'
+    + 'function encode_char(c) {\n'
+    + '  return _ENCODE_HTML_RULES[c] || c;\n'
+    + '};\n';
+    
+    /**
+     * Escape characters reserved in XML.
+     *
+     * If `markup` is `undefined` or `null`, the empty string is returned.
+     *
+     * @implements {EscapeCallback}
+     * @param {String} markup Input string
+     * @return {String} Escaped string
+     * @static
+     * @private
+     */
+    
+    exports.escapeXML = function (markup) {
+        return markup == undefined
+            ? ''
+            : String(markup)
+                .replace(_MATCH_HTML, encode_char);
+    };
+    
+    function escapeXMLToString() {
+        return Function.prototype.toString.call(this) + ';\n' + escapeFuncStr;
+    }
+    
+    try {
+        if (typeof Object.defineProperty === 'function') {
+        // If the Function prototype is frozen, the "toString" property is non-writable. This means that any objects which inherit this property
+        // cannot have the property changed using an assignment. If using strict mode, attempting that will cause an error. If not using strict
+        // mode, attempting that will be silently ignored.
+        // However, we can still explicitly shadow the prototype's "toString" property by defining a new "toString" property on this object.
+            Object.defineProperty(exports.escapeXML, 'toString', { value: escapeXMLToString });
+        } else {
+            // If Object.defineProperty() doesn't exist, attempt to shadow this property using the assignment operator.
+            exports.escapeXML.toString = escapeXMLToString;
+        }
+    } catch (err) {
+        console.warn('Unable to set escapeXML.toString (is the Function prototype frozen?)');
+    }
+    
+    /**
+     * Naive copy of properties from one object to another.
+     * Does not recurse into non-scalar properties
+     * Does not check to see if the property has a value before copying
+     *
+     * @param  {Object} to   Destination object
+     * @param  {Object} from Source object
+     * @return {Object}      Destination object
+     * @static
+     * @private
+     */
+    exports.shallowCopy = function (to, from) {
+        from = from || {};
+        if ((to !== null) && (to !== undefined)) {
+            for (var p in from) {
+                if (!hasOwn(from, p)) {
+                    continue;
+                }
+                if (p === '__proto__' || p === 'constructor') {
+                    continue;
+                }
+                to[p] = from[p];
+            }
+        }
+        return to;
+    };
+    
+    /**
+     * Naive copy of a list of key names, from one object to another.
+     * Only copies property if it is actually defined
+     * Does not recurse into non-scalar properties
+     *
+     * @param  {Object} to   Destination object
+     * @param  {Object} from Source object
+     * @param  {Array} list List of properties to copy
+     * @return {Object}      Destination object
+     * @static
+     * @private
+     */
+    exports.shallowCopyFromList = function (to, from, list) {
+        list = list || [];
+        from = from || {};
+        if ((to !== null) && (to !== undefined)) {
+            for (var i = 0; i < list.length; i++) {
+                var p = list[i];
+                if (typeof from[p] != 'undefined') {
+                    if (!hasOwn(from, p)) {
+                        continue;
+                    }
+                    if (p === '__proto__' || p === 'constructor') {
+                        continue;
+                    }
+                    to[p] = from[p];
+                }
+            }
+        }
+        return to;
+    };
+    
+    /**
+     * Simple in-process cache implementation. Does not implement limits of any
+     * sort.
+     *
+     * @implements {Cache}
+     * @static
+     * @private
+     */
+    exports.cache = {
+        _data: new Map(),
+        _capacity: 64,
+        set: function (key, val) {
+            if (this._data.has(key))
+                this._data.delete(key);
+            this._data.set(key, val);
+            while (this._capacity > 0 && this._data.size > this._capacity) {
+                const first = this._data.keys().next().value;
+                this._data.delete(first);
+            }
+        },
+        get: function (key) {
+            if (!this._data.has(key))
+                return undefined;
+            const value = this._data.get(key);
+            this._data.delete(key);
+            this._data.set(key, value);
+            return value;
+        },
+        remove: function (key) {
+            this._data.delete(key);
+        },
+        reset: function () {
+            this._data.clear();
+        }
+    };
+    
+    /**
+     * Transforms hyphen case variable into camel case.
+     *
+     * @param {String} string Hyphen case string
+     * @return {String} Camel case string
+     * @static
+     * @private
+     */
+    exports.hyphenToCamel = function (str) {
+        return str.replace(/-[a-z]/g, function (match) { return match[1].toUpperCase(); });
+    };
+    
+    /**
+     * Returns a null-prototype object in runtimes that support it
+     *
+     * @return {Object} Object, prototype will be set to null where possible
+     * @static
+     * @private
+     */
+    exports.createNullProtoObjWherePossible = (function () {
+        if (typeof Object.create == 'function') {
+            return function () {
+                return Object.create(null);
+            };
+        }
+        if (!({__proto__: null} instanceof Object)) {
+            return function () {
+                return {__proto__: null};
+            };
+        }
+        // Not possible, just pass through
+        return function () {
+            return {};
+        };
+    })();
+    
+    exports.hasOwnOnlyObject = function (obj) {
+        var o = exports.createNullProtoObjWherePossible();
+        for (var p in obj) {
+            if (hasOwn(obj, p)) {
+                o[p] = obj[p];
+            }
+        }
+        return o;
+    };
+    
+    
+    },{}],3:[function(require,module,exports){
+    
+    },{}],4:[function(require,module,exports){
+    (function (process){
+    // .dirname, .basename, and .extname methods are extracted from Node.js v8.11.1,
+    // backported and transplited with Babel, with backwards-compat fixes
+    
+    // Copyright Joyent, Inc. and other Node contributors.
+    //
+    // Permission is hereby granted, free of charge, to any person obtaining a
+    // copy of this software and associated documentation files (the
+    // "Software"), to deal in the Software without restriction, including
+    // without limitation the rights to use, copy, modify, merge, publish,
+    // distribute, sublicense, and/or sell copies of the Software, and to permit
+    // persons to whom the Software is furnished to do so, subject to the
+    // following conditions:
+    //
+    // The above copyright notice and this permission notice shall be included
+    // in all copies or substantial portions of the Software.
+    //
+    // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+    // OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    // MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+    // NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+    // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+    // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+    // USE OR OTHER DEALINGS IN THE SOFTWARE.
+    
+    // resolves . and .. elements in a path array with directory names there
+    // must be no slashes, empty elements, or device names (c:\) in the array
+    // (so also no leading and trailing slashes - it does not distinguish
+    // relative and absolute paths)
+    function normalizeArray(parts, allowAboveRoot) {
+        // if the path tries to go above the root, `up` ends up > 0
+        var up = 0;
+        for (var i = parts.length - 1; i >= 0; i--) {
+            var last = parts[i];
+            if (last === '.') {
+                parts.splice(i, 1);
+            } else if (last === '..') {
+                parts.splice(i, 1);
+                up++;
+            } else if (up) {
+                parts.splice(i, 1);
+                up--;
+            }
+        }
+    
+        // if the path is allowed to go above the root, restore leading ..s
+        if (allowAboveRoot) {
+            for (; up--; up) {
+                parts.unshift('..');
+            }
+        }
+    
+        return parts;
+    }
+    
+    // path.resolve([from ...], to)
+    // posix version
+    exports.resolve = function() {
+        var resolvedPath = '',
+                resolvedAbsolute = false;
+    
+        for (var i = arguments.length - 1; i >= -1 && !resolvedAbsolute; i--) {
+            var path = (i >= 0) ? arguments[i] : process.cwd();
+    
+            // Skip empty and invalid entries
+            if (typeof path !== 'string') {
+                throw new TypeError('Arguments to path.resolve must be strings');
+            } else if (!path) {
+                continue;
+            }
+    
+            resolvedPath = path + '/' + resolvedPath;
+            resolvedAbsolute = path.charAt(0) === '/';
+        }
+    
+        // At this point the path should be resolved to a full absolute path, but
+        // handle relative paths to be safe (might happen when process.cwd() fails)
+    
+        // Normalize the path
+        resolvedPath = normalizeArray(filter(resolvedPath.split('/'), function(p) {
+            return !!p;
+        }), !resolvedAbsolute).join('/');
+    
+        return ((resolvedAbsolute ? '/' : '') + resolvedPath) || '.';
+    };
+    
+    // path.normalize(path)
+    // posix version
+    exports.normalize = function(path) {
+        var isAbsolute = exports.isAbsolute(path),
+                trailingSlash = substr(path, -1) === '/';
+    
+        // Normalize the path
+        path = normalizeArray(filter(path.split('/'), function(p) {
+            return !!p;
+        }), !isAbsolute).join('/');
+    
+        if (!path && !isAbsolute) {
+            path = '.';
+        }
+        if (path && trailingSlash) {
+            path += '/';
+        }
+    
+        return (isAbsolute ? '/' : '') + path;
+    };
+    
+    // posix version
+    exports.isAbsolute = function(path) {
+        return path.charAt(0) === '/';
+    };
+    
+    // posix version
+    exports.join = function() {
+        var paths = Array.prototype.slice.call(arguments, 0);
+        return exports.normalize(filter(paths, function(p, index) {
+            if (typeof p !== 'string') {
+                throw new TypeError('Arguments to path.join must be strings');
+            }
+            return p;
+        }).join('/'));
+    };
+    
+    
+    // path.relative(from, to)
+    // posix version
+    exports.relative = function(from, to) {
+        from = exports.resolve(from).substr(1);
+        to = exports.resolve(to).substr(1);
+    
+        function trim(arr) {
+            var start = 0;
+            for (; start < arr.length; start++) {
+                if (arr[start] !== '') break;
+            }
+    
+            var end = arr.length - 1;
+            for (; end >= 0; end--) {
+                if (arr[end] !== '') break;
+            }
+    
+            if (start > end) return [];
+            return arr.slice(start, end - start + 1);
+        }
+    
+        var fromParts = trim(from.split('/'));
+        var toParts = trim(to.split('/'));
+    
+        var length = Math.min(fromParts.length, toParts.length);
+        var samePartsLength = length;
+        for (var i = 0; i < length; i++) {
+            if (fromParts[i] !== toParts[i]) {
+                samePartsLength = i;
+                break;
+            }
+        }
+    
+        var outputParts = [];
+        for (var i = samePartsLength; i < fromParts.length; i++) {
+            outputParts.push('..');
+        }
+    
+        outputParts = outputParts.concat(toParts.slice(samePartsLength));
+    
+        return outputParts.join('/');
+    };
+    
+    exports.sep = '/';
+    exports.delimiter = ':';
+    
+    exports.dirname = function (path) {
+        if (typeof path !== 'string') path = path + '';
+        if (path.length === 0) return '.';
+        var code = path.charCodeAt(0);
+        var hasRoot = code === 47 /*/*/;
+        var end = -1;
+        var matchedSlash = true;
+        for (var i = path.length - 1; i >= 1; --i) {
+            code = path.charCodeAt(i);
+            if (code === 47 /*/*/) {
+                    if (!matchedSlash) {
+                        end = i;
+                        break;
+                    }
+                } else {
+                // We saw the first non-path separator
+                matchedSlash = false;
+            }
+        }
+    
+        if (end === -1) return hasRoot ? '/' : '.';
+        if (hasRoot && end === 1) {
+            // return '//';
+            // Backwards-compat fix:
+            return '/';
+        }
+        return path.slice(0, end);
+    };
+    
+    function basename(path) {
+        if (typeof path !== 'string') path = path + '';
+    
+        var start = 0;
+        var end = -1;
+        var matchedSlash = true;
+        var i;
+    
+        for (i = path.length - 1; i >= 0; --i) {
+            if (path.charCodeAt(i) === 47 /*/*/) {
+                    // If we reached a path separator that was not part of a set of path
+                    // separators at the end of the string, stop now
+                    if (!matchedSlash) {
+                        start = i + 1;
+                        break;
+                    }
+                } else if (end === -1) {
+                // We saw the first non-path separator, mark this as the end of our
+                // path component
+                matchedSlash = false;
+                end = i + 1;
+            }
+        }
+    
+        if (end === -1) return '';
+        return path.slice(start, end);
+    }
+    
+    // Uses a mixed approach for backwards-compatibility, as ext behavior changed
+    // in new Node.js versions, so only basename() above is backported here
+    exports.basename = function (path, ext) {
+        var f = basename(path);
+        if (ext && f.substr(-1 * ext.length) === ext) {
+            f = f.substr(0, f.length - ext.length);
+        }
+        return f;
+    };
+    
+    exports.extname = function (path) {
+        if (typeof path !== 'string') path = path + '';
+        var startDot = -1;
+        var startPart = 0;
+        var end = -1;
+        var matchedSlash = true;
+        // Track the state of characters (if any) we see before our first dot and
+        // after any path separator we find
+        var preDotState = 0;
+        for (var i = path.length - 1; i >= 0; --i) {
+            var code = path.charCodeAt(i);
+            if (code === 47 /*/*/) {
+                    // If we reached a path separator that was not part of a set of path
+                    // separators at the end of the string, stop now
+                    if (!matchedSlash) {
+                        startPart = i + 1;
+                        break;
+                    }
+                    continue;
+                }
+            if (end === -1) {
+                // We saw the first non-path separator, mark this as the end of our
+                // extension
+                matchedSlash = false;
+                end = i + 1;
+            }
+            if (code === 46 /*.*/) {
+                    // If this is our first dot, mark it as the start of our extension
+                    if (startDot === -1)
+                        startDot = i;
+                    else if (preDotState !== 1)
+                        preDotState = 1;
+            } else if (startDot !== -1) {
+                // We saw a non-dot and non-path separator before our dot, so we should
+                // have a good chance at having a non-empty extension
+                preDotState = -1;
+            }
+        }
+    
+        if (startDot === -1 || end === -1 ||
+                // We saw a non-dot character immediately before the dot
+                preDotState === 0 ||
+                // The (right-most) trimmed path component is exactly '..'
+                preDotState === 1 && startDot === end - 1 && startDot === startPart + 1) {
+            return '';
+        }
+        return path.slice(startDot, end);
+    };
+    
+    function filter (xs, f) {
+            if (xs.filter) return xs.filter(f);
+            var res = [];
+            for (var i = 0; i < xs.length; i++) {
+                    if (f(xs[i], i, xs)) res.push(xs[i]);
+            }
+            return res;
+    }
+    
+    // String.prototype.substr - negative index don't work in IE8
+    var substr = 'ab'.substr(-1) === 'b'
+            ? function (str, start, len) { return str.substr(start, len) }
+            : function (str, start, len) {
+                    if (start < 0) start = str.length + start;
+                    return str.substr(start, len);
+            }
+    ;
+    
+    }).call(this,require('_process'))
+    },{"_process":5}],5:[function(require,module,exports){
+    // shim for using process in browser
+    var process = module.exports = {};
+    
+    // cached from whatever global is present so that test runners that stub it
+    // don't break things.  But we need to wrap it in a try catch in case it is
+    // wrapped in strict mode code which doesn't define any globals.  It's inside a
+    // function because try/catches deoptimize in certain engines.
+    
+    var cachedSetTimeout;
+    var cachedClearTimeout;
+    
+    function defaultSetTimout() {
+            throw new Error('setTimeout has not been defined');
+    }
+    function defaultClearTimeout () {
+            throw new Error('clearTimeout has not been defined');
+    }
+    (function () {
+            try {
+                    if (typeof setTimeout === 'function') {
+                            cachedSetTimeout = setTimeout;
+                    } else {
+                            cachedSetTimeout = defaultSetTimout;
+                    }
+            } catch (e) {
+                    cachedSetTimeout = defaultSetTimout;
+            }
+            try {
+                    if (typeof clearTimeout === 'function') {
+                            cachedClearTimeout = clearTimeout;
+                    } else {
+                            cachedClearTimeout = defaultClearTimeout;
+                    }
+            } catch (e) {
+                    cachedClearTimeout = defaultClearTimeout;
+            }
+    } ())
+    function runTimeout(fun) {
+            if (cachedSetTimeout === setTimeout) {
+                    //normal enviroments in sane situations
+                    return setTimeout(fun, 0);
+            }
+            // if setTimeout wasn't available but was latter defined
+            if ((cachedSetTimeout === defaultSetTimout || !cachedSetTimeout) && setTimeout) {
+                    cachedSetTimeout = setTimeout;
+                    return setTimeout(fun, 0);
+            }
+            try {
+                    // when when somebody has screwed with setTimeout but no I.E. maddness
+                    return cachedSetTimeout(fun, 0);
+            } catch(e){
+                    try {
+                            // When we are in I.E. but the script has been evaled so I.E. doesn't trust the global object when called normally
+                            return cachedSetTimeout.call(null, fun, 0);
+                    } catch(e){
+                            // same as above but when it's a version of I.E. that must have the global object for 'this', hopfully our context correct otherwise it will throw a global error
+                            return cachedSetTimeout.call(this, fun, 0);
+                    }
+            }
+    
+    
+    }
+    function runClearTimeout(marker) {
+            if (cachedClearTimeout === clearTimeout) {
+                    //normal enviroments in sane situations
+                    return clearTimeout(marker);
+            }
+            // if clearTimeout wasn't available but was latter defined
+            if ((cachedClearTimeout === defaultClearTimeout || !cachedClearTimeout) && clearTimeout) {
+                    cachedClearTimeout = clearTimeout;
+                    return clearTimeout(marker);
+            }
+            try {
+                    // when when somebody has screwed with setTimeout but no I.E. maddness
+                    return cachedClearTimeout(marker);
+            } catch (e){
+                    try {
+                            // When we are in I.E. but the script has been evaled so I.E. doesn't  trust the global object when called normally
+                            return cachedClearTimeout.call(null, marker);
+                    } catch (e){
+                            // same as above but when it's a version of I.E. that must have the global object for 'this', hopfully our context correct otherwise it will throw a global error.
+                            // Some versions of I.E. have different rules for clearTimeout vs setTimeout
+                            return cachedClearTimeout.call(this, marker);
+                    }
+            }
+    
+    
+    
+    }
+    var queue = [];
+    var draining = false;
+    var currentQueue;
+    var queueIndex = -1;
+    
+    function cleanUpNextTick() {
+            if (!draining || !currentQueue) {
+                    return;
+            }
+            draining = false;
+            if (currentQueue.length) {
+                    queue = currentQueue.concat(queue);
+            } else {
+                    queueIndex = -1;
+            }
+            if (queue.length) {
+                    drainQueue();
+            }
+    }
+    
+    function drainQueue() {
+            if (draining) {
+                    return;
+            }
+            var timeout = runTimeout(cleanUpNextTick);
+            draining = true;
+    
+            var len = queue.length;
+            while(len) {
+                    currentQueue = queue;
+                    queue = [];
+                    while (++queueIndex < len) {
+                            if (currentQueue) {
+                                    currentQueue[queueIndex].run();
+                            }
+                    }
+                    queueIndex = -1;
+                    len = queue.length;
+            }
+            currentQueue = null;
+            draining = false;
+            runClearTimeout(timeout);
+    }
+    
+    process.nextTick = function (fun) {
+            var args = new Array(arguments.length - 1);
+            if (arguments.length > 1) {
+                    for (var i = 1; i < arguments.length; i++) {
+                            args[i - 1] = arguments[i];
+                    }
+            }
+            queue.push(new Item(fun, args));
+            if (queue.length === 1 && !draining) {
+                    runTimeout(drainQueue);
+            }
+    };
+    
+    // v8 likes predictible objects
+    function Item(fun, array) {
+            this.fun = fun;
+            this.array = array;
+    }
+    Item.prototype.run = function () {
+            this.fun.apply(null, this.array);
+    };
+    process.title = 'browser';
+    process.browser = true;
+    process.env = {};
+    process.argv = [];
+    process.version = ''; // empty string to avoid regexp issues
+    process.versions = {};
+    
+    function noop() {}
+    
+    process.on = noop;
+    process.addListener = noop;
+    process.once = noop;
+    process.off = noop;
+    process.removeListener = noop;
+    process.removeAllListeners = noop;
+    process.emit = noop;
+    process.prependListener = noop;
+    process.prependOnceListener = noop;
+    
+    process.listeners = function (name) { return [] }
+    
+    process.binding = function (name) {
+            throw new Error('process.binding is not supported');
+    };
+    
+    process.cwd = function () { return '/' };
+    process.chdir = function (dir) {
+            throw new Error('process.chdir is not supported');
+    };
+    process.umask = function() { return 0; };
+    
+    },{}],6:[function(require,module,exports){
+    module.exports={
+        "name": "ejs",
+        "description": "Embedded JavaScript templates",
+        "keywords": [
+            "template",
+            "engine",
+            "ejs"
+        ],
+        "version": "3.1.9",
+        "author": "Matthew Eernisse <mde@fleegix.org> (http://fleegix.org)",
+        "license": "Apache-2.0",
+        "bin": {
+            "ejs": "./bin/cli.js"
+        },
+        "main": "./lib/ejs.js",
+        "jsdelivr": "ejs.min.js",
+        "unpkg": "ejs.min.js",
+        "repository": {
+            "type": "git",
+            "url": "git://github.com/mde/ejs.git"
+        },
+        "bugs": "https://github.com/mde/ejs/issues",
+        "homepage": "https://github.com/mde/ejs",
+        "dependencies": {
+            "jake": "^10.8.5"
+        },
+        "devDependencies": {
+            "browserify": "^16.5.1",
+            "eslint": "^6.8.0",
+            "git-directory-deploy": "^1.5.1",
+            "jsdoc": "^4.0.2",
+            "lru-cache": "^4.0.1",
+            "mocha": "^10.2.0",
+            "uglify-js": "^3.3.16"
+        },
+        "engines": {
+            "node": ">=0.10.0"
+        },
+        "scripts": {
+            "test": "npx jake test"
+        }
+    }
+    
+    },{}]},{},[1])(1)
+    });
+    
+return module.exports;
+};
 root.__MVU2SHUJUKU_CARD_API_FACTORY__ = function createCardApi(options) {
     const { readMetadata, isCurrent, readMvu } = options;
     const schemas = new Map();
@@ -1216,7 +3128,110 @@ root.__MVU2SHUJUKU_CARD_API_FACTORY__ = function createCardApi(options) {
         if (reusable) proofs.set(result, { owner: proofOwner, revision, keys: keySignature, value: JSON.stringify(result) });
         return result;
     }
-    function facade(original) {
+    // 状态恢复只借用无业务副作用的原 Zod 检查，不重新运行 transform/provider。
+    async function stateImportRules() {
+        await ready();
+        const registered = (readMetadata().schemaKeys || []).map(key => schemas.get(key)), capturedRevision = revision;
+        const assertCurrent = () => { if (!isCurrent() || revision !== capturedRevision) throw new Error('目标 Schema 已更新，请重新导入'); };
+        const unwrap = schema => {
+            while (['optional', 'nonoptional', 'nullable', 'readonly', 'default', 'prefault'].includes(schema?._zod?.def?.type)) schema = schema._zod.def.innerType;
+            return schema;
+        };
+        const safeChecks = def => (def.checks || []).every(check => {
+            const kind = check?._zod?.def?.check;
+            if (typeof check?._zod?.def?.fn === 'function') return false;
+            return ['greater_than', 'less_than', 'multiple_of', 'number_format', 'string_format', 'min_length', 'max_length', 'length_equals', 'min_size', 'max_size', 'size_equals', 'mime_type'].includes(kind);
+        });
+        function inert(schema, depth = 0) {
+            const def = schema?._zod?.def;
+            if (!def || depth > 48 || !safeChecks(def)) return false;
+            if (['optional', 'nonoptional', 'nullable', 'readonly'].includes(def.type)) return inert(def.innerType, depth + 1);
+            if (def.type === 'object') return Object.values(def.shape).every(child => inert(child, depth + 1)) && (!def.catchall || inert(def.catchall, depth + 1));
+            if (def.type === 'record') return inert(def.keyType, depth + 1) && inert(def.valueType, depth + 1);
+            if (def.type === 'array') return inert(def.element, depth + 1);
+            return ['string', 'number', 'boolean', 'enum', 'literal', 'null', 'undefined', 'any', 'unknown', 'never', 'nan'].includes(def.type);
+        }
+        function pure(schema, value, depth = 0) {
+            if (depth > 48) return false;
+            const def = schema?._zod?.def;
+            if (!def || !safeChecks(def)) return false;
+            if (['optional', 'nonoptional', 'nullable', 'readonly'].includes(def.type)) return value === undefined && def.type === 'optional' ? inert(def.innerType, depth + 1) : value === null && def.type === 'nullable' || pure(def.innerType, value, depth + 1);
+            // 值存在时 Zod 不调用默认函数；缺失时不能为了恢复进度生成默认值。
+            if (['default', 'prefault'].includes(def.type)) return value !== undefined && pure(def.innerType, value, depth + 1);
+            if (def.type === 'object') return value !== null && typeof value === 'object' && !Array.isArray(value)
+                && Object.entries(def.shape).every(([k, child]) => pure(child, value[k], depth + 1))
+                && (!def.catchall || Object.keys(value).every(k => Object.hasOwn(def.shape, k) || pure(def.catchall, value[k], depth + 1)));
+            if (def.type === 'record') return value !== null && typeof value === 'object' && !Array.isArray(value)
+                && Object.entries(value).every(([k, v]) => pure(def.keyType, k, depth + 1) && pure(def.valueType, v, depth + 1));
+            if (def.type === 'array') return Array.isArray(value) && value.every(v => pure(def.element, v, depth + 1));
+            return ['string', 'number', 'boolean', 'enum', 'literal', 'null', 'undefined', 'any', 'unknown', 'never', 'nan'].includes(def.type);
+        }
+        function shape(schema, depth = 0) {
+            if (depth > 48) return { type: 'any' };
+            let nullable = false, optional, hasDefault = false, wrapper = schema;
+            while (['optional', 'nonoptional', 'nullable', 'readonly', 'default', 'prefault'].includes(wrapper?._zod?.def?.type)) {
+                const def = wrapper._zod.def;
+                nullable ||= def.type === 'nullable';
+                if (optional === undefined && ['optional', 'nonoptional'].includes(def.type)) optional = def.type === 'optional';
+                hasDefault ||= ['default', 'prefault'].includes(def.type);
+                wrapper = def.innerType;
+            }
+            const unwrapped = unwrap(schema), def = unwrapped?._zod?.def;
+            if (!def) return null;
+            let node;
+            if (def.type === 'object') {
+                const properties = {};
+                for (const [key, child] of Object.entries(def.shape)) Object.defineProperty(properties, key, { value: shape(child, depth + 1) || { type: 'any' }, enumerable: true });
+                node = { type: 'object', properties, extensible: !!def.catchall && def.catchall._zod?.def?.type !== 'never' };
+            } else if (def.type === 'record') node = { type: 'object', properties: {}, extensible: true, record: true };
+            else if (def.type === 'array') node = { type: 'array', elementType: shape(def.element, depth + 1) || { type: 'any' } };
+            else node = { type: ['string', 'number', 'boolean', 'null'].includes(def.type) ? def.type : 'any' };
+            if (nullable) node.nullable = true;
+            if (optional && !hasDefault) node.optional = true;
+            return node;
+        }
+        function locate(schema, path) {
+            for (const key of path) {
+                while (['optional', 'nonoptional', 'nullable', 'readonly', 'default', 'prefault'].includes(schema?._zod?.def?.type)) {
+                    if (!safeChecks(schema._zod.def)) return null;
+                    schema = schema._zod.def.innerType;
+                }
+                const def = schema?._zod?.def;
+                if (!def || !safeChecks(def)) return null;
+                if (def.type === 'object') schema = Object.hasOwn(def.shape, key) ? def.shape[key] : def.catchall;
+                else if (def.type === 'record') schema = def.valueType;
+                else return null;
+            }
+            return schema;
+        }
+        const canonical = value => value && typeof value === 'object' ? Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']' : '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}' : JSON.stringify(value);
+        return {
+            assertCurrent,
+            schema: registered.map(s => shape(s)).find(Boolean),
+            async validateComplete(value) {
+                assertCurrent();
+                for (const root of registered) {
+                    if (typeof root === 'function' || !pure(root, value)) return 'opaque';
+                    const parsed = typeof root.safeParseAsync === 'function' ? await root.safeParseAsync(clone(value)) : root.safeParse(clone(value));
+                    assertCurrent();
+                    if (!parsed.success) return 'invalid';
+                }
+                return 'valid';
+            },
+            async accept(path, value) {
+                assertCurrent();
+                for (const root of registered) {
+                    const node = typeof root === 'function' ? null : locate(root, path);
+                    if (!node || !pure(node, value)) return '目标 Schema 含无法安全独立校验的规则，保留目标值';
+                    const parsed = typeof node.safeParseAsync === 'function' ? await node.safeParseAsync(clone(value)) : node.safeParse(clone(value));
+                    assertCurrent();
+                    if (!parsed.success || canonical(parsed.data) !== canonical(value)) return '值不符合目标 Schema 或需要变换，保留目标值';
+                }
+                return '';
+            },
+        };
+    }
+    function facade(original, facadeOptions = {}) {
         if (!original || typeof original !== 'object') return original;
         const out = Object.create(original);
         const set = (name, value) => Object.defineProperty(out, name, { value, writable: true, configurable: true, enumerable: true });
@@ -1241,10 +3256,12 @@ root.__MVU2SHUJUKU_CARD_API_FACTORY__ = function createCardApi(options) {
             return result && typeof result.then === 'function' ? result.then(apply) : apply(result);
         };
         if (typeof original.getWorldbookNames === 'function') set('getWorldbookNames', function (...args) {
-            return decorateNames(original.getWorldbookNames.apply(original, args));
+            const result = original.getWorldbookNames.apply(original, args);
+            return facadeOptions.includeAliases === false ? result : decorateNames(result);
         });
         if (typeof original.getCharWorldbookNames === 'function') set('getCharWorldbookNames', function (...args) {
             const result = original.getCharWorldbookNames.apply(original, args);
+            if (facadeOptions.includeAliases === false) return result;
             const apply = info => {
                 if (!info || typeof info !== 'object') return info;
                 const aliases = metadata().worldbookAliases || {}, names = [info.primary, ...(info.additional || [])], additional = [...(info.additional || [])];
@@ -1256,7 +3273,7 @@ root.__MVU2SHUJUKU_CARD_API_FACTORY__ = function createCardApi(options) {
         if (typeof original.createChatMessages === 'function') set('createChatMessages', wrapCreate(original.createChatMessages, original));
         return out;
     }
-    function patchWorldbookGlobals(w, globals) {
+    function patchWorldbookGlobals(w, globals, facadeOptions) {
         const names = ['getWorldbook', 'replaceWorldbook', 'updateWorldbookWith', 'createWorldbookEntries', 'deleteWorldbookEntries', 'getWorldbookNames', 'getCharWorldbookNames'];
         const original = {}, pending = [];
         for (const name of names) {
@@ -1266,7 +3283,7 @@ root.__MVU2SHUJUKU_CARD_API_FACTORY__ = function createCardApi(options) {
             original[name] = (...args) => fn.apply(w, args);
             pending.push(name);
         }
-        const wrapped = facade(original);
+        const wrapped = facade(original, facadeOptions);
         for (const name of pending) {
             wrapped[name].__mvu2shujuku = true;
             wrapped[name].__mvu2shujukuCardApi = api;
@@ -1292,72 +3309,904 @@ root.__MVU2SHUJUKU_CARD_API_FACTORY__ = function createCardApi(options) {
             return result;
         };
     }
-    const api = { registerSchema, ready, validate, proofOf, facade, patchWorldbookGlobals, wrapCreate };
+    const api = { registerSchema, ready, validate, stateImportRules, proofOf, facade, patchWorldbookGlobals, wrapCreate };
     return api;
 };
-root.__MVU2SHUJUKU_JS_SOURCE_FACTORY__ = function createJsSource() {
-    const idStart = ch => !!ch && /[A-Za-z_$\u0080-\uffff]/.test(ch);
-    const idPart = ch => !!ch && /[\w$\u0080-\uffff]/.test(ch);
-    function tokens(source) {
-        const s = String(source || ''), out = [];
-        let i = 0;
-        function quoted(quote) {
-            i++;
-            while (i < s.length) { const c = s[i++]; if (c === '\\') i++; else if (c === quote) break; }
+root.__MVU2SHUJUKU_STAT_STORAGE_FACTORY__ = function createStatStorage(options = {}) {
+    // Legacy layouts retain their original split. New conversions explicitly
+    // select version 2 and preserve each object's complete ownership boundary.
+    const completeContainers = () => options.readPolicy?.()?.version >= 2;
+    const declaredDollarWrites = () => options.readPolicy?.()?.version >= 3;
+    const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
+    const object = value => value !== null && typeof value === 'object';
+    const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+    const put = (target, key, value) => Object.defineProperty(target, key,
+        { value, enumerable: true, writable: true, configurable: true });
+    const matches = (pattern, path) => pattern.length <= path.length && pattern.every((part, i) => part === '*' || part === path[i]);
+    const prefixes = entry => entry.writePaths?.length ? entry.writePaths : [entry.path?.length ? entry.path : [entry.group]];
+    const columnPaths = (entry, column) => {
+        const path = Array.isArray(column) ? column[3] : column.path;
+        const name = Array.isArray(column) ? column[0] : column.zh;
+        if (['rows', 'nestedRows'].includes(entry.kind)) {
+            if (name === entry.keyCol || (entry.ancestorKeyCols || []).includes(name) || name === entry.parentKeyCol) return [];
+            if (name === entry.scalarValueCol) return prefixes(entry).map(prefix => [...prefix, '*']);
+            return prefixes(entry).map(prefix => [...prefix, '*', ...(path?.length ? path : [name])]);
         }
-        function template() {
-            i++;
-            while (i < s.length) {
-                const c = s[i++];
-                if (c === '\\') i++;
-                else if (c === '`') break;
-                else if (c === '$' && s[i] === '{') { i++; scan(true, []); }
+        return [path?.length ? path : [entry.group, name]];
+    };
+    function rules(layout) {
+        const result = [];
+        for (const entry of layout || []) {
+            if (entry.kind === 'nestedArray') {
+                const path = entry.path || [entry.group];
+                result.push([...path.slice(0, -1), '*', path[path.length - 1]]);
+                continue;
+            }
+            if (['json', 'array', 'pathArray'].includes(entry.kind)) {
+                for (const path of prefixes(entry)) result.push(path);
+                continue;
+            }
+            for (const column of entry.cols || []) {
+                const name = Array.isArray(column) ? column[0] : column.zh;
+                if (name === (entry.overflowCol || '_扩展数据')) continue;
+                result.push(...columnPaths(entry, column));
+            }
+            if (entry.overflowCol) {
+                for (const prefix of prefixes(entry)) result.push([...prefix, ...(['rows', 'nestedRows'].includes(entry.kind) ? ['*'] : []), '*']);
             }
         }
-        function scan(inTemplate, output) {
-            let expression = true, previous = '', depth = 0;
-            const parens = [], braces = [];
-            while (i < s.length) {
-                const start = i, c = s[i], next = s[i + 1];
-                if (/\s/.test(c)) { i++; continue; }
-                if (c === '/' && next === '/') { i += 2; while (i < s.length && s[i] !== '\n') i++; continue; }
-                if (c === '/' && next === '*') { i += 2; while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++; i = Math.min(s.length, i + 2); continue; }
-                let kind = 'punct';
-                if (c === '"' || c === "'") { quoted(c); kind = 'literal'; }
-                else if (c === '`') { template(); kind = 'literal'; }
-                else if (c === '/' && expression) {
-                    i++; let inClass = false;
-                    while (i < s.length) {
-                        const r = s[i++];
-                        if (r === '\\') i++;
-                        else if (r === '[') inClass = true;
-                        else if (r === ']') inClass = false;
-                        else if (r === '/' && !inClass) break;
-                        else if (r === '\n' || r === '\r') break;
-                    }
-                    while (idPart(s[i])) i++;
-                    kind = 'literal';
-                } else if (idStart(c)) { i++; while (idPart(s[i])) i++; kind = 'identifier'; }
-                else if (/\d/.test(c)) { i++; while (i < s.length && /[\w.]/.test(s[i])) i++; kind = 'literal'; }
-                else {
-                    const multi = ['===', '!==', '...', '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '**'].find(v => s.startsWith(v, i));
-                    i += multi ? multi.length : 1;
+        return result;
+    }
+    // Visibility follows the original formatting macro: $ descendants are omitted
+    // from its default display. This is storage routing, never an actor permission.
+    function split(stat, displayOnly = false) {
+        // 没有启用原消息分流的旧卡，所有映射字段仍按原布局存入数据库。
+        // displayOnly 则始终沿用 MVU 展示时过滤 $ 字段的规则。
+        if (!displayOnly && options.enabled && !options.enabled()) return { database: stat === undefined ? {} : stat, native: {} };
+        if (completeContainers() && displayOnly !== true) {
+            const database = {}, native = {};
+            const policy = options.readPolicy?.() || {};
+            const roots = new Set(policy.roots || []);
+            // Root entries have independent ownership. Hidden descendants stay
+            // inside their complete object while SQL executes the operation once.
+            for (const key of Object.keys(stat || {})) {
+                if (key === '$internal') continue;
+                const unmapped = Array.isArray(policy.roots) && !roots.has(key) && !policy.rootContainer;
+                put(unmapped || key.startsWith('$') && !declaredDollarWrites() ? native : database, key, stat[key]);
+            }
+            return { database, native };
+        }
+        const seen = new WeakMap();
+        function walk(value) {
+            if (!object(value)) return { database: value };
+            if (seen.has(value)) return seen.get(value);
+            // 投影不能先把非法 JSON 序列化成合法值；原写入校验必须看到原类型、缺口和循环。
+            if (!Array.isArray(value) && Object.prototype.toString.call(value) !== '[object Object]') return { database: value };
+            const database = Array.isArray(value) ? new Array(value.length) : Object.create(Object.getPrototypeOf(value));
+            const native = Array.isArray(value) ? [] : {};
+            const result = { database };
+            seen.set(value, result);
+            let hasNative = false;
+            for (const key of Object.keys(value)) {
+                if (key.startsWith('$')) {
+                    if (key !== '$internal') { put(native, key, clone(value[key])); hasNative = true; }
+                    continue;
                 }
-                const value = s.slice(start, i);
-                if (inTemplate && value === '}' && depth === 0) return;
-                output.push({ value, start, end: i, kind });
-                if (value === '(') parens.push(/^(if|while|for|with|switch|catch)$/.test(previous));
-                if (value === '{') { depth++; braces.push(previous === ')' || previous === '=>' || /^(else|try|finally|do)$/.test(previous)); }
-                if (value === '}') depth--;
-                if (kind === 'literal') expression = false;
-                else if (kind === 'identifier') expression = /^(return|throw|case|delete|void|typeof|new|in|of|yield|await|else|do)$/.test(value);
-                else if (value === ')') expression = !!parens.pop();
-                else if (value === '}') expression = !!braces.pop();
-                else expression = !['.', '?.', ']', '++', '--'].includes(value);
-                previous = value;
+                const part = walk(value[key]);
+                put(database, key, part.database);
+                if (own(part, 'native')) { put(native, key, part.native); hasNative = true; }
+            }
+            if (hasNative) result.native = native;
+            return result;
+        }
+        const part = walk(stat === undefined ? {} : stat);
+        return { database: part.database, native: part.native || {} };
+    }
+    // The inspected schema stays intact for execution. Only its layout/display
+    // descriptor omits fields hidden by the original formatting convention.
+    function displaySchemaNode(node) {
+        if (!object(node)) return node;
+        const out = { ...node };
+        if (node.fields) {
+            out.fields = {};
+            for (const [key, child] of Object.entries(node.fields)) {
+                if (!key.startsWith('$')) put(out.fields, key, displaySchemaNode(child));
             }
         }
-        scan(false, out);
+        if (node.value) out.value = displaySchemaNode(node.value);
+        if (node.element) out.element = displaySchemaNode(node.element);
+        for (const key of ['defaultValue', 'prefaultValue']) if (own(node, key) && object(node[key])) out[key] = split(node[key], true).database;
+        return out;
+    }
+    function project(stat, layout = options.readLayout?.() || []) {
+        const rootEntry = layout.find(entry => entry.rootContainer);
+        if (rootEntry) {
+            const data = {};
+            for (const key of Object.keys(stat || {})) if (key !== '$internal' && (declaredDollarWrites() || rootEntry.statStorageVersion >= 3 || !key.startsWith('$'))) put(data, key, stat[key]);
+            return { [rootEntry.group]: data };
+        }
+        const fallback = layout.find(entry => entry.publicFallback);
+        if (!fallback) return stat;
+        const seenNumbers = new WeakSet();
+        const checkNumbers = value => {
+            if (typeof value === 'number' && !Number.isFinite(value)) throw new Error('变量包含非有限数值');
+            if (object(value) && !seenNumbers.has(value)) {
+                seenNumbers.add(value);
+                for (const child of Object.values(value)) checkNumbers(child);
+            }
+        };
+        checkNumbers(stat);
+        stat = split(stat).database;
+        const accepted = rules(layout.filter(entry => !entry.publicFallback));
+        function walk(value, path) {
+            if (accepted.some(pattern => matches(pattern, path))) return { mapped: value };
+            const ancestor = accepted.some(pattern => path.length < pattern.length && path.every((part, i) => pattern[i] === '*' || pattern[i] === part));
+            if (!ancestor) return { extra: value };
+            if (!object(value)) return { extra: value };
+            const mapped = Array.isArray(value) ? [] : {}, extra = Array.isArray(value) ? [] : {};
+            let hasExtra = false;
+            for (const key of Object.keys(value)) {
+                const part = walk(value[key], path.concat(key));
+                if (own(part, 'mapped')) put(mapped, key, part.mapped);
+                if (own(part, 'extra')) { put(extra, key, part.extra); hasExtra = true; }
+            }
+            return { mapped, ...(hasExtra ? { extra } : {}) };
+        }
+        const part = walk(stat || {}, []), out = part.mapped || {};
+        put(out, fallback.group, part.extra || {});
+        return out;
+    }
+    function planLegacy(schema, shapeInfo, initial, layout, makeIdent) {
+        const retained = [];
+        for (const group of schema) {
+            const entry = layout.find(item => item.table === group.tableName);
+            if (!entry || prefixes(entry).every(path => path.some(key => String(key).startsWith('$')))) continue;
+            if (group.kind === 'json' && !group.aiReadonly) group.jsonAiWritable = true;
+            const originalColumns = group.columns.slice();
+            const originalRows = (group.rows || []).map(row => row.slice());
+            group.columns = group.columns.filter(column => column.zh === group.vwdMetaZh || column.zh !== '_扩展数据' &&
+                !columnPaths(entry, entry.cols.find(item => item.zh === column.zh) || column).some(path => path.some(key => String(key).startsWith('$'))));
+            if (!group.columns.length) continue;
+            const fields = group.columns.filter(column => column.zh !== group.vwdMetaZh && column.zh !== group.keyCol && column.zh !== group.parentKeyCol);
+            if (group.kind === 'singleton' && fields.length && fields.every(column => column.aiReadonly)) group.aiReadonly = true;
+            const cleanCell = (column, cell) => {
+                if (completeContainers()) return cell;
+                if (!column.isObject || typeof cell !== 'string' || !cell.trim()) return cell;
+                try { return JSON.stringify(split(JSON.parse(cell)).database); } catch (_) { return cell; }
+            };
+            for (const column of group.columns) column.value = cleanCell(column, column.value);
+            group.rows = originalRows.map(row => [row[0], ...group.columns.map(column => {
+                const oldIndex = originalColumns.findIndex(old => old.zh === column.zh);
+                return cleanCell(column, row[oldIndex + 1]);
+            })]);
+            retained.push(group);
+            if (completeContainers() && group.columns.some(column => column.isObject)) group.fullStatContainer = true;
+        }
+        schema.splice(0, schema.length, ...retained);
+        // One ordinary writable JSON table carries public runtime fields which
+        // have no fixed column. It is not a hidden column or script-only storage.
+        const names = new Set(schema.map(group => group.name)), tables = new Set(schema.map(group => group.tableName));
+        let name = '动态变量', n = 2;
+        while (names.has(name) || tables.has(name + '表') || own(initial, name)) name = '动态变量' + n++;
+        const tableName = name + '表';
+        const group = { name, tableName, ident: makeIdent(tableName, new Set(schema.map(group => group.ident)), 'table'),
+            kind: 'json', publicFallback: true, jsonAiWritable: true, keyCol: '', keyValue: '', childTables: [],
+            columns: [{ zh: '内容', ident: makeIdent('内容', new Set(['row_id']), 'column'), path: [name, '内容'],
+                value: '{}', type: 'TEXT', isObject: true, jsonKind: 'object', desc: '未单独映射到其他表的公开变量（JSON）；内部键保留原变量名，已映射字段使用对应表列更新。' }],
+            rows: [[1, '{}']], source: 'public-dynamic-state',
+            groupChecks: ['仅承接未单独映射到其他表的公开变量；遵守原变量业务规则，已映射字段使用对应表列更新。'] };
+        schema.push(group);
+        const current = layout.filter(entry => retained.some(group => group.tableName === entry.table)).map(entry => {
+            const g = retained.find(group => group.tableName === entry.table);
+            return { ...entry, cols: entry.cols.filter(c => g.columns.some(column => column.zh === (Array.isArray(c) ? c[0] : c.zh))) };
+        });
+        const extra = project(split(initial).database, [...current, { kind: 'json', group: name, publicFallback: true }])[name];
+        group.rows[0][1] = JSON.stringify(extra);
+        group.fullStatContainer = completeContainers();
+        return { version: completeContainers() ? 2 : 1, visibility: 'original-dollar-display', initial: split(initial).native };
+    }
+    function plan(schema, shapeInfo, initial, layout, makeIdent) {
+        if (!completeContainers()) return planLegacy(schema, shapeInfo, initial, layout, makeIdent);
+        const get = (value, path) => path.reduce((v, key) => own(v, key) ? v[key] : undefined, value);
+        const relative = (entry, col) => {
+            const path = columnPaths(entry, col)[0];
+            if (!path) return null;
+            return path.slice(prefixes(entry)[0].length + (entry.kind === 'rows' ? 1 : 0));
+        };
+        const residual = (raw, paths) => {
+            const out = clone(raw) || {};
+            const remove = (value, path, i = 0) => {
+                if (!object(value) || !own(value, path[i])) return;
+                if (i === path.length - 1) delete value[path[i]];
+                else {
+                    remove(value[path[i]], path, i + 1);
+                    if (object(value[path[i]]) && !Array.isArray(value[path[i]]) && !Object.keys(value[path[i]]).length) delete value[path[i]];
+                }
+            };
+            for (const path of paths) if (path?.length) remove(out, path);
+            return out;
+        };
+        const retained = [];
+        for (const group of schema) {
+            const entry = layout.find(e => e.table === group.tableName);
+            if (!entry || !declaredDollarWrites() && prefixes(entry).every(path => path.some(key => String(key).startsWith('$')))) continue;
+            const old = group.columns.slice();
+            group.columns = group.columns.filter(c => c.zh !== '_扩展数据' && c.zh !== group.vwdMetaZh &&
+                !(declaredDollarWrites() && group.privateRoot ? [] : columnPaths(entry, entry.cols.find(x => x.zh === c.zh) || c))
+                    .some(path => path.some(key => String(key).startsWith('$'))));
+            if (!group.columns.length) continue;
+            const fields = group.columns.filter(c => c.zh !== group.keyCol && c.zh !== group.parentKeyCol);
+            if (group.kind === 'singleton' && fields.length && fields.every(c => c.aiReadonly)) group.aiReadonly = true;
+            // Complex ownership has already been collapsed to a complete JSON
+            // boundary by the schema layout. Ordinary records retain their columns.
+            const extraNeeded = ['singleton', 'rows'].includes(entry.kind) && !entry.valueCol && !entry.scalarValueCol;
+            let extra;
+            if (extraNeeded) {
+                let zh = '扩展数据', n = 2;
+                while (group.columns.some(c => c.zh === zh)) zh = '扩展数据' + n++;
+                extra = { zh, ident: makeIdent(zh, new Set(['row_id', ...group.columns.map(c => c.ident)]), 'column'),
+                    path: [entry.group, zh], itemPath: [zh], value: '{}', type: 'TEXT', isObject: true,
+                    jsonKind: 'object', jsonDefaultMissing: true,
+                    desc: '保存本记录中没有对应独立列的字段；没有明确更新依据时保持原样。' };
+                group.overflowCol = zh;
+            }
+            const base = entry.rootContainer ? split(initial).database : get(initial, prefixes(entry)[0]);
+            const keyIndex = old.findIndex(c => c.zh === entry.keyCol) + 1;
+            const paths = group.columns.map(c => relative(entry, entry.cols.find(x => x.zh === c.zh) || c)).filter(Boolean);
+            const sourceRows = (group.rows || []).map(row => row.slice());
+            if (entry.kind === 'rows' && object(base)) {
+                const existing = new Set(sourceRows.map(row => String(row[keyIndex])));
+                for (const key of Object.keys(base)) {
+                    if (existing.has(key)) continue;
+                    const raw = base[key];
+                    sourceRows.push([sourceRows.length + 1, ...old.map(c => {
+                        if (c.zh === entry.keyCol) return key;
+                        let value = get(raw, relative(entry, entry.cols.find(x => x.zh === c.zh) || c) || []);
+                        if (c.isPair && Array.isArray(value)) value = value[0];
+                        if (c.isObject) return value === undefined ? '' : JSON.stringify(value);
+                        return value === undefined ? '' : value;
+                    })]);
+                }
+            }
+            group.rows = sourceRows.map(row => {
+                const raw = entry.kind === 'rows' ? base?.[String(row[keyIndex])] : base;
+                const cells = group.columns.map(c => {
+                    const value = (entry.kind === 'json' || entry.valueCol) && c.isObject ? raw
+                        : get(raw, relative(entry, entry.cols.find(x => x.zh === c.zh) || c) || []);
+                    // Preserve the existing scalar/pair coercion and optional
+                    // encoders. Only complete object cells need raw restoration.
+                    if (c.isObject && c.zh !== entry.keyCol && value !== undefined)
+                        return JSON.stringify(value);
+                    return row[old.findIndex(o => o.zh === c.zh) + 1];
+                });
+                if (extra) cells.push(JSON.stringify(residual(raw, paths)));
+                return [row[0], ...cells];
+            });
+            if (extra) group.columns.push(extra);
+            if (group.kind === 'json' && !group.aiReadonly) group.jsonAiWritable = true;
+            group.fullStatContainer = group.columns.some(c => c.isObject);
+            group.statStorageVersion = declaredDollarWrites() ? 3 : 2;
+            retained.push(group);
+        }
+        schema.splice(0, schema.length, ...retained);
+        const roots = retained.flatMap(g => {
+            const entry = layout.find(e => e.table === g.tableName);
+            return entry ? prefixes(entry).map(path => path[0]).filter(Boolean) : [];
+        });
+        return { version: declaredDollarWrites() ? 3 : 2, visibility: 'original-dollar-display', roots: [...new Set(roots)], rootContainer: retained.some(g => g.rootContainer), initial: {} };
+    }
+    // Reuse SQLite's own JSON path production and removal. No parser for keys,
+    // arrays or SQL is emulated here. Invalid/absent JSON never sends raw text.
+    function sendRowsSql(group) {
+        const quote = name => '"' + String(name).replace(/"/g, '""') + '"';
+        const visibleJson = col => {
+            const value = 't.' + quote(col.ident);
+            return `CASE WHEN json_valid(${value}) THEN (WITH RECURSIVE hidden(n,path) AS (`
+                + `SELECT row_number() OVER (ORDER BY length(fullkey) DESC,fullkey),fullkey FROM json_tree(${value}) WHERE substr(CAST(key AS TEXT),1,1)=char(36)),`
+                + `pruned(n,value) AS (SELECT 0,${value} UNION ALL SELECT pruned.n+1,json_remove(pruned.value,hidden.path) FROM pruned JOIN hidden ON hidden.n=pruned.n+1)`
+                + ` SELECT value FROM pruned ORDER BY n DESC LIMIT 1) ELSE '' END AS ${quote(col.ident)}`;
+        };
+        const key = group.kind === 'rows' && group.columns.find(c => c.zh === group.keyCol);
+        const sql = 'SELECT t.row_id,' + group.columns.map(c => c.isObject ? visibleJson(c) : 't.' + quote(c.ident)).join(',')
+            + ' FROM ' + quote(group.ident) + ' AS t'
+            + (group.privateRoot ? ' WHERE 0' : key ? " WHERE substr(CAST(t." + quote(key.ident) + " AS TEXT),1,1)<>char(36)" : '') + ' ORDER BY t.row_id';
+        // The host inserts table text using String.replace with a string.
+        // Spell the dollar as SQLite char(36): a literal dollar followed by
+        // an SQL closing quote would be JS's replacement-suffix token.
+        // The prepare pass executes only a constant. The resulting inner macro
+        // reads data in the host's final, snapshot-scoped SQL pass after EJS.
+        const inner = "{[sql '" + sql + "']}";
+        return '{[sql "SELECT \'' + inner.replace(/'/g, "''") + '\'"]}';
+    }
+    function read(index) {
+        const chat = options.readChat?.() || [];
+        index = index == null ? chat.length - 1 : index;
+        for (let i = index; i >= 0; i--) {
+            const message = chat[i], data = message?.variables?.[Number(message.swipe_id || 0)];
+            if (object(data) && own(data, 'stat_data')) return split(data.stat_data).native;
+        }
+        return clone(options.readPolicy?.()?.initial || {});
+    }
+    function combine(database, native) {
+        if (completeContainers()) {
+            const out = {};
+            for (const part of [native, database]) for (const key of Object.keys(part || {})) put(out, key, clone(part[key]));
+            return out;
+        }
+        if (!object(database) || !object(native) || Array.isArray(database) !== Array.isArray(native)) return clone(database);
+        const out = clone(native);
+        for (const key of Object.keys(database)) {
+            if (own(native, key) && object(database[key]) && object(native[key])) put(out, key, combine(database[key], native[key]));
+            else put(out, key, clone(database[key]));
+        }
+        return out;
+    }
+    function merge(wrap, index) {
+        if (!wrap?.stat_data || options.enabled && !options.enabled()) return wrap;
+        // Preserve original reads, including explicitly displayed $ values.
+        // Display omission is not a write lock on JSON content.
+        const part = split(wrap.stat_data), database = part.database;
+        const native = combine(part.native, read(index));
+        return { ...wrap, stat_data: combine(database, native),
+            ...(wrap.display_data ? { display_data: combine(wrap.display_data, native) } : {}) };
+    }
+    function stage(stat, session) {
+        if (options.enabled && !options.enabled()) return { changed: false, rollback() {} };
+        const native = split(stat).native;
+        const old = read(session?.writeTarget?.index), stateChanged = JSON.stringify(old) !== JSON.stringify(native);
+        if (!stateChanged && Object.keys(native).length === 0) return { changed: false, stateChanged: false, rollback() {} };
+        session = options.bindSession ? options.bindSession(session) : session;
+        options.assertCurrent(session);
+        const chat = options.readChat(), target = session.writeTarget;
+        if (!target || !chat[target.index]) throw new Error('脚本状态写入目标已变化');
+        const message = chat[target.index], swipe = Number(message.swipe_id || 0);
+        const previous = message.variables, previousData = previous?.[swipe];
+        if (!stateChanged && own(previousData, 'stat_data')) return { changed: false, stateChanged: false, rollback() {} };
+        const variables = Array.isArray(previous) ? previous.slice() : { ...(previous || {}) };
+        variables[swipe] = { ...(previousData || {}), stat_data: native };
+        message.variables = variables;
+        return { changed: true, stateChanged, rollback() {
+            if (message.variables !== variables) return;
+            const currentData = variables[swipe];
+            if (currentData?.stat_data !== native) return;
+            if (own(previousData, 'stat_data')) currentData.stat_data = previousData.stat_data; else delete currentData.stat_data;
+            const sameKeys = Object.keys(currentData).every(key => own(previousData, key) && currentData[key] === previousData[key]) && Object.keys(previousData || {}).length === Object.keys(currentData).length;
+            const unchangedOtherSwipes = Object.keys(variables).every(key => Number(key) === swipe || variables[key] === previous?.[key]);
+            if (sameKeys && unchangedOtherSwipes) { if (previous === undefined) delete message.variables; else message.variables = previous; }
+        } };
+    }
+    return { split, plan, rules, project, read, merge, stage, combine, sendRowsSql, displaySchemaNode };
+};
+root.__MVU2SHUJUKU_STATE_TRANSFER_FACTORY__ = function createStateTransfer() {
+    const format = 'm2sjk-state';
+    const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const clone = value => JSON.parse(JSON.stringify(value));
+    function canonical(value) {
+        if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+        if (record(value)) return '{' + Object.keys(value).sort().filter(k => value[k] !== undefined)
+            .map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}';
+        return JSON.stringify(value);
+    }
+    const equal = (a, b) => canonical(a) === canonical(b);
+    function equalRuntimeTables(a, b) {
+        const runtime = value => {
+            const copy = clone(value || {});
+            // 数据库 hydrate 会把 guide 的初始化种子附到运行时表上。种子规则
+            // 在调用方通过完整的目标模板／聊天元数据单独保护，不当作当前数据行。
+            for (const key of Object.keys(copy)) if (key.startsWith('sheet_') && record(copy[key])) delete copy[key].seedRows;
+            return copy;
+        };
+        return equal(runtime(a), runtime(b));
+    }
+    function stat(value) {
+        if (!record(value)) throw new Error('stat_data 必须是 JSON 对象');
+        function validate(node) {
+            if (typeof node === 'number' && !Number.isFinite(node)) throw new Error('stat_data 包含无法用 JSON 无损保存的非有限数值');
+            if (node && typeof node === 'object') for (const key of Object.keys(node)) {
+                if (key === '$internal' && node === value) continue;
+                validate(node[key]);
+            }
+        }
+        validate(value);
+        const result = clone(value);
+        delete result.$internal; // MVU 更新事件中的临时引用；保留其他 $ 业务数据。
+        return result;
+    }
+    function resolveImportSchema(schema, generateSchema) {
+        if (record(schema) && typeof schema.type === 'string') return schema;
+        // MVU Zod 的字符串占位由原 generateSchema 解释为 any。未知字符串
+        // 仍视为规则缺失，不能用当前初值推导一份新的导入约束。
+        if (typeof schema === 'string' && typeof generateSchema === 'function') {
+            const normalized = generateSchema({}, schema);
+            if (normalized?.type === 'any') return normalized;
+        }
+        return null;
+    }
+    // 新功能的字段匹配策略，不执行 MVU 更新、作者变换或字段改名推断。
+    async function compatibleFields(source, target, options = {}) {
+        source = stat(source); target = stat(target);
+        const imported = [], skipped = [], retained = [];
+        const pathText = path => '/' + path.map(k => String(k).replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
+        const put = (o, k, v) => Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
+        let visits = 0;
+        function fits(value, node, previous) {
+            if (node?.type === 'any') return true;
+            if (!node) return previous === undefined || previous === null || value === null
+                ? previous === undefined || previous === value : Array.isArray(previous) === Array.isArray(value) && typeof previous === typeof value;
+            if (value === null) return node.nullable === true || node.type === 'null';
+            if (node.type === 'array') return Array.isArray(value);
+            if (node.type === 'object') return record(value) && Object.entries(node.properties || {}).every(([k, child]) =>
+                own(value, k) ? fits(value[k], child) : child.required !== true);
+            return typeof value === node.type;
+        }
+        async function atomic(value, previous, node, path) {
+            let reason = fits(value, node, previous) ? '' : '目标类型或必需结构不相容';
+            if (!reason && options.accept) reason = await options.accept(path, value) || '';
+            if (reason) { skipped.push({ path: pathText(path), reason }); return previous === undefined ? undefined : clone(previous); }
+            imported.push(pathText(path)); return clone(value);
+        }
+        async function walk(value, previous, node, path) {
+            if (++visits > 20000) throw new Error('字段匹配超过安全处理规模，未导入');
+            // 数组、动态记录和类型变化以完整容器为单位；不拼接行或下标。
+            if (!record(value) || !record(previous) || node?.record === true || node?.type === 'any' || node && node.type !== 'object') return atomic(value, previous, node, path);
+            const result = clone(previous);
+            for (const key of Object.keys(previous)) if (!own(value, key)) {
+                const child = node?.properties && own(node.properties, key) ? node.properties[key] : null;
+                if (child?.optional === true) delete result[key];
+                else retained.push(pathText([...path, key]));
+            }
+            for (const key of Object.keys(value)) {
+                const child = node?.properties && own(node.properties, key) ? node.properties[key] : undefined;
+                if (!own(previous, key) && !child && node?.extensible !== true && !(options.allowUndeclared && options.accept)) {
+                    skipped.push({ path: pathText([...path, key]), reason: '目标没有同路径字段声明' }); continue;
+                }
+                const next = await walk(value[key], own(previous, key) ? previous[key] : undefined, child, [...path, key]);
+                if (next !== undefined) put(result, key, next);
+            }
+            return result;
+        }
+        const result = await walk(source, target, options.schema, []);
+        return { stat_data: result, imported, skipped, retained, partial: skipped.length > 0 || retained.length > 0 };
+    }
+    // 当前转换布局本身也是字段映射契约。旧产物没有公开 Schema 时，先用
+    // 产品实际 writer/codec 验证完整快照，不把旧聊天的现有动态键当成声明。
+    async function prepareImport(source, target, options) {
+        source = stat(source); target = stat(target);
+        const layoutOnly = options.layoutOnly === true && !options.schema;
+        if (layoutOnly) {
+            try { return { stat_data: source, fields: null, tables: await options.project(source) }; }
+            catch (_) { /* 无损投影失败才按路径降级；不执行作者函数。 */ }
+        }
+        const probe = await compatibleFields(source, target, { schema: options.schema });
+        const completeValid = options.validateComplete ? await options.validateComplete(source) : 'opaque';
+        let fields = null, imported = source;
+        const fieldProject = async (path, value) => {
+            const reason = options.accept ? await options.accept(path, value) : '';
+            if (reason) return reason;
+            let candidate = clone(target);
+            if (!path.length) candidate = clone(value);
+            else {
+                let node = candidate;
+                for (const key of path.slice(0, -1)) {
+                    if (!own(node, key) || !node[key] || typeof node[key] !== 'object')
+                        Object.defineProperty(node, key, { value: {}, enumerable: true, writable: true, configurable: true });
+                    node = node[key];
+                }
+                Object.defineProperty(node, path[path.length - 1], { value: clone(value), enumerable: true, writable: true, configurable: true });
+            }
+            try { await options.project(candidate); return ''; }
+            catch (_) { return '目标布局无法无损保存此字段，保留目标值'; }
+        };
+        if (probe.partial || completeValid === 'invalid') {
+            fields = await compatibleFields(source, target, { schema: options.schema,
+                allowUndeclared: layoutOnly, accept: layoutOnly ? fieldProject : options.accept });
+            imported = fields.stat_data;
+        }
+        let tables;
+        try { tables = await options.project(imported); }
+        catch (_) {
+            fields = await compatibleFields(source, target, { schema: options.schema,
+                allowUndeclared: layoutOnly, accept: fieldProject });
+            imported = fields.stat_data;
+            tables = await options.project(imported);
+        }
+        return { stat_data: imported, fields, tables };
+    }
+    function sheetRows(sheet) {
+        const content = sheet?.content;
+        if (!Array.isArray(content) || !Array.isArray(content[0]) || !content[0].length) throw new Error('额外表格缺少列定义');
+        const headers = content[0];
+        if (headers.some(v => typeof v !== 'string') || new Set(headers).size !== headers.length) throw new Error('额外表格列名无效或重复');
+        for (const row of content.slice(1)) {
+            if (!Array.isArray(row) || row.length !== headers.length || row.some(v => v !== null && (!['string', 'number', 'boolean'].includes(typeof v) || typeof v === 'number' && !Number.isFinite(v)))) {
+                throw new Error('额外表格行结构无效：' + String(sheet.name || '未命名'));
+            }
+        }
+        return clone(content);
+    }
+    function extraTables(tables, layout) {
+        const mapped = new Set((layout || []).map(entry => String(entry.table || '')));
+        return Object.keys(tables || {}).filter(key => key.startsWith('sheet_') && record(tables[key]) && !mapped.has(String(tables[key].name)))
+            .map(key => {
+                const sheet = tables[key];
+                return { key, uid: String(sheet.uid || key), name: String(sheet.name || ''),
+                    ddl: String(sheet.sourceData?.ddl || '').replace(/\r\n/g, '\n').trim(), content: sheetRows(sheet) };
+            });
+    }
+    function archive(snapshot) {
+        const mvu = snapshot.mvu || {};
+        return { format, version: 1, exportedAt: new Date().toISOString(), source: clone(snapshot.source || {}),
+            stat_data: stat(mvu.stat_data),
+            mvu: { ...(record(mvu.schema) || typeof mvu.schema === 'string' ? { schema: clone(mvu.schema) } : {}),
+                ...(record(mvu.initialized_lorebooks) ? { initialized_lorebooks: clone(mvu.initialized_lorebooks) } : {}) },
+            extraTables: extraTables(snapshot.tables, snapshot.layout) };
+    }
+    function parse(text) {
+        const value = typeof text === 'string' ? JSON.parse(text.replace(/^\uFEFF/, '')) : text;
+        if (!record(value)) throw new Error('存档必须是 JSON 对象');
+        if (value.format === format) {
+            if (value.version !== 1) throw new Error('不支持的状态存档版本：' + value.version);
+            if (!Array.isArray(value.extraTables)) throw new Error('状态存档额外表格清单无效');
+            const restoredStat = stat(value.stat_data);
+            for (const sheet of value.extraTables) sheetRows(sheet);
+            const result = clone(value);
+            result.stat_data = restoredStat;
+            const seen = new Set();
+            for (const sheet of result.extraTables) {
+                if (!record(sheet) || typeof sheet.key !== 'string' || !sheet.key.startsWith('sheet_') || typeof sheet.name !== 'string' || typeof sheet.uid !== 'string' || typeof sheet.ddl !== 'string' || seen.has(sheet.key)) throw new Error('状态存档额外表格身份无效或重复');
+                seen.add(sheet.key); sheet.content = sheetRows(sheet);
+            }
+            return result;
+        }
+        // 普通 MVU 的变量表导出，或裸 stat_data JSON。
+        return { format, version: 1, source: {}, mvu: {}, stat_data: stat(record(value.stat_data) ? value.stat_data : value), extraTables: [] };
+    }
+    function matchExtras(extras, tables, layout) {
+        const targets = extraTables(tables, layout), used = new Set(), matches = [], skipped = [];
+        for (const source of extras) {
+            const compatible = target => target.ddl === source.ddl && target.content[0].length === source.content[0].length && target.content[0].every(h => source.content[0].includes(h));
+            const identities = targets.filter(t => t.uid === source.uid || t.key === source.key);
+            const candidates = identities.length ? identities.filter(compatible) : targets.filter(t => t.name === source.name && compatible(t));
+            if (candidates.length !== 1 || used.has(candidates[0]?.key)) {
+                skipped.push({ name: source.name, reason: identities.length && !candidates.length ? '目标列结构或 DDL 不相容' : candidates.length > 1 || used.has(candidates[0]?.key) ? '匹配身份不唯一' : '没有相容目标模板' });
+                continue;
+            }
+            const target = candidates[0]; used.add(target.key);
+            const indices = target.content[0].map(h => source.content[0].indexOf(h));
+            matches.push({ name: source.name, key: target.key,
+                content: [target.content[0], ...source.content.slice(1).map(row => indices.map(i => row[i]))] });
+        }
+        return { matches, skipped };
+    }
+    function applyExtras(tables, matches) {
+        const candidate = clone(tables || {});
+        for (const match of matches) candidate[match.key].content = clone(match.content);
+        return candidate;
+    }
+    function assertPersistentDbVersion(version) {
+        const match = String(version || '').match(/^(naiv)?(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
+        const supported = match && (match[1]
+            ? Number(match[2]) >= 1
+            : Number(match[2]) > 8 || Number(match[2]) === 8 && Number(match[3]) >= 5);
+        if (!supported) {
+            throw new Error('涉及表格的状态导入需要可识别的 SP·数据库 8.5 或更新版本，或龙血玄黄·数据库 1.0.0 或更新版本；当前：' + String(version || '未知'));
+        }
+    }
+    function verifyBackup(jsonl, chat, metadata) {
+        let lines;
+        try { lines = String(jsonl).replace(/^\uFEFF/, '').split(/\r?\n/).filter(l => l.trim()).map(l => JSON.parse(l)); }
+        catch (_) { throw new Error('聊天备份不是有效的酒馆 JSONL 文件'); }
+        if (!record(lines[0]) || !own(lines[0], 'chat_metadata') || !equal(lines.slice(1), chat) || !equal(lines[0].chat_metadata, metadata || {})) {
+            throw new Error('聊天文件与当前聊天不一致，可能尚未保存或已发生并发更新');
+        }
+        return true;
+    }
+    // stage/commit/restore 均由真实宿主适配注入；失败时仅回退仍属于本次操作的值。
+    async function execute(plan, host) {
+        let rollback, attemptedTables = false;
+        host.assertUnchanged();
+        if (plan.backup !== false) await host.backup();
+        host.assertUnchanged();
+        try {
+            rollback = host.rollbackStage;
+            rollback = await host.stage();
+            host.assertCurrent();
+            if (plan.writeTables) {
+                attemptedTables = true;
+                const result = await host.importTables(plan.tables);
+                if (result !== true && result?.success !== true) throw new Error('数据库拒绝导入状态');
+            }
+            host.assertCurrent();
+            await host.save(false);
+            host.assertCurrent();
+            await host.verify();
+            return true;
+        } catch (error) {
+            const recovery = [];
+            try { host.assertCurrent(); if (rollback) await rollback(); } catch (e) { recovery.push('变量回退：' + e.message); }
+            try { host.assertCurrent(); if (attemptedTables) await host.restoreTables(); } catch (e) { recovery.push('表格回退：' + e.message); }
+            try { host.assertCurrent(); await host.save(true); } catch (e) { recovery.push('保存回退：' + e.message); }
+            error.message += (plan.backup !== false ? '。已下载覆盖前的完整聊天备份' : '。本次未选择下载聊天备份') + (recovery.length ? '；自动回退未完整确认：' + recovery.join('；') : '；已执行回退');
+            throw error;
+        }
+    }
+    return { format, archive, parse, resolveImportSchema, compatibleFields, prepareImport, matchExtras, applyExtras, assertPersistentDbVersion, verifyBackup, execute, stat, equal, equalRuntimeTables, clone };
+};
+root.__MVU2SHUJUKU_MVU_SCHEMA_FACTORY__ = function createMvuSchema(lodash) {
+/*
+Copyright (c) 2025 MagicalAstrogy & StageDog.
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+*/
+    const _ = lodash;
+    const klona = value => JSON.parse(JSON.stringify(value));
+    const EXTENSIBLE_MARKER = '$__META_EXTENSIBLE__$';
+    const isArraySchema = value => value.type === 'array';
+    const isObjectSchema = value => value.type === 'object';
+function generateSchema(
+    data,
+    oldSchemaNode,
+    parentRecursiveExtensible = false
+) {
+    // @ts-expect-error hack for mvu zod
+    if (oldSchemaNode === '没有用别管这个') {
+        return { type: 'any' };
+    }
+
+    if (Array.isArray(data)) {
+        let isExtensible = false;
+        let isRecursiveExtensible = parentRecursiveExtensible;
+        let oldElementType;
+        let template;
+
+        // 使用类型守卫检查 oldSchemaNode 是否为 ArraySchemaNode
+        if (oldSchemaNode) {
+            if (isArraySchema(oldSchemaNode)) {
+                isExtensible = oldSchemaNode.extensible === true;
+                isRecursiveExtensible =
+                    oldSchemaNode.recursiveExtensible === true || parentRecursiveExtensible;
+                oldElementType = oldSchemaNode.elementType;
+                template = oldSchemaNode.template;
+            } else {
+                console.error(
+                    `Type mismatch: expected array schema but got ${oldSchemaNode.type} at path`
+                );
+            }
+        }
+
+        // 检查是否有只包含 $meta 的元素
+        const metaElementIndex = data.findIndex(
+            item =>
+                _.isObject(item) &&
+                !_.isDate(item) &&
+                '$arrayMeta' in item &&
+                '$meta' in item &&
+                item['$arrayMeta'] === true
+        );
+
+        if (metaElementIndex !== -1) {
+            const metaElement = data[metaElementIndex];
+            // 从 $meta 中提取数组的元数据
+            if (metaElement.$meta.extensible !== undefined) {
+                isExtensible = metaElement.$meta.extensible;
+            }
+            if (metaElement.$meta.template !== undefined) {
+                template = metaElement.$meta.template;
+            }
+            // 从数组中移除这个元数据元素
+            data.splice(metaElementIndex, 1);
+            console.log(`Array metadata element found and processed.`);
+        }
+
+        // 检查并处理魔法字符串
+        const markerIndex = data.indexOf(EXTENSIBLE_MARKER);
+        if (markerIndex > -1) {
+            isExtensible = true;
+            // 从数组中移除标记，以免影响后续的类型推断
+            data.splice(markerIndex, 1);
+            console.log(`Extensible marker found and removed from an array.`);
+        }
+
+        const schema_node = {
+            type: 'array',
+            extensible: isExtensible || parentRecursiveExtensible,
+            recursiveExtensible: isRecursiveExtensible,
+            elementType:
+                data.length > 0
+                    ? generateSchema(data[0], oldElementType, isRecursiveExtensible)
+                    : { type: 'any' },
+        };
+
+        if (template !== undefined) {
+            schema_node.template = template;
+        }
+
+        return schema_node;
+    }
+    if (_.isObject(data) && !_.isDate(data)) {
+        const typedData = data; // 类型断言
+
+        // 使用类型守卫检查 oldSchemaNode 是否为 ObjectSchemaNode
+        let oldExtensible = false;
+        let oldRecursiveExtensible = parentRecursiveExtensible;
+        let oldProperties;
+
+        if (oldSchemaNode) {
+            if (isObjectSchema(oldSchemaNode)) {
+                oldExtensible = oldSchemaNode.extensible === true;
+                oldRecursiveExtensible =
+                    oldSchemaNode.recursiveExtensible === true || parentRecursiveExtensible;
+                oldProperties = oldSchemaNode.properties;
+            } else {
+                console.error(
+                    `Type mismatch: expected object schema but got ${oldSchemaNode.type} at path`
+                );
+            }
+        }
+
+        const schemaNode = {
+            type: 'object',
+            properties: {},
+            // 默认不可扩展，但检查旧 schema、$meta.extensible 或 parentRecursiveExtensible
+            extensible:
+                oldExtensible ||
+                typedData.$meta?.extensible === true ||
+                typedData.$meta?.recursiveExtensible === true ||
+                parentRecursiveExtensible,
+            recursiveExtensible:
+                oldRecursiveExtensible || typedData.$meta?.recursiveExtensible === true,
+        };
+
+        // 处理 template
+        if (typedData.$meta?.template !== undefined) {
+            schemaNode.template = typedData.$meta.template;
+        } else if (oldSchemaNode && isObjectSchema(oldSchemaNode) && oldSchemaNode.template) {
+            schemaNode.template = oldSchemaNode.template;
+        }
+
+        // 暂存父节点的 $meta，以便在循环中使用
+        const parentMeta = typedData.$meta;
+
+        // 从 $meta 中读取信息后，将其从数据中移除，避免污染
+        if (typedData.$meta) {
+            delete typedData.$meta;
+        }
+
+        for (const key in data) {
+            const oldChildNode = oldProperties?.[key];
+            // 传递当前节点的 recursiveExtensible（如果存在）或父节点的 recursiveExtensible
+            // 但如果当前节点明确设置 extensible: false, 则停止递归扩展
+            const childRecursiveExtensible =
+                schemaNode.extensible !== false && schemaNode.recursiveExtensible;
+            const childSchema = generateSchema(
+                typedData[key],
+                oldChildNode,
+                childRecursiveExtensible
+            );
+
+            // 一个属性是否必需？
+
+            // 1. 默认值: 如果父节点可扩展，子节点默认为可选；否则为必需。
+            let isRequired = !schemaNode.extensible;
+
+            // 2. 覆盖规则: 检查父元数据中的 'required' 数组。
+            //    如果父节点的 $meta.required 是一个数组，并且当前 key 在这个数组里，
+            //    则无论默认值是什么，都强制覆盖为必需。
+            if (Array.isArray(parentMeta?.required) && parentMeta.required.includes(key)) {
+                isRequired = true;
+            }
+
+            // 3. 检查旧 schema 的设置，作为最后的参考
+            if (oldChildNode?.required === false) {
+                // 如果旧 schema 明确说这个是可选的，那么以这个为准
+                isRequired = false;
+            } else if (oldChildNode?.required === true) {
+                isRequired = true;
+            }
+
+            schemaNode.properties[key] = {
+                ...childSchema,
+                required: isRequired,
+            };
+        }
+        return schemaNode;
+    }
+    // 处理原始类型
+    const dataType = typeof data;
+    if (dataType === 'string' || dataType === 'number' || dataType === 'boolean') {
+        return { type: dataType };
+    }
+    // 对于其他类型（function, symbol, bigint, undefined 等），默认返回 'any'
+    return { type: 'any' };
+}
+
+function reconcileAndApplySchema(variables) {
+    console.log('Reconciling schema with current data state...');
+
+    // 1. 深拷贝数据，以防 generateSchema 修改原始数据（例如删除 $meta）
+    const currentDataClone = klona(variables.stat_data);
+
+    // 2. 使用改进后的 generateSchema 生成一个与当前数据完全匹配的新 Schema，
+    //    并在此过程中从旧 Schema 继承元数据。
+    const newSchema = generateSchema(currentDataClone, variables.schema);
+
+    // 3. 直接用新 Schema 替换旧 Schema
+    // stat_data 的根节点应该始终是对象，所以生成的 schema 也应该是 ObjectSchemaNode
+    if (!isObjectSchema(newSchema)) {
+        return;
+    }
+
+    // 保留 RootAdditionalProps
+    const newSchemaWithProps = newSchema;
+    if (variables.schema?.strictTemplate !== undefined) {
+        newSchemaWithProps.strictTemplate = variables.schema.strictTemplate;
+    }
+    if (variables.schema?.strictSet !== undefined) {
+        newSchemaWithProps.strictSet = variables.schema.strictSet;
+    }
+    if (variables.schema?.concatTemplateArray !== undefined) {
+        newSchemaWithProps.concatTemplateArray = variables.schema.concatTemplateArray;
+    }
+    if (_.has(variables.stat_data, '$meta.strictTemplate'))
+        newSchemaWithProps.strictTemplate = variables.stat_data['$meta']?.strictTemplate;
+    if (_.has(variables.stat_data, '$meta.strictSet'))
+        newSchemaWithProps.strictSet = variables.stat_data['$meta']?.strictSet;
+    if (_.has(variables.stat_data, '$meta.concatTemplateArray'))
+        newSchemaWithProps.concatTemplateArray = variables.stat_data['$meta']
+            ?.concatTemplateArray;
+
+    variables.schema = newSchemaWithProps;
+
+    console.log('Schema reconciliation complete.');
+}
+
+    return { generateSchema, reconcileAndApplySchema };
+};
+root.__MVU2SHUJUKU_JS_SOURCE_FACTORY__ = function createJsSource(deps = {}) {
+    const acorn = deps.acorn
+        || (typeof globalThis !== 'undefined' && globalThis.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__?.acorn)
+        || (typeof require === 'function' ? require('./vendor/schema-engine-libs').acorn : null);
+    function tokens(source) {
+        if (!acorn) throw new Error('Acorn tokenizer missing');
+        const s = String(source || ''), out = [], lexer = acorn.tokenizer(s, { ecmaVersion: 'latest', allowHashBang: true });
+        let templateStart = 0, templateDepth = 0, previous = '';
+        for (;;) {
+            const t = lexer.getToken(), label = t.type.label;
+            if (label === 'eof') break;
+            if (label === '`') {
+                if (previous === 'template') {
+                    if (--templateDepth === 0) out.push({ value: s.slice(templateStart, t.end), start: templateStart, end: t.end, kind: 'literal' });
+                } else {
+                    if (templateDepth++ === 0) templateStart = t.start;
+                }
+            } else if (!templateDepth) {
+                const kind = ['string', 'num', 'regexp'].includes(label) ? 'literal'
+                    : label === 'name' || t.type.keyword ? 'identifier' : 'punct';
+                out.push({ value: s.slice(t.start, t.end), start: t.start, end: t.end, kind });
+            }
+            previous = label;
+        }
         return out;
     }
     function balancedEnd(source, open) {
@@ -1543,13 +4392,32 @@ root.__MVU2SHUJUKU_REMOTE_SCHEMA_FACTORY__ = function createRemoteSchema({ creat
     }
     function runtimeAdapter(snapshot, content, localize = false) {
         const schemaKey = key(snapshot);
-        const prelude = `await waitGlobalInitialized('Mvu');
-const __remoteRegister = window.registerVariableSchema;
+        const prelude = `const __remoteRegister = window.registerVariableSchema;
+const __remoteOwner = () => {
+    const host = window.parent || window;
+    const context = host.SillyTavern && host.SillyTavern.getContext && host.SillyTavern.getContext();
+    if (!context) return null;
+    const character = context.characters && context.characters[context.characterId];
+    return JSON.stringify([character && character.avatar || context.characterId,
+        context.groupId, context.chatId || context.chat_id || context.chatFile || context.chatFileName]);
+};
+const __remoteOwnerKey = __remoteOwner();
+let __remoteRegistration = Promise.resolve();
 window.registerVariableSchema = function(schema, options) {
     const result = typeof __remoteRegister === 'function' ? __remoteRegister.apply(this, arguments) : undefined;
     if (options && options.type === 'message' && schema && schema.shape && schema.shape.stat_data) {
-        const api = window.parent && window.parent.Mvu || window.Mvu;
-        if (!api || !api.__mvu2shujukuFake || !api.registerSchema(schema.shape.stat_data, ${JSON.stringify(schemaKey)})) throw new Error('远程 Schema 登记未接入当前数据桥');
+        __remoteRegistration = __remoteRegistration.then(async () => {
+            for (let retry = 0; retry < 200; retry++) {
+                if (__remoteOwnerKey !== null && __remoteOwner() !== __remoteOwnerKey) throw new Error('远程 Schema 所属聊天已切换，已取消登记');
+                const api = window.parent && window.parent.Mvu || window.Mvu;
+                if (api && api.__mvu2shujukuFake && typeof api.registerSchema === 'function' && api.registerSchema(schema.shape.stat_data, ${JSON.stringify(schemaKey)})) return;
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+            throw new Error('远程 Schema 登记未接入当前数据桥');
+        });
+        // Some author modules register from a later document-ready callback.
+        // Observe that failure even when the import itself has already completed.
+        __remoteRegistration.catch(error => console.error(error));
     }
     return result;
 };\n`;
@@ -1563,12 +4431,12 @@ window.registerVariableSchema = function(schema, options) {
                     edits.push({ ...token, value: JSON.stringify(new URL(token.value.slice(1, -1), snapshot.runtimeUrl).href) });
             });
             for (const edit of edits.reverse()) body = body.slice(0, edit.start) + edit.value + body.slice(edit.end);
-            return { content: prelude + body, key: schemaKey };
+            return { content: prelude + body + '\nawait __remoteRegistration;', key: schemaKey };
         }
         const found = imports(content).filter(item => item.url === snapshot.url);
         if (found.length !== 1 || !/^\s*(?:await\s+)?import\s*(?:\(\s*)?['"][^'"]+['"]\s*\)?\s*;?\s*$/.test(content))
             throw new Error('远程 Schema 启动脚本包含其他逻辑，尚不能自动接入');
-        return { content: prelude + 'await import(' + JSON.stringify(snapshot.runtimeUrl) + ');', key: schemaKey };
+        return { content: prelude + 'await import(' + JSON.stringify(snapshot.runtimeUrl) + ');\nawait __remoteRegistration;', key: schemaKey };
     }
     return { candidates, classify, resolve, analysisSource, supported, key, runtimeAdapter };
 };
@@ -1802,20 +4670,36 @@ root.__MVU2SHUJUKU_SCHEMA_EXECUTION_FACTORY__ = function createSchemaExecution({
     }
     // This factory is recreated inside the isolated realm, including all callbacks.
     async function execute(libs, program) {
-        const captured=[],pending=[], fallbackFields=new WeakSet(), defaults=new WeakMap(),instrumented=new WeakSet(), namespaceCache=new WeakMap();
+        const captured=[],pending=[], fallbackFields=new WeakSet(), defaults=new WeakMap(),defaultProviders=new WeakMap(),instrumented=new WeakSet(), namespaceCache=new WeakMap();
         const plain=v=>{if(v===undefined)return undefined;const encoded=JSON.stringify(v);if(encoded===undefined)throw new Error('默认值不是JSON值');return JSON.parse(encoded);};
+        function defaultProvider(def){
+            const descriptor=Object.getOwnPropertyDescriptor(def,def.type==='catch'?'catchValue':'defaultValue');
+            return descriptor?.get || (typeof descriptor?.value==='function'?descriptor.value:null);
+        }
+        function rememberedDefault(def){
+            const provider=defaultProvider(def);
+            return defaults.get(def) || (provider && defaultProviders.get(provider));
+        }
+        function remember(result,key,value){
+            if(!['default','prefault','catch'].includes(key)||!result?._zod)return;
+            const def=result._zod.def,metadata=typeof value==='function'?{dynamic:true}:{value:plain(value),kind:key};
+            defaults.set(def,metadata);
+            // Zod clones definitions when adding checks, retaining these exact
+            // providers. Inspect descriptors without invoking their getters.
+            const provider=defaultProvider(def);if(provider)defaultProviders.set(provider,metadata);
+        }
         function instrument(schema){
             if(!schema?._zod||instrumented.has(schema))return schema;
             instrumented.add(schema);
             const methods=new Set();for(let p=schema;p&&p!==Object.prototype;p=Object.getPrototypeOf(p))Object.getOwnPropertyNames(p).forEach(key=>methods.add(key));
             for(const key of methods)if(typeof schema[key]==='function'&&!['constructor','parse','safeParse','parseAsync','safeParseAsync'].includes(key)){
-                const original=schema[key];schema[key]=function(...args){const result=Reflect.apply(original,schema,args);if(['default','prefault'].includes(key)&&result?._zod)defaults.set(result._zod.def,typeof args[0]==='function'?{dynamic:true}:{value:plain(args[0]),kind:key});return instrument(result);};
+                const original=schema[key];schema[key]=function(...args){const result=Reflect.apply(original,schema,args);remember(result,key,args[0]);return instrument(result);};
             }
             return schema;
         }
         function namespace(object){
             if(namespaceCache.has(object))return namespaceCache.get(object);
-            const proxy=new Proxy(object,{get(target,key){const value=Reflect.get(target,key);if(key==='z')return proxy;if(typeof value==='function')return new Proxy(value,{apply(fn,thisArg,args){return instrument(Reflect.apply(fn,target,args));},construct(fn,args){return instrument(Reflect.construct(fn,args));}});if(value&&typeof value==='object')return namespace(value);return value;}});
+            const proxy=new Proxy(object,{get(target,key){const value=Reflect.get(target,key);if(key==='z')return proxy;if(typeof value==='function')return new Proxy(value,{apply(fn,thisArg,args){const result=Reflect.apply(fn,target,args);remember(result,key,args[1]);return instrument(result);},construct(fn,args){return instrument(Reflect.construct(fn,args));}});if(value&&typeof value==='object')return namespace(value);return value;}});
             namespaceCache.set(object,proxy);return proxy;
         }
         const __field=value=>{try{return value();}catch(error){if(error.name!=='ReferenceError'&&!/Schema.*(?:依赖|构造依赖)/.test(error.message))throw error;const fallback=libs.zod.unknown().optional();fallbackFields.add(fallback);return fallback;}};
@@ -1832,6 +4716,34 @@ root.__MVU2SHUJUKU_SCHEMA_EXECUTION_FACTORY__ = function createSchemaExecution({
         for(let n=0;n<8;n++){const count=pending.length;await Promise.all(pending);await Promise.resolve();if(count===pending.length)break;}
         if(!captured.length)throw new Error('隔离执行后未登记 Schema');
         const unsupported=[],seen=new Set();let visited=0;
+        // Catch/default outputs bypass the inner validator. Keep its input rules, but
+        // allow their statically captured outputs in storage; never call a callback.
+        function allowOutput(node,value){
+            if(value===undefined){node.optional=true;return node;}
+            if(value===null){node.nullable=true;return node;}
+            const compatible=node.kind==='text'&&typeof value==='string'
+                ||node.kind==='number'&&typeof value==='number'
+                ||node.kind==='boolean'&&typeof value==='boolean';
+            if(compatible){
+                node.outputFallbacks=[...new Set([...(node.outputFallbacks||[]),value])];
+                if(node.kind==='number'&&!Number.isInteger(value))node.integer=false;
+                return node;
+            }
+            if(node.kind==='object'&&typeof value==='object'&&!Array.isArray(value)){
+                for(const [key,child]of Object.entries(value)){
+                    if(node.dynamic&&node.value)node.value=allowOutput(node.value,child);
+                    else if(node.fields?.[key])node.fields[key]=allowOutput(node.fields[key],child);
+                    else node.passthrough=true;
+                }
+                return node;
+            }
+            if(node.kind==='array'&&Array.isArray(value)){
+                for(const child of value)node.element=allowOutput(node.element||{kind:'unknown'},child);
+                return node;
+            }
+            return {kind:'unknown',optional:node.optional,nullable:node.nullable,desc:node.desc,
+                ...(node.hasDefault?{hasDefault:true,defaultValue:node.defaultValue,defaultKind:node.defaultKind}:{}),dynamicDefault:node.dynamicDefault};
+        }
         function walk(schema,path=[],depth=0){
             if(fallbackFields.has(schema)){unsupported.push({path:path.join('.'),kind:'字段构造依赖环境（完整JSON，不补默认）'});return{kind:'unknown',optional:true,unresolved:true};}
             if(!schema?._zod||depth>48||seen.has(schema)||++visited>20000){unsupported.push({path:path.join('.'),kind:'递归或无法展开的结构（完整JSON）'});return{kind:'unknown',unresolved:true};}
@@ -1841,11 +4753,15 @@ root.__MVU2SHUJUKU_SCHEMA_EXECUTION_FACTORY__ = function createSchemaExecution({
                 if(type==='optional')node.optional=true;if(type==='nullable')node.nullable=true;
                 if(type==='nonoptional')delete node.optional;
                 if(type==='default'||type==='prefault'){
-                    const value=defaults.get(def);
+                    const value=rememberedDefault(def);
                     if(!value||value.dynamic){node.dynamicDefault=true;unsupported.push({path:path.join('.'),kind:'动态默认值（不用于静态开局）'});}
-                    else{node.hasDefault=true;node.defaultValue=value.value;node.defaultKind=type;}
+                    else{if(type==='default')node=allowOutput(node,value.value);node.hasDefault=true;node.defaultValue=value.value;node.defaultKind=type;}
                 }
-                if(type==='catch'){node.dynamicDefault=true;unsupported.push({path:path.join('.'),kind:'catch回退（运行时执行）'});}
+                if(type==='catch'){
+                    const value=rememberedDefault(def);
+                    node=value&&!value.dynamic?allowOutput(node,value.value):{kind:'unknown',optional:node.optional,nullable:node.nullable,desc:node.desc};
+                    node.dynamicDefault=true;unsupported.push({path:path.join('.'),kind:'catch回退（运行时执行）'});
+                }
             }else if(type==='object'){
                 node={kind:'object',fields:{},dynamic:false};
                 for(const [key,child]of Object.entries(def.shape))Object.defineProperty(node.fields,key,{value:walk(child,path.concat(key),depth+1),enumerable:true,writable:true,configurable:true});
@@ -1925,7 +4841,7 @@ root.__MVU2SHUJUKU_SCHEMA_EXECUTION_BROWSER_FACTORY__ = function createSchemaExe
     return createExecution({libraries,runAsync,runSync(){throw new Error('浏览器转换注册Schema须调用异步转换入口');}});
 };
 root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(dependencies) {
-    const { createJsSource, getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, physicalTableName, maskJsStringsAndComments, createStatusUsage, isPromptVisibleColumn, isMvuOutputDocument = () => false, vwdExperimental = () => false, canValidateRegisteredSchema = () => false } = dependencies;
+    const { createJsSource, getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, physicalTableName, maskJsStringsAndComments, ejsScriptBlocks, createStatusUsage, isPromptVisibleColumn, isMvuOutputDocument = () => false, vwdExperimental = () => false, canValidateRegisteredSchema = () => false } = dependencies;
     function leafInfo(v) {
             if (Array.isArray(v)) {
                 return { value: v.length > 0 ? v[0] : '', desc: v.length > 1 ? String(v[1]) : '' };
@@ -3502,7 +6418,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 if (incoming.value) out.value = mergeZodSchemaNodes(out.value, incoming.value) || incoming.value;
                 if (incoming.keySchema) out.keySchema = mergeZodSchemaNodes(out.keySchema, incoming.keySchema) || incoming.keySchema;
             }
-            for (const key of ['min', 'max', 'enum', 'desc', 'integer', 'hasDefault', 'defaultValue', 'defaultKind', 'dynamicDefault', 'unresolved', 'passthrough', 'coerce', 'clampTransform', 'nullable', 'optional']) {
+            for (const key of ['min', 'max', 'enum', 'desc', 'integer', 'outputFallbacks', 'hasDefault', 'defaultValue', 'defaultKind', 'dynamicDefault', 'unresolved', 'passthrough', 'coerce', 'clampTransform', 'nullable', 'optional']) {
                 if (incoming[key] !== undefined) out[key] = incoming[key];
             }
             return out;
@@ -4187,7 +7103,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             return blobs;
         }
     
-    const scanStatusUsage = createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSchemaFieldName, cardTextBlobs });
+    const scanStatusUsage = createStatusUsage({ maskJsStringsAndComments, ejsScriptBlocks, splitJsTopLevelArgs, isSchemaFieldName, cardTextBlobs });
 
     function isPairLeaf(v) {
             return Array.isArray(v) && v.length === 2 && typeof v[1] === 'string';
@@ -4200,6 +7116,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
     function collectColumns(obj, prefixPath, report, opts = {}) {
             const cols = [];
             const usedIdents = new Set(['row_id']);
+            const flattenColumns = opts.flattenObjectColumns || flattenFixedObjectColumns;
             for (const key of Object.keys(obj)) {
                 const v = obj[key];
                 const li = leafInfo(v);
@@ -4209,12 +7126,15 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     cols.push(optionalJsonContainerColumn(key, v, path, fixedSchema, usedIdents));
                     continue;
                 }
-                if (fixedObjectSchema(fixedSchema) && isPlainObject(v) && Object.keys(v).length === 0) {
-                    for (const c of flattenFixedObjectColumns(key, v, fixedSchema, { rootPath: prefixPath, relativeRoot: [key] })) {
+                if (fixedObjectSchema(fixedSchema) && isPlainObject(v)) {
+                    const fixedCols = flattenColumns(key, v, fixedSchema, { rootPath: prefixPath, relativeRoot: [key] });
+                    if (Object.keys(v).length === 0 || fixedCols.length === 1 && fixedCols[0].isObject && fixedCols[0].zh === key) {
+                      for (const c of fixedCols) {
                         c.ident = toIdent(c.zh, usedIdents, 'column');
                         cols.push(c);
+                      }
+                      continue;
                     }
-                    continue;
                 }
                 // 普通数组是明确的值形状（日志/勋章列表等），优先按 JSON 单元格保留；
                 // 不能被宽泛的动态字典规则改造成行对象。二元 [value, desc] 仍走叶子分支。
@@ -4300,7 +7220,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 }
                 const looksLikeEntryDict = allObject && sharedChildFields && sharedChildFields.size > 0;
                 if (fixedObjectFromValue(v) && !looksLikeEntryDict) {
-                    const fixedCols = flattenFixedObjectColumns(key, v, null, { rootPath: prefixPath, relativeRoot: [key] });
+                    const fixedCols = flattenColumns(key, v, null, { rootPath: prefixPath, relativeRoot: [key] });
                     for (const c of fixedCols) {
                         c.ident = toIdent(c.zh, usedIdents, 'column');
                         cols.push(c);
@@ -4411,6 +7331,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 path,
                 value,
                 desc: desc || '对象（JSON 存储，读取时还原）',
+                _generatedDescription: !desc,
                 type: 'TEXT',
                 range: null,
                 ident: toIdent(key, usedIdents, 'column'),
@@ -4424,7 +7345,9 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
         if (value !== undefined) {
             try { encoded = JSON.stringify(value); } catch (e) { encoded = undefined; }
         }
-        return { zh: key, path, value: encoded, desc: describeObjectSchema(node) || '可空对象/数组（JSON 整体存储）',
+        return { zh: key, path, value: encoded, desc: describeObjectSchema(node)
+                || (node && node.kind === 'unknown' ? '完整 JSON 值（类型遵循原字段规则）' : '可空对象/数组（JSON 整体存储）'),
+            _schemaDescription: true,
             type: 'TEXT', range: null, ident: toIdent(key, usedIdents, 'column'), isObject: true,
             jsonDefaultMissing: !!(node && node.kind === 'unknown'),
             logicalType: 'jsonObjectOptional', jsonKind: node && node.kind === 'unknown' ? 'any' : node && node.kind === 'array' ? 'array' : 'object', objectSchema: node || null };
@@ -4446,18 +7369,23 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             return out;
         }
     
-    function describeObjectSchema(node) {
-            if (!node) return '';
-            if (node.kind === 'array') return 'JSON 数组；示例：[]';
-            if (node.kind !== 'object') return '';
-            const fields = Object.entries(node.fields || {});
-            const allowed = fields.map(([key, child]) => `${key}(${schemaTypeLabel(child)})`).join('、');
-            const parts = ['JSON 对象'];
-            if (allowed) parts.push(`允许键：${allowed}`);
-            if (node.dynamic) parts.push('可使用运行期动态键');
-            if (fields.length) parts.push(`示例：${JSON.stringify(schemaExample(node))}`);
-            return parts.join('；');
+    // Keep text the author supplied, without synthesizing a second schema manual.
+    // SQL examples and executable constraints are generated separately.
+    function authoredSchemaDescriptions(node, path = []) {
+        if (!node) return [];
+        const descriptions = node.desc ? [(path.length ? path.join('.') + '：' : '') + node.desc] : [];
+        if (node.dynamic) descriptions.push(...authoredSchemaDescriptions(node.value, [...path, '<动态键>']));
+        else for (const [key, child] of Object.entries(node.fields || {})) {
+            if (!key.startsWith('$')) descriptions.push(...authoredSchemaDescriptions(child, [...path, key]));
         }
+        if (node.kind === 'array') descriptions.push(...authoredSchemaDescriptions(node.element, [...path, '<数组元素>']));
+        return descriptions;
+    }
+
+    function describeObjectSchema(node) {
+        if (!node || !['object', 'array'].includes(node.kind)) return '';
+        return [node.kind === 'array' ? 'JSON 数组' : 'JSON 对象', ...authoredSchemaDescriptions(node)].join('\n');
+    }
     
     function fixedObjectFromValue(value) {
             if (!isPlainObject(value) || Object.keys(value).length === 0) return false;
@@ -4476,6 +7404,31 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             const out = [];
             const rootPath = Array.isArray(opts.rootPath) ? opts.rootPath : [];
             const relativeRoot = Array.isArray(opts.relativeRoot) ? opts.relativeRoot : [rootName];
+            // Decide the boundary from structure, not a sampled record's size or
+            // field names. Keep mixed containers together so object operations
+            // retain dynamic, missing and private descendants.
+            const needsWholeJson = (node, sample, seen = new Set()) => {
+                if (node) {
+                    if (seen.has(node)) return true;
+                    if (node.kind === 'unknown' || node.kind === 'array' || node.dynamic || node.passthrough
+                        || node.kind === 'object' && (node.optional || node.nullable)) return true;
+                    seen.add(node);
+                    const result = Object.entries(node.fields || {}).some(([key, child]) =>
+                        key.startsWith('$') || needsWholeJson(child, undefined, seen));
+                    seen.delete(node);
+                    if (result) return true;
+                }
+                if (Array.isArray(sample)) return true;
+                return isPlainObject(sample) && Object.entries(sample).some(([key, child]) =>
+                    key.startsWith('$') || needsWholeJson(null, child, seen));
+            };
+            if (opts.hasHiddenFields || needsWholeJson(schema, value)) {
+                const column = optionalJsonContainerColumn(rootName, value, [...rootPath, rootName], schema
+                    || { kind: 'object' }, new Set());
+                column.itemPath = relativeRoot;
+                column.jsonDefaultMissing = true;
+                return [column];
+            }
             const walk = (displayParts, pathParts, relativeParts, currentValue, currentSchema) => {
                 const schemaFields = fixedObjectSchema(currentSchema) ? currentSchema.fields : null;
                 const valueFields = fixedObjectFromValue(currentValue) ? currentValue : null;
@@ -4510,6 +7463,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         itemPath: [...relativeParts, key],
                         value: v,
                         desc: isJson ? (describeObjectSchema(childSchema) || '动态/未知结构（JSON 存储）') : '',
+                        _schemaDescription: isJson,
                         type: kind === 'number' || kind === 'boolean' || typeof childValue === 'number' || typeof childValue === 'boolean' ? 'INTEGER' : 'TEXT',
                         logicalType: kind || (typeof childValue === 'boolean' ? 'boolean' : (typeof childValue === 'number' ? 'number' : '')),
                         range: null,
@@ -4610,6 +7564,23 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 const node = nullableNodeAt(pathArr);
                 if (node) return node.kind === 'array';
                 return ((shapeFieldTypes[pathArr[0]] || {})[pathArr[1]] === 'array');
+            };
+            // Public samples omit $ values. Inspect only their presence in the
+            // original objects; never feed private values into DEFAULT/examples.
+            const hasPrivateDescendant = value => value && typeof value === 'object'
+                && Object.entries(value).some(([key, child]) => key.startsWith('$') || hasPrivateDescendant(child));
+            const flattenObjectColumns = (name, value, node, opts = {}) => {
+                const path = [...(opts.rootPath || []), name];
+                let candidates = options.originalInitvar ? [options.originalInitvar] : [];
+                for (let index = 0; index < path.length; index++) {
+                    const prefix = path.slice(0, index);
+                    if (isDynamicPath(prefix) || opts.rootRows && index === 1) {
+                        candidates = candidates.flatMap(v => isPlainObject(v) ? Object.values(v) : []);
+                    }
+                    candidates = candidates.map(v => v && v[path[index]]).filter(v => v !== undefined);
+                }
+                return flattenFixedObjectColumns(name, value, node, { ...opts,
+                    hasHiddenFields: candidates.some(hasPrivateDescendant) });
             };
             const groupNameSet = new Set(Object.keys(initvar));
             for (const name of Object.keys(shapeInfo && shapeInfo.branchRootNodes || {})) groupNameSet.add(name);
@@ -4724,7 +7695,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     column.jsonKind = kind;
                     column.objectSchema = schema || null;
                     const schemaDesc = describeObjectSchema(schema);
-                    if (schemaDesc) column.desc = schemaDesc;
+                    if (schemaDesc) { column.desc = schemaDesc; column._schemaDescription = true; }
                     if (zodField && (zodField.nullable || zodField.optional)) {
                         column.logicalType = 'jsonObjectOptional';
                         if (column.value !== undefined && typeof column.value !== 'string') column.value = JSON.stringify(column.value);
@@ -4815,6 +7786,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             };
             function recordScalarColumn(name, path, node, kind, used) {
                 return { zh: name, path, value: '',
+                    _generatedDescription: !(node && node.desc),
                     desc: node && node.desc || (kind === 'number' ? '条目数值' : kind === 'boolean' ? '条目布尔值（1=true，0=false）'
                         : kind === 'mixed' ? '条目值（JSON 标量，保留字符串/数字/布尔/null 类型）' : '条目描述'),
                     type: scalarSqlType(kind, node),
@@ -4986,7 +7958,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 // 不从顶层收集子表，避免“每角色一张字段相同的重复表”。
                 const columns = kind === 'rows'
                     ? []
-                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, hasDeclaredDescendant, isArrayPath, objectSchemaAt: nullableNodeAt,
+                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, hasDeclaredDescendant, isArrayPath, objectSchemaAt: nullableNodeAt, flattenObjectColumns,
                         isFixedPath: path => (objectDynamicOverrides && objectDynamicOverrides.get(path.join('.')) === false) ||
                             (!isDynamicPath(path) && fixedFieldParents.has(path.join('.'))) });
                 if (kind !== 'rows') {
@@ -4998,7 +7970,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                             try { actual = JSON.parse(c.value); } catch (e) { actual = undefined; }
                         }
                         if (c.isObject && c.logicalType !== 'jsonObjectOptional' && (fixedObjectSchema(declaredSchema) || ((!declaredSchema || !declaredSchema.dynamic) && fixedObjectFromValue(actual)))) {
-                            const flatCols = flattenFixedObjectColumns(c.zh, actual, declaredSchema, {
+                            const flatCols = flattenObjectColumns(c.zh, actual, declaredSchema, {
                                 rootPath: [groupName],
                                 relativeRoot: [c.zh],
                             });
@@ -5081,9 +8053,10 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                             }
                             const declaredObjectSchema = (shapeObjectSchemas[groupName] || {})[subKey];
                             if (!(declaredObjectSchema && (declaredObjectSchema.nullable || declaredObjectSchema.optional)) && (fixedObjectSchema(declaredObjectSchema) || ((!declaredObjectSchema || !declaredObjectSchema.dynamic) && fixedObjectFromValue(sv)))) {
-                                const flatCols = flattenFixedObjectColumns(subKey, sv, declaredObjectSchema, {
+                                const flatCols = flattenObjectColumns(subKey, sv, declaredObjectSchema, {
                                     rootPath: [groupName],
                                     relativeRoot: [subKey],
+                                    rootRows: true,
                                 });
                                 if (flatCols.length) {
                                     flattenedRoots.add(subKey);
@@ -5144,7 +8117,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         }
                         const fixedSamples = samples.filter(fixedObjectFromValue);
                         if (!fixedSamples.length) continue;
-                        const flatCols = flattenFixedObjectColumns(rootField, fixedSamples[0], declared, { rootPath: [groupName], relativeRoot: [rootField] });
+                        const flatCols = flattenObjectColumns(rootField, fixedSamples[0], declared, { rootPath: [groupName], relativeRoot: [rootField] });
                         if (!flatCols.length) continue;
                         flattenedRoots.add(rootField);
                         objFields.delete(rootField);
@@ -5190,7 +8163,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     // 固定嵌套结构必须直接从 type schema 生成展平列。
                     for (const [rootField, rootSchema] of Object.entries(shapeObjectSchemas[groupName] || {})) {
                         if (!fixedObjectSchema(rootSchema) || rootSchema.nullable || rootSchema.optional || flattenedRoots.has(rootField)) continue;
-                        const flatCols = flattenFixedObjectColumns(rootField, undefined, rootSchema, {
+                        const flatCols = flattenObjectColumns(rootField, undefined, rootSchema, {
                             rootPath: [groupName],
                             relativeRoot: [rootField],
                         });
@@ -5464,7 +8437,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                         const rootField = c.path && c.path.length >= 2 ? c.path[1] : c.zh;
                         const declaredSchema = (shapeObjectSchemas[groupName] || {})[rootField];
                         if (c.isObject && c.logicalType !== 'jsonObjectOptional' && fixedObjectSchema(declaredSchema)) {
-                            const flat = flattenFixedObjectColumns(rootField, undefined, declaredSchema, {
+                            const flat = flattenObjectColumns(rootField, undefined, declaredSchema, {
                                 rootPath: [groupName], relativeRoot: [rootField],
                             });
                             if (flat.length) { finalSingletonCols.push(...flat); continue; }
@@ -5975,6 +8948,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     : ['INTEGER', 'REAL'].includes(c.type) ? 'number' : 'text';
                 c.type = scalarSqlType(kind, node || c);
                 if (!c.isPair) c.logicalType = kind;
+                if (node?.outputFallbacks) c.outputFallbacks = node.outputFallbacks.slice();
                 if (node && ['text', 'boolean'].includes(node.kind)) c.range = null;
                 if (kind === 'number' && node && Number.isFinite(node.min) && Number.isFinite(node.max)) c.range = [node.min, node.max];
             }
@@ -6024,9 +8998,50 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
 
     // 在已有规则/列推导完成后合并，复用其完整路径与规则归属，不另猜一套结构。
     // true 选择全部顶层容器；路径列表用于只选择指定顶层组。既有完整 JSON 组直接复用。
+    // Keep one ownership boundary wherever separate rows cannot identify an
+    // original object operation. Stable dictionary records remain ordinary rows.
+    function prepareStatStorageLayout(schema, initvar, shapeInfo, report, options = {}) {
+        const root = shapeInfo.zodDefaultsRoot;
+        // MVU generateSchema defaults to a closed root; only the actual root
+        // metadata can open it. A template by itself is not an open declaration.
+        const mvuRoot = shapeInfo.mvuMetadata?.get('');
+        const mvuRootOpen = mvuRoot?.kind === 'object' && mvuRoot.extensible === true;
+        const openRoot = root?.kind === 'object' && (root.dynamic || root.passthrough) ? root
+            : mvuRootOpen ? { ...(root?.kind === 'object' ? root : { kind: 'object', fields: {} }),
+                dynamic: true, value: root?.value || { kind: 'unknown' } } : null;
+        if (openRoot) {
+            const cardName = String(options.cardName || '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '').trim();
+            const name = (cardName || '角色') + '表', tableName = name;
+            const column = optionalJsonContainerColumn('内容', initvar, [], openRoot, new Set(['row_id']));
+            column.jsonDefaultMissing = true;
+            column.desc = '本列完整保存原 stat_data（JSON）；字段名和嵌套结构保持原样，按原变量更新要求修改。';
+            const descriptions = authoredSchemaDescriptions(openRoot);
+            if (descriptions.length) column.desc += '\n' + descriptions.join('\n');
+            const checks = schema.flatMap(g => g.groupChecks || []);
+            report.note('原 Schema 或 MVU 根元数据允许根对象动态键；直接映射完整根对象，不另建未映射变量兜底表。');
+            return [{ name, tableName, ident: physicalTableName(tableName), kind: 'singleton',
+                keyCol: '', keyValue: '', valueCol: column.zh, rootContainer: true,
+                columns: [column], rows: [[1, column.value]], childTables: [],
+                source: 'declared-root-container', containerSchema: openRoot, groupChecks: checks }];
+        }
+        const entries = buildLayout(schema).entries;
+        const selected = new Set();
+        for (const entry of entries) {
+            const group = schema.find(g => g.tableName === entry.table);
+            const rootKey = (entry.path?.length ? entry.path : entry.writePaths?.[0] || [entry.group])[0];
+            if (String(rootKey).startsWith('$')) selected.add(rootKey);
+            if (['array', 'pathArray', 'nestedArray', 'nestedRows'].includes(entry.kind)
+                || group.childTables?.length || group.vwdMetaZh) {
+                selected.add((entry.path?.length ? entry.path : entry.writePaths?.[0] || [entry.group])[0]);
+            }
+        }
+        return preserveJsonContainers(schema, initvar, [...selected], report);
+    }
+
     function preserveJsonContainers(schema, initvar, selection, report) {
-        const selected = new Set(Object.keys(initvar || {}).filter(key => key !== '$meta'
-            && (isPlainObject(initvar[key]) || Array.isArray(initvar[key]))
+        const candidates = [...new Set([...Object.keys(initvar || {}), ...(Array.isArray(selection) ? selection.filter(key => String(key).startsWith('$')) : [])])];
+        const selected = new Set(candidates.filter(key => key !== '$meta'
+            && (isPlainObject(initvar[key]) || Array.isArray(initvar[key]) || String(key).startsWith('$'))
             && (selection === true || Array.isArray(selection) && selection.includes(key))));
         if (!selected.size) return schema;
         const layout = buildLayout(schema), byTable = new Map(layout.entries.map(e => [e.table, e]));
@@ -6037,14 +9052,14 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
         for (const root of selected) {
             const members = schema.filter(g => owners.get(g) === root);
             if (!members.length) continue;
-            if (members.length === 1 && members[0].valueCol) {
+            if (!root.startsWith('$') && members.length === 1 && members[0].valueCol && !members[0].vwdMetaZh) {
                 const group = members[0];
                 replacements.set(root, { ...group, columns: group.columns.map(c => c.zh === group.valueCol
                     ? { ...c, jsonDefaultMissing: true } : c) });
                 continue;
             }
             const first = members.find(g => prefixOf(byTable.get(g.tableName)).length === 1) || members[0];
-            const raw = initvar[root], node = { kind: Array.isArray(raw) ? 'array' : 'object' };
+            const raw = initvar[root], node = { kind: root.startsWith('$') ? 'unknown' : Array.isArray(raw) ? 'array' : 'object' };
             const column = optionalJsonContainerColumn('内容', raw, [root], node, new Set(['row_id']));
             // 初始数据由 content/seedRows 保存。DDL 不再复制完整 JSON 初值；
             // 新增空身份行的 SQL 默认值表示缺失，和已有完整容器协议一致。
@@ -6067,19 +9082,20 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     else if (entry.kind === 'rows' || entry.kind === 'nestedRows')
                         path = [...prefix, '*', ...(entry.scalarValueCol === col.zh ? [] : registered.path || [col.zh])];
                     else path = [...prefix, '*'];
+                    if (path.some(key => String(key).startsWith('$'))) continue;
                     const pair = col.isPair === true;
                     const hints = [];
                     if (pair) hints.push('[当前值, 说明]，当前说明直接保存在 JSON 第二项');
-                    else if (col.desc) hints.push(col.desc);
+                    else if (col._schemaDescription) hints.push(...authoredSchemaDescriptions(col.objectSchema));
+                    else if (col.desc && !col._generatedDescription) hints.push(col.desc);
                     if (col.format) hints.push('格式 ' + col.format);
-                    if (Array.isArray(col.range)) hints.push('范围 ' + col.range.join('～'));
-                    if (Array.isArray(col.enum) && col.enum.length) hints.push('取值 ' + JSON.stringify(col.enum));
+                    if (col.aiReadonly) hints.push('只读（作者脚本仍可更新）');
                     hints.push(...(Array.isArray(col.check) ? col.check : col.check ? [col.check] : []));
                     if (hints.length) descriptions.push(path.join('.') + '：' + hints.join('；'));
                     const valuePath = [...path.slice(1), ...(pair ? [0] : [])];
                     const constraints = [];
                     if (col.range || Array.isArray(col.enum) && col.enum.length <= 8)
-                        constraints.push({ path: valuePath, range: col.range, enum: col.enum });
+                        constraints.push({ path: valuePath, range: col.range, enum: col.enum, outputFallbacks: col.outputFallbacks });
                     for (const check of col.jsonPathChecks || [])
                         constraints.push({ ...check, path: [...valuePath, ...check.path] });
                     for (const check of constraints) {
@@ -6090,14 +9106,22 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             }
             column.desc = '完整保存 ' + root + ' 的 JSON 数据；字段名和嵌套结构保持原样。'
                 + '\n缺失用空单元格，null 用 JSON null，空容器用 {} 或 []。'
-                + (descriptions.length ? '\n字段说明与规则：\n' + [...new Set(descriptions)].join('\n') : '');
+                + (descriptions.length ? '\n' + [...new Set(descriptions)].join('\n') : '');
             if (jsonChecks.length) column.jsonPathChecks = jsonChecks;
+            const whollyReadonly = g => {
+                if (g.aiReadonly) return true;
+                const fields = g.columns.filter(c => c.zh !== '_扩展数据' && !isVwdMetaColumn(c)
+                    && !(c.path || c.itemPath || []).some(key => String(key).startsWith('$')));
+                return g.kind === 'singleton' && fields.length > 0 && fields.every(c => c.aiReadonly);
+            };
             replacements.set(root, { name: root, tableName: first.tableName, ident: first.ident,
                 kind: 'singleton', keyCol: '', keyValue: root, valueCol: column.zh,
+                ...(root.startsWith('$') ? { privateRoot: true } : {}),
                 columns: [column], rows: [[1, column.value]], childTables: [], source: 'full-json-container',
-                containerSchema: node, groupChecks: [...new Set(checks)], reminders: [...new Set(reminders)], wildcardRules: [] });
+                containerSchema: node, groupChecks: [...new Set(checks)], reminders: [...new Set(reminders)], wildcardRules: [],
+                aiReadonly: members.every(whollyReadonly) });
             report.note(`完整 JSON 容器「${root}」合并 ${members.length} 张来源表；空状态和嵌套数据原样保存，SQLite 可用 JSON 路径局部更新。`);
-            if (dynamicConstraints) report.note(`完整 JSON 容器「${root}」的动态记录/数组元素约束保留在说明中；SQLite CHECK 不遍历任意元素。`);
+            if (dynamicConstraints) report.note(`完整 JSON 容器「${root}」的 SQLite CHECK 不遍历任意元素；原运行时校验与业务要求保持原有处理。`);
         }
         const emitted = new Set(), out = [];
         for (const group of schema) {
@@ -6333,43 +9357,41 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 const collectionChecks = allWildcardRules.filter(e =>
                     groupWritePaths.some(path => rulePathMatch(e.path, path))).flatMap(e => e.checks || []);
                 g.groupChecks = [...new Set([...g.groupChecks, ...containerChecks, ...collectionChecks])];
-                if (g.containerSchema && (g.valueCol || g.scalarValueCol)) {
-                    // 容器没有拆列，字段的说明和约束仍需出现在 note 中。
-                    // 直接保留来源路径，不能把内部字段规则误挂成对「内容」整列的数值约束。
-                    const descriptions = [], jsonPathChecks = [];
-                    const containerPath = g.containerPath || [g.name];
-                    const column = g.columns.find(c => c.zh === (g.valueCol || g.scalarValueCol));
+                const containerColumns = g.columns.filter(column =>
+                    g.containerSchema && column.zh === (g.valueCol || g.scalarValueCol)
+                    || column.isObject && ['object', 'array'].includes(column.objectSchema?.kind));
+                for (const column of containerColumns) {
+                    // Author descriptions remain bound to the container. Executable
+                    // constraints do not require a synthesized prompt inventory.
+                    const jsonPathChecks = [];
+                    const standalone = !!(g.containerSchema && column.zh === (g.valueCol || g.scalarValueCol));
+                    const containerPath = standalone ? g.containerPath || [g.name] : column.path;
+                    const containerSchema = standalone ? g.containerSchema : column.objectSchema;
                     let dynamicConstraints = false;
                     const visit = (node, path, dynamic = false) => {
                         if (!node) return;
-                        const info = [schemaTypeLabel(node)];
-                        if (node.nullable) info.push('可为 null');
-                        if (node.optional) info.push('可缺失');
-                        if (Number.isFinite(node.min)) info.push('最小值/长度 ' + node.min);
-                        if (Number.isFinite(node.max)) info.push('最大值/长度 ' + node.max);
-                        if (Array.isArray(node.enum) && node.enum.length) info.push('取值 ' + JSON.stringify(node.enum));
-                        if (node.desc) info.push(node.desc);
                         const field = path[path.length - 1];
-                        const format = (ruleFormats[g.name] || {})[field];
-                        if (format) info.push('格式 ' + format);
                         const range = node.kind === 'number' && Number.isFinite(node.min) && Number.isFinite(node.max)
                             ? [node.min, node.max] : (node.kind === 'number' || ruleNumeric.has(field) ? ruleRanges[field] : null);
                         const enumValues = node.enum || ruleEnums[field];
-                        if (range) info.push('范围 ' + range.join('～'));
-                        if (!node.enum && Array.isArray(enumValues)) info.push('取值 ' + JSON.stringify(enumValues));
                         if (path.length > containerPath.length && !['object', 'array'].includes(node.kind) && (range || Array.isArray(enumValues) && enumValues.length <= 8)) {
                             if (dynamic) dynamicConstraints = true;
-                            else jsonPathChecks.push({ path: path.slice(containerPath.length), range, enum: enumValues });
+                            else jsonPathChecks.push({ path: path.slice(containerPath.length), range, enum: enumValues, outputFallbacks: node.outputFallbacks });
                         }
-                        descriptions.push(path.join('.') + '：' + info.join('；'));
                         if (node.dynamic) visit(node.value, [...path, '<动态键>'], true);
                         else for (const [key, child] of Object.entries(node.fields || {})) visit(child, [...path, key], dynamic);
                         if (node.kind === 'array') visit(node.element, [...path, '<数组元素>'], true);
                     };
-                    visit(g.containerSchema, containerPath);
-                    column.desc = '本列保存整个 ' + containerPath.join('.') + '，JSON 内部结构与约束：\n' + descriptions.join('\n');
+                    visit(containerSchema, containerPath);
+                    if (standalone) {
+                        column.desc = '本列完整保存 ' + containerPath.join('.') + ' 的 JSON 数据；字段名和嵌套结构保持原样。';
+                        column._schemaDescription = true;
+                        const descriptions = authoredSchemaDescriptions(containerSchema, containerPath);
+                        if (descriptions.length) column.desc += '\n' + descriptions.join('\n');
+                    }
                     if (jsonPathChecks.length) column.jsonPathChecks = jsonPathChecks;
-                    if (dynamicConstraints) report.note(`可空容器「${containerPath.join('.')}」的动态键/数组元素范围与枚举保留在字段说明；SQLite CHECK 无法遍历任意元素，本表不承诺执行这些内部约束。`);
+                    if (dynamicConstraints) report.note(`可空容器「${containerPath.join('.')}」的 SQLite CHECK 不遍历任意元素；原运行时校验与业务要求保持原有处理。`);
+                    if (!standalone) continue;
                     const checks = ruleCheckPaths.filter(e => {
                         const path = Array.isArray(e.path) ? e.path : String(e.path || '').split('.');
                         const prefix = containerPath.slice(0, g.scalarValueCol ? -1 : undefined);
@@ -6542,6 +9564,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                     const entry = {
                         kind: 'json',
                         scalarType: g.scalarType,
+                        ...(g.publicFallback ? { publicFallback: true } : {}),
                         group: g.name,
                         table: g.tableName,
                         keyCol: g.keyCol,
@@ -6704,6 +9727,9 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 if (!group) continue;
                 const names = group.columns.filter(c => c.omitMissingParents).map(c => c.zh);
                 if (names.length) entry.omitMissingParents = names;
+                if (group.overflowCol) entry.overflowCol = group.overflowCol;
+                if (group.statStorageVersion) entry.statStorageVersion = group.statStorageVersion;
+                if (group.rootContainer) entry.rootContainer = true;
             }
             return { entries, pathIndex, tableByName };
         }
@@ -6724,6 +9750,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
                 valueCol: e.valueCol || '',
                 scalarValueCol: e.scalarValueCol || '',
                 scalarType: e.scalarType,
+                ...(e.publicFallback ? { publicFallback: true } : {}),
                 emptyValue: Object.prototype.hasOwnProperty.call(e, 'emptyValue') ? e.emptyValue : undefined,
                 cols: (e.cols || []).map(c => {
                     const col = [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || ''];
@@ -6739,6 +9766,9 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             for (let i = 0; i < safe.length; i++) {
                 const src = layout.entries[i];
                 if (src?.omitMissingParents) safe[i].omitMissingParents = src.omitMissingParents;
+                if (src?.overflowCol) safe[i].overflowCol = src.overflowCol;
+                if (src?.statStorageVersion) safe[i].statStorageVersion = src.statStorageVersion;
+                if (src?.rootContainer) safe[i].rootContainer = true;
                 if (src && src.vwd) safe[i].vwd = src.vwd;
             }
             return JSON.stringify(safe);
@@ -6791,7 +9821,7 @@ root.__MVU2SHUJUKU_SCHEMA_LAYOUT_FACTORY__ = function createSchemaLayout(depende
             }
             return entries;
         }
-    return { unwrapMvuRuleDocument, wrapMvuRuleDocument, parseProseMvuRules, leafInfo, maskYamlBlockScalarBodies, yamlStripQuotes, parseInlineEnumValues, yamlCheckItems, yamlExpandTemplateKeys, expandYamlTemplateFieldKey, protectYamlTemplateScalarValues, prepareMvuRuleYaml, yamlCollectCheckRanges, collectRulesFromYaml, yamlParseRange, isMvuRulePathKey, registerYamlWildcard, registerWildcardTypeShape, registerYamlField, parseMvuShapes, parseRegisteredZodSchema, mergeZodSchemaNodes, countZodSchemaFlag, mergeRegisteredZodIntoShapeInfo, applyRegisteredZodDefaults, missingRegisteredZodDefaults, scanGreetingShapeVariation, extractListItems, stripRuleQuotes, scanDynamicKeyNamesFromRules, parseZodStyleRules, isSchemaFieldName, mergeShapeMetadata, parseTypeSchema, parseShapeString, extractYamlBlockScalar, cardTextBlobs, scanStatusUsage, isPairLeaf, isLeaf, collectColumns, inferType, jsonColumnFromObject, schemaTypeLabel, schemaExample, describeObjectSchema, fixedObjectFromValue, fixedObjectSchema, flattenFixedObjectColumns, buildSchema, rowFirstValue, attachFieldRules, sanitizeMacroColumnZh, disambiguateColumnSlugs, isVwdMetaColumn, vwdFieldId, columnLayoutType, buildLayout, buildLayoutJson, resolveLayoutMacros };
+    return { isMvuOutputProtocolRule, unwrapMvuRuleDocument, wrapMvuRuleDocument, parseProseMvuRules, leafInfo, maskYamlBlockScalarBodies, yamlStripQuotes, parseInlineEnumValues, yamlCheckItems, yamlExpandTemplateKeys, expandYamlTemplateFieldKey, protectYamlTemplateScalarValues, prepareMvuRuleYaml, yamlCollectCheckRanges, collectRulesFromYaml, yamlParseRange, isMvuRulePathKey, registerYamlWildcard, registerWildcardTypeShape, registerYamlField, parseMvuShapes, parseRegisteredZodSchema, mergeZodSchemaNodes, countZodSchemaFlag, mergeRegisteredZodIntoShapeInfo, applyRegisteredZodDefaults, missingRegisteredZodDefaults, scanGreetingShapeVariation, extractListItems, stripRuleQuotes, scanDynamicKeyNamesFromRules, parseZodStyleRules, isSchemaFieldName, mergeShapeMetadata, parseTypeSchema, parseShapeString, extractYamlBlockScalar, cardTextBlobs, scanStatusUsage, isPairLeaf, isLeaf, collectColumns, inferType, jsonColumnFromObject, schemaTypeLabel, schemaExample, describeObjectSchema, fixedObjectFromValue, fixedObjectSchema, flattenFixedObjectColumns, buildSchema, prepareStatStorageLayout, preserveJsonContainers, rowFirstValue, attachFieldRules, sanitizeMacroColumnZh, disambiguateColumnSlugs, isVwdMetaColumn, vwdFieldId, columnLayoutType, buildLayout, buildLayoutJson, resolveLayoutMacros };
 };
 root.__MVU2SHUJUKU_SHEET_IDENTITY_FACTORY__ = function createSheetIdentity() {
 /*
@@ -6836,319 +9866,190 @@ SOFTWARE.
     }
     return { asciiSlug, physicalName };
 };
-root.__MVU2SHUJUKU_UPDATE_RULE_MIGRATION_FACTORY__ = function createUpdateRuleMigration({ parseJs }) {
-    const contract = '以下规则描述更新条件和目标变化；实际更新必须使用本次数据库填表协议，操作列表不作为输出格式。';
-    // DB 1.2.5 / 1a5ffdb: its configuration UI hides these title substrings
-    // and removes their selected UIDs. Keep safe author names without guessing
-    // synonyms for blocked ones; the converter report retains the source name.
+root.__MVU2SHUJUKU_UPDATE_RULE_MIGRATION_FACTORY__ = function createUpdateRuleMigration({ YAML, isProtocolRule = () => false }) {
+    const guideCall = '<% /* mvu2shujuku:fill-adaptation:v1 */ %>';
+    const guideTitle = '[M2SJK]填表适配说明';
+    const guidance = '本次任务是根据当前对话、数据库状态和作者业务要求更新数据库。输出格式、表列名称和记录定位遵循本次数据库填表协议及提供的表结构、列说明。\n' +
+        '保留作者要求中的条件、数值、阈值、例外和禁止事项。原文要求使用 JSONPatch、UpdateVariable 等旧格式时，执行其业务要求，输出改用本次数据库协议。具体操作列表中的目标和值仍是变更要求；这些名称若属于业务数据，保留原值。';
+    const guideContent = guideCall + '\n' + guidance;
     const blockedTitleTerms = ['规则', '思维链', 'cot', 'MVU', 'mvu', '变量', '状态',
         'Status', 'Rule', 'rule', '检定', '判断', '叙事', '文风', 'InitVar', '格式'];
-    function fillTitle(comment, id, split = false) {
+    function fillTitle(comment, id) {
         const name = String(comment || '').replace(/\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/ig, '').trim();
         if (!name || blockedTitleTerms.some(term => name.includes(term))) {
             const number = Number(id);
-            const ordinal = id != null && Number.isInteger(number) && number >= 0 ? String(number) : '未编号';
-            return `[M2SJK]更新要求（${ordinal}）`;
+            return `[M2SJK]更新要求（${id != null && Number.isInteger(number) && number >= 0 ? number : '未编号'}）`;
         }
-        return `[M2SJK]${name}${split ? '（更新要求）' : ''}`;
+        return '[M2SJK]' + name;
     }
-    const protocol = /<\/?(?:JSON_?Patch|UpdateVariable)\b[^>]*>|\bJSON\s*Patch\b|\bRFC\s*6902\b/i;
-    const updateKey = /^(?:checks?|instructions?|update_rules?|update_instructions?|variables?_update_rules?|variables?_update_format|variable_output_protocol|force_structured_output|output_format|mandatory_patch(?:_template)?|json_?patch|更新要求|更新指令|强制更新|变量更新规则|变量输出格式)$/i;
-    const quotedKey = /^(?:examples?|samples?|dialogue|quotes?|code|narrative|story|示例|样例|台词|引用|代码|正文|剧情|故事)$/i;
-    const patchKey = /^(?:mandatory_patch(?:_template)?|json_?patch)$/i;
-    const pointer = /(?<![\p{L}\p{N}_$}])\/[\p{L}\p{N}_$](?:<[^<>\n]+>|[^\s，。、；;:："'<>()[\]（）|=≤≥])*/gu;
-    function protocolReferences(literal) {
-        // An exact quoted protocol name may be a business value, not a format.
-        const data = [], protectedText = literal.replace(/(["'`])(?:JSON\s*Patch|<\/?(?:JSON_?Patch|UpdateVariable)>)(?:\1)/gi,
-            value => { data.push(value); return '\u0000' + (data.length - 1) + '\u0000'; });
-        return protectedText.replace(/<\/(?:JSON_?Patch|UpdateVariable)\s*>/gi, '')
-            .replace(/<(?:JSON_?Patch|UpdateVariable)\s*>/gi, '本次数据库填表')
-            .replace(/\bJSON\s*Patch\b|\bRFC\s*6902\b/gi, '数据库填表协议')
-            .replace(/\u0000(\d+)\u0000/g, (_, index) => data[Number(index)]);
-    }
-    function segment(source) {
-        const tokens = [], mask = source.split('');
-        for (const match of source.matchAll(/<%([_=#-]?)([\s\S]*?)([-_]?)%>/g)) {
-            const token = { start: match.index, end: match.index + match[0].length, raw: match[0],
-                mode: match[1], code: match[2], close: match[3] };
-            tokens.push(token);
-            for (let i = token.start; i < token.end; i++) if (mask[i] !== '\n' && mask[i] !== '\r') mask[i] = ' ';
+    const formatKey = /^(?:format(?:_template)?|output_format|格式)$/i;
+    const documentKey = /^(?:Force_Structured_Output|variables?_update_format|output_format|变量(?:输出(?:规则|格式)|更新格式)(?:强调)?)$/i;
+    const quoteKey = /^(?:examples?|samples?|dialogue|quotes?|code|narrative|story|示例|样例|台词|引用|代码|正文|剧情|故事)$/i;
+    const placeholder = value => typeof value === 'string' &&
+        /^\$\{\/[^{}\n]+\}$/.test(value);
+    // Recognize syntax and placeholder targets; never interpret Analysis prose.
+    function formatParts(value) {
+        if (typeof value !== 'string' || /<%|%>|&lt;%/.test(value)) return null;
+        let text = value.trim();
+        const update = /^<UpdateVariable>\s*([\s\S]*?)\s*<\/UpdateVariable>$/i.exec(text);
+        if (!update) return false;
+        text = update[1];
+        // The slot can contain business rules. Preserve its contents verbatim.
+        const analysis = /<Analysis>([\s\S]*?)<\/Analysis>/i.exec(text);
+        if (analysis) text = text.replace(analysis[0], '');
+        const patch = /^\s*<JSON_?Patch>\s*([\s\S]*?)\s*<\/JSON_?Patch>\s*$/i.exec(text);
+        if (!patch) return false;
+        let operations;
+        try { operations = JSON.parse(patch[1]); }
+        catch (_) {
+            const lines = patch[1].trim().split('\n').map(s => s.trim());
+            if (lines.shift() !== '[' || lines.pop() !== ']') return false;
+            try { operations = lines.filter(s => s && s !== '...' && s !== '...,').map(s => JSON.parse(s.replace(/,$/, ''))); }
+            catch (_) { return false; }
         }
-        const visible = mask.join('');
-        if (/<%|%>|&lt;%/.test(visible)) throw new Error('模板含无法完整识别的 EJS 边界');
-        return { tokens, visible };
+        const placeholders = Array.isArray(operations) && operations.every(op => op && typeof op === 'object' &&
+            ['add', 'remove', 'replace', 'move', 'copy', 'test', 'delta', 'insert'].includes(op.op) &&
+            placeholder(op.path || op.from) && (!('path' in op) || placeholder(op.path)) &&
+            (!('from' in op) || placeholder(op.from)) && (!('to' in op) || placeholder(op.to)) &&
+            Object.keys(op).every(k => ['op', 'path', 'from', 'to', 'value'].includes(k)));
+        return placeholders ? { pure: !analysis || !analysis[1].trim() || /^(?:\.{3}|…)$/.test(analysis[1].trim()) } : null;
     }
-    function safeTemplate(tokens) {
-        if (!tokens.length) return;
-        const code = tokens.filter(t => t.mode !== '#').map(t => t.mode === '=' || t.mode === '-'
-            ? '__emit((' + t.code + '));' : t.code).join('\n');
-        const ast = parseJs(code, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true });
-        const locals = new Set(), functions = new Set();
-        function walk(node, callback) {
-            if (!node || typeof node !== 'object') return;
-            if (typeof node.type === 'string') callback(node);
-            for (const value of Object.values(node)) {
-                if (Array.isArray(value)) value.forEach(child => walk(child, callback));
-                else if (value && typeof value === 'object') walk(value, callback);
-            }
+    function syntaxCuts(source, start, end) {
+        const raw = source.slice(start, end), cuts = [];
+        const opening = /<UpdateVariable>/i.exec(raw), closings = [...raw.matchAll(/<\/UpdateVariable>/gi)];
+        if (opening) cuts.push([start + opening.index, start + opening.index + opening[0].length]);
+        const closing = closings.at(-1);
+        if (closing) cuts.push([start + closing.index, start + closing.index + closing[0].length]);
+        const analysis = /<Analysis>([\s\S]*?)<\/Analysis>/i.exec(raw);
+        let visible = raw;
+        if (analysis) {
+            cuts.push([start + analysis.index, start + analysis.index + '<Analysis>'.length]);
+            const closeStart = analysis.index + analysis[0].length - '</Analysis>'.length;
+            cuts.push([start + closeStart, start + closeStart + '</Analysis>'.length]);
+            // Protocol names inside opaque business text are data, not tags to cut.
+            visible = raw.slice(0, analysis.index) + ' '.repeat(analysis[0].length) + raw.slice(analysis.index + analysis[0].length);
         }
-        walk(ast, n => {
-            if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier') {
-                locals.add(n.id.name);
-                if (n.init && /Function/.test(n.init.type)) functions.add(n.id.name);
-            }
-            if (n.type === 'FunctionDeclaration' && n.id) { locals.add(n.id.name); functions.add(n.id.name); }
-            if (/Function/.test(n.type)) for (const param of n.params || []) if (param.type === 'Identifier') locals.add(param.name);
-        });
-        const bare = new Set(['__emit', 'getvar', 'getAllVariables', 'mvu2shujukuGetAllVariables',
-            'mvu2shujukuFormatMessageVariable', 'String', 'Number', 'Boolean', 'parseInt', 'parseFloat', 'isNaN', 'isFinite']);
-        const globals = new Set([...bare, '_', 'Object', 'JSON', 'Math', 'Array', 'NaN', 'Infinity', 'undefined']);
-        // Validate references in their lexical scope. A parameter in one function
-        // does not establish that a same-named host object elsewhere is safe.
-        function scoped(node, inherited = new Set()) {
-            const scope = new Set(inherited);
-            if (/Function/.test(node.type)) {
-                if (node.id) scope.add(node.id.name);
-                for (const param of node.params || []) {
-                    if (param.type !== 'Identifier') throw new Error('EJS 参数绑定无法确认为只读计算');
-                    scope.add(param.name);
+        const patch = /<JSON_?Patch>[\s\S]*?<\/JSON_?Patch>/i.exec(visible);
+        if (patch) cuts.push([start + patch.index, start + patch.index + patch[0].length]);
+        return cuts.sort((a, b) => a[0] - b[0]);
+    }
+    function envelope(source) {
+        let start = 0, end = source.length;
+        for (let depth = 0; depth < 8; depth++) {
+            const raw = source.slice(start, end), text = raw.trim(), trimStart = raw.indexOf(text);
+            start += trimStart; end = start + text.length;
+            const xml = /^<([\p{L}_][\p{L}\p{N}_.:-]*)[ \t]*>([\s\S]*?)<\/\1[ \t]*>$/iu.exec(text);
+            if (xml && !/^(?:script|style|template|html|head|body|UpdateVariable|JSON_?Patch|initvar|status_current_variables?)$/i.test(xml[1])) {
+                const tag = xml[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                if (!new RegExp('<\\/?' + tag + '(?:\\s|>)', 'iu').test(xml[2])) {
+                    start += text.indexOf('>') + 1; end = start + xml[2].length; continue;
                 }
             }
-            function gather(n) {
-                if (!n || typeof n !== 'object') return;
-                if (n.type === 'FunctionDeclaration' && n.id) scope.add(n.id.name);
-                if (n !== node && (/Function/.test(n.type || '') || n.type === 'BlockStatement')) return;
-                if (n.type === 'VariableDeclarator') {
-                    if (n.id.type !== 'Identifier') throw new Error('EJS 变量绑定无法确认为只读计算');
-                    scope.add(n.id.name);
-                }
-                for (const value of Object.values(n)) {
-                    if (Array.isArray(value)) value.forEach(gather);
-                    else if (value && typeof value === 'object') gather(value);
-                }
+            const fence = /^(`{3,}|~{3,})[ \t]*(?:yaml|yml|json|json5)?[ \t]*\r?\n([\s\S]*?)\r?\n\1[ \t]*$/i.exec(text);
+            if (fence && !new RegExp('^' + fence[1] + '[ \\t]*$', 'm').test(fence[2])) {
+                start += text.indexOf('\n') + 1; end = start + fence[2].length; continue;
             }
-            gather(node);
-            function visit(n, parent, key) {
-                if (!n || typeof n !== 'object') return;
-                if (n !== node && (/Function/.test(n.type || '') || n.type === 'BlockStatement')) { scoped(n, scope); return; }
-                if (n.type === 'Identifier') {
-                    const binding = parent && ((parent.type === 'VariableDeclarator' && key === 'id') ||
-                        /Function/.test(parent.type) && (key === 'id' || key === 'params'));
-                    const property = parent && !parent.computed &&
-                        (parent.type === 'MemberExpression' && key === 'property' || parent.type === 'Property' && key === 'key');
-                    if (!binding && !property && !scope.has(n.name) && !globals.has(n.name))
-                        throw new Error('EJS 含无法确认为只读的外部依赖');
-                }
-                for (const [childKey, value] of Object.entries(n)) {
-                    if (Array.isArray(value)) value.forEach(child => visit(child, n, childKey));
-                    else if (value && typeof value === 'object') visit(value, n, childKey);
-                }
-            }
-            visit(node, null, '');
+            break;
         }
-        scoped(ast);
-        const methods = new Set(['get', 'has', 'clamp', 'round', 'floor', 'ceil', 'max', 'min', 'sum', 'sumBy',
-            'keys', 'values', 'entries', 'isArray', 'isFinite', 'isInteger', 'parse', 'stringify',
-            'map', 'filter', 'reduce', 'find', 'some', 'every', 'includes', 'join', 'slice', 'concat',
-            'startsWith', 'endsWith', 'trim', 'replace', 'match', 'test', 'toLowerCase', 'toUpperCase', 'indexOf', 'forEach']);
-        walk(ast, n => {
-            if (['ImportExpression', 'NewExpression', 'AwaitExpression', 'WithStatement', 'ThisExpression'].includes(n.type))
-                throw new Error('EJS 含无法安全拆分的宿主或异步依赖');
-            if (n.type === 'AssignmentExpression' || n.type === 'UpdateExpression' ||
-                n.type === 'UnaryExpression' && n.operator === 'delete')
-                throw new Error('EJS 含无法安全拆分的写入或重绑定');
-            if (n.type !== 'CallExpression') return;
-            if (n.callee.type === 'Identifier' && (bare.has(n.callee.name) || functions.has(n.callee.name))) return;
-            if (n.callee.type === 'MemberExpression' && !n.callee.computed && methods.has(n.callee.property.name)) {
-                let base = n.callee.object;
-                while (base.type === 'MemberExpression') base = base.object;
-                if (base.type === 'Identifier' && (locals.has(base.name) || ['_', 'Object', 'JSON', 'Math', 'Array', 'Number'].includes(base.name))) return;
-            }
-            throw new Error('EJS 调用的行为无法确认为只读计算');
-        });
+        return { start, end };
     }
-    function fields(visible, tokens = []) {
-        const lines = [], nodes = [], stack = [];
-        let offset = 0;
-        for (const line of visible.split('\n')) { lines.push({ text: line, start: offset, end: offset + line.length + 1 }); offset += line.length + 1; }
-        for (const line of lines) {
-            if (!line.text.trim() || /^\s*#/.test(line.text)) continue;
-            let indent = line.text.match(/^[ \t]*/)[0].length;
-            const leadingCode = tokens.find(t => t.start >= line.start && t.start < line.start + indent);
-            if (leadingCode) indent = leadingCode.start - line.start;
-            while (stack.length && indent <= stack.at(-1).indent) stack.pop().end = line.start;
-            const match = /^([ \t]*)([\p{L}\p{N}_$.-]+)[ \t]*:[ \t]*(.*)$/u.exec(line.text);
-            if (!match) continue;
-            const node = { key: match[2], indent, start: line.start, end: visible.length,
-                parent: stack.at(-1) || null, lineEnd: Math.min(line.end, visible.length), value: match[3] };
-            nodes.push(node); stack.push(node);
-        }
-        return nodes;
-    }
-    function literals(source, tokens, start, end, callback) {
-        let cursor = start, out = '';
-        for (const token of tokens.filter(t => t.end > start && t.start < end)) {
-            if (token.start < start || token.end > end) throw new Error('更新段落与 EJS 标签交叉');
-            out += callback(source.slice(cursor, token.start)); out += token.raw; cursor = token.end;
-        }
-        return out + callback(source.slice(cursor, end));
-    }
-    function migrate(source, { updateOnly = false, resolvePath }) {
-        const result = { body: source, fill: '', migrated: 0, issues: [] };
-        if (!protocol.test(source) && !/mandatory_patch|json_?patch\s*:/i.test(source)) return result;
-        const issue = text => { if (!result.issues.includes(text)) result.issues.push(text); };
-        let parts;
-        try { parts = segment(source); safeTemplate(parts.tokens); }
-        catch (error) { issue(error.message); return result; }
-        const { visible, tokens } = parts;
-        if (/(?:^|[\s:])[&*][A-Za-z_][\w-]*/m.test(visible)) { issue('含 YAML 共享节点，不能拆开其定义与引用'); return result; }
-        if (/<(?:script|style|iframe)\b/i.test(visible)) { issue('含前端代码，不能作为更新段落拆分'); return result; }
-        const nodes = fields(visible, tokens);
-        let candidates = [];
-        if (updateOnly && !/<\/?status_current_variables?\b/i.test(visible))
-            candidates = [{ start: 0, end: source.length, key: '', parent: null, patch: false }];
-        else for (const node of nodes) {
-            let quoted = quotedKey.test(node.key);
-            for (let parent = node.parent; parent; parent = parent.parent) quoted ||= quotedKey.test(parent.key);
-            if (quoted || !updateKey.test(node.key)) continue;
-            const text = visible.slice(node.start, node.end);
-            if (protocol.test(text) || patchKey.test(node.key)) candidates.push({ ...node, patch: patchKey.test(node.key) });
-        }
-        // A complete source span is the migration unit, including every operation
-        // of a patch list. Nested matches belong to their enclosing section.
-        candidates = candidates.filter(n => !candidates.some(p => p !== n && p.start <= n.start && p.end >= n.end));
-        const accepted = [];
-        for (const candidate of candidates) {
-            const text = visible.slice(candidate.start, candidate.end), mappings = new Map();
-            const siblings = candidates.filter(n => n.parent === candidate.parent);
-            const related = siblings.some(n => n.patch) ? siblings : [candidate];
-            const bindingText = related.map(n => visible.slice(n.start, n.end)).join('\n');
-            let unresolved = false;
-            for (const tag of ['JSONPatch', 'JSON_Patch', 'UpdateVariable']) {
-                const opens = [...text.matchAll(new RegExp('<'+tag+'\\b[^>]*>', 'gi'))].length;
-                const closes = [...text.matchAll(new RegExp('</'+tag+'\\s*>', 'gi'))].length;
-                if (opens !== closes && new RegExp('</'+tag+'\\s*>', 'i').test(visible)) unresolved = true;
-            }
-            if (unresolved) { issue('更新段落与旧协议标签边界交叉，整段保留'); continue; }
-            const pathText = bindingText.replace(/<\/?[A-Za-z_][^>]*>/g, (markup, offset) => bindingText[offset - 1] === '/' ? markup : ' '.repeat(markup.length));
-            for (const match of pathText.matchAll(pointer)) {
-                const path = match[0];
-                if (/~(?![01])/.test(path)) { unresolved = true; break; }
-                const binding = resolvePath(path.slice(1).split('/').map(p => p.replace(/~1/g, '/').replace(/~0/g, '~')));
-                if (!binding) { issue('无法绑定更新路径：' + path); unresolved = true; break; }
-                mappings.set(path, binding.label);
-            }
-            if (unresolved) { issue('更新段落含无法绑定到实际表列的路径，整段保留'); continue; }
-            if (!mappings.size && !/<\/?(?:JSON_?Patch|UpdateVariable)\b|\bJSON\s+Patch\b|\bRFC\s*6902\b|mandatory_patch|json_?patch\s*:/i.test(text)) {
-                issue('仅有协议名称提及，不能确认为旧更新协议要求'); continue;
-            }
-            // An unmarked instruction mentioning the protocol without any target
-            // cannot establish that it is an independent update requirement.
-            if (!updateOnly && !mappings.size && !candidate.patch && !/update_|更新|输出格式|output_format|output_protocol|force_structured_output/i.test(candidate.key)) {
-                issue('无法确认该段落的更新目标或独立更新职责'); continue;
-            }
-            const payloadNodes = nodes.filter(n => patchKey.test(n.key) && n.start >= candidate.start && n.end <= candidate.end);
-            const payload = candidate.patch || payloadNodes.length > 0;
-            const rewrite = literal => {
-                let value = literal;
-                value = value.replace(/^([ \t]*)(?:format|output_format|格式)([ \t]*:)/gim, '$1变更要求说明（非输出格式）$2');
-                if (!payload) for (const [path, label] of [...mappings].sort((a, b) => b[0].length - a[0].length)) {
-                    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    value = value.replace(new RegExp(escaped + '(?![\\p{L}\\p{N}_$/])', 'gu'), () => label);
-                }
-                // Payload strings are data, including a literal named JSONPatch.
-                // A patch list keeps its contents and gains a local binding guide.
-                return protocolReferences(value);
+    function plan(source, { outputOnly = false } = {}) {
+        source = String(source || '');
+        const result = { text: source, excluded: [], issues: [] };
+        // Preserve offsets while shielding all executable blocks from parsing.
+        const tokens = [...source.matchAll(/<%[\s\S]*?%>/g)].map(m => [m.index, m.index + m[0].length]);
+        const masked = source.replace(/<%[\s\S]*?%>/g, m => m.replace(/[^\r\n]/g, ' '));
+        if (/<%|%>|&lt;%/.test(masked)) return result;
+        const outer = envelope(source), body = source.slice(outer.start, outer.end);
+        const whole = outputOnly && formatParts(body);
+        if (whole) result.excluded = whole.pure ? [[outer.start, outer.end]] : syntaxCuts(source, outer.start, outer.end);
+        else {
+            let doc;
+            try { doc = YAML.parseDocument(masked.slice(outer.start, outer.end), { uniqueKeys: true }); }
+            catch (_) { return result; }
+            if (doc.errors.length || !YAML.isMap(doc.contents)) return result;
+            let shared = false;
+            YAML.visit(doc, (_, node) => { if (YAML.isAlias(node) || node?.anchor || node?.tag && node.tag !== 'tag:yaml.org,2002:str') shared = true; });
+            if (shared) return result;
+            const cuts = [];
+            const span = node => [outer.start + node.range[0], outer.start + node.range[2]];
+            const pairSpan = pair => {
+                const begin = outer.start + pair.key.range[0];
+                const line = source.lastIndexOf('\n', begin - 1) + 1;
+                return [/^[ \t]*$/.test(source.slice(line, begin)) ? line : begin, outer.start + pair.value.range[1]];
             };
-            let rewritten;
-            try {
-                let cursor = candidate.start;
-                rewritten = '';
-                for (const node of payloadNodes.filter(n => !payloadNodes.some(p => p !== n && p.start <= n.start && p.end >= n.end)).sort((a,b)=>a.start-b.start)) {
-                    rewritten += literals(source, tokens, cursor, node.start, rewrite);
-                    rewritten += literals(source, tokens, node.start, node.end, literal => literal.replace(/^([ \t]*)(?:mandatory_patch(?:_template)?|json_?patch)([ \t]*:)/im, '$1数据库变更要求$2'));
-                    cursor = node.end;
+            function walk(map, inDocument = outputOnly) {
+                const complete = map.items.some(pair => formatKey.test(String(pair.key?.value || '')) && formatParts(pair.value?.value));
+                for (const pair of map.items) {
+                    if (!pair.key || !pair.value || !pair.key.range || !pair.value.range) continue;
+                    const key = String(pair.key.value || '');
+                    if (quoteKey.test(key)) continue;
+                    if (formatKey.test(key)) {
+                        const range = pairSpan(pair);
+                        if (tokens.some(([a, b]) => a < range[1] && b > range[0])) continue;
+                        const parts = formatParts(pair.value.value);
+                        if (parts) cuts.push(...(parts.pure ? [range] : syntaxCuts(source, ...range)));
+                    }
+                    else if (inDocument && complete && /^(?:rules?|输出规则|规则)$/i.test(key) && YAML.isSeq(pair.value)) {
+                        for (const item of pair.value.items) {
+                            if (!item?.range || !isProtocolRule(item.toJSON())) continue;
+                            // YAML comments can be business instructions too. A
+                            // known protocol value does not prove its comments disposable.
+                            let commented = false;
+                            YAML.visit(item, (_, node) => { if (node?.comment || node?.commentBefore) commented = true; });
+                            if (commented) continue;
+                            const range = span(item), line = source.lastIndexOf('\n', range[0] - 1) + 1;
+                            if (/^[ \t]*-[ \t]*$/.test(source.slice(line, range[0]))) range[0] = line;
+                            cuts.push(range);
+                        }
+                    } else if (YAML.isMap(pair.value) && documentKey.test(key)) walk(pair.value, true);
                 }
-                rewritten += literals(source, tokens, cursor, candidate.end, rewrite);
             }
-            catch (error) { issue(error.message); continue; }
-            if (payload && mappings.size) rewritten += '\n' + ' '.repeat(candidate.indent || 0) + '更新目标对应: ' + [...mappings].map(([path, label]) => path + ' → ' + label).join('；') + '。\n';
-            accepted.push({ ...candidate, rewritten });
+            walk(doc.contents);
+            result.excluded = cuts.sort((a, b) => a[0] - b[0]);
         }
-        if (!accepted.length) return result;
-        // Ancestor headers and static sibling fields carry explicit conditions.
-        const context = [];
-        for (const range of accepted) {
-            for (let parent = range.parent; parent; parent = parent.parent) {
-                context.push({ start: parent.start, end: parent.lineEnd });
-                for (const sibling of nodes.filter(n => n.parent === parent && !accepted.some(a => a.start <= n.start && a.end >= n.end))) {
-                    if (!nodes.some(n => n.parent === sibling) && !quotedKey.test(sibling.key) && !updateKey.test(sibling.key))
-                        context.push({ start: sibling.start, end: sibling.end });
-                }
-            }
-        }
-        function render(fill) {
-            let text = '', cursor = 0;
-            const selected = (start, end) => (fill ? accepted.concat(context) : accepted).some(r => r.start <= start && r.end >= end);
-            const cuts = [...new Set([0, source.length, ...accepted.flatMap(r => [r.start, r.end]), ...context.flatMap(r => [r.start, r.end]), ...tokens.flatMap(t => [t.start, t.end])])].sort((a, b) => a - b);
-            for (let i = 0; i < cuts.length - 1; i++) {
-                const start = cuts[i], end = cuts[i + 1];
-                if (start < cursor || start === end) continue;
-                const whole = accepted.find(r => r.start === start);
-                if (fill && whole) { text += whole.rewritten; cursor = whole.end; continue; }
-                const token = tokens.find(t => t.start === start);
-                if (token) {
-                    const keep = selected(token.start, token.end);
-                    if (token.mode === '=' || token.mode === '-') {
-                        text += (fill ? keep : !keep) ? token.raw : '<% void (' + token.code + '); ' + token.close + '%>';
-                    } else text += token.raw;
-                    cursor = token.end; continue;
-                }
-                if (fill ? selected(start, end) : !selected(start, end)) text += source.slice(start, end);
-                cursor = end;
-            }
-            return text;
-        }
-        const isolate = text => tokens.length ? '<% { %>\n' + text + '\n<% } %>' : text;
-        result.body = accepted.some(r => r.start === 0 && r.end === source.length) ? '' : isolate(render(false));
-        result.fill = isolate(contract + '\n' + render(true));
-        result.migrated = accepted.length;
-        const fillVisible = segment(result.fill).visible;
-        const withoutPayloads = fillVisible.split('');
-        for (const field of fields(fillVisible).filter(n => n.key === '数据库变更要求'))
-            for (let i = field.start; i < field.end; i++) withoutPayloads[i] = ' ';
-        if (protocol.test(withoutPayloads.join(''))) issue('迁移结果仍含未承接协议引用，不能视为已完整清理');
+        for (const [start, end] of result.excluded.slice().reverse()) result.text = result.text.slice(0, start) + result.text.slice(end);
         return result;
     }
-    function normalizeRule(source, { resolvePath, jsonLocal = false }) {
-        const result = { text: source, issues: [] };
-        if (!protocol.test(source)) return result;
-        let parts;
-        try { parts = segment(source); } catch (error) { result.issues.push(error.message); return result; }
-        const mappings = new Map();
-        const text = parts.visible.replace(/<\/?[A-Za-z_][^>]*>/g, (markup, offset) => parts.visible[offset - 1] === '/' ? markup : ' '.repeat(markup.length));
-        if (!jsonLocal) for (const match of text.matchAll(pointer)) {
-            const path = match[0], binding = !/~(?![01])/.test(path) && resolvePath(path.slice(1).split('/').map(p=>p.replace(/~1/g,'/').replace(/~0/g,'~')));
-            if (!binding) { result.issues.push('无法绑定更新路径：' + path); return result; }
-            mappings.set(path, binding.label);
-        }
-        const rewritten = literals(source, parts.tokens, 0, source.length, literal => {
-            let value = literal;
-            for (const [path, label] of [...mappings].sort((a,b)=>b[0].length-a[0].length)) {
-                const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                value = value.replace(new RegExp(escaped + '(?![\\p{L}\\p{N}_$/])', 'gu'), () => label);
-            }
-            return protocolReferences(value);
-        });
-        if (rewritten !== source) result.text = '业务更新要求（实际输出遵循数据库填表协议）：' + rewritten;
-        return result;
+    function guideTokens(text) {
+        return [...text.matchAll(/<%([_=#-]?)([\s\S]*?)([-_]?)%>/g)]
+            .filter(m => m[0] === guideCall && (m.index === 0 || text[m.index - 1] === '\n') &&
+                (m.index + m[0].length === text.length || /[\r\n]/.test(text[m.index + m[0].length])));
     }
-    return { migrate, normalizeRule, fillTitle };
+    function preparePrompt(code, entries = []) {
+        let text = String(code || '');
+        // The private comment is the fill-view marker, not an arbitrary keyword.
+        if (!guideTokens(text).length) return { text, adapted: false };
+        for (const entry of entries) {
+            if (!entry || entry.enabled === false || !entry.extensions?.mvu2shujukuFillView) continue;
+            const source = String(entry.content || '').trim();
+            if (!source || !text.includes(source)) continue;
+            const view = plan(source, { outputOnly: entry.extensions.mvu2shujukuFillView.outputOnly });
+            if (!view.excluded.length) continue;
+            // Match whole entry text. Never remove individual words, patches or
+            // a partial match inside a quotation / larger business sentence.
+            let from = 0;
+            while (from <= text.length) {
+                const index = text.indexOf(source, from);
+                if (index < 0) break;
+                const end = index + source.length;
+                if ((index === 0 || text[index - 1] === '\n') && (end === text.length || text[end] === '\n')) {
+                    text = text.slice(0, index) + view.text + text.slice(end); from = index + view.text.length;
+                } else from = end;
+            }
+        }
+        for (const token of guideTokens(text).slice().reverse()) {
+            const duplicate = token.index !== guideTokens(text)[0].index && text.slice(token.index).startsWith(guideContent);
+            text = text.slice(0, token.index) + text.slice(token.index + (duplicate ? guideContent.length : guideCall.length));
+        }
+        return { text, adapted: true };
+    }
+    return { guideCall, guideContent, guideTitle, guidance, fillTitle, plan, preparePrompt };
 };
 root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
     'use strict';
     const { describeGroup, isRelationshipKeyColumn, isDollarPrivateColumn,
-        isUnderscoreReadonlyColumn, isAiPromptColumn, sqlQuote, schemaExample, vwdToken, normalizeUpdateRuleText } = deps;
+        isUnderscoreReadonlyColumn, isAiPromptColumn, sqlTextLiteral, schemaExample, vwdToken, normalizeUpdateRuleText } = deps;
 
     function aiJsonColumns(group) {
         if (group.scalarType === 'number') return [];
@@ -7164,26 +10065,34 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
         const cols = aiJsonColumns(group);
         if (!cols.length) return '';
         const label = group.kind === 'json' ? '内容列' : cols.map(c => `「${c.zh}」`).join('、');
-        if (mode === 'native') return `${label}以 JSON 存储；更新单元格时提供完整的新 JSON，保留未改动的字段和元素。`;
         return `${label}以 JSON 存储。`
-            + (mode === 'both' ? '本次要求原生行操作时，提供完整的新单元格 JSON，保留未改内容。' : '')
-            + `本次要求 SQL 脚本时，优先用 json_set(列, '$."键"', 新值)、json_replace 或 json_remove 局部更新，仅操作规则允许的路径；对象/数组/布尔/null 新值用 json('...')，字符串用 SQL 字符串。数组从 0 索引，末尾追加用 [#]，中间插入/移动需重建受影响数组。空单元格或 JSON null 容器先按规则初始化，保留未改字段；json_patch 的 null 会删键，不作路径更新替代。`;
+            + `对象/数组优先用 json_set(列, '$."键"', 新值)、json_replace 或 json_remove 局部更新，仅操作规则允许的路径；标量按原类型整体更新。对象/数组/布尔/null 新值用 json('...')，字符串用 SQL 字符串。数组从 0 索引，末尾追加用 [#]，中间插入/移动需重建受影响数组。空单元格或 JSON null 容器先按规则初始化，保留未改字段；json_patch 的 null 会删键，不作路径更新替代。`;
     }
 
     function buildNote(group, opts = {}) {
-        const mode = opts.mode || 'both';
+        const mode = 'sqlite';
         const L = [];
         const emitRule = (rule, context, scope = {}) => {
             const rendered = sanitizeCheckRule(rule, context);
             if (rendered && typeof opts.onRule === 'function') opts.onRule({ text: rule, rendered, ...scope });
             return rendered;
         };
-        const metadataWriteScope = group.kind === 'json' && !group.aiReadonly && group.jsonAiWritable;
+        const metadataWriteScope = group.kind === 'json' && group.scalarType !== 'number' && !group.aiReadonly && group.jsonAiWritable;
         if (metadataWriteScope) L.push('【可写路径与约束】');
         if ((group.pathSpecifications || []).length) {
             L.push('【字段业务规则】');
-            for (const specification of group.pathSpecifications)
-                L.push(emitRule(specification.text, { group, pathSpecification: specification }, { rulePath: specification.path }));
+            let previousJsonScope = '';
+            for (const specification of group.pathSpecifications) {
+                const preserveJsonSpecification = !!(group.rootContainer || specification.jsonPath || specification.jsonValue);
+                if (preserveJsonSpecification && !group.rootContainer) {
+                    const path = (specification.jsonRelativePath || []).map(k => String(k).replace(/~/g, '~0').replace(/\//g, '~1'));
+                    const label = specification.jsonBindingLabel || specification.label;
+                    const scope = label === '本表' && !path.length ? '' : label + (path.length ? '内 /' + path.join('/') : '');
+                    if (scope && scope !== previousJsonScope) L.push(scope + '：');
+                    previousJsonScope = scope;
+                } else previousJsonScope = '';
+                L.push(emitRule(specification.text, { group, pathSpecification: specification, preserveJsonSpecification }, { rulePath: specification.path }));
+            }
         }
         if ((group.proseChecks || []).length) {
             L.push('【更新规则】');
@@ -7194,7 +10103,7 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
         if (!group.aiReadonly && explicitReadonly.length)
             L.push('模型只读字段：' + explicitReadonly.map(c => c.zh).join('、') + '；由原卡脚本/前端管理，模型不得修改。');
         if (group.scalarType === 'number') {
-            const scriptReadonly = group.aiReadonly || /^[_$]/.test(String(group.name || ''));
+            const scriptReadonly = !!group.aiReadonly;
             const rules = [...(group.groupChecks || []), ...(group.wildcardRules || []).flatMap(r => r.checks || [])];
             const valueKind = group.columns[0] && (group.columns[0].integer || group.columns[0].type === 'INTEGER') ? '一个整数，不接受小数' : '一个数字，可含小数';
             L.push('数值表（全表固定一行）：「内容」直接保存' + valueKind + '；禁止写入对象、数组、布尔值或带引号的 JSON 字符串。禁止新增/删除行。');
@@ -7208,14 +10117,13 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
         }
         const aiCols = group.kind === 'json' ? [] : group.columns.filter(c => isAiPromptColumn(group, c));
         if (group.kind === 'singleton' && group.valueCol && aiCols.length) {
-            L.push(`「${group.valueCol}」直接保存整个「${group.name}」变量；空单元格表示该变量不存在，JSON null 表示空值，{} / [] 表示相应空容器。状态切换也只更新此单元格，不能删除身份行。JSON 路径从内容内部开始，不再重复外层组名；内部以 _ 开头的字段由脚本维护，不主动修改。`);
+            L.push(`「${group.valueCol}」直接保存整个「${group.name}」变量；空单元格表示该变量不存在，JSON null 表示空值，{} / [] 表示相应空容器。状态切换也只更新此单元格，不能删除身份行。JSON 路径从内容内部开始，不再重复外层组名。`);
         }
         if (group.scalarValueCol && group.containerSchema && aiCols.length) {
-            L.push(`「${group.scalarValueCol}」保存当前键名对应的完整记录；JSON null 表示该记录为空值，{} / [] 表示空容器，删除行表示该键不存在（空单元格读回也视为缺失）。JSON 路径从记录内部开始，不重复键名或关联列。修改内部字段须保留其他字段；内部以 _ 开头的字段由脚本维护。`);
+            L.push(`「${group.scalarValueCol}」保存当前键名对应的完整记录；JSON null 表示该记录为空值，{} / [] 表示空容器，删除行表示该键不存在（空单元格读回也视为缺失）。JSON 路径从记录内部开始，不重复键名或关联列。修改内部字段须保留其他字段，并遵守原变量规则。`);
         }
-        // 所有下划线前缀列都是只读状态；内部溢出列 _扩展数据虽不进列定义/写入示例，
-        // 但 AI 仍能在真实表头/DDL 里看到，因此同样要触发现有只读提示。
-        const userReadonlyCols = (group.columns || []).filter(c => isUnderscoreReadonlyColumn(group, c));
+        // 只读约束来自原卡明确声明，不从字段前缀推断。
+        const userReadonlyCols = (group.columns || []).filter(c => c.aiReadonly);
         const hasUserReadonly = userReadonlyCols.length > 0;
         const allReadonly = (hasUserReadonly || group.aiReadonly) && aiCols.length === 0;
         if (group.kind === 'json') {
@@ -7224,7 +10132,9 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
             if (!group.aiReadonly && (wr.length || gc.length || group.jsonAiWritable)) {
                 // 规则声明了 AI 可写路径（如 户.<门牌>.妻.好感值）：JSON 表不再一刀切只读，
                 // 而是列出可写路径与约束；SQL 可在单元格内按路径更新。
-                L.push('整组 JSON 存储表（全表固定一行）：本表以 JSON 保存动态结构。AI 可更新「内容」列，只改变【可写路径与约束】中列出的路径，其余字段保持原样；禁止新增/删除行。');
+                L.push(group.jsonAiWritable
+                    ? '整组 JSON 存储表（全表固定一行）：AI 可更新「内容」列中的公开变量；遵守原变量规则，按本轮变化更新，未变化字段保持原值；禁止新增/删除行。'
+                    : '整组 JSON 存储表（全表固定一行）：本表以 JSON 保存动态结构。AI 可更新「内容」列，只改变【可写路径与约束】中列出的路径，其余字段保持原样；禁止新增/删除行。');
                 if (!metadataWriteScope || wr.length || gc.length) L.push('【可写路径与约束】');
                 for (const r of wr) {
                     const parts = [];
@@ -7238,7 +10148,9 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
                 // 且不是所有卡都用 <>（也有纯点分路径）。规则原文已在上方【可写路径与约束】保留。
                 // 守卫统一放宽：只限制“未声明路径”，不堵死“规则声明可 insert/初始化/新增”
                 // 的路径（否则空 JSON 表永远无法初始化，如大荒 宗门表）。不做关键词检测。
-                L.push('- 只更新【可写路径与约束】中列出的路径；未列出的字段一律只读（它们仍存在于同一 JSON 中，由脚本/系统维护，AI 不得改动）。规则要求 insert/初始化/新增 的路径允许创建对应字段、对象或记录；严禁新增未声明的字段、对象或记录');
+                L.push(group.jsonAiWritable
+                    ? '- 原变量规则约束取值、结构及新增/删除；明确声明只读的字段不得修改，不从字段名或缺少逐字段说明推断只读'
+                    : '- 只更新【可写路径与约束】中列出的路径；未列出的字段一律只读（它们仍存在于同一 JSON 中，由脚本/系统维护，AI 不得改动）。规则要求 insert/初始化/新增 的路径允许创建对应字段、对象或记录；严禁新增未声明的字段、对象或记录');
                 L.push('- 只更新本轮剧情中明确出现并被影响到的对象；其余对象的数据保持原样');
                 L.push('- 更新后必须保留 JSON 中其余全部字段及其原有类型');
             } else {
@@ -7293,7 +10205,7 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
             // 三种模式共用逻辑字段例子；SQL 列名以实际 DDL 和操作示例为准。
             // 注意：只声明“不列入填表字段/严禁更新”，不要声称“更新会被回滚”——
             // 转换器没有回滚机制（下划线字段只是不进填表规则，AI 若硬写 SQL 不会被回滚）。
-            L.push('下划线开头字段（如 _扩展数据）为脚本/系统维护的只读状态，不列入填表字段：AI 只能读取、严禁更新。');
+            L.push('原卡声明的只读字段保留原约束，不列入更新示例。');
             // 展平后表头可能丢失开头的下划线，必须用实际列名说明只读范围。
             const flattenedReadonly = userReadonlyCols.filter(c => !String(c.zh || '').startsWith('_') && !isDollarPrivateColumn(group, c));
             if (flattenedReadonly.length) L.push(`只读列：${flattenedReadonly.map(c => `「${c.zh}」`).join('、')}；AI 只能读取、严禁更新。`);
@@ -7309,8 +10221,12 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
             const nullableCols = aiCols.filter(c => (c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional'));
             if (nullableCols.length) L.push(`- ${nullableCols.map(c => c.zh).join('、')}：按 JSON 标量填值；null 表示空值，字符串保留 JSON 双引号（空字符串为 ""），空单元格表示缺失字段。`);
             const encodedCols = aiCols.filter(c => c.logicalType === 'jsonScalar');
-            if (encodedCols.length) L.push(`- ${encodedCols.map(c => `「${c.zh}」`).join('、')}：单元格保存完整 JSON 值，遵守原字段/数组元素的类型；字符串保留 JSON 双引号（如 \"文字\"），数字、布尔、null 不加 JSON 引号，对象/数组保存完整 JSON。` + (mode === 'native' ? '' : '本次要求 SQL 脚本时，SQL 字符串外围的单引号不属于单元格内容。'));
-            const nullableContainers = aiCols.filter(c => c.logicalType === 'jsonObjectOptional');
+            if (encodedCols.length) L.push(`- ${encodedCols.map(c => `「${c.zh}」`).join('、')}：单元格保存完整 JSON 值，遵守原字段/数组元素的类型；字符串保留 JSON 双引号（如 \"文字\"），数字、布尔、null 不加 JSON 引号，对象/数组保存完整 JSON。SQL 字符串外围的单引号不属于单元格内容。`);
+            const anyJsonValues = aiCols.filter(c => c.logicalType === 'jsonObjectOptional' && c.jsonKind === 'any');
+            if (anyJsonValues.length) L.push(`- ${anyJsonValues.map(c => c.zh).join('、')}：保存完整 JSON 值，类型遵循原字段规则；数字、布尔、null 不加 JSON 引号，字符串保留 JSON 双引号，对象/数组保持完整结构；空单元格表示缺失字段。`);
+            const nullableContainers = aiCols.filter(c => c.logicalType === 'jsonObjectOptional' && c.jsonKind !== 'any'
+                && !(group.kind === 'singleton' && c.zh === group.valueCol)
+                && !(group.containerSchema && c.zh === group.scalarValueCol));
             if (nullableContainers.length) L.push(`- ${nullableContainers.map(c => c.zh).join('、')}：保存 JSON 对象/数组；JSON null 表示空值，空单元格表示缺失字段。`);
             if (group.kind === 'nestedRows') {
                 const entity = group.relationEntity || String(group.parentKeyCol || '').replace(/_键名$/, '') || '关联记录';
@@ -7321,7 +10237,6 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
                 if (c.range) parts.push(`数值范围 ${c.range[0]}~${c.range[1]}`);
                 if (c.enum) parts.push(`可选值：${c.enum.join(' / ')}`);
                 if (c.format) parts.push(`格式要求：${String(c.format).replace(/\n/g, ' ')}`);
-                if (c.isObject) parts.push('对象以 JSON 存储，读取时还原');
                 const checks = (c.check || []).map(rule => emitRule(rule, { group, column: c }, { columnPath: c.path })).filter(Boolean);
                 return { parts, checks };
             };
@@ -7357,7 +10272,13 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
             };
             for (const c of aiCols) {
                 const view = columnRuleView(c);
-                const desc = c.desc ? String(c.desc).trim() : '';
+                let desc = c.desc ? String(c.desc).trim() : '';
+                if (group.source === 'full-json-container' && c.zh === group.valueCol) {
+                    const generatedIntro = '完整保存 ' + group.name + ' 的 JSON 数据；字段名和嵌套结构保持原样。'
+                        + '\n缺失用空单元格，null 用 JSON null，空容器用 {} 或 []。';
+                    if (desc === generatedIntro) desc = '';
+                    else if (desc.startsWith(generatedIntro + '\n')) desc = desc.slice(generatedIntro.length + 1);
+                }
                 const generic = desc === '唯一标识' || desc === '对象（JSON 存储，读取时还原）';
                 const generatedRelation = (group.ancestorKeyCols || []).some(a => c.zh === a.col
                     && desc === `关联「${a.parentTable}.${a.parentKeyCol}」`);
@@ -7412,11 +10333,11 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
     function buildInitNode(group) {
         if (group.aiReadonly) return '开局数据已由模板初始化；本表由脚本/前端维护，模型禁止再次初始化或修改。';
         if (group.scalarType === 'number') {
-            if (/^[_$]/.test(String(group.name || ''))) return '开局已初始化唯一数值记录；不得再次初始化或新增/删除行，后续由脚本/前端维护，自动填表阶段不修改本表。';
             return '开局已初始化唯一数值记录；不得再次初始化或新增/删除行，后续根据正文、设定与 note 按需更新。';
         }
         if (group.kind === 'json') {
-            return ((group.wildcardRules || []).length || (group.groupChecks || []).length || group.jsonAiWritable)
+            if (group.jsonAiWritable) return '开局模板已初始化整组数据；自动填表阶段按原变量规则更新「内容」列中的公开变量，未变化字段保持原值。';
+            return ((group.wildcardRules || []).length || (group.groupChecks || []).length)
                 ? `开局模板已初始化整组数据；自动填表阶段仅按 note 中「可写路径与约束」更新「内容」列，其余由脚本/前端维护。`
                 : `开局模板已初始化整组数据；此后整组 JSON 由脚本/前端写入，自动填表阶段禁止修改本表。`;
         }
@@ -7442,7 +10363,7 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
     // INSERT 只按声明类型和约束生成短示例，不复制初值或默认载荷。
     // 标识和业务值均需按本轮替换。
     function exampleCellValue(col) {
-        const quote = v => `'${sqlQuote(v)}'`;
+        const quote = sqlTextLiteral;
         if (['jsonScalarOptional', 'jsonPairOptional', 'jsonObjectOptional', 'jsonScalar'].includes(col.logicalType)) return quote('null');
         if (col.isObject) {
             return quote(JSON.stringify(col.objectSchema ? schemaExample(col.objectSchema) : col.jsonKind === 'array' ? [] : {}));
@@ -7490,14 +10411,16 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
         // jsonScalar 也能承载数组/对象元素，不用字符串示例替换它们。
         if (col.logicalType === 'jsonScalar' && current && typeof current === 'object') return null;
         const value = exampleScalarValue(col, current);
-        if (['jsonScalar', 'jsonScalarOptional', 'jsonPairOptional'].includes(col.logicalType)) return `'${sqlQuote(JSON.stringify(value))}'`;
+        if (['jsonScalar', 'jsonScalarOptional', 'jsonPairOptional'].includes(col.logicalType)) return sqlTextLiteral(JSON.stringify(value));
         if (typeof value === 'boolean') return value ? '1' : '0';
-        return typeof value === 'number' && Number.isFinite(value) ? String(value) : `'${sqlQuote(value)}'`;
+        return typeof value === 'number' && Number.isFinite(value) ? String(value) : sqlTextLiteral(value);
     }
 
     // SQL 专用模板的示例从实际 JSON 单元格选一条已有公开路径，避免教模型
     // 用残缺对象覆盖整格。整组 JSON 的可写范围另由规则决定，不猜示例路径。
     function exampleUpdateAssignment(group, col) {
+        // 私有根的写入结构公开，当前值不作示例采样；不能通过示例泄漏隐藏数据。
+        if (group.privateRoot) return null;
         if (!aiJsonColumns(group).includes(col) || group.kind === 'json') {
             const value = exampleUpdateValue(col, group);
             return value === null ? null : `${col.ident} = ${value}`;
@@ -7525,7 +10448,7 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
             const newValue = typeof leaf.value === 'string' ? "'新值'"
                 : typeof leaf.value === 'number' && Number.isFinite(leaf.value) ? String(leaf.value)
                     : `json('${leaf.value === null ? 'null' : JSON.stringify(leaf.value)}')`;
-            return `${col.ident} = json_replace(${col.ident}, '${sqlQuote(leaf.path)}', ${newValue})`;
+            return `${col.ident} = json_replace(${col.ident}, ${sqlTextLiteral(leaf.path)}, ${newValue})`;
         }
         // 缺失、null、空对象或仅含私有字段时没有可证明的局部路径，不编造键。
         return null;
@@ -7538,7 +10461,7 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
         if (!s) return s;
         const ctx = context || {};
         const col = ctx.column || null;
-        if (ctx.pathSpecification) {
+        if (ctx.pathSpecification && !ctx.preserveJsonSpecification) {
             const specification = ctx.pathSpecification;
             let body = specification.readonly
                 ? (specification.jsonPath || specification.recordSpecific ? '模型只读；' : '') + (specification.readonlyDescription || '由脚本/前端维护')
@@ -7565,7 +10488,7 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
                         } catch (_) { return original; }
                     });
                 s = s.replace(new RegExp('(?:(\\b(?:add|replace|remove))\\s+)?' + escaped + '(?![\\p{L}\\p{N}_$/])', 'giu'),
-                    (_, op) => (op ? ({ add: alias.singleton ? '更新' : '新增', replace: '更新', remove: '移除' })[op.toLowerCase()] + ' ' : '') + alias.label);
+                    (_, op) => (op ? ({ add: alias.singleton && !alias.jsonPath ? '更新' : '新增', replace: '更新', remove: '移除' })[op.toLowerCase()] + ' ' : '') + alias.label);
             }
         }
         const jsonArray = !!(ctx.jsonContainer || (col && col.isObject && col.jsonKind === 'array'));
@@ -7628,7 +10551,6 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
         if (group.aiReadonly) return '禁止。由原卡脚本/前端维护，模型不得写入。';
         if (group.scalarType === 'number') {
             if (kind !== 'update') return '禁止。';
-            if (/^[_$]/.test(String(group.name || ''))) return '本数值由脚本/前端维护，AI 不应直接修改。';
             const col = group.columns[0];
             const hasRules = (group.groupChecks || []).length || (group.wildcardRules || []).length;
             const basis = hasRules ? '根据 note 中的更新规则' : '根据正文、设定与本表规则';
@@ -7636,7 +10558,8 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
         }
         if (group.kind === 'json') {
             if (kind === 'update') {
-                if ((group.wildcardRules || []).length || (group.groupChecks || []).length || group.jsonAiWritable) {
+                if (group.jsonAiWritable) return '只允许更新现有记录，禁止新增或删除行；按本轮变化和原变量规则更新公开字段，明确声明只读的字段不得修改，保留未变化字段。';
+                if ((group.wildcardRules || []).length || (group.groupChecks || []).length) {
                     return '只允许更新现有记录，禁止新增或删除行；正文明确造成字段变化时，按 note 中【可写路径与约束】维护允许的路径（未列出字段一律只读），保留其余字段。';
                 }
                 return '整组 JSON 由脚本/前端整体写入，AI 不应直接修改本表。';
@@ -7664,7 +10587,7 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
             const parentValues = parents.map(c => {
                 const index = group.columns.indexOf(c) + 1;
                 const value = group.rows && group.rows[0] && group.rows[0][index];
-                return `'${sqlQuote(value === undefined ? '所属记录标识' : value)}'`;
+                return sqlTextLiteral(value === undefined ? '所属记录标识' : value);
             });
             const where = [...parents.map((c, i) => `${c.ident} = ${parentValues[i]}`), 'row_id = 1'].join(' AND ');
             const value = exampleUpdateValue(col, group);
@@ -7715,7 +10638,7 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
         // UPDATE/DELETE 定位示例沿用已有记录；INSERT 使用新键占位和声明类型短示例。
         const sampleRow = group.rows && group.rows[0] ? group.rows[0] : null;
         const keyValue = (sampleRow && sampleRow[1] !== undefined && String(sampleRow[1]) !== '')
-            ? `'${sqlQuote(sampleRow[1])}'`
+            ? sqlTextLiteral(sampleRow[1])
             : "'键名'";
         // 示例列排除内部溢出列（_扩展数据）与下划线只读字段：AI 不应直接修改
         const exampleCols = group.columns.filter(c => isAiPromptColumn(group, c));
@@ -7742,15 +10665,21 @@ root.__MVU2SHUJUKU_TABLE_PROMPTS_FACTORY__ = function createTablePrompts(deps) {
 
     return { buildNote, buildInitNode, buildNodeProse };
 };
-root.__MVU2SHUJUKU_STATUS_USAGE_FACTORY__ = function createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSchemaFieldName, cardTextBlobs }) {
-    function sourceTexts(text) {
+root.__MVU2SHUJUKU_STATUS_USAGE_FACTORY__ = function createStatusUsage({ maskJsStringsAndComments, ejsScriptBlocks, splitJsTopLevelArgs, isSchemaFieldName, cardTextBlobs }) {
+    function sourceTexts(text, label) {
         const source = String(text || '').replace(/^```(?:html|javascript|js)?[ \t]*\r?$/gm, '');
-        if (!/^\s*<(?:!doctype|html|head|body|div|style|script)\b/i.test(source)) return [source];
+        // TH 脚本是原始 JS；世界书、开场和正则替换可能是混合模板。
+        // 它们的实际 EJS 代码必须由同一解析器提取，不能把模板全文交给 JS lexer。
+        const startsHtml = /^\s*<(?:!doctype|html|head|body|div|style|script)\b/i.test(source);
+        const isScript = String(label || '').startsWith('script:');
+        if (isScript && !startsHtml) return [source];
+        const isHtml = startsHtml || /<script\b/i.test(source);
+        if (!isHtml && !source.includes('<%')) return [source];
         // HTML/Markdown 不是 JS；先提取可执行片段，避免把围栏当模板字符串吞掉整个前端。
         const scripts = [...source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)]
             .filter(m => !/\btype\s*=/.test(m[1]) || /\btype\s*=\s*["']?(?:module|(?:text|application)\/javascript)\b/i.test(m[1]))
             .map(m => m[2]);
-        const ejs = [...source.matchAll(/<%[-=]?([\s\S]*?)%>/g)].map(m => m[1]);
+        const ejs = ejsScriptBlocks(source);
         return [...scripts, ...(ejs.length ? [ejs.join('\n')] : [])];
     }
 
@@ -7883,7 +10812,7 @@ root.__MVU2SHUJUKU_STATUS_USAGE_FACTORY__ = function createStatusUsage({ maskJsS
             // 已知组名来自 initvar 顶层键（扫描只针对这些组做归属）
             const knownGroups = new Set(Array.isArray(groupNames) ? groupNames : []);
 
-            const blobs = cardTextBlobs(card).flatMap(blob => sourceTexts(blob.text).map(text => ({ text, bindings: createBindings(text) })));
+            const blobs = cardTextBlobs(card).flatMap(blob => sourceTexts(blob.text, blob.label).map(text => ({ text, bindings: createBindings(text) })));
 
             // 阶段1：直接 stat 映射（只跑一轮即可稳定）
             for (const { text, bindings } of blobs) {
@@ -8646,10 +11575,8 @@ root.__MVU2SHUJUKU_MVU_COMMANDS_FACTORY__ = function createMvuCommands(deps) {
         for (const cmd of cmds) {
             if (!cmd.path) continue;
             const parts = commandPathParts(cmd.path);
-            if (parts.some((p) => p.charAt(0) === '_')) continue;
             if (cmd.type === 'move') {
                 const mf = commandPathParts(cmd.from);
-                if (mf.some((p) => p.charAt(0) === '_')) continue;
                 let mv;
                 let mc = stat, mok = true;
                 for (let i = 0; i < mf.length - 1; i++) { mc = mc ? mc[mf[i]] : null; if (!mc) { mok = false; break; } }
@@ -9441,6 +12368,14 @@ root.__MVU2SHUJUKU_SETTINGS_VIEW__ = function settingsView(settings) {
             '  </div>',
             '  <div class="inline-drawer-content">',
             '    <div class="mvu2shujuku-card">',
+            '      <h3 class="mvu2shujuku-section-title">聊天状态存档</h3>',
+            '      <div class="mvu2shujuku-row">',
+            '        <button id="mvu2shujuku-export-state" class="menu_button">导出状态</button>',
+            '        <button id="mvu2shujuku-import-state" class="menu_button">导入状态</button>',
+            '        <input id="mvu2shujuku-state-file" type="file" accept=".json,application/json" hidden />',
+            '      </div>',
+            '      <div id="mvu2shujuku-state-progress" class="mvu2shujuku-hint" role="status" aria-live="polite"></div>',
+            '      <div class="mvu2shujuku-help">迁移当前选中分支的最新状态，支持普通 MVU 与转换卡互导。额外表格只导入相容的已有模板；完整聊天 JSONL 备份可选，默认勾选；部分兼容时先显示迁移结果。</div>',
             '      <h3 class="mvu2shujuku-section-title">转换角色卡</h3>',
             '      <div class="mvu2shujuku-row">',
             '        <span class="mvu2shujuku-label">输入来源（二选一）</span>',
@@ -9464,8 +12399,8 @@ root.__MVU2SHUJUKU_SETTINGS_VIEW__ = function settingsView(settings) {
             '        </div>',
             '      </div>',
             '      <div class="mvu2shujuku-row mvu2shujuku-mode-group">',
-            '        <span class="mvu2shujuku-label" title="模板保留列名、DDL、字段说明及更新规则；SQL 或原生填表格式由 龙血玄黄·数据库 当前模式提供，转换器无需选择">填表模式</span>',
-            '        <span class="mvu2shujuku-hint">双模式（跟随插件当前设置）</span>',
+            '        <span class="mvu2shujuku-label" title="使用转换卡前，请将龙血玄黄·数据库设为 SQLite 模式">填表模式</span>',
+            '        <span class="mvu2shujuku-hint">SQLite（仅支持 SQL 填表）</span>',
             '      </div>',
             '      <div class="mvu2shujuku-row">',
             '        <label class="mvu2shujuku-label" for="mvu2shujuku-profile-select">转换配置</label>',
@@ -9477,7 +12412,7 @@ root.__MVU2SHUJUKU_SETTINGS_VIEW__ = function settingsView(settings) {
             '        <label class="mvu2shujuku-check-label" title="控制生成的表格 DDL 是否带 CHECK 约束（数值范围、枚举、JSON 表 json_valid）。关闭后仅保留列类型与默认值，新建聊天时 SQLite 不再做这些校验；改动需重新转换生效"><input type="checkbox" id="mvu2shujuku-ddl-check" ' + (settings.ddlIncludeCheck !== false ? 'checked' : '') + ' /> 启用数值、枚举和 JSON 结构校验（CHECK）</label>',
             '      </div>',
             '      <div class="mvu2shujuku-row">',
-            '        <label class="mvu2shujuku-check-label" title="每个顶层对象或数组保留为一张表的一列完整 JSON，合并其子表，准确保存缺失、null、空容器及嵌套说明。推荐 SQLite：可按 JSON 路径局部更新；native 填表需提交整个 JSON 单元格。重新转换后生效"><input type="checkbox" id="mvu2shujuku-json-containers" ' + (settings.jsonContainers === true ? 'checked' : '') + ' /> 将容器保存为完整 JSON（保留空状态与嵌套结构）</label>',
+            '        <label class="mvu2shujuku-check-label" title="每个顶层对象或数组保留为一张表的一列完整 JSON，合并其子表，准确保存缺失、null、空容器及嵌套说明。可按 JSON 路径局部更新，重新转换后生效"><input type="checkbox" id="mvu2shujuku-json-containers" ' + (settings.jsonContainers === true ? 'checked' : '') + ' /> 将容器保存为完整 JSON（保留空状态与嵌套结构）</label>',
             '      </div>',
             '      <details class="mvu2shujuku-detail mvu2shujuku-advanced">',
             '        <summary>高级兼容选项</summary>',
@@ -9528,7 +12463,7 @@ root.__MVU2SHUJUKU_SETTINGS_VIEW__ = function settingsView(settings) {
             '        <button id="mvu2shujuku-save-card" class="menu_button" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设">保存角色卡和模板到sillytavern</button>',
             '      </div>',
             '      <div class="mvu2shujuku-hint">',
-            '        前提：已安装 龙血玄黄·数据库插件（不自动安装，也不迁移旧聊天）。数据桥已写入转换后的角色卡，不需要手动导入；单独下载的 .js 只是供开发者查看和调试的源码备份，不是酒馆助手 .json 导入包。',
+            '        转换卡前提：已安装 龙血玄黄·数据库插件（不自动安装，也不自动迁移旧聊天历史）。数据桥已写入转换后的角色卡，不需要手动导入；单独下载的 .js 只是供开发者查看和调试的源码备份，不是酒馆助手 .json 导入包。',
             '      </div>',
             '    </div>',
             '  </div>',
@@ -10062,6 +12997,13 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
     });
     function captureRuntimeSession(validate) { return runtimeSessions.capture(validate); }
     function bindWriteTarget(session) { return runtimeSessions.bindWriteTarget(session, () => getContextSafe().chat); }
+    const nativeStatStorage = window.__MVU2SHUJUKU_STAT_STORAGE_FACTORY__({
+        readLayout: () => activeLayout || [],
+        readPolicy: () => readCardApiMetadata().statStorage || {},
+        enabled: () => readCardApiMetadata().statStorage?.version >= 1,
+        readChat: () => getContextSafe().chat || [],
+        bindSession: bindWriteTarget, assertCurrent: assertRuntimeSession,
+    });
     function isRuntimeSessionCurrent(session) { return runtimeSessions.isCurrent(session); }
     function runtimeScopedChatKey(chatKey) { return runtimeSessions.scopedChatKey(chatKey); }
     function assertRuntimeSession(session) { return runtimeSessions.assertCurrent(session); }
@@ -10230,6 +13172,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         if (snapshot) {
             st.snapshot = snapshot;
             st.expiresAt = Date.now() + 30 * 60 * 1000;
+            dbg('[开场连续性] 已按本次提交更新恢复快照。');
         }
     }
     async function recoverOpeningContinuity(reason) {
@@ -10296,7 +13239,11 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             assertRuntimeSession(session);
             if (!ready) throw new Error('数据库运行时未就绪');
             overlayFlushRetries = 0;
-            const ok = await scheduleWindowStatOverlay(snapshot, null, false, false, chatKey, session);
+            // This is a committed snapshot, not a new model candidate. MVU's
+            // replaceMvuData restores values without executing Schema again;
+            // transforms/default providers must not run a second time here.
+            const restoreSession = { ...session, rawAuthorWrite: true };
+            const ok = await scheduleWindowStatOverlay(snapshot, null, false, false, chatKey, restoreSession);
             assertRuntimeSession(session);
             if (!ok) throw new Error('开场数据重写未落定');
             st.recoveries += 1;
@@ -10584,6 +13531,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 const greetingState = greetingInitState(key);
                 greetingState.ready = true;
                 if (preparedOpening && preparedOpening.opening && !preparedOpening.opening.schemaDeferred) {
+                    greetingState.schemaInitialized = !!(readCardApiMetadata().schemaKeys || []).length;
                     greetingState.appliedFp = preparedOpening.opening.fp;
                     greetingState.appliedSourceFp = preparedOpening.opening.sourceFp || '';
                     greetingState.pendingFp = '';
@@ -10591,7 +13539,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     greetingState.pendingAt = 0;
                     scheduleGreetingMessageWrite(preparedOpening.opening, greetingState);
                 }
-                if (hadHistoricalCheckpointBeforeInit && !greetingState.appliedFp && !greetingState.pendingFp) {
+                if (hadHistoricalCheckpointBeforeInit && !greetingState.created && !greetingState.appliedFp && !greetingState.pendingFp) {
                     greetingState.baselineNext = true;
                 }
                 // 旧聊天已有数据库状态时，所有现存更新块都是历史，只登记不重放；
@@ -10975,6 +13923,8 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             greetingInitStateByChat[key] = {
                 ready: false,
                 baselineNext: false,
+                created: false,
+                schemaInitialized: false,
                 appliedFp: '',
                 appliedSourceFp: '',
                 pendingFp: '',
@@ -11016,23 +13966,25 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
         const first = chat[0];
         if (!first || first.is_user) return null;
+        const hasSchema = !!(readCardApiMetadata().schemaKeys || []).length;
         const text = String(first.mes != null ? first.mes : (first.message || ''));
         let swipeId = '';
         try { swipeId = String(first.swipe_id == null ? 0 : first.swipe_id); } catch (e) {}
         const hit = greetingSourceSnapCache;
-        if (hit && hit.first === first && hit.text === text && hit.swipeId === swipeId) return hit.snap;
+        if (hit && hit.first === first && hit.text === text && hit.swipeId === swipeId && hit.hasSchema === hasSchema) return hit.snap;
         const m = text.match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
         const updateSource = messageUpdateBlocks(text);
-        if (!m && !updateSource) {
-            // 无 initvar/更新块的首楼也缓存，避免常见卡每 2s 重跑正则后返回 null。
-            greetingSourceSnapCache = { first, text, swipeId, snap: null };
+        if (!m && !updateSource && !hasSchema) {
+            // 无初始化任务的首楼也缓存；Schema 元数据晚到时须重新检查。
+            greetingSourceSnapCache = { first, text, swipeId, hasSchema, snap: null };
             return null;
         }
-        const sourceText = (m ? String(m[1]) : 'no-initvar') + '\n' + String(updateSource || '');
+        const schemaOnly = !m && !updateSource;
+        const sourceText = (m ? String(m[1]) : (schemaOnly ? 'worldbook-schema-init' : 'no-initvar')) + '\n' + String(updateSource || '');
         const core = window.MVU2SHUJUKU_CORE;
         const sourceFp = core && typeof core.stableHash === 'function' ? core.stableHash(sourceText) : sourceText;
-        const snap = { first, text, m, updateSource, swipe: Number(first.swipe_id || 0), sourceFp: String(sourceFp || '') };
-        greetingSourceSnapCache = { first, text, swipeId, snap };
+        const snap = { first, text, m, updateSource, schemaOnly, swipe: Number(first.swipe_id || 0), sourceFp: String(sourceFp || '') };
+        greetingSourceSnapCache = { first, text, swipeId, hasSchema, snap };
         return snap;
     }
     function guardGreetingSource(session, source) {
@@ -11088,15 +14040,15 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             await emitMvuEvent('mag_before_message_update', updateContext);
             finalWrap = updateContext.variables || finalWrap;
             messageContent = updateContext.message_content;
-        } else if (m && !options.deferSchema) {
-            // A pure InitVar swipe still passes through the registered author
-            // Schema. Run it at play time so clock-dependent transforms retain
-            // their real environment rather than freezing conversion-time data.
+        } else if ((m || source.schemaOnly) && !options.deferSchema) {
+            // Worldbook-seeded state needs the same author validation as inline
+            // InitVar. Run it after data is available, allowing scripts that
+            // register their Schema only after Mvu initialization to proceed.
             finalWrap.stat_data = await validateCardStat(finalWrap.stat_data);
             finalWrap.display_data = JSON.parse(JSON.stringify(finalWrap.stat_data));
         }
         return { first, text, messageContent, swipe: source.swipe, hasInitvar: !!m,
-            schemaDeferred: !!(m && !updateSource && options.deferSchema),
+            schemaDeferred: !!((m || source.schemaOnly) && !updateSource && options.deferSchema),
             updateSource, sourceFp, fp, baseStat: currentAll.stat_data || {}, finalWrap };
     }
 
@@ -11120,7 +14072,8 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             greetingState.pendingAt = Date.now();
             activePendingState = greetingState;
             guardGreetingSource(session, sourceSnapshot);
-            const prepared = await computeActiveGreetingSnapshot(undefined, sourceSnapshot);
+            const prepared = await computeActiveGreetingSnapshot(undefined, sourceSnapshot,
+                { deferSchema: !!(greetingState.baselineNext && sourceSnapshot.schemaOnly) });
             if (!isRuntimeSessionCurrent(session)) {
                 greetingState.pendingSourceFp = '';
                 greetingState.pendingAt = 0;
@@ -11151,6 +14104,13 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             greetingState.pendingFp = fp;
             activePendingFp = fp;
             const finalStat = (prepared.finalWrap && prepared.finalWrap.stat_data) || prepared.baseStat;
+            // The opening evaluator already ran the author's Schema/update cycle.
+            // Persist its complete result, as MVU does after initialization, rather
+            // than applying non-idempotent transforms again in the write adapter.
+            if (!prepared.schemaDeferred) {
+                session.rawAuthorWrite = true;
+                session.schemaProof = currentCardApi && currentCardApi.proofOf(finalStat);
+            }
             dbg('[开场分支] 按当前分支注入' + (prepared.hasInitvar ? ' <initvar>' : '') + (prepared.updateSource ? ' <UpdateVariable/JSONPatch>' : '') + '（swipe=' + String(prepared.first.swipe_id == null ? 0 : prepared.first.swipe_id) + '，顶层组 ' + Object.keys(finalStat).join('、') + '）。');
             scheduleWindowStatOverlay(finalStat, (ok) => {
                 if (greetingState.pendingFp !== fp) return;
@@ -11158,6 +14118,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 greetingState.pendingSourceFp = '';
                 greetingState.pendingAt = 0;
                 if (ok) {
+                    greetingState.schemaInitialized = !!(readCardApiMetadata().schemaKeys || []).length;
                     greetingState.appliedFp = fp;
                     greetingState.appliedSourceFp = sourceFp;
                     scheduleGreetingMessageWrite(prepared, greetingState);
@@ -11376,6 +14337,22 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         if (!es || !et || typeof es.on !== 'function') return;
         try {
             if (!autoInitState.inited) {
+                if (et.CHAT_CREATED) es.on(et.CHAT_CREATED, async () => {
+                    // A database seed is already a checkpoint by the time ST emits
+                    // CHAT_CREATED. The explicit lifecycle event, rather than the
+                    // stored values or chat length, identifies unfinished new-chat
+                    // initialization. Existing chats never take this path.
+                    if (!(readCardApiMetadata().schemaKeys || []).length) return;
+                    const state = greetingInitState(autoInitChatId());
+                    if (state.created) return;
+                    state.created = true;
+                    if (state.schemaInitialized) return;
+                    state.baselineNext = false;
+                    state.appliedFp = '';
+                    state.appliedSourceFp = '';
+                    await autoInitDatabase();
+                    await applyActiveGreetingInitvar();
+                });
                 es.on(et.CHAT_CHANGED, () => {
                     cancelReplyStatusCleanups();
                     cancelMvuMessageWrites();
@@ -11581,7 +14558,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         if (!context.extensionSettings) context.extensionSettings = {};
         if (!context.extensionSettings[SETTINGS_KEY]) {
             context.extensionSettings[SETTINGS_KEY] = {
-                mode: 'both',
+                mode: 'sqlite',
                 installMvuShim: 'auto',
                 appendPlaceholder: true,
                 asPng: 'auto',
@@ -12417,6 +15394,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             // settledOk：本次写入是否真正落定（成功或与目标一致）；retryScheduled：
             // 是否已安排重试（重试会携带同一回调，最终落定时才通知调用方）。
             let settledOk = false;
+            let nativeWrite = null;
             let retryScheduled = false;
             let writeUnsettled = false;
             try {
@@ -12486,7 +15464,24 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
-                    // SQL 读取能力不代表 CRUD 就绪：SP 9.2.5 在 native 模式下始终
+                    // New complete-object layouts require the host's published
+                    // SQLite runtime. A missing getter may mean loading or native;
+                    // retry without staging data, then fail rather than guessing.
+                    if (readCardApiMetadata().statStorage?.version >= 2
+                        && typeof api.querySql !== 'function' && typeof api.executeSqlQuery !== 'function') {
+                        if (overlayFlushRetries < 6) {
+                            overlayFlushRetries += 1;
+                            hostWindow.setTimeout(() => {
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, null, true, isInitializationWrite, writeChatKey, writeSession);
+                            }, 800);
+                            retryScheduled = true;
+                            return;
+                        }
+                        toast('SQLite 运行时未就绪，已停止本次变量写入。请检查数据库模式与加载状态。', 'error');
+                        if (statWriteOverlayGen === gen) pendingStatWrite = null;
+                        return;
+                    }
+                    // SQL 读取能力不代表旧布局 CRUD 就绪：SP 9.2.5 在 native 模式下始终
                     // 隐藏 querySql/executeSqlQuery。SQLite CRUD 自身会等待 provider
                     // 发布，并在 commit 内核验 readiness/revision；此处只检查实际表格，
                     // 保留来源会话守卫和写入失败重试，不以 SQL getter 拦截原生写入。
@@ -12531,7 +15526,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     for (const g of rawGroups2) {
                         if (!layoutGroupSet2.has(g)) { hasForeignGroup2 = true; break; }
                     }
-                    if (hasForeignGroup2 && rawGroups2.length) {
+                    if (!(readCardApiMetadata().statStorage?.version >= 1) && hasForeignGroup2 && rawGroups2.length) {
                         if (lastForeignWriteDropChat !== chatKeyNow) {
                             lastForeignWriteDropChat = chatKeyNow;
                             dbgWarn('[切卡隔离] 检测到跨卡残留前端写库（target 混入布局外组：' + rawGroups2.join('、') + '），整笔丢弃，后续同类写入静默跳过。');
@@ -12543,8 +15538,11 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
                     // 普通旧布局缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
                     // 最终 importTableAsJson 还可能存旧 checkpoint，导致“写入未保存”。
+                    const storageEnabled = readCardApiMetadata().statStorage?.version >= 1;
+                    const fullPrev = nativeStatStorage.merge({ stat_data: prev }).stat_data;
                     let effectiveTarget = (() => {
                         if (!target || typeof target !== 'object') return prev || {};
+                        if (storageEnabled) return JSON.parse(JSON.stringify(target));
                         const out = JSON.parse(JSON.stringify(prev || {}));
                         // 切卡隔离：前端可能缓存上一张卡的 stat_data（target 混入当前布局外的组）。
                         // 只接受当前布局内的顶层组，布局外的组一律丢弃，避免串卡数据写进当前聊天。
@@ -12559,7 +15557,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                         }
                         for (const k of Object.keys(target)) {
                             if (k === '$internal') continue;
-                            if (allowedGroups.has(k)) {
+                            if (storageEnabled || allowedGroups.has(k)) {
                                 const tv = target[k];
                                 const pv = out[k];
                                 // 空组保护（行表 rows 与关系子表集合 nestedRows）：前端 target
@@ -12582,8 +15580,15 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                         }
                         return out;
                     })();
-                    effectiveTarget = await validateCardStat(effectiveTarget, writeSession.schemaProof);
+                    if (storageEnabled) {
+                        // Native values follow complete replacement semantics.
+                        effectiveTarget = nativeStatStorage.combine(nativeStatStorage.split(effectiveTarget).database,
+                            nativeStatStorage.split(target).native);
+                    }
+                    if (!storageEnabled || !writeSession.rawAuthorWrite) effectiveTarget = await validateCardStat(effectiveTarget, writeSession.schemaProof);
                     assertRuntimeSession(writeSession);
+                    const fullEffectiveTarget = effectiveTarget;
+                    if (storageEnabled) effectiveTarget = nativeStatStorage.split(fullEffectiveTarget).database;
                     const unmappedAfterSchema = window.MVU2SHUJUKU_CORE.unmappedStatGroups(activeLayout, prev, effectiveTarget);
                     if (unmappedAfterSchema.length) throw new Error('Schema 产生未映射组：' + unmappedAfterSchema.join('、'));
                     // 诊断：打印实际到达写路径的 系统._hypnoos（成就/购买等内部状态），
@@ -12701,8 +15706,10 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                             // 待全部落库后由下方统一广播一次。
                             sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) + 1;
                             tableBroadcastSuppressed = true;
+                            nativeWrite = nativeStatStorage.stage(fullEffectiveTarget, writeSession);
                             const needsReplySnapshot = replySnapshot || !!(writeSession.writeTarget && !writeSession.writeTarget.canUseCrud());
-                            const currentReplyBatch = !needsReplySnapshot && writeSession.writeTarget && writeSession.writeTarget.index > 0;
+                            const currentReplyBatch = !needsReplySnapshot && writeSession.writeTarget &&
+                                (writeSession.writeTarget.index > 0 || !isInitializationWrite);
                             replySnapshot = needsReplySnapshot || !!currentReplyBatch;
                             bulkInit = needsReplySnapshot
                                 ? await commitMessageUpdateSnapshot(api, prev, effectiveTarget, writeSession)
@@ -12821,28 +15828,32 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                         // 整表快速路径内的 importTableAsJson/initGameSession 已由插件以
                         // strictSave 提交；此处再保存一次会与卡内重载争用宿主保存锁。
                         // 仅逐格 CRUD 路径需要这层等待。
-                        if (n > 0 && saveFn2 && bulkInit !== true) {
+                        if (nativeWrite?.changed && bulkInit !== true && !saveFn2) throw new Error('酒馆消息保存接口不可用');
+                        if (saveFn2 && (nativeWrite?.changed || n > 0) && bulkInit !== true) {
                             await Promise.resolve(saveFn2());
                             assertRuntimeSession(writeSession);
                             dbg('[保存] 写库后已等待酒馆保存完成。');
                         }
-                    } catch (eS) { writeUnsettled = true; }
+                    } catch (eS) { nativeWrite?.rollback(); writeUnsettled = true; }
                     assertRuntimeSession(writeSession);
                     // 只有真正写了差异（n>0）才广播 VARIABLE_UPDATE_ENDED：
                     // 无差异回声写（前端把整份 stat_data 原样写回）此前也会触发广播 →
                     // 前端收到后重渲染 → 再回声 → 再广播，形成“一直刷”循环。
                     // 与官方语义一致：状态没变就不发更新事件。
-                    if (n > 0 && !writeUnsettled) {
+                    const afterMvu = !writeUnsettled ? nativeStatStorage.merge(mvuDataFromCompleteTableSnapshot(api.exportTableAsJson()) || { stat_data: effectiveTarget, display_data: JSON.parse(JSON.stringify(effectiveTarget)), delta_data: {}, initialized_lorebooks: {} }) : null;
+                    // Include bulk imports and successful no-op commits: their state
+                    // can differ from the recovery cache even when n is zero. Refresh
+                    // before events can replace the checkpoint's message carrier.
+                    if (afterMvu) refreshOpeningContinuityAfterWrite(chatKeyNow, afterMvu.stat_data);
+                    if ((n > 0 || nativeWrite?.stateChanged) && !writeUnsettled) {
                         // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
                         // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
-                        const afterMvu = mvuDataFromCompleteTableSnapshot(api.exportTableAsJson()) || { stat_data: effectiveTarget, display_data: JSON.parse(JSON.stringify(effectiveTarget)), delta_data: {}, initialized_lorebooks: {} };
-                        // 自有写入期间抑制了 SP 回调，旧的提交读窗口可能仍存着上一批数据。
-                        // 先发布本批已经提交的 after，保证事件内重读及 Promise 后 getter 一致。
+                        // 自有写入期间抑制了 SP 回调，先发布实际已提交状态。
                         stageFrontendCommittedMvuRead(afterMvu);
                         let hadInternal = false;
                         try { if (effectiveTarget && typeof effectiveTarget === 'object' && effectiveTarget.$internal === undefined) { effectiveTarget.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
-                        if (bulkInit && !replySnapshot) emitMvuEvent('mag_variable_initialized', afterMvu, 0);
-                        dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} }, !!writeSession.businessEventEmitted);
+                        if (bulkInit && !replySnapshot && !writeSession.rawAuthorWrite) emitMvuEvent('mag_variable_initialized', afterMvu, 0);
+                        dispatchVariableUpdateEnded(afterMvu, { stat_data: fullPrev, display_data: fullPrev, delta_data: {}, initialized_lorebooks: {} }, !!(writeSession.businessEventEmitted || writeSession.rawAuthorWrite));
                         try { if (hadInternal) delete effectiveTarget.$internal; } catch (e) {}
                     }
                     // 写入已落定（含“差异无操作”）：调用方（如开场分支注入）可在此时提交指纹
@@ -12853,6 +15864,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             } catch (e) {
                 dbgWarn(' Mvu 合并写入异常:', e);
             } finally {
+                if (!settledOk) nativeWrite?.rollback();
                 if (statWriteOverlayGen === gen) {
                     pendingStatWrite = null;
                     if (!retryScheduled) pendingStatWriteIsInitialization = false;
@@ -12886,7 +15898,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
     // 只读：运行时为空/插件异步回放中/切卡残留时，从当前聊天持久化帧（V2 storageFrame）重建表格数据。
     // 仅用于读侧兜底，防止前端“空读 → schema 默认值 → 写回”把数据库重置成默认值；不写运行时。
     // 基底取最后一个 full checkpoint 或 data_replace 完整后态；随后按 logEntries 顺序应用
-    // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁），即“数据库原始真相”。
+    // row_upsert / row_delete；遇到 SQL 等其他操作交由宿主完成回放，不返回部分重建结果。
     let persistedReadCache = { key: '', data: null };
     function persistedFrameFingerprint(value) {
         let source = '';
@@ -12922,21 +15934,22 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 frontendCommittedMvuRead = null;
                 return null;
             }
-            return JSON.parse(JSON.stringify(item.value));
+            return nativeStatStorage.merge(JSON.parse(JSON.stringify(item.value)));
         } catch (e) { return null; }
     }
     // 只读：从当前聊天持久化帧（V2 storageFrame）重建表格数据——“数据库真相”。
     // 基底取最后一个 full checkpoint 或 data_replace 完整后态；只应用其后 logEntries 的
-    // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁）。
-    // 用于读侧兜底：运行时只是缓存（异步回放中可能为空/旧值），持久化帧才是最新真相，
+    // row_upsert / row_delete；其余操作只信任宿主已完成的回放。
+    // 用于读侧兜底：运行时只是缓存（异步回放中可能为空/旧值），可完整重建的持久化帧才可作为备用读取，
     // 防止前端“空读/旧读 → schema 默认值 → 写回”把数据库重置成默认值。不写运行时。
     // 带按聊天缓存（key = 各消息 storage 帧长度和），写库/切聊天后自动失效。
-    function readPersistedTableData() {
+    function readPersistedTableData(endIndex) {
         try {
             const ctx = getContextSafe();
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-            let key = chat.length + ':';
-            for (let mi = 0; mi < chat.length; mi++) {
+            const count = endIndex == null ? chat.length : Math.max(0, Math.min(chat.length, endIndex + 1));
+            let key = count + ':';
+            for (let mi = 0; mi < count; mi++) {
                 const msg = chat[mi];
                 if (!msg || typeof msg !== 'object') continue;
                 const iso = msg.TavernDB_ACU_IsolatedData;
@@ -12945,7 +15958,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             if (persistedReadCache.key === key) return persistedReadCache.data;
             let base = null;
             const ops = [];
-            for (let mi = 0; mi < chat.length; mi++) {
+            for (let mi = 0; mi < count; mi++) {
                 const msg = chat[mi];
                 if (!msg || typeof msg !== 'object') continue;
                 let iso = msg.TavernDB_ACU_IsolatedData;
@@ -12968,7 +15981,9 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                             if (op.kind === 'data_replace' && op.data && typeof op.data === 'object') {
                                 base = JSON.parse(JSON.stringify(op.data));
                                 ops.length = 0;
-                            } else if (op.kind === 'row_upsert' || op.kind === 'row_delete' || op.kind === 'sql_sheet_batch') {
+                            } else {
+                                // Keep unsupported operations in sequence: ignoring one
+                                // would turn an older checkpoint into a false latest state.
                                 ops.push(op);
                             }
                         }
@@ -12979,7 +15994,10 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             if (base) {
                 for (const op of ops) {
                     const sheet = base[op.sheetKey];
-                    if (!sheet || !Array.isArray(sheet.content)) continue;
+                    if (!sheet || !Array.isArray(sheet.content)) {
+                        persistedReadCache = { key, data: null };
+                        return null;
+                    }
                     if (op.kind === 'row_delete') {
                         const rid = String(op.rowId == null ? '' : op.rowId);
                         sheet.content = sheet.content.filter(function (row, idx) {
@@ -12993,12 +16011,12 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                         });
                         if (idx >= 0) sheet.content[idx] = cells;
                         else sheet.content.push(cells);
-                    } else if (op.kind === 'sql_sheet_batch') {
-                        // SQLite 模式的原生 CRUD（updateCell/insertRow/deleteRow）持久化为
-                        // sql_sheet_batch（逐条 UPDATE/INSERT/DELETE 语句）。此前重建只认
-                        // row_upsert/row_delete，会漏掉这些写入，导致“运行时为空”窗口内读到
-                        // 陈旧 checkpoint（如充值后前端读到旧值并写回）。这里按语句回放。
-                        replaySqlBatchIntoSheet(sheet, op);
+                    } else {
+                        // SQL and other host operations require the host's real
+                        // replay engine. A synchronous fallback cannot execute
+                        // their semantics; wait for its published runtime instead.
+                        persistedReadCache = { key, data: null };
+                        return null;
                     }
                 }
                 result = base;
@@ -13006,114 +16024,6 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             persistedReadCache = { key, data: result };
             return result;
         } catch (e) { return null; }
-    }
-
-    // 把插件 SQLite 模式持久化的 sql_sheet_batch（statements + params 数组）按序回放到
-    // 重建的 sheet 上。支持三种语句形状（与插件 createTableCrudApi 一致）：
-    //   UPDATE tbl SET col = ? WHERE row_id = ?;
-    //   INSERT INTO tbl (c1, ...) VALUES (?, ...);
-    //   DELETE FROM tbl WHERE row_id = ?;
-    // 物理列名是中文表头的拼音 slug（toPinyinSlug），与扩展/插件命名一致。
-    function replaySqlBatchIntoSheet(sheet, op) {
-        try {
-            const stmts = Array.isArray(op.statements) ? op.statements : [];
-            const paramsList = Array.isArray(op.params) ? op.params : [];
-            if (!Array.isArray(sheet.content) || !sheet.content.length) return;
-            const header = sheet.content[0] || [];
-            // 拼音 slug 助手：UI 运行副本（extensionIndexUi）的作用域里没有 toPinyinSlug，
-            // 但同文件核心副本把它导出在 MVU2SHUJUKU_CORE 上（转换器/核心共享同一字典）。
-            const slugOf = function (zh) {
-                try {
-                    if (typeof toPinyinSlug === 'function') return toPinyinSlug(String(zh));
-                } catch (e) {}
-                try {
-                    const holder = (typeof window !== 'undefined' ? window : root);
-                    if (holder && holder.MVU2SHUJUKU_CORE && typeof holder.MVU2SHUJUKU_CORE.toPinyinSlug === 'function') {
-                        return holder.MVU2SHUJUKU_CORE.toPinyinSlug(String(zh));
-                    }
-                } catch (e) {}
-                return '';
-            };
-            const colIndexBySlug = {};
-            for (let hi = 0; hi < header.length; hi++) {
-                const slug = slugOf(String(header[hi]));
-                if (slug && colIndexBySlug[slug] === undefined) colIndexBySlug[slug] = hi;
-            }
-            const findRow = (rid) => {
-                const s = String(rid == null ? '' : rid).trim();
-                if (!s) return -1;
-                for (let ri = 1; ri < sheet.content.length; ri++) {
-                    const r = sheet.content[ri];
-                    if (Array.isArray(r) && String(r[0] == null ? '' : r[0]).trim() === s) return ri;
-                }
-                return -1;
-            };
-            for (let si = 0; si < stmts.length; si++) {
-                const sql = String(stmts[si] || '');
-                const params = Array.isArray(paramsList[si]) ? paramsList[si] : [];
-                const up = /UPDATE\s+\`?[A-Za-z0-9_]+\`?\s+SET\s+\`?([A-Za-z0-9_]+)\`?\s*=\s*\?\s*WHERE\s+\`?row_id\`?\s*=\s*\?/i.exec(sql);
-                if (up) {
-                    const ci = colIndexBySlug[String(up[1]).toLowerCase()];
-                    if (ci === undefined) continue;
-                    const ri = findRow(params[1]);
-                    if (ri < 0) continue;
-                    sheet.content[ri][ci] = params[0];
-                    continue;
-                }
-                const del = /DELETE\s+FROM\s+\`?[A-Za-z0-9_]+\`?\s+WHERE\s+\`?row_id\`?\s*=\s*\?/i.exec(sql);
-                if (del) {
-                    const rid = String(params[0] == null ? '' : params[0]).trim();
-                    if (rid) {
-                        sheet.content = sheet.content.filter(function (row, idx) {
-                            return idx === 0 || !Array.isArray(row) || String(row[0] == null ? '' : row[0]).trim() !== rid;
-                        });
-                    }
-                    continue;
-                }
-                const ins = /INSERT\s+INTO\s+\`?[A-Za-z0-9_]+\`?\s*(?:\(([^)]*)\))?\s*(?:VALUES\s*\(([^)]*)\))?/i.exec(sql);
-                if (ins) {
-                    const colPart = String(ins[1] || '');
-                    const colNames = colPart.split(',').map(function (s) { return String(s).replace(/[\`\s]/g, '').toLowerCase(); }).filter(Boolean);
-                    const row = header.map(function () { return ''; });
-                    let hasRowId = false;
-                    let nameVal = null;
-                    let nameIdx = -1;
-                    for (let ci2 = 0; ci2 < colNames.length; ci2++) {
-                        const cn = colNames[ci2];
-                        let hIdx = -1;
-                        if (cn === 'row_id') hIdx = 0;
-                        else if (colIndexBySlug[cn] !== undefined) hIdx = colIndexBySlug[cn];
-                        if (hIdx >= 0) {
-                            if (hIdx === 0) hasRowId = true;
-                            if (hIdx > 0 && String(header[hIdx]) === '名称') { nameIdx = hIdx; nameVal = params[ci2]; }
-                            if (params[ci2] !== undefined) row[hIdx] = params[ci2];
-                        }
-                    }
-                    let targetRi = -1;
-                    if (nameIdx >= 0 && nameVal !== null && nameVal !== undefined) {
-                        for (let ri2 = 1; ri2 < sheet.content.length; ri2++) {
-                            const r2 = sheet.content[ri2];
-                            if (Array.isArray(r2) && String(r2[nameIdx] == null ? '' : r2[nameIdx]) === String(nameVal)) { targetRi = ri2; break; }
-                        }
-                    }
-                    if (targetRi >= 0) {
-                        for (let ci3 = 0; ci3 < row.length; ci3++) {
-                            if (row[ci3] !== '' && row[ci3] !== null && row[ci3] !== undefined) sheet.content[targetRi][ci3] = row[ci3];
-                        }
-                    } else {
-                        if (!hasRowId || row[0] === '' || row[0] === null || row[0] === undefined) {
-                            let maxId = 0;
-                            for (let ri3 = 1; ri3 < sheet.content.length; ri3++) {
-                                const r3 = sheet.content[ri3];
-                                if (Array.isArray(r3) && r3[0] !== undefined && r3[0] !== null && !isNaN(Number(r3[0]))) maxId = Math.max(maxId, Number(r3[0]));
-                            }
-                            row[0] = String(maxId + 1);
-                        }
-                        sheet.content.push(row);
-                    }
-                }
-            }
-        } catch (e) {}
     }
 
     // EJS 会在 CHAT_CHANGED 的同步提示词构建阶段执行，比 autoInitDatabase
@@ -13128,7 +16038,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             const mk = ext && ext.mvu2shujuku;
             if (!mk || !mk.layout) return false;
             const parsed = typeof mk.layout === 'string' ? JSON.parse(mk.layout) : mk.layout;
-            if (!Array.isArray(parsed) || !parsed.length) return false;
+            if (!Array.isArray(parsed) || !parsed.length && !(mk.statStorage?.version >= 1)) return false;
             activeLayout = resolveRuntimeLayout(parsed);
             activeLayoutCardKey = cardCacheKey(ch);
             activePlaceholderNeeded = detectPlaceholderFor(ch);
@@ -13165,7 +16075,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             // 运行时表尚未完整回放时，checkpoint/log 才是更可靠的当前聊天真相。
             try {
                 const persisted = readPersistedTableData();
-                if (persisted && tableSnapshotCoversLayout(persisted, activeLayout)) {
+                if (persisted && tableSnapshotCoversLayout(persisted, activeLayout, true)) {
                     return statDataFromTablesCached(activeLayout, persisted);
                 }
             } catch (e) {}
@@ -13203,10 +16113,10 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         try { chatKey = autoInitChatId(); } catch (e) {}
         const now = Date.now();
         const hit = statProjectionCache;
-        if (hit && hit.chatKey === chatKey && hit.layout === layout && hit.tables === tables && (now - hit.at) < 1500) return hit.wrap;
+        if (hit && hit.chatKey === chatKey && hit.layout === layout && hit.tables === tables && (now - hit.at) < 1500) return nativeStatStorage.merge(hit.wrap);
         const wrap = core.statDataFromTables(layout, tables);
         statProjectionCache = { chatKey, layout, tables, wrap, at: now };
-        return wrap;
+        return nativeStatStorage.merge(wrap);
     }
 
     // 结构骨架只供只读模板兜底，不得作为脚本“读-改-写”的真实快照。
@@ -13249,7 +16159,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     try {
                         const persisted0 = readPersistedTableData();
-                        if (persisted0 && tableSnapshotCoversLayout(persisted0, activeLayout)) return statDataFromTablesCached(activeLayout || [], persisted0);
+                        if (persisted0 && tableSnapshotCoversLayout(persisted0, activeLayout, true)) return statDataFromTablesCached(activeLayout || [], persisted0);
                     } catch (e) {}
                     return unavailableMvuRead(core.statDataFromTables(activeLayout || [], {}));
                 }
@@ -13258,7 +16168,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 // 且每张单例/JSON 表都有数据行；只看“任意表有行”会把 V2 replay
                 // 中已物化一部分的半成品当成完整快照。此时若按运行时读，
                 // 单例表会退化成布局默认值（如 当前MC点=0/零花钱=6000），前端读到后既显示又写回；
-                // 必须先等 content 有行，或改用持久化重建（checkpoint + row_upsert/sql_sheet_batch）。
+                // 必须先等 content 有行，或改用能完整重建的持久化快照。
                 const cur = api.exportTableAsJson() || {};
                 // 切卡隔离必须早于“运行时不完整 → 持久化兜底”：切卡空窗内
                 // 运行时和聊天帧都可能还属于上一张卡，不得用新 layout 投影旧卡快照。
@@ -13266,7 +16176,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     const foreign = runtimeForeignTableNames(api, activeLayout);
                     if (foreign.length) {
                         const persisted2 = readPersistedTableData();
-                        if (persisted2 && tableSnapshotCoversLayout(persisted2, activeLayout)) {
+                        if (persisted2 && tableSnapshotCoversLayout(persisted2, activeLayout, true)) {
                             dbg(' [切卡隔离] 运行时含跨卡残留表：' + foreign.join('、') + '，改用当前卡持久化帧。');
                             return statDataFromTablesCached(activeLayout, persisted2);
                         }
@@ -13276,7 +16186,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 } catch (e) {}
                 if (!tableSnapshotCoversLayout(cur, activeLayout)) {
                     const persisted = readPersistedTableData();
-                    if (persisted && tableSnapshotCoversLayout(persisted, activeLayout)) return statDataFromTablesCached(activeLayout, persisted);
+                    if (persisted && tableSnapshotCoversLayout(persisted, activeLayout, true)) return statDataFromTablesCached(activeLayout, persisted);
                     // 无存档且尚未物化数据行时，读取卡内初始模板。JSON 可选列的
                     // 空单元格表示字段不存在，不能靠 codec 恢复默认值；已开始的
                     // 聊天仍按当前表读取，避免复活游玩中删除的字段。
@@ -13591,7 +16501,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         }
         return false;
     }
-    function tableSnapshotCoversLayout(data, layout) {
+    function tableSnapshotCoversLayout(data, layout, allowEmptyRows = false) {
         if (!tableSnapshotHasSheets(data) || !Array.isArray(layout) || !layout.length) return false;
         const byName = {};
         for (const k in data) {
@@ -13608,26 +16518,27 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         for (const name of Object.keys(requirements)) {
             const sheet = byName[name];
             if (!sheet) return false;
-            if (requirements[name].row && (!Array.isArray(sheet.content) || sheet.content.length <= 1)) return false;
+            if (!Array.isArray(sheet.content) || !sheet.content.length) return false;
+            if (!allowEmptyRows && requirements[name].row && sheet.content.length <= 1) return false;
         }
         return true;
     }
 
-    function mvuDataFromCompleteTableSnapshot(data) {
+    function mvuDataFromCompleteTableSnapshot(data, messageIndex, allowEmptyRows = false) {
         try {
-            if (!activeLayout || !tableSnapshotCoversLayout(data, activeLayout)) return null;
+            if (!activeLayout || !tableSnapshotCoversLayout(data, activeLayout, allowEmptyRows)) return null;
             const core = window.MVU2SHUJUKU_CORE;
             if (!core || typeof core.statDataFromTables !== 'function') return null;
             const after = core.statDataFromTables(activeLayout, data);
-            return after && after.stat_data ? after : null;
+            return after && after.stat_data ? nativeStatStorage.merge(after, messageIndex) : null;
         } catch (e) { return null; }
     }
 
     // 所有表格变化共用同一个前端出口：SP 的提交回调、聊天历史回放兜底都必须
     // 先暂存同一份权威 after，再驱动事件、无副作用的直接重读入口和明确刷新控件。
     // 整页 body.load/iframe reload 只允许手动执行，避免普通改单元格清空前端局部状态。
-    function publishCommittedTableSnapshot(data, source, force, eventAlreadyEmitted) {
-        const after = mvuDataFromCompleteTableSnapshot(data);
+    function publishCommittedTableSnapshot(data, source, force, eventAlreadyEmitted, allowEmptyRows = false) {
+        const after = mvuDataFromCompleteTableSnapshot(data, undefined, allowEmptyRows);
         if (!after) return false;
         try {
             const fp = autoInitChatId() + '|' + canonicalJsonForSync(after.stat_data);
@@ -13863,9 +16774,16 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 data = currentApi.exportTableAsJson() || {};
             }
         } catch (e2) { data = data || {}; }
-        // 切换聊天时 SP 会先通知“运行时已清空”。不广播空数据，
-        // 但给后续物化留一个有限重试窗口。
+        // 有完整持久化帧的空表是用户清空后的有效状态；缺表的回放窗口仍等待。
+        let persistedEmpty = false;
         if (!tableSnapshotCoversLayout(data, activeLayout)) {
+            const persisted = readPersistedTableData();
+            if (tableSnapshotCoversLayout(persisted, activeLayout, true)) {
+                data = persisted;
+                persistedEmpty = true;
+            }
+        }
+        if (!tableSnapshotCoversLayout(data, activeLayout, persistedEmpty)) {
             if (tableUpdateHookRetryCount < 8) {
                 tableUpdateHookRetryCount += 1;
                 tableUpdateHookTimer = hostWindow.setTimeout(flushTableUpdateHook, Math.min(1200, 300 * tableUpdateHookRetryCount));
@@ -13889,7 +16807,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 return;
             } finally { tableBusinessRunning = false; }
         }
-        publishCommittedTableSnapshot(data, '表格更新回调', false);
+        publishCommittedTableSnapshot(data, '表格更新回调', false, false, persistedEmpty);
     }
     const tableUpdateHookCallback = (latestTableData, meta) => {
         if (!activeLayout) return;
@@ -13909,6 +16827,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         // SP 每次事务提交都代表运行时数据已变化（含被抑制广播的批量 CRUD），
         // 投影缓存必须立即失效。
         invalidateStatProjectionCache();
+        if (meta && meta.persisted === true) frontendCommittedMvuRead = null;
         if (tableSnapshotHasSheets(latestTableData)) tableUpdateHookPendingData = latestTableData;
         tableUpdateHookRetryCount = 0;
         if (tableUpdateHookTimer) hostWindow.clearTimeout(tableUpdateHookTimer);
@@ -14145,7 +17064,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 readMetadata: readCardApiMetadata, isCurrent: () => isRuntimeSessionCurrent(shimSession) && currentCardApi === sessionCardApi,
                 readMvu: () => sessionMvu,
                 wait: ms => new Promise(resolve => hostWindow.setTimeout(resolve, ms)),
-                unmapped: stat => core.unmappedStatGroups(activeLayout, {}, stat),
+                unmapped: stat => readCardApiMetadata().statStorage?.version >= 1 ? [] : core.unmappedStatGroups(activeLayout, {}, stat),
             });
             currentCardApi = sessionCardApi;
             sessionMvu.registerSchema = sessionCardApi.registerSchema;
@@ -14158,7 +17077,12 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 BEFORE_MESSAGE_UPDATE: 'mag_before_message_update',
                 SINGLE_VARIABLE_UPDATED: 'mag_variable_updated',
             };
-            windowMvuFake.getMvuData = function () {
+            windowMvuFake.getMvuData = function (options) {
+                if (options && options.type && options.type !== 'message') {
+                    const original = noteGlobalOriginals(window);
+                    return original.hasGet ? original.get.call(window, options) : {};
+                }
+                if (options && options.message_id != null && options.message_id !== 'latest') return readDatabaseVariables(options);
                 if (!isRuntimeSessionCurrent(shimSession)) return { stat_data: {}, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
                 // 有待写快照时直接返回，保证 写→读 一致（持久化由合并定时器落库）
                 if (pendingStatWrite) {
@@ -14245,8 +17169,13 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 }
                 return false;
             };
-            windowMvuFake.replaceMvuData = async function (data) {
+            windowMvuFake.replaceMvuData = async function (data, options) {
                 try {
+                    if (options && options.type && options.type !== 'message') {
+                        const original = noteGlobalOriginals(window);
+                        return original.hasRep ? await original.rep.call(window, data, options) : false;
+                    }
+                    assertDatabaseMessageWrite(options);
                     const callerSession = bindWriteTarget(shimSession);
                     assertRuntimeSession(callerSession);
                     let api = getAcuApi();
@@ -14278,9 +17207,8 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                     const nextStat = (data && data.stat_data) || {};
                     const writeChatKey = autoInitChatId();
                     const writeSession = { ...callerSession, businessEventEmitted: !!(data && data.__mvu2shujukuBusinessProcessed),
-                        schemaProof: currentCardApi && currentCardApi.proofOf(nextStat) };
+                        schemaProof: currentCardApi && currentCardApi.proofOf(nextStat), rawAuthorWrite: true };
                     const ok = await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, writeSession);
-                    if (ok && isRuntimeSessionCurrent(shimSession)) refreshOpeningContinuityAfterWrite(writeChatKey, nextStat);
                     return !!ok;
                 } catch (e) {
                     dbgWarn(' Mvu.replaceMvuData 异常:', e);
@@ -14323,11 +17251,15 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 // 切卡还原时从共享注册表取回，绝不把桥/扩展自己的接管当原始值。
                 const originalRec = noteGlobalOriginals(w);
                 if (w.TavernHelper && w.TavernHelper.__mvu2shujukuCardApi !== currentCardApi) {
-                    const helper = currentCardApi.facade(runtimeGlobals.original(w, 'TavernHelper'));
+                    const helper = currentCardApi.facade(runtimeGlobals.original(w, 'TavernHelper'), {
+                        includeAliases: w !== window && w !== hostWindow,
+                    });
                     Object.defineProperty(helper, '__mvu2shujukuCardApi', { value: currentCardApi });
                     runtimeGlobals.patch(w, 'TavernHelper', helper);
                 }
-                currentCardApi.patchWorldbookGlobals(w, runtimeGlobals);
+                currentCardApi.patchWorldbookGlobals(w, runtimeGlobals, {
+                    includeAliases: w !== window && w !== hostWindow,
+                });
                 if (typeof w.createChatMessages === 'function' && w.createChatMessages.__mvu2shujukuCardApi !== currentCardApi) {
                     const create = currentCardApi.wrapCreate(runtimeGlobals.original(w, 'createChatMessages'), w);
                     create.__mvu2shujuku = true; create.__mvu2shujukuCardApi = currentCardApi; runtimeGlobals.patch(w, 'createChatMessages', create);
@@ -14422,6 +17354,13 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                             : {};
                     } catch (e) { return {}; }
                 };
+                // 原消息现在保存独立的原生状态。辅助变量整份替换先保留它，
+                // 真正的 stat_data 变更仍由既有暂存/数据库提交/回滚流程接管。
+                const auxiliaryWithNativeState = (auxiliary, opts) => {
+                    if (!(readCardApiMetadata().statStorage?.version >= 1)) return auxiliary;
+                    const target = databaseVariableTarget(opts, false);
+                    return { ...auxiliary, stat_data: nativeStatStorage.read(target.index) };
+                };
                 const makeGetVariables = (opts) => {
                     try {
                         if (!isDbVariableScope(opts)) {
@@ -14430,20 +17369,10 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                                 : {};
                         }
                         const auxiliary = readOriginalVariables(opts);
-                        // 与 getMvuData 一致：有待写快照时优先返回待写快照，
-                        // 保证前端连续“读-改-写”（如成就领取 updateResources + updateStoreWith）
-                        // 在 150ms 合并窗口内基于同一状态累积，不会互相覆盖丢标记。
-                        // MVU/TH 的 getVariables 返回的是 { stat_data, ... }，不能只返回裸 stat_data，
-                        // 否则 getVariables(...).stat_data 会拿不到数据，前端会回退默认值并反复写回。
-                        if (pendingStatWrite && typeof pendingStatWrite === 'object') {
-                            return Object.assign({}, auxiliary, { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} });
-                        }
-                        const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                        assertMvuReadReady(all);
-                        const dbView = all && typeof all === 'object' ? all : { stat_data: all || {} };
+                        const dbView = readDatabaseVariables(opts);
                         return Object.assign({}, auxiliary, dbView);
                     } catch (e) {
-                        if (e && e.code === 'MVU_DATA_NOT_READY') throw e;
+                        if (e && (e.code === 'MVU_DATA_NOT_READY' || String(e.code || '').startsWith('MVU_HISTORY'))) throw e;
                         return { stat_data: {} };
                     }
                 };
@@ -14480,6 +17409,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                                 : false;
                         }
                         assertRuntimeSession(shimSession);
+                        assertDatabaseMessageWrite(opts);
                         const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                         if (!pendingStatWrite) assertMvuReadReady(all);
                         const base = (pendingStatWrite && typeof pendingStatWrite === 'object')
@@ -14498,7 +17428,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                         const oldAux = stripDbVariableKeys(readOriginalVariables(opts));
                         const nextAux = stripDbVariableKeys(result);
                         if (!deepEqualCanon(nextAux, oldAux) && originalRec && originalRec.hasRep) {
-                            await Promise.resolve(originalRec.rep.call(w, nextAux, opts));
+                            await Promise.resolve(originalRec.rep.call(w, auxiliaryWithNativeState(nextAux, opts), opts));
                             assertRuntimeSession(shimSession);
                         }
                         // 无变化不写库、不发事件：外部 UI 的自动清理/回写 effect 经常重复写相同数据，
@@ -14529,8 +17459,10 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                         }
                         assertRuntimeSession(shimSession);
                         const input = variables && typeof variables === 'object' ? variables : {};
+                        if (Object.prototype.hasOwnProperty.call(input, 'stat_data')) assertDatabaseMessageWrite(opts);
                         if (originalRec && originalRec.hasRep) {
-                            await Promise.resolve(originalRec.rep.call(w, stripDbVariableKeys(input), opts));
+                            await Promise.resolve(originalRec.rep.call(w, Object.prototype.hasOwnProperty.call(input, 'stat_data')
+                                ? auxiliaryWithNativeState(stripDbVariableKeys(input), opts) : stripDbVariableKeys(input), opts));
                             assertRuntimeSession(shimSession);
                         }
                         if (Object.prototype.hasOwnProperty.call(input, 'stat_data')) {
@@ -14553,6 +17485,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                         }
                         assertRuntimeSession(shimSession);
                         const input = variables && typeof variables === 'object' ? variables : {};
+                        if (Object.prototype.hasOwnProperty.call(input, 'stat_data')) assertDatabaseMessageWrite(opts);
                         const auxiliary = stripDbVariableKeys(input);
                         if (Object.keys(auxiliary).length && originalRec && originalRec.hasIns) {
                             await Promise.resolve(originalRec.ins.call(w, auxiliary, opts));
@@ -14830,9 +17763,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         if (!core || typeof core.convert !== 'function') {
             throw new Error('转换核心未加载（MVU2SHUJUKU_CORE 不可用）');
         }
-        // AI 实际输出 insertRow DSL 还是 SQL 由 SP·数据库 插件自身的填表模式决定，
-        // 模板本身对三种模式产出完全一致（测试断言过），因此转换统一按双模式输出。
-        const mode = 'both';
+        const mode = 'sqlite';
         const opts = {
             mode,
             targetSpVersion: await readTargetSpVersion(),
@@ -15042,7 +17973,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         dbg(' applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
         if (!merged.added.length) { toast('没有可并入的表（全部重名或无效）', 'error'); return; }
         const settings = getSettings();
-        const mode = 'both';
+        const mode = 'sqlite';
         const opts = {
             mode,
             template: merged.template,
@@ -15435,7 +18366,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.refreshConversion !== 'function') throw new Error('转换核心不可用');
         const opts = {
-            mode: 'both',
+            mode: 'sqlite',
             template: lastResult.template,
             asPng: settings.asPng === 'auto' ? !!lastResult.meta.isPngInput : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
@@ -15576,6 +18507,288 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
 
     function renderSettingsPanel(panel) { panel.innerHTML = window.__MVU2SHUJUKU_SETTINGS_VIEW__(getSettings()); }
 
+    const stateTransfer = window.MVU2SHUJUKU_CORE.getStateTransferFactory()();
+    let stateTransferBusy = false;
+    function stateTransferProgress(text) {
+        const panel = hostDocument.getElementById(PANEL_ID);
+        for (const id of ['mvu2shujuku-export-state', 'mvu2shujuku-import-state']) {
+            const button = panel?.querySelector('#' + id); if (button) button.disabled = stateTransferBusy;
+        }
+        const status = panel?.querySelector('#mvu2shujuku-state-progress');
+        if (status) status.textContent = text;
+    }
+    function stateTransferHelper() {
+        for (const w of [window, hostWindow]) {
+            const helper = runtimeGlobals.original(w, 'TavernHelper');
+            if (helper && typeof helper.getVariables === 'function' && typeof helper.replaceVariables === 'function') return helper;
+        }
+        throw new Error('需要酒馆助手的公开消息变量接口');
+    }
+    function assertStateTransferIdle() {
+        if (pendingStatWrite || statWriteFlushPromise || autoInitState.running || getContextSafe().streamingProcessor && !getContextSafe().streamingProcessor.isFinished) {
+            throw new Error('聊天或变量仍在更新，请等待完成后重试');
+        }
+        const stop = hostDocument.querySelector('#mes_stop');
+        if (stop && stop.getClientRects().length && hostWindow.getComputedStyle(stop).visibility !== 'hidden') throw new Error('正文正在生成，请等待完成后重试');
+    }
+    function stateTransferTableNames(tables) {
+        return Object.keys(tables || {}).filter(key => key.startsWith('sheet_') && tables[key]?.name).map(key => String(tables[key].name)).sort();
+    }
+    async function waitStateTransferTableRead(api, session, expected) {
+        const deadline = Date.now() + 15000;
+        while (true) {
+            assertRuntimeSession(session);
+            const tables = api?.exportTableAsJson?.() || {};
+            if (!expected.length || stateTransfer.equal(stateTransferTableNames(tables), expected)) return tables;
+            if (Date.now() >= deadline) throw new Error('数据库尚未发布目标聊天的完整状态，请稍后重试');
+            await new Promise(resolve => hostWindow.setTimeout(resolve, 100));
+        }
+    }
+    async function captureStateTransferSnapshot() {
+        assertStateTransferIdle();
+        const context = getContextSafe(), ch = currentCharacter();
+        if (!context.chatId || !Array.isArray(context.chat) || !context.chat.length) throw new Error('请先打开有消息的目标聊天');
+        const chatLength = context.chat.length;
+        const session = bindWriteTarget(captureRuntimeSession(() => getContextSafe().chat?.length === chatLength));
+        if (!session.writeTarget) throw new Error('聊天中没有可写的 AI 消息');
+        const helper = stateTransferHelper(), index = session.writeTarget.index;
+        let variableOption = { type: 'message', message_id: index };
+        const converted = isConvertedMvuCard(ch), api = getAcuApi();
+        const hasDatabase = converted || context.chatMetadata?.TavernDB_ACU_ScopedConfig || context.chat.some(row => row?.TavernDB_ACU_IsolatedData);
+        const template = hasDatabase && api?.getTableTemplate ? await api.getTableTemplate({ scope: 'chat' }) : null;
+        const tables = stateTransfer.clone(await waitStateTransferTableRead(api, session, stateTransferTableNames(template)));
+        assertStateTransferIdle();
+        let raw = stateTransfer.clone(helper.getVariables(variableOption));
+        let mvu, layout = [];
+        if (converted) {
+            if (!activeLayout || activeLayoutCardKey !== cardCacheKey(ch)) throw new Error('转换卡布局尚未就绪，请稍后重试');
+            layout = stateTransfer.clone(activeLayout);
+            mvu = mvuDataFromCompleteTableSnapshot(tables, index, true);
+            if (!mvu) throw new Error('当前数据库不包含转换卡完整表格，请先初始化正确模板');
+            mvu = { ...raw, ...mvu, ...(raw.schema !== undefined ? { schema: raw.schema } : {}), initialized_lorebooks: raw.initialized_lorebooks || {} };
+        } else {
+            // 与消息变量读取的选中 swipe 一致；没有新状态的楼层沿用最近一份 MVU 状态。
+            for (let i = index; i >= 0; i--) {
+                const row = context.chat[i]; if (!row || row.is_user) continue;
+                const vars = helper.getVariables({ type: 'message', message_id: i });
+                if (vars && vars.stat_data && typeof vars.stat_data === 'object' && !Array.isArray(vars.stat_data) && vars.schema !== undefined) { mvu = { ...stateTransfer.clone(vars), stat_data: stateTransfer.stat(vars.stat_data) }; break; }
+            }
+            if (!mvu) {
+                const vars = helper.getVariables({ type: 'chat' });
+                if (vars && vars.stat_data && typeof vars.stat_data === 'object' && !Array.isArray(vars.stat_data) && vars.schema !== undefined) {
+                    variableOption = { type: 'chat' }; raw = stateTransfer.clone(vars);
+                    mvu = { ...stateTransfer.clone(vars), stat_data: stateTransfer.stat(vars.stat_data) };
+                }
+            }
+            if (!mvu) throw new Error('当前聊天没有已初始化的 MVU 消息／聊天状态（stat_data / schema）');
+        }
+        const latestContext = getContextSafe();
+        const metadata = latestContext.chatMetadata || latestContext.chat_metadata || {};
+        const originalName = charExtensions(ch)?.mvu2shujuku?.originalName || characterDisplayName(ch) || context.name2 || '';
+        return { session, helper, index, variableOption, api, converted, layout, raw, mvu, tables, template: stateTransfer.clone(template || null),
+            chat: stateTransfer.clone(latestContext.chat), metadata: stateTransfer.clone(metadata),
+            source: { character: originalName, chat: String(context.chatId), message: index, swipe: Number(context.chat[index].swipe_id || 0),
+                backend: converted ? 'converted' : 'mvu', scope: variableOption.type, converterVersion: window.MVU2SHUJUKU_CORE.VERSION },
+        };
+    }
+    function assertStateTransferUnchanged(snapshot) {
+        assertRuntimeSession(snapshot.session); assertStateTransferIdle(); snapshot.schemaGuard?.();
+        const context = getContextSafe();
+        const changes = [];
+        if (!stateTransfer.equal(snapshot.chat, context.chat)) changes.push('消息');
+        if (!stateTransfer.equal(snapshot.metadata, context.chatMetadata || context.chat_metadata || {})) changes.push('聊天元数据');
+        if (!stateTransfer.equalRuntimeTables(snapshot.tables, snapshot.api?.exportTableAsJson() || {})) changes.push('表格');
+        if (snapshot.template && !stateTransfer.equal(snapshot.template, snapshot.api?.getTableTemplate?.({ scope: 'chat' }) || null)) changes.push('表格模板');
+        if (changes.length) {
+            const error = new Error('预览后' + changes.join('、') + '已更新，请重新导入');
+            error.stateTransferChanges = changes;
+            throw error;
+        }
+    }
+    function stateTransferFilename(name, suffix) {
+        return String(name || '聊天').replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g, '_').replace(/[. ]+$/g, '').slice(0, 100) + '-' + new Date().toISOString().replace(/[:.]/g, '-') + suffix;
+    }
+    async function saveStateTransferChat(snapshot) {
+        assertRuntimeSession(snapshot.session);
+        const context = getContextSafe();
+        const save = context.saveChatConditional || context.saveChat;
+        if (typeof save !== 'function') throw new Error('酒馆聊天保存接口不可用');
+        await save.call(context); assertRuntimeSession(snapshot.session);
+        await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(snapshot.tables));
+    }
+    async function exportStateTransferChat(snapshot) {
+        assertRuntimeSession(snapshot.session);
+        const context = getContextSafe();
+        const filename = String(context.chatId).replace(/\.jsonl$/i, '');
+        const avatar = currentCharacter()?.avatar;
+        if (!context.groupId && !avatar) throw new Error('无法确定聊天备份的角色身份');
+        const response = await hostWindow.fetch('/api/chats/export', { method: 'POST', headers: context.getRequestHeaders(),
+            body: JSON.stringify({ is_group: !!context.groupId, avatar_url: avatar, file: filename + '.jsonl', exportfilename: filename + '.jsonl', format: 'jsonl' }) });
+        assertRuntimeSession(snapshot.session);
+        if (!response.ok) throw new Error('聊天备份导出失败：HTTP ' + response.status);
+        const result = await response.json();
+        if (typeof result.result !== 'string') throw new Error('酒馆未返回聊天备份');
+        return result.result;
+    }
+    async function prepareStateTransferImport(input) {
+        const session = captureRuntimeSession();
+        for (let attempt = 0; ; attempt++) {
+            try { return await prepareStateTransferImportOnce(input); }
+            catch (error) {
+                assertRuntimeSession(session);
+                // 尚未展示预览，允许用初始化后最新的元数据/表格重新准备。
+                // 消息变化、切换会话及确认后的变化仍拒绝，不能覆盖用户操作。
+                if (attempt >= 2 || !error.stateTransferChanges || error.stateTransferChanges.includes('消息')) throw error;
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        }
+    }
+    async function prepareStateTransferImportOnce(input) {
+        const archive = stateTransfer.parse(input), snapshot = await captureStateTransferSnapshot();
+        const extras = stateTransfer.matchExtras(archive.extraTables, snapshot.tables, snapshot.layout);
+        if (snapshot.converted || extras.matches.length) {
+            stateTransfer.assertPersistentDbVersion(await readTargetSpVersion());
+            assertStateTransferUnchanged(snapshot);
+        }
+        const rules = snapshot.converted && (readCardApiMetadata().schemaKeys || []).length
+            ? await currentCardApi?.stateImportRules() : null;
+        if (snapshot.converted && (readCardApiMetadata().schemaKeys || []).length && !rules) throw new Error('目标 Schema 接口尚未就绪');
+        snapshot.schemaGuard = rules?.assertCurrent;
+        const schemaReconciler = window.MVU2SHUJUKU_CORE.getMvuSchemaFactory()(window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash);
+        const schema = rules?.schema || stateTransfer.resolveImportSchema(snapshot.mvu.schema, schemaReconciler.generateSchema);
+        const target = stateTransfer.stat(snapshot.mvu.stat_data);
+        const accept = async (path, value) => {
+            if (rules) return rules.accept(path, value);
+            if (!schema && !snapshot.converted) return '目标没有公开可独立校验的字段规则，保留目标值';
+            return '';
+        };
+        async function project(value) {
+            if (!snapshot.converted) return snapshot.tables;
+            const candidate = await buildUpdatedTemplateFromStat(snapshot.layout, nativeStatStorage.split(target).database,
+                nativeStatStorage.split(value).database, snapshot.tables);
+            if (!candidate) throw new Error('无法将状态映射到目标表格');
+            const readback = window.MVU2SHUJUKU_CORE.statDataFromTables(snapshot.layout, candidate);
+            const merged = nativeStatStorage.combine(readback?.stat_data || {}, nativeStatStorage.split(value).native);
+            if (!stateTransfer.equal(stateTransfer.stat(merged), value)) throw new Error('目标布局无法无损保存这份 stat_data');
+            return candidate;
+        }
+        const candidate = await stateTransfer.prepareImport(archive.stat_data, target, {
+            schema, accept, project, layoutOnly: snapshot.converted && !schema && !rules,
+            validateComplete: rules ? value => rules.validateComplete(value) : null,
+        });
+        const fields = candidate.fields, importedStat = candidate.stat_data;
+        let tables = candidate.tables;
+        if (fields?.partial && !fields.imported.length && !extras.matches.length) throw new Error('没有可安全导入的兼容字段或额外表格；未写入数据');
+        assertStateTransferUnchanged(snapshot);
+        tables = stateTransfer.applyExtras(tables, extras.matches);
+        const targetMvu = { ...snapshot.mvu, stat_data: stateTransfer.clone(importedStat) };
+        schemaReconciler.reconcileAndApplySchema(targetMvu);
+        const nativeStat = snapshot.converted ? nativeStatStorage.split(importedStat).native : importedStat;
+        const variables = { ...snapshot.raw, stat_data: stateTransfer.clone(nativeStat),
+            ...(targetMvu.schema !== undefined ? { schema: targetMvu.schema } : {}),
+            initialized_lorebooks: stateTransfer.clone(snapshot.mvu.initialized_lorebooks || {}), display_data: stateTransfer.clone(nativeStat), delta_data: {} };
+        return { archive, snapshot, tables, variables, extras, fields, importedStat, backup: true, writeTables: snapshot.converted || extras.matches.length > 0 };
+    }
+    async function commitStateTransferImport(plan) {
+        const { snapshot } = plan;
+        let broadcastSuppressed = false;
+        const rollbackStage = async () => {
+            const current = snapshot.helper.getVariables(snapshot.variableOption);
+            if (stateTransfer.equal(current, snapshot.raw)) return;
+            if (!stateTransfer.equal(current, plan.variables)) throw new Error('消息变量已被其他操作修改，未强制覆盖');
+            snapshot.helper.replaceVariables(stateTransfer.clone(snapshot.raw), snapshot.variableOption);
+        };
+        if (plan.writeTables && typeof snapshot.api?.importTableAsJson !== 'function') throw new Error('数据库公开状态导入接口不可用');
+        await stateTransfer.execute(plan, {
+            rollbackStage,
+            assertCurrent: () => { assertRuntimeSession(snapshot.session); snapshot.schemaGuard?.(); },
+            assertUnchanged: () => assertStateTransferUnchanged(snapshot),
+            backup: async () => {
+                stateTransferProgress('正在保存并备份完整聊天…');
+                await saveStateTransferChat(snapshot);
+                assertStateTransferUnchanged(snapshot);
+                const jsonl = await exportStateTransferChat(snapshot);
+                assertStateTransferUnchanged(snapshot);
+                stateTransfer.verifyBackup(jsonl, snapshot.chat, snapshot.metadata);
+                download(stateTransferFilename(snapshot.source.chat, '-覆盖前备份.jsonl'), 'application/jsonl', jsonl);
+            },
+            stage: async () => {
+                stateTransferProgress('正在导入状态…');
+                sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) + 1;
+                broadcastSuppressed = true;
+                snapshot.helper.replaceVariables(stateTransfer.clone(plan.variables), snapshot.variableOption);
+                return rollbackStage;
+            },
+            importTables: tables => snapshot.api.importTableAsJson(JSON.stringify(tables), { persist: true }),
+            restoreTables: async () => {
+                const current = await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(snapshot.tables));
+                if (stateTransfer.equalRuntimeTables(current, snapshot.tables)) return;
+                if (!stateTransfer.equalRuntimeTables(current, plan.tables)) throw new Error('表格状态与本次候选不一致，未强制覆盖；请检查并手动恢复');
+                const result = await snapshot.api.importTableAsJson(JSON.stringify(snapshot.tables), { persist: true });
+                if (result !== true && result?.success !== true) throw new Error('数据库拒绝回退');
+            },
+            // importTableAsJson 的持久提交已保存同一份暂存变量；沿用现有批量写入
+            // 契约，成功时不再次保存并触发宿主重新加载。失败回退仍明确保存。
+            save: recovering => !plan.writeTables || recovering ? saveStateTransferChat(snapshot) : Promise.resolve(),
+            verify: async () => {
+                const variables = snapshot.helper.getVariables(snapshot.variableOption);
+                if (!stateTransfer.equal(variables, plan.variables)) throw new Error('消息变量读回不一致');
+                if (plan.writeTables) {
+                    const current = await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(plan.tables));
+                    if (snapshot.converted) {
+                        const wrap = mvuDataFromCompleteTableSnapshot(current, snapshot.index, true);
+                        if (!wrap || !stateTransfer.equal(stateTransfer.stat(wrap.stat_data), plan.importedStat)) throw new Error('数据库状态读回不一致');
+                    }
+                    for (const match of plan.extras.matches) if (!stateTransfer.equal(current[match.key]?.content, match.content)) throw new Error('额外表格读回不一致：' + match.name);
+                }
+                const context = getContextSafe(), chat = stateTransfer.clone(context.chat), metadata = stateTransfer.clone(context.chatMetadata || context.chat_metadata || {});
+                stateTransferProgress('正在确认聊天已保存…');
+                const jsonl = await exportStateTransferChat(snapshot);
+                stateTransfer.verifyBackup(jsonl, chat, metadata);
+                if (!stateTransfer.equal(chat, getContextSafe().chat)) throw new Error('保存核对期间聊天又发生更新');
+            },
+        }).finally(() => {
+            if (broadcastSuppressed) sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = Math.max(0, (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) - 1);
+            invalidateStatProjectionCache();
+        });
+        if (snapshot.converted) {
+            refreshOpeningContinuityAfterWrite(snapshot.source.chat, plan.importedStat);
+            publishCommittedTableSnapshot(snapshot.api.exportTableAsJson(), '手动导入状态', true, true, true);
+        }
+    }
+    async function confirmStateTransferImport(plan) {
+        const context = getContextSafe(), text = [];
+        text.push('目标角色：' + plan.snapshot.source.character, '目标聊天：' + plan.snapshot.source.chat,
+            '目标存储：' + (plan.snapshot.variableOption.type === 'chat' ? '聊天变量（沿用原卡位置）' : '消息变量（最新 AI 消息的选中分支）'),
+            '覆盖当前状态，保留其他消息和分支。',
+            (plan.snapshot.converted ? 'stat_data 已通过目标布局的无损读回预检。' : '已检查 stat_data JSON 结构。') + '沿用目标 Schema 规则和初始化标记，不重跑作者初始化或变换。');
+        if (plan.archive.source?.character && plan.archive.source.character !== plan.snapshot.source.character) text.push('源角色与目标角色名称不同，请确认变量含义相容。');
+        text.push('额外表格匹配：' + (plan.extras.matches.map(t => t.name).join('、') || '无'));
+        for (const skip of plan.extras.skipped) text.push('跳过 ' + skip.name + '：' + skip.reason);
+        if (plan.fields?.partial) {
+            text.push('无法完整导入，将仅导入兼容字段。未匹配或不相容的字段保留目标值；不会猜测字段改名或拼接数组。',
+                '可导入字段：' + (plan.fields.imported.join('、') || '无'),
+                '旧存档缺少，保留目标字段：' + (plan.fields.retained.join('、') || '无'));
+            for (const skip of plan.fields.skipped) text.push('跳过 ' + skip.path + '：' + skip.reason);
+        }
+        text.push('聊天备份为可选项；选中时，写入前保存并下载完整 JSONL（不包含外置世界书、角色脚本或全局设置）。');
+        if (!context.callGenericPopup || !context.POPUP_TYPE) throw new Error('酒馆确认弹窗接口不可用');
+        const escaped = text.join('\n\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const html = '<h3>导入状态预览</h3><div style="text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;max-height:55vh;overflow-y:auto">' + escaped + '</div>'
+            + '<label style="display:flex;align-items:center;gap:.5em;text-align:left;margin-top:1em"><input type="checkbox" id="mvu2shujuku-state-backup" checked>导入前下载完整聊天备份</label>';
+        return await context.callGenericPopup(html, context.POPUP_TYPE.CONFIRM, '', {
+            okButton: plan.fields?.partial ? '仅导入兼容字段' : '导入', cancelButton: '取消',
+            onClosing: popup => { plan.backup = popup.content.querySelector('#mvu2shujuku-state-backup')?.checked !== false; return true; },
+        }) === 1;
+    }
+    async function stateTransferAction(task) {
+        if (stateTransferBusy) return;
+        stateTransferBusy = true; stateTransferProgress('正在读取状态…');
+        try { await task(); }
+        catch (e) { stateTransferProgress('操作失败：' + e.message); toast('状态存档：' + e.message, 'error'); }
+        finally { stateTransferBusy = false; stateTransferProgress(hostDocument.querySelector('#mvu2shujuku-state-progress')?.textContent || ''); }
+    }
+
     function bindSettingsPanel(panel, context) {
         const bind = (id, fn) => {
             const el = panel.querySelector(id);
@@ -15584,6 +18797,30 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 el.addEventListener('click', fn);
             }
         };
+        bind('#mvu2shujuku-export-state', () => stateTransferAction(async () => {
+            const snapshot = await captureStateTransferSnapshot();
+            const archive = stateTransfer.archive(snapshot);
+            assertStateTransferUnchanged(snapshot);
+            download(stateTransferFilename(snapshot.source.character, '-状态.json'), 'application/json', JSON.stringify(archive, null, 2));
+            stateTransferProgress('状态已导出，额外表格 ' + archive.extraTables.length + ' 张。');
+        }));
+        bind('#mvu2shujuku-import-state', () => { if (!stateTransferBusy) panel.querySelector('#mvu2shujuku-state-file')?.click(); });
+        const stateFile = panel.querySelector('#mvu2shujuku-state-file');
+        if (stateFile && stateFile.dataset.bound !== 'true') {
+            stateFile.dataset.bound = 'true';
+            stateFile.addEventListener('change', () => {
+                const file = stateFile.files?.[0]; stateFile.value = ''; if (!file) return;
+                stateTransferAction(async () => {
+                    if (file.size > 64 * 1024 * 1024) throw new Error('状态存档超过 64 MiB');
+                    const plan = await prepareStateTransferImport(await file.text());
+                    stateTransferProgress('等待确认导入…');
+                    if (!await confirmStateTransferImport(plan)) { stateTransferProgress('已取消导入。'); return; }
+                    await commitStateTransferImport(plan);
+                    stateTransferProgress((plan.fields?.partial ? '兼容字段导入完成；跳过字段 ' + plan.fields.skipped.length + ' 个，保留目标字段 ' + plan.fields.retained.length + ' 个；' : '状态导入完成；') + '匹配额外表格 ' + plan.extras.matches.length + ' 张，跳过 ' + plan.extras.skipped.length + ' 张。');
+                });
+            });
+        }
+        stateTransferProgress(panel.querySelector('#mvu2shujuku-state-progress')?.textContent || '');
         populateCharacterSelect(panel);
         startCharacterListRefresh(panel);
         populateProfileSelect(panel);
@@ -15819,40 +19056,50 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         } catch (e) {}
         return original;
     }
-    function templateDatabaseDefines() {
-        const safeDefine = function () { return ejsVariablesSafe(); };
-        const getMessageDefine = function (path, options) {
-                    const defaultValue = options && typeof options === 'object' && Object.prototype.hasOwnProperty.call(options, 'defaults')
-                        ? options.defaults
-                        : options;
-                    try {
-                        const parts = String(path || '').split('.').filter(Boolean);
-                        let cur = ejsVariablesSafe();
-                        for (const p of parts) { if (cur == null) return defaultValue; cur = cur[p]; }
-                        return cur === undefined ? defaultValue : cur;
-                    } catch (e) { return defaultValue; }
-        };
+    function hasDatabaseMessageData(index) {
+        const chat = getContextSafe().chat || [];
+        // Unchanged AI replies and user messages inherit the preceding database
+        // state even when no new storage frame was required on that floor.
+        for (let i = index; i >= 0; i--) {
+            let isolated = chat[i] && chat[i].TavernDB_ACU_IsolatedData;
+            if (typeof isolated === 'string') { try { isolated = JSON.parse(isolated); } catch (_) { continue; } }
+            if (isolated && typeof isolated === 'object' && Object.values(isolated).some(tag =>
+                tag && tag.storageFrame && tag.storageFrame.version === 2)) return true;
+        }
+        return false;
+    }
+    function readDatabaseMessageHistory(index) {
+        const tables = readPersistedTableData(index);
+        const wrap = tables ? mvuDataFromCompleteTableSnapshot(tables, index) : null;
+        return wrap ? nativeStatStorage.merge(wrap, index) : undefined;
+    }
+    function databaseVariableTarget(options, writing) {
+        const messageId = options && options.message_id;
+        return ejsEvalBridge.selectMessage(messageId == null || messageId === 'latest'
+            ? {} : { withMsg: { id: messageId } }, {}, writing);
+    }
+    function readDatabaseVariables(options) {
+        const target = databaseVariableTarget(options, false);
+        if (target.missing) return {};
+        if (!target.current) return readDatabaseMessageHistory(target.index) || {};
+        const all = pendingStatWrite ? { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} }
+            : window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+        assertMvuReadReady(all);
+        return all;
+    }
+    function assertDatabaseMessageWrite(options) {
+        ejsEvalBridge.assertWritable(databaseVariableTarget(options, true));
+    }
+    function templateDatabaseDefines(context, execution) {
+        const safeDefine = function () { return variables.getvar(null); };
+        const variables = ejsEvalBridge.createVariableContext(ejsVariablesSafe, scheduleWindowStatOverlay, context || {}, execution || { refreshReads: !context });
+        const getMessageDefine = variables.getMessageVar;
+        const setMessageDefine = variables.setMessageVar;
         const formatMessageDefine = function (path) {
                     const coreNow = window.MVU2SHUJUKU_CORE;
                     return coreNow && typeof coreNow.formatMessageVariableValue === 'function'
                         ? coreNow.formatMessageVariableValue(getMessageDefine(path))
                         : '';
-        };
-        const setMessageDefine = function (path, value) {
-                    try {
-                        const parts = String(path || '').split('.').filter(Boolean);
-                        if (parts[0] !== 'stat_data' || parts.length < 2) return value;
-                        const all = ejsVariablesSafe();
-                        const next = JSON.parse(JSON.stringify((all && all.stat_data) || {}));
-                        let cur = next;
-                        for (let i = 1; i < parts.length - 1; i++) {
-                            if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) cur[parts[i]] = {};
-                            cur = cur[parts[i]];
-                        }
-                        cur[parts[parts.length - 1]] = value;
-                        scheduleWindowStatOverlay(next);
-                        return value;
-                    } catch (e) { return value; }
         };
         const resolveMacroDefine = function (body) { return resolvePromptMacroRuntime(body); };
         const applyWorldInfoRegexDefine = function (name, original, encodedReplacement, initiallyEnabled) {
@@ -15861,6 +19108,8 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
         const defines = {
             mvu2shujukuGetAllVariables: safeDefine,
             mvu2shujukuGetMessageVar: getMessageDefine,
+            mvu2shujukuGetVar: variables.getvar,
+            mvu2shujukuSetVar: variables.setvar,
             mvu2shujukuFormatMessageVariable: formatMessageDefine,
             mvu2shujukuVwdDescriptions: function (table, fieldIds) {
                 if (!ensureActiveLayoutLazy()) throw new Error('动态说明布局尚未就绪');
@@ -15878,41 +19127,31 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
             mvu2shujukuResolveMacro: resolveMacroDefine,
             mvu2shujukuApplyWorldInfoRegex: applyWorldInfoRegexDefine,
         };
+        if (context && isConvertedMvuCard(currentCharacter())) {
+            Object.assign(defines, variables);
+            const descriptor = Object.getOwnPropertyDescriptor(context, 'variables');
+            if (!descriptor || descriptor.configurable) Object.defineProperty(context, 'variables', {
+                configurable: true, enumerable: true, get: () => variables.variableView(),
+            });
+        }
         for (const fn of Object.values(defines)) fn.__mvu2shujuku = true;
         return defines;
     }
-    function ensureEjsEvalContextBridge(ejs) {
-        try {
-            if (!ejs || typeof ejs.evalTemplate !== 'function') return false;
-            if (ejs.evalTemplate.__mvu2shujukuContextBridge) return true;
-            const originalEvalTemplate = ejs.evalTemplate;
-            const wrappedEvalTemplate = async function (code, context, options) {
-                // 只介入包含本转换器 helper 的模板，其他卡/模板完全走原调用。
-                if (!/\bmvu2shujuku(?:GetAllVariables|GetMessageVar|FormatMessageVariable|VwdDescriptions|SetMessageVar|ResolveMacro|ApplyWorldInfoRegex)\b/.test(String(code || ''))) {
-                    return originalEvalTemplate.apply(this, arguments);
-                }
-                const defines = templateDatabaseDefines();
-                let actualContext = context;
-                if (!actualContext || typeof actualContext !== 'object') {
-                    // SP·数据库 v8.9.2 直接 evalTemplate(finalContent)，不传 context。
-                    // 显式 prepare 才能保证本次执行环境拿到 helper，不依赖
-                    // defines 何时被复制，也不依赖 prompt_template_prepare 事件是否对外发布。
-                    actualContext = typeof ejs.prepareContext === 'function'
-                        ? await ejs.prepareContext(defines)
-                        : defines;
-                } else {
-                    Object.assign(actualContext, defines);
-                }
-                if (actualContext && typeof actualContext === 'object') Object.assign(actualContext, defines);
-                return originalEvalTemplate.call(this, code, actualContext, options);
-            };
-            wrappedEvalTemplate.__mvu2shujuku = true;
-            wrappedEvalTemplate.__mvu2shujukuContextBridge = true;
-            wrappedEvalTemplate.__mvu2shujukuOriginal = originalEvalTemplate;
-            ejs.evalTemplate = wrappedEvalTemplate;
-            return true;
-        } catch (e) { return false; }
-    }
+    const ejsEvalBridge = window.MVU2SHUJUKU_CORE.getEjsEvalBridgeFactory()({
+        readCharacter: currentCharacter,
+        isConverted: () => isConvertedMvuCard(currentCharacter()),
+        readCore: () => window.MVU2SHUJUKU_CORE,
+        makeDefines: templateDatabaseDefines,
+        pathParts: mvuVariablePathParts,
+        readChat: () => getContextSafe().chat || [],
+        readSessionKey: () => { const session = captureRuntimeSession(); return session.key + ":" + session.epoch; },
+        hasMessageData: hasDatabaseMessageData,
+        readHistory: readDatabaseMessageHistory,
+        readTemplate: () => window.EjsTemplate || hostWindow.EjsTemplate,
+        onWriteError: error => dbgWarn(' EJS 数据库变量写入失败:', error),
+        lodash: window._ || hostWindow._,
+    });
+    function ensureEjsEvalContextBridge(ejs) { return ejsEvalBridge.install(ejs); }
     function ensureTemplateDefine() {
         try {
             const roots = [];
@@ -15964,7 +19203,7 @@ root.__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__ = function installExtensionRunt
                 // evalTemplate(finalContent)，不同窗口/缓存时它可能不带当前 defines。
                 // prepare 事件上再直接注入实际执行上下文，避免任意一个 helper
                 // ReferenceError 使 SP 整份提示退回未处理原文。
-                if (prepared && typeof prepared === 'object') Object.assign(prepared, templateDatabaseDefines());
+                if (prepared && typeof prepared === 'object') Object.assign(prepared, templateDatabaseDefines(prepared));
                 installFrontendEjsLiteralGuard(prepared);
                 if (firstPreparedLogged) return;
                 firstPreparedLogged = true;
@@ -16291,6 +19530,363 @@ root.__MVU2SHUJUKU_WORLDBOOK_REQUEST_FILTER_FACTORY__ = function createWorldbook
     }
     return { filter, bind, stop };
 };
+root.__MVU2SHUJUKU_EJS_EVAL_BRIDGE_FACTORY__ = function createEjsEvalBridgeFactory(deps) {
+    'use strict';
+    const { readCharacter, readCore, makeDefines } = deps;
+    const lodash = deps.lodash || (typeof globalThis !== 'undefined' && globalThis._)
+        || (typeof require === 'function' ? require('./vendor/schema-engine-libs').lodash : null);
+    const pathParts = deps.pathParts || (path => lodash.toPath(path));
+    const own = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
+    function failure(code, message) {
+        const error = new Error(message);
+        error.code = code;
+        return error;
+    }
+    function optionObject(value) {
+        if (typeof value === 'boolean') return { dryRun: value };
+        if (typeof value === 'string') {
+            if (['old', 'new', 'fullcache'].includes(value)) return { results: value };
+            if (['n', 'nx', 'xx', 'nxs', 'xxs'].includes(value)) return { flags: value };
+            if (['cache', 'initial', 'global', 'local', 'message'].includes(value)) return { scope: value };
+            return {};
+        }
+        return value && typeof value === 'object' ? { ...value } : {};
+    }
+    function jsonIndex(value) {
+        const numeric = Number(value);
+        return Number.isNaN(numeric) ? value : numeric;
+    }
+    function selectMessage(options = {}, context = {}, writing = false) {
+        const chat = deps.readChat ? deps.readChat() : null;
+        const filter = options.withMsg;
+        if (!Array.isArray(chat)) {
+            if (filter || context.message_id != null) throw failure('MVU_HISTORY_UNAVAILABLE', '数据库消息历史尚未就绪');
+            return { current: true };
+        }
+        let latest = -1;
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (chat[i] && !chat[i].is_user && !chat[i].is_system) { latest = i; break; }
+        }
+        let index = latest;
+        if (filter && filter.id != null) {
+            index = Number(filter.id);
+            if (index < 0) index += chat.length;
+        } else if (filter && filter.role != null) {
+            // Retain the host selector's boolean-role matching contract, including
+            // its overlapping user/system tests; do not silently tighten it here.
+            const eligible = msg => filter.role === 'any'
+                || msg.is_system === (filter.role === 'system')
+                || msg.is_user === (filter.role === 'user')
+                || (filter.role === 'assistant' && !msg.is_user && !msg.is_system);
+            index = -1;
+            for (let i = chat.length - 1; i >= 0; i--) {
+                if (chat[i] && eligible(chat[i]) && (writing || !deps.hasMessageData || deps.hasMessageData(i))) { index = i; break; }
+            }
+        } else if (context.message_id != null) {
+            index = Number(context.message_id);
+            if (index < 0) index += chat.length;
+            if (index > chat.length) index = chat.length - 1;
+            if (!writing && deps.hasMessageData) {
+                while (index >= 0 && !deps.hasMessageData(index)) index--;
+            }
+        }
+        if (!Number.isInteger(index) || index < 0 || index >= chat.length) return { missing: true, current: false };
+        const message = chat[index];
+        let swipe = filter && filter.swipe_id != null ? Number(filter.swipe_id)
+            : context.swipe_id != null ? Number(context.swipe_id) : Number(message.swipe_id || 0);
+        if (swipe < 0) swipe += Array.isArray(message.swipes) ? message.swipes.length : 0;
+        if (!Number.isInteger(swipe) || swipe < 0) return { missing: true, current: false };
+        if (swipe !== Number(message.swipe_id || 0)) {
+            throw failure('MVU_HISTORY_SWIPE_UNSUPPORTED', '数据库未提供未选中 swipe 的独立快照，不能改读当前 swipe');
+        }
+        return { index, swipe, current: index === latest };
+    }
+    function assertWritable(target) {
+        if (!target || target.missing || !target.current) {
+            throw failure('MVU_HISTORY_WRITE_UNSUPPORTED', '数据库公开接口不支持任意历史消息写入；已阻止修改当前状态');
+        }
+    }
+    function createVariableContext(readVariables, writeStat, context = {}, execution = {}) {
+        const original = {};
+        for (const name of ['getvar', 'getMessageVar', 'setvar', 'setMessageVar', 'incvar', 'incMessageVar', 'decvar', 'decMessageVar', 'delvar', 'delMessageVar', 'insvar', 'insertMessageVar', 'patchVariables']) {
+            const fn = context[name];
+            original[name] = fn && fn.__mvu2shujukuVariableAdapter ? fn.__mvu2shujukuVariableOriginal : fn;
+        }
+        const sessionKey = deps.readSessionKey && deps.readSessionKey();
+        const assertSession = () => {
+            if (deps.readSessionKey && deps.readSessionKey() !== sessionKey) throw failure('MVU_VARIABLE_CONTEXT_STALE', '变量执行上下文所属聊天已改变，已停止数据库操作');
+        };
+        let cache = null;
+        const currentData = () => readVariables() || {};
+        const selectionContext = options => execution.publicEval && !options.withMsg ? {} : context;
+        const read = (options, writing = false) => {
+            assertSession();
+            // withMsg selects a persisted message only for message-scoped reads
+            // or writes. Native cache reads/cache-only writes ignore this filter.
+            const selected = options.scope === 'cache' || (!writing && options.scope !== 'message')
+                ? { ...options, withMsg: undefined } : options;
+            const target = selectMessage(selected, selectionContext(selected), writing);
+            if (target.missing) return undefined;
+            if (!target.current) {
+                if (!deps.readHistory) throw failure('MVU_HISTORY_UNAVAILABLE', '数据库消息历史尚未就绪');
+                return deps.readHistory(target.index, target.swipe);
+            }
+            if (!writing && options.scope === 'message' && options.withMsg) return lodash.cloneDeep(currentData());
+            if (options.noCache || execution.refreshReads || !cache) cache = lodash.cloneDeep(currentData());
+            return cache;
+        };
+        const delegate = (name, args) => {
+            if (typeof original[name] !== 'function') throw failure('MVU_NATIVE_VARIABLE_API_UNAVAILABLE', '宿主原变量接口尚未就绪：' + name);
+            return original[name].apply(context, args);
+        };
+        const databasePath = path => {
+            if (typeof path !== 'string' && !Array.isArray(path)) return null;
+            const parts = pathParts(path, {});
+            return parts[0] === 'stat_data' ? parts : null;
+        };
+        const useDatabase = (parts, options) => parts && !['global', 'local', 'initial'].includes(options.scope);
+        function getter(name, forcedScope) {
+            const fn = function (path, rawOptions) {
+                const options = optionObject(rawOptions);
+                if (forcedScope) options.scope = forcedScope;
+                if (path == null && !['global', 'local', 'initial'].includes(options.scope)) {
+                    const native = typeof original[name] === 'function' ? delegate(name, arguments) : {};
+                    return { ...(native || {}), ...(read(options) || {}) };
+                }
+                const parts = databasePath(path);
+                if (!useDatabase(parts, options)) return delegate(name, arguments);
+                const all = read(options);
+                let result = lodash.get(all, parts, options.defaults);
+                if (options.index != null) {
+                    const data = JSON.parse(result || '{}');
+                    // The host cache branch uses Number(index) even for named keys;
+                    // explicit message scope falls back to the original string.
+                    return lodash.get(data, options.scope === 'message' ? jsonIndex(options.index) : Number(options.index), options.defaults);
+                }
+                return options.clone && options.scope === 'message' ? lodash.cloneDeep(result) : result;
+            };
+            fn.__mvu2shujukuVariableOriginal = original[name];
+            fn.__mvu2shujukuVariableAdapter = true;
+            return fn;
+        }
+        function setter(name, forcedScope) {
+            const fn = function (path, value, rawOptions) {
+                const options = optionObject(rawOptions);
+                if (forcedScope) options.scope = forcedScope;
+                if (path == null && value && own(value, 'stat_data') && !['global', 'local', 'initial'].includes(options.scope)) {
+                    throw failure('MVU_BULK_VARIABLE_WRITE_UNSUPPORTED', '整份变量表包含数据库变量，不能通过原生批量写入绕过数据库');
+                }
+                const parts = databasePath(path);
+                if (!useDatabase(parts, options)) return delegate(name, arguments);
+                if (parts.some(key => ['__proto__', 'constructor', 'prototype'].includes(key))) {
+                    throw failure('MVU_VARIABLE_PATH_UNSAFE', '禁止写入原型属性');
+                }
+                assertSession();
+                if (!options.dryRun && (execution.publicEval ? false : context.isDryRun)) return undefined;
+                const scope = options.scope || 'message';
+                if (!['message', 'cache'].includes(scope)) throw failure('MVU_VARIABLE_SCOPE_UNSUPPORTED', '不支持的数据库变量作用域：' + scope);
+                if (scope === 'message') assertWritable(selectMessage(options, selectionContext(options), true));
+                const all = read(options, true) || {};
+                let container = all, field = parts;
+                if (options.index != null) {
+                    container = JSON.parse(lodash.get(all, parts, '{}') || '{}');
+                    field = lodash.toPath(jsonIndex(options.index));
+                    if (field.some(key => ['__proto__', 'constructor', 'prototype'].includes(key))) throw failure('MVU_VARIABLE_PATH_UNSAFE', '禁止写入原型属性');
+                }
+                const previous = lodash.get(container, field);
+                const exists = lodash.has(container, field);
+                if ((options.flags === 'nx' && exists) || (options.flags === 'xx' && !exists)
+                    || (options.flags === 'nxs' && getter('getvar')(path, options) !== undefined)
+                    || (options.flags === 'xxs' && getter('getvar')(path, options) === undefined)) return undefined;
+                let nextValue = value;
+                if (options.merge) {
+                    nextValue = Array.isArray(value) && (previous === undefined || Array.isArray(previous))
+                        ? lodash.concat(previous ?? [], value)
+                        : lodash.mergeWith(lodash.cloneDeep(previous ?? {}), value, (_old, incoming) => Array.isArray(incoming) ? incoming : undefined);
+                }
+                const next = lodash.cloneDeep(all);
+                if (options.index != null) {
+                    if (nextValue === undefined) lodash.unset(container, field);
+                    else lodash.set(container, field, nextValue);
+                    lodash.set(next, parts, JSON.stringify(container));
+                } else if (nextValue === undefined) lodash.unset(next, parts);
+                else lodash.set(next, parts, nextValue);
+                if (scope === 'message' && (!next.stat_data || typeof next.stat_data !== 'object' || Array.isArray(next.stat_data))) {
+                    throw failure('MVU_VARIABLE_ROOT_INVALID', 'stat_data 必须是对象，不能删除或写成标量');
+                }
+                if (scope === 'message') {
+                    // Cache-only edits and mutations of cached references must not
+                    // hitchhike on a later write to an unrelated field.
+                    const persisted = lodash.cloneDeep(currentData());
+                    if (options.index != null && options.withMsg) {
+                        const stored = JSON.parse(lodash.get(persisted, parts, '{}') || '{}');
+                        if (nextValue === undefined) lodash.unset(stored, field);
+                        else lodash.set(stored, field, nextValue);
+                        const encoded = JSON.stringify(stored);
+                        lodash.set(persisted, parts, encoded);
+                        lodash.set(next, parts, encoded);
+                    } else if (options.index != null) lodash.set(persisted, parts, lodash.get(next, parts));
+                    else if (nextValue === undefined) lodash.unset(persisted, parts);
+                    else lodash.set(persisted, parts, nextValue);
+                    // The native setter is synchronous. Keep read-after-write visible;
+                    // persistence uses the existing guarded, coalesced write pipeline.
+                    const pending = writeStat(persisted.stat_data);
+                    if (pending && typeof pending.catch === 'function') pending.catch(error => { if (deps.onWriteError) deps.onWriteError(error); });
+                    cache = next;
+                } else cache = next;
+                if (options.results === 'old') return previous;
+                if (options.results === 'fullcache') {
+                    const nativeVariables = context.variables || {};
+                    return { ...nativeVariables, ...(cache || currentData()) };
+                }
+                return nextValue;
+            };
+            fn.__mvu2shujukuVariableOriginal = original[name];
+            fn.__mvu2shujukuVariableAdapter = true;
+            return fn;
+        }
+        const result = { getvar: getter('getvar'), getMessageVar: getter('getMessageVar', 'message'),
+            setvar: setter('setvar'), setMessageVar: setter('setMessageVar', 'message') };
+        function shortcut(name, operation, forcedScope) {
+            const fn = function (path, value, indexOrOptions, rawOptions) {
+                const raw = operation === 'insert' ? rawOptions : indexOrOptions;
+                const options = optionObject(raw);
+                if (name === 'delMessageVar') value = { ...(value || {}), scope: 'message' };
+                if (forcedScope && name !== 'delMessageVar') {
+                    if (operation === 'increase' || operation === 'decrease') options.outscope = forcedScope;
+                    else options.scope = forcedScope;
+                }
+                const parts = databasePath(path);
+                const outputScope = options.outscope || options.scope;
+                if (!parts || ['global', 'local', 'initial'].includes(outputScope)) return delegate(name, arguments);
+                if (operation === 'increase' || operation === 'decrease') {
+                    const lookup = { index: options.index, withMsg: options.withMsg, scope: options.inscope, noCache: options.noCache };
+                    const current = result.getvar(path, lookup);
+                    const present = lodash.has(read({ noCache: options.noCache }), parts);
+                    const shouldWrite = { n: true, nx: !present, xx: present, nxs: current === undefined, xxs: current !== undefined }[options.flags || 'n'];
+                    if (!shouldWrite) return undefined;
+                    let next = result.getvar(path, { ...lookup, defaults: options.defaults || 0 })
+                        + (operation === 'decrease' ? -(value === undefined ? 1 : value) : value === undefined ? 1 : value);
+                    if (options.min != null) next = Math.max(next, options.min);
+                    if (options.max != null) next = Math.min(next, options.max);
+                    return result.setvar(path, next, { ...options, scope: options.outscope, flags: 'n' });
+                }
+                if (operation === 'delete' && value == null) return result.setvar(path, undefined, options);
+                const current = lodash.cloneDeep(result.getvar(path, options));
+                if (operation === 'delete') {
+                    if (Array.isArray(current)) {
+                        const index = current.indexOf(value);
+                        if (index < 0) return undefined;
+                        current.splice(index, 1);
+                    } else if (current && typeof current === 'object') {
+                        delete current[String(value)];
+                    } else if (typeof current === 'string' && typeof value === 'string') {
+                        if (!current.includes(value)) return undefined;
+                        throw new TypeError('宿主 delvar 的字符串分支调用了不存在的 splice 方法');
+                    } else return undefined;
+                } else {
+                    const index = indexOrOptions;
+                    if (Array.isArray(current)) {
+                        if (index == null) current.push(value);
+                        else current.splice(Number(index) < 0 ? current.length + Number(index) : Number(index), 0, value);
+                    } else if (current && typeof current === 'object' && index != null) {
+                        if (['__proto__', 'constructor', 'prototype'].includes(String(index))) throw failure('MVU_VARIABLE_PATH_UNSAFE', '禁止写入原型属性');
+                        const exists = own(current, String(index));
+                        if ((String(options.flags).includes('nx') && exists) || (String(options.flags).includes('xx') && !exists)) return undefined;
+                        current[String(index)] = value;
+                    } else if (typeof current === 'string') {
+                        if (index == null) return result.setvar(path, current + value.toString(), options);
+                        if (typeof index === 'string' && !current.includes(index)) return result.setvar(path, current, options);
+                        throw new TypeError('宿主 insvar 的字符串分支调用了不存在的 splice 方法');
+                    } else return undefined;
+                }
+                return result.setvar(path, current, options);
+            };
+            fn.__mvu2shujukuVariableOriginal = original[name];
+            fn.__mvu2shujukuVariableAdapter = true;
+            return fn;
+        }
+        for (const [name, operation, scope] of [
+            ['incvar', 'increase'], ['incMessageVar', 'increase', 'message'],
+            ['decvar', 'decrease'], ['decMessageVar', 'decrease', 'message'],
+            ['delvar', 'delete'], ['delMessageVar', 'delete', 'message'],
+            ['insvar', 'insert'], ['insertMessageVar', 'insert', 'message'],
+        ]) result[name] = shortcut(name, operation, scope);
+        result.patchVariables = function (path, patch, options) {
+            if (path == null && !['global', 'local', 'initial'].includes(optionObject(options).scope)) {
+                const ejs = deps.readTemplate && deps.readTemplate();
+                const operations = typeof patch === 'string' && ejs ? ejs.parseJSON(patch) : patch;
+                if (!Array.isArray(operations) || operations.some(op => [op && op.path, op && op.from].some(value => typeof value === 'string' && /^\/stat_data(?:\/|$)/.test(value)))) {
+                    throw failure('MVU_BULK_VARIABLE_WRITE_UNSUPPORTED', '整份变量表补丁包含数据库变量，不能通过原生写入绕过数据库');
+                }
+            }
+            if (!useDatabase(databasePath(path), optionObject(options))) return delegate('patchVariables', arguments);
+            const ejs = deps.readTemplate && deps.readTemplate();
+            if (!ejs || typeof ejs.jsonPatch !== 'function') throw failure('MVU_NATIVE_JSON_PATCH_UNAVAILABLE', '宿主公开 jsonPatch 接口尚未就绪');
+            return result.setvar(path, ejs.jsonPatch(result.getvar(path, options), typeof patch === 'string' ? ejs.parseJSON(patch) : patch), options);
+        };
+        result.patchVariables.__mvu2shujukuVariableOriginal = original.patchVariables;
+        result.patchVariables.__mvu2shujukuVariableAdapter = true;
+        Object.defineProperty(result, 'variableView', { value: () => {
+            const native = typeof original.getvar === 'function' ? delegate('getvar', [null]) : {};
+            const target = native && typeof native === 'object' ? native : {};
+            return new Proxy(target, {
+                get: (object, key) => key === 'stat_data' ? result.getvar('stat_data') : Reflect.get(object, key),
+                set: (object, key, value) => {
+                    if (key === 'stat_data') { result.setvar('stat_data', value, { scope: 'cache' }); return true; }
+                    return Reflect.set(object, key, value);
+                },
+                deleteProperty: (object, key) => {
+                    if (key === 'stat_data') { result.setvar('stat_data', undefined, { scope: 'cache' }); return true; }
+                    return Reflect.deleteProperty(object, key);
+                },
+                ownKeys: object => [...new Set([...Reflect.ownKeys(object), 'stat_data'])],
+                getOwnPropertyDescriptor: (object, key) => key === 'stat_data'
+                    ? { configurable: true, enumerable: true, writable: true, value: result.getvar('stat_data') }
+                    : Reflect.getOwnPropertyDescriptor(object, key),
+            });
+        } });
+        return result;
+    }
+    function createMessageGetter(readVariables, context = {}) {
+        return createVariableContext(readVariables, () => {}, context, { refreshReads: true }).getMessageVar;
+    }
+    function createMessageSetter(readVariables, writeStat, context = {}) {
+        return createVariableContext(readVariables, writeStat, context).setMessageVar;
+    }
+    function install(ejs) {
+        if (!ejs || typeof ejs.evalTemplate !== 'function') return false;
+        if (ejs.evalTemplate.__mvu2shujukuContextBridge) return true;
+        const original = ejs.evalTemplate;
+        const wrapped = async function (code, context, options) {
+            const core = readCore();
+            // DB calls evalTemplate(finalContent) without a context. The private
+            // guide call and current converted-card metadata must also agree.
+            // Body/preview/world_info calls supply their own execution context.
+            const view = context == null && core && typeof core.prepareFillPrompt === 'function'
+                ? core.prepareFillPrompt(code, readCharacter()) : { text: code, adapted: false };
+            if (!view.adapted && !/\bmvu2shujuku(?:GetAllVariables|GetMessageVar|GetVar|SetVar|FormatMessageVariable|VwdDescriptions|SetMessageVar|ResolveMacro|ApplyWorldInfoRegex)\b/.test(String(code || ''))
+                && !(deps.isConverted && deps.isConverted() && String(code || '').includes('<%')))
+                return original.apply(this, arguments);
+            const defines = makeDefines();
+            let actualContext = context;
+            if (!actualContext || typeof actualContext !== 'object') {
+                // Public EjsTemplate API: prepareContext(context, end=-1).
+                // The internal function reverses these arguments.
+                actualContext = typeof ejs.prepareContext === 'function' ? await ejs.prepareContext(defines, -1) : {};
+            }
+            // Per invocation: no shared mutable group, dice or guide cache.
+            Object.assign(actualContext, makeDefines(actualContext, { publicEval: true }));
+            return original.call(this, view.text, actualContext, options);
+        };
+        wrapped.__mvu2shujuku = true;
+        wrapped.__mvu2shujukuContextBridge = true;
+        wrapped.__mvu2shujukuOriginal = original;
+        ejs.evalTemplate = wrapped;
+        return true;
+    }
+    return { install, createMessageGetter, createMessageSetter, createVariableContext, selectMessage, assertWritable };
+};
 root.__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__ = function createWorldbookSave(deps) {
     const clone = value => JSON.parse(JSON.stringify(value));
     function canonical(value) {
@@ -16490,10 +20086,13 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
         debugOn: mvu2shujukuDebugOn = () => false,
         // 调用方验证对应布局、真实 note 和运行期渲染能力。缺少能力仍整笔拒绝。
         vwdNoteSyncSupported: vwdNoteSync = () => false,
-        debug: dbg = () => {}, warn: dbgWarn = () => {} } = dependencies;
+        debug: dbg = () => {}, warn: dbgWarn = () => {}, projectStat = value => value } = dependencies;
     if (typeof safeParseJson !== 'function') throw new Error('写入模块需要 JSON 解析函数');
     let statWriteHadFailure = false;
     function unmappedStatGroups(layout, previous, next) {
+        // A declared root container owns the source root itself. Its display
+        // group name is not a source variable; callers may pass raw stat_data.
+        if ((layout || []).some(entry => entry.publicFallback || entry.rootContainer)) return [];
         const mapped = new Set((Array.isArray(layout) ? layout : []).flatMap(entry => {
             const kind = entry.kind;
             const paths = entry.writePaths && entry.writePaths.length ? entry.writePaths : [entry.path && entry.path.length ? entry.path : [entry.group]];
@@ -16515,6 +20114,8 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
             else dbgWarn(' ' + label + ' 返回失败结果。');
         };
         const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
+        try { prevStat = projectStat(prevStat, entries); nextStat = projectStat(nextStat, entries); }
+        catch (error) { noteWriteFailure(error.message); return 0; }
         const unmapped = unmappedStatGroups(entries, prevStat, nextStat);
         if (unmapped.length) { noteWriteFailure('存在未映射的变量组：' + unmapped.join('、')); return 0; }
         // 登记、更新和新增共用同一判定，避免标量化的数字/布尔 pair 只在更新路径识别。
@@ -17387,7 +20988,7 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                 continue;
             }
             if (op.overflowRemove) {
-                const ovcIdx = header.indexOf('_扩展数据');
+                const ovcIdx = header.indexOf(L.overflowCol || '_扩展数据');
                 if (ovcIdx === -1) continue;
                 let ovRow = 1;
                 if (E.kind === 'rows' || E.kind === 'nestedRows') {
@@ -17403,7 +21004,7 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                 continue;
             }
             if (op.overflow) {
-                const ovcIdx = header.indexOf('_扩展数据');
+                const ovcIdx = header.indexOf(L.overflowCol || '_扩展数据');
                 if (ovcIdx === -1) {
                     dbgWarn(' 表「' + L.table + '」缺少「_扩展数据」列（旧模板/旧聊天），动态字段写入已跳过；请重新转换角色卡并新开聊天。');
                     continue;
@@ -17434,11 +21035,11 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                         const ovObj = {};
                         setNestedValue(ovObj, op.mergePath || [op.mergeKey], op.value);
                         const ovCell = JSON.stringify(ovObj);
-                        const prevOv = nr2.cells['_扩展数据'];
+                        const prevOv = nr2.cells[L.overflowCol || '_扩展数据'];
                         if (prevOv) {
-                            try { const m = JSON.parse(prevOv); setNestedValue(m, op.mergePath || [op.mergeKey], op.value); nr2.cells['_扩展数据'] = JSON.stringify(m); } catch (e) { nr2.cells['_扩展数据'] = ovCell; }
+                            try { const m = JSON.parse(prevOv); setNestedValue(m, op.mergePath || [op.mergeKey], op.value); nr2.cells[L.overflowCol || '_扩展数据'] = JSON.stringify(m); } catch (e) { nr2.cells[L.overflowCol || '_扩展数据'] = ovCell; }
                         } else {
-                            nr2.cells['_扩展数据'] = ovCell;
+                            nr2.cells[L.overflowCol || '_扩展数据'] = ovCell;
                         }
                         continue;
                     }
@@ -18059,14 +21660,14 @@ root.__MVU2SHUJUKU_TABLE_WRITER_FACTORY__ = function createTableWriter(dependenc
                         // 同一次写入可能同时有“改动态字段”和“删动态字段”：必须读当前单元格再
                         // 合并/删除，不能直接覆盖整列（否则先写后删会把本次新增也抹掉）。
                         const curRow = d.sheet && d.sheet.content && d.sheet.content[d.rowIndex];
-                        const ovcIdx = curRow && Array.isArray(d.header) ? d.header.indexOf('_扩展数据') : -1;
+                        const ovcIdx = curRow && Array.isArray(d.header) ? d.header.indexOf(d.layout.overflowCol || '_扩展数据') : -1;
                         if (curRow && ovcIdx !== -1) {
                             const cur = parseObj(curRow[ovcIdx]);
                             if (d.kind === 'overflow-remove') delete cur[d.removeKey];
                             else setNestedValue(cur, d.mergePath || [d.mergeKey], d.value);
                             const out = JSON.stringify(cur);
                             if (!sameValue(curRow[ovcIdx], out)) {
-                                const ook = await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', out));
+                                const ook = await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, d.layout.overflowCol || '_扩展数据', out));
                                 if (!ook) markWriteFailure('溢出列 updateCell(' + d.layout.table + ')');
                                 else curRow[ovcIdx] = out;
                             }
@@ -18284,6 +21885,21 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         if (typeof require === 'function') return require('./result-view.js');
         throw new Error('转换结果视图未加载，请使用构建后的 index.js');
     }
+    function getStatStorageFactory() {
+        if (typeof root.__MVU2SHUJUKU_STAT_STORAGE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_STAT_STORAGE_FACTORY__;
+        if (typeof require === 'function') return require('./stat-storage.js');
+        throw new Error('变量存储模块未加载');
+    }
+    function getStateTransferFactory() {
+        if (typeof root.__MVU2SHUJUKU_STATE_TRANSFER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_STATE_TRANSFER_FACTORY__;
+        if (typeof require === 'function') return require('./state-transfer.js');
+        throw new Error('状态存档模块未加载');
+    }
+    function getMvuSchemaFactory() {
+        if (typeof root.__MVU2SHUJUKU_MVU_SCHEMA_FACTORY__ === 'function') return root.__MVU2SHUJUKU_MVU_SCHEMA_FACTORY__;
+        if (typeof require === 'function') return require('./vendor/mvu-schema.js');
+        throw new Error('MVU Schema 模块未加载');
+    }
     function getCardApiFactory() {
         if (typeof root.__MVU2SHUJUKU_CARD_API_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CARD_API_FACTORY__;
         if (typeof require === 'function') return require('./card-api.js');
@@ -18364,23 +21980,31 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
     let sharedUpdateRuleMigration;
     function getUpdateRuleMigration() {
         if (!sharedUpdateRuleMigration) {
-            const libraries = root.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__ || (typeof require === 'function' && require('./vendor/schema-engine-libs.js'));
-            sharedUpdateRuleMigration = getUpdateRuleMigrationFactory()({ parseJs: libraries.acorn.parse });
+            sharedUpdateRuleMigration = getUpdateRuleMigrationFactory()({
+                YAML: getMvuYamlLibs().YAML,
+                isProtocolRule: getSchemaLayout().isMvuOutputProtocolRule,
+            });
         }
         return sharedUpdateRuleMigration;
     }
-    function migrateWorldbookUpdateRules(content, options) { return getUpdateRuleMigration().migrate(content, options); }
-    function normalizeUpdateRuleText(text, context) {
-        if (!context.group) return text;
-        const resolver = createMvuRulePathResolver([context.group], {});
-        const result = getUpdateRuleMigration().normalizeRule(text, { resolvePath: resolver.resolve,
-            jsonLocal: !!(context.jsonContainer || context.pathSpecification && context.pathSpecification.jsonPath) });
-        if (result.issues.length) {
-            if (!context.group._unresolvedProtocolRules) Object.defineProperty(context.group, '_unresolvedProtocolRules', { value: new Set(), configurable: true });
-            result.issues.forEach(issue => context.group._unresolvedProtocolRules.add(issue));
-        }
-        return result.text;
+    function normalizeUpdateRuleText(text) { return text; }
+    function prepareFillPrompt(code, card) {
+        const data = card && (card.data || card);
+        if (data?.extensions?.mvu2shujuku?.fillAdapterVersion !== 1) return { text: code, adapted: false };
+        const views = new Map((data.extensions.mvu2shujuku.fillViewEntries || []).map(item => [item.contentHash, item]));
+        const entries = (data.character_book?.entries || []).map(entry => {
+            if (entry.enabled === false || /\[mvu[ _-]?plot\]|\[mvuplot\]/i.test(String(entry.comment || ''))) return entry;
+            const view = views.get(stableHash(String(entry.content || '').replace(/\r\n/g, '\n').trim())) || entry.extensions?.mvu2shujukuFillView;
+            return view ? { ...entry, extensions: { ...entry.extensions, mvu2shujukuFillView: view } } : entry;
+        });
+        return getUpdateRuleMigration().preparePrompt(code, entries);
     }
+    function fillAdaptationGuidance() { return getUpdateRuleMigration().guidance; }
+    function fillEntryRequestView(entry) {
+        if (!entry?.extensions?.mvu2shujukuFillView) return String(entry?.content || '');
+        return getUpdateRuleMigration().plan(entry.content, { outputOnly: entry.extensions.mvu2shujukuFillView.outputOnly }).text;
+    }
+
     let sharedSheetIdentity;
     function physicalTableName(name) {
         if (!sharedSheetIdentity) sharedSheetIdentity = getSheetIdentityFactory()();
@@ -18390,20 +22014,30 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         if (!sharedSchemaLayout) sharedSchemaLayout = getSchemaLayoutFactory()({
             createJsSource: getJsSourceFactory(), getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf,
             physicalTableName,
-            maskJsStringsAndComments, createStatusUsage: getStatusUsageFactory(), isPromptVisibleColumn, isMvuOutputDocument,
+            maskJsStringsAndComments, ejsScriptBlocks, createStatusUsage: getStatusUsageFactory(), isPromptVisibleColumn, isMvuOutputDocument,
             vwdExperimental: isVwdExperimental,
             canValidateRegisteredSchema: source => connectRegisteredSchema(source).count > 0,
         });
         return sharedSchemaLayout;
     }
     let sharedEjsTransform = null;
+    let sharedEjsParser = null;
+    function getEjsParserFactory() {
+        if (typeof root.__MVU2SHUJUKU_EJS_PARSER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_EJS_PARSER_FACTORY__;
+        if (typeof require === 'function') return require('./vendor/ejs-parser.js');
+        throw new Error('EJS 解析库未加载，请使用构建后的 index.js');
+    }
+    function getEjsParser() { return sharedEjsParser || (sharedEjsParser = getEjsParserFactory()()); }
     function getEjsTransformFactory() {
         if (typeof root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ === 'function') return root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__;
         if (typeof require === 'function') return require('./ejs-transform.js');
         throw new Error('EJS 转换模块未加载，请使用构建后的 index.js');
     }
     function getEjsTransform() {
-        if (!sharedEjsTransform) sharedEjsTransform = getEjsTransformFactory()();
+        if (!sharedEjsTransform) sharedEjsTransform = getEjsTransformFactory()({
+            ejs: getEjsParser(),
+            acorn: (root.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__ || (typeof require === 'function' ? require('./vendor/schema-engine-libs.js') : {})).acorn,
+        });
         return sharedEjsTransform;
     }
     function findJsCallEnd(...args) { return getEjsTransform().findJsCallEnd(...args); }
@@ -18423,7 +22057,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         if (!sharedTableCodec) sharedTableCodec = getTableCodecFactory()(source => {
             const libs = getMvuYamlLibs();
             return libs && typeof libs.jsonrepair === 'function' ? libs.jsonrepair(source) : null;
-        });
+        }, getStatStorageFactory()());
         return sharedTableCodec;
     }
     let sharedTableWriter = null;
@@ -18441,6 +22075,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         if (!sharedTableWriter) sharedTableWriter = getTableWriterFactory()({
             parseJson: safeParseJson, debugOn: mvu2shujukuDebugOn, debug: dbg, warn: dbgWarn,
             vwdNoteSyncSupported: canWriteVwdDescriptions,
+            projectStat: (stat, layout) => getStatStorageFactory()().project(stat, layout),
             readCachedTemplate: () => {
                 const holder = typeof window !== 'undefined' ? window : root;
                 return holder && holder.__mvu2shujukuTemplateCache;
@@ -19041,23 +22676,37 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         return String(v == null ? '' : v).replace(/'/g, "''");
     }
 
+    // 提示宿主使用字符串替换插入 SQL；避免 SQL 字面量被 JS 的 $ 替换标记解释。
+    // SQLite 自身执行表达式；普通字面量保持原写法，不另实现 SQL 语义。
+    function sqlTextLiteral(value) {
+        const text = String(value == null ? '' : value);
+        const quoted = `'${sqlQuote(text)}'`;
+        if (!/\$['&`$]/.test(quoted)) return quoted;
+        const terms = [];
+        text.split('$').forEach((part, index) => {
+            if (index) terms.push('char(36)');
+            if (part) terms.push(`'${sqlQuote(part)}'`);
+        });
+        return '(' + terms.join(' || ') + ')';
+    }
+
     function jsonPathChecksSql(column) {
         if (!Array.isArray(column.jsonPathChecks) || !column.jsonPathChecks.length) return '';
         let initial;
         try { initial = JSON.parse(column.value); } catch (_) {}
         const initialValues = Array.isArray(column.initialJsonValues) ? column.initialJsonValues : [initial];
-        const literal = v => typeof v === 'number' ? String(v) : typeof v === 'boolean' ? (v ? '1' : '0') : `'${sqlQuote(v)}'`;
+        const literal = v => typeof v === 'number' ? String(v) : typeof v === 'boolean' ? (v ? '1' : '0') : sqlTextLiteral(v);
         const checks = [];
         for (const check of column.jsonPathChecks || []) {
             const path = '$' + check.path.map(key => typeof key === 'number' && Number.isInteger(key) && key >= 0
                 ? '[' + key + ']' : '.' + JSON.stringify(String(key))).join('');
-            const value = `json_extract(${column.ident}, '${sqlQuote(path)}')`;
-            const type = `json_type(${column.ident}, '${sqlQuote(path)}')`;
+            const value = `json_extract(${column.ident}, ${sqlTextLiteral(path)})`;
+            const type = `json_type(${column.ident}, ${sqlTextLiteral(path)})`;
             const fallbacks = [...new Set(initialValues.map(initial => {
                 let value = initial;
                 for (const key of check.path) value = value == null ? undefined : value[key];
                 return value;
-            }).filter(value => value !== undefined && value !== null && ['string', 'number', 'boolean'].includes(typeof value)))];
+            }).filter(value => value !== undefined && value !== null && ['string', 'number', 'boolean'].includes(typeof value)).concat(check.outputFallbacks || []))];
             const wrap = expr => ` CHECK(CASE WHEN ${column.ident} = '' OR NOT json_valid(${column.ident}) THEN 1 WHEN ${type} IS NULL OR ${type} = 'null' THEN 1 ELSE (${expr}) END)`;
             if (check.range && check.range.length === 2 && check.range.every(Number.isFinite)) {
                 let expr = `${value} BETWEEN ${check.range[0]} AND ${check.range[1]}`;
@@ -19090,7 +22739,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             const isKey = i === 0 && group.kind === 'rows';
             let def = `  ${c.ident} ${c.type}`;
             const range = c.range || null;
-            const extras = Array.isArray(group.extraAllowed && group.extraAllowed[c.ident]) ? group.extraAllowed[c.ident] : [];
+            const extras = [...new Set([...(Array.isArray(group.extraAllowed && group.extraAllowed[c.ident]) ? group.extraAllowed[c.ident] : []), ...(c.outputFallbacks || [])])];
             let dv = c.value;
             // 默认值若越界也加入放行列表（不修改初始值）；非数字哨兵（如“无”）同样放行
             if (range) {
@@ -19106,23 +22755,23 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             }
             if ((c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional')) {
                 const encodedDefault = dv === undefined ? '' : JSON.stringify(dv);
-                def += ` NOT NULL DEFAULT '${sqlQuote(encodedDefault)}'`;
+                def += ` NOT NULL DEFAULT ${sqlTextLiteral(encodedDefault)}`;
                 if (includeCheck) {
                     def += ` CHECK(${c.ident} = '' OR (json_valid(${c.ident}) AND json_type(${c.ident}) IN ('null', 'text', 'integer', 'real', 'true', 'false')))`;
-                    const valueExpr = `json_extract(${c.ident}, '$')`;
+                    const valueExpr = `json_extract(${c.ident}, ${sqlTextLiteral("$")})`;
                     const emptyExpr = `${c.ident} = '' OR json_type(${c.ident}) = 'null'`;
                     if (range) {
-                        const allowed = extras.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`);
+                        const allowed = extras.map(v => typeof v === 'number' ? v : sqlTextLiteral(v));
                         def += ` CHECK(${emptyExpr} OR ${valueExpr} BETWEEN ${range[0]} AND ${range[1]}${allowed.length ? ` OR ${valueExpr} IN (${allowed.join(', ')})` : ''})`;
                     }
                     if (c.enum && c.enum.length <= 8) {
                         const allowed = [...new Set([...c.enum, ...(dv === undefined || dv === null ? [] : [dv]), ...extras])];
-                        if (allowed.length) def += ` CHECK(${emptyExpr} OR ${valueExpr} IN (${allowed.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`).join(', ')}))`;
+                        if (allowed.length) def += ` CHECK(${emptyExpr} OR ${valueExpr} IN (${allowed.map(v => typeof v === 'number' ? v : sqlTextLiteral(v)).join(', ')}))`;
                     }
                 }
             } else if (c.logicalType === 'jsonObjectOptional') {
                 const encodedDefault = c.jsonDefaultMissing === true || dv === undefined ? '' : (typeof dv === 'string' ? dv : JSON.stringify(dv));
-                def += ` NOT NULL DEFAULT '${sqlQuote(encodedDefault)}'`;
+                def += ` NOT NULL DEFAULT ${sqlTextLiteral(encodedDefault)}`;
                 if (includeCheck) {
                     const kinds = c.jsonKind === 'any' ? "'array', 'object', 'text', 'integer', 'real', 'true', 'false'" : c.jsonKind === 'array' ? "'array'" : "'object'";
                     def += ` CHECK(${c.ident} = '' OR (json_valid(${c.ident}) AND json_type(${c.ident}) IN ('null', ${kinds})))`;
@@ -19136,7 +22785,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                     defaultExpr = dv;
                 } else if (typeof dv === 'string' && dv.trim() !== '') {
                     const nv = Number(dv);
-                    defaultExpr = Number.isFinite(nv) ? nv : `'${sqlQuote(dv)}'`;
+                    defaultExpr = Number.isFinite(nv) ? nv : sqlTextLiteral(dv);
                 } else if (range) {
                     // 空/缺省值不能用 0 做默认，否则 CHECK(1~100) 会在 INSERT 省略该列时失败；
                     // 改为合法区间下限作为安全默认。
@@ -19148,7 +22797,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 if (range && includeCheck) {
                     def += ` CHECK(${c.ident} BETWEEN ${range[0]} AND ${range[1]}`;
                     if (extras.length) {
-                        const allowed = extras.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`);
+                        const allowed = extras.map(v => typeof v === 'number' ? v : sqlTextLiteral(v));
                         def += ` OR ${c.ident} IN (${allowed.join(', ')})`;
                     }
                     def += ')';
@@ -19156,7 +22805,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             } else {
                 let dvs = dv === undefined || dv === null ? '' : String(dv);
                 if (c.isObject && dvs === '') dvs = c.jsonKind === 'array' ? '[]' : '{}';
-                def += ` NOT NULL DEFAULT '${sqlQuote(dvs)}'`;
+                def += ` NOT NULL DEFAULT ${sqlTextLiteral(dvs)}`;
                 if (isKey) def += ' UNIQUE';
                 // 整组 JSON 表的内容列：SQLite 模式下用 json_valid CHECK 保证整列 JSON 合法
                 // （updateCell/insertRow 的 SQL 由 SQLite 执行时会真正校验；native 模式不生效，见报告）
@@ -19173,7 +22822,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                     const allowed = [...c.enum];
                     if (dvs !== '' && !allowed.includes(dvs)) allowed.push(dvs);
                     for (const ex of extras) if (!allowed.includes(ex)) allowed.push(ex);
-                    def += ` CHECK(${c.ident} IN (${allowed.map(v => `'${sqlQuote(v)}'`).join(', ')}))`;
+                    def += ` CHECK(${c.ident} IN (${allowed.map(v => sqlTextLiteral(v)).join(', ')}))`;
                 }
             }
             // 插件校验要求 DDL 列注释与 content 表头逐字一致，描述只写进 note，不拼进注释；
@@ -19213,14 +22862,14 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             || (Array.isArray(column.path) && column.path.some(part => String(part).startsWith('$')));
     }
     function isUnderscoreReadonlyColumn(group, column) {
-        return column && (String(column.zh || '').startsWith('_')
-            || (!isRelationshipKeyColumn(group, column) && Array.isArray(column.path)
-                && column.path.some(part => String(part).startsWith('_'))));
+        // Names do not establish ownership. Only resolved original declarations
+        // contribute a readonly prompt; no physical write permission is added.
+        return false;
     }
     function isAiPromptColumn(group, column) {
         return column && !group.aiReadonly && !column.aiReadonly && column.zh !== '_扩展数据'
             && !isUnderscoreReadonlyColumn(group, column)
-            && !isDollarPrivateColumn(group, column);
+            && (group.privateRoot || !isDollarPrivateColumn(group, column));
     }
 
     // 模型确实能看到该列说明（= 会进 buildNote 的【字段说明与规则】）。VWD 只登记
@@ -19237,7 +22886,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
     function getTablePrompts() {
         if (!sharedTablePrompts) sharedTablePrompts = getTablePromptsFactory()({
             describeGroup, isRelationshipKeyColumn, isDollarPrivateColumn,
-            isUnderscoreReadonlyColumn, isAiPromptColumn, sqlQuote, schemaExample, vwdToken,
+            isUnderscoreReadonlyColumn, isAiPromptColumn, sqlTextLiteral, schemaExample, vwdToken,
             normalizeUpdateRuleText,
         });
         return sharedTablePrompts;
@@ -19393,8 +23042,19 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             || (Number(parts[1]) === 8 && Number(parts[2]) >= 5);
     }
 
+    function sqliteConversionMode(opts = {}, report) {
+        if (opts.mode && !['sqlite', 'native', 'both'].includes(opts.mode)) {
+            throw new Error('不支持的转换模式：' + opts.mode + '；转换结果仅支持 SQLite。');
+        }
+        // 旧调用参数只作为迁移入口接受，不再生成原生或双模式模板。
+        if (opts.mode && opts.mode !== 'sqlite' && report) {
+            report.warn('转换模式 ' + opts.mode + ' 已停用，本次生成 SQLite 模板；使用时请将数据库设为 SQLite 模式。');
+        }
+        return 'sqlite';
+    }
+
     function generateTemplate(schema, opts = {}) {
-        const mode = opts.mode || 'both';
+        const mode = sqliteConversionMode(opts, opts.report);
         const includeCheck = opts.ddlIncludeCheck !== false;
         const report = opts.report || createReport();
         const targetVersion = opts.targetSpVersion === undefined ? '9.2.5' : opts.targetSpVersion;
@@ -19450,7 +23110,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 }
             }
             g.extraAllowed = extraAllowed;
-            const hiddenColumns = g.columns.filter(c => c.zh === '_扩展数据' || isDollarPrivateColumn(g, c));
+            const hiddenColumns = g.columns.filter(c => c.zh === '_扩展数据' || !g.privateRoot && isDollarPrivateColumn(g, c));
             if (hiddenColumns.length && !canHidePhysicalColumns && !warnedHiddenColumnGate) {
                 const knownVersion = /^v?\d+\.\d+(?:\.\d+){0,2}$/.test(String(targetVersion || '').trim());
                 report.warn(knownVersion
@@ -19474,7 +23134,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             }
             for (let ci = 0; ci < g.columns.length; ci++) {
                 const column = g.columns[ci];
-                if (hiddenColumns.includes(column) || !(column.isObject || g.kind === 'json')) continue;
+                if (g.fullStatContainer || hiddenColumns.includes(column) || !(column.isObject || g.kind === 'json')) continue;
                 const hasPrivate = (g.rows || []).some(row => {
                     try { const value = row[ci + 1]; return hasPrivateJsonKey(typeof value === 'string' ? JSON.parse(value) : value); }
                     catch (_) { return false; }
@@ -19517,12 +23177,9 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 return mode === 'native' ? prose.split('\nSQL示例:')[0] : prose;
             };
             const triggerNodes = Object.fromEntries(['delete', 'update', 'insert'].map(kind => [kind, trigger(kind)]));
-            // 使用范围与禁止照抄的说明每表只写一次，各操作仍保留具体 SQL。
-            const sqlNotice = Object.values(triggerNodes).some(text => text.includes('\nSQL示例:'))
-                ? `\nSQL 示例仅在本次输出要求 SQL 脚本时适用；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。` : '';
             const vwdSlotPlan = vwdAllowed ? vwdSlotPlanForGroup(g) : null;
             const ruleReceipts = [];
-            const noteText = buildNote(g, { mode, vwdSlotPlan, onRule: receipt => ruleReceipts.push(receipt) }) + sqlNotice;
+            const noteText = buildNote(g, { mode, vwdSlotPlan, onRule: receipt => ruleReceipts.push(receipt) });
             Object.defineProperty(g, '_emittedRules', { value: ruleReceipts, configurable: true });
             // 落进 sourceData/卡的是静态说明版：没有运行期覆盖时与旧版逐字节相同，
             // 插槽只存在于内部布局，模型请求不会看到 \u0000VWD·n\u0000。
@@ -19542,7 +23199,8 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                     ddl: buildDdl(g, { includeCheck }),
                 },
                 content,
-                updateConfig: { skipFloors: -1, ...(g.aiReadonly ? { updateFrequency: 0 } : {}) },
+                updateConfig: { skipFloors: -1, ...(g.aiReadonly ? { updateFrequency: 0 } : {}),
+                    ...(g.fullStatContainer ? { sendRowsSqlTemplate: getStatStorageFactory()().sendRowsSql(g) } : {}) },
                 exportConfig: { enabled: false, splitByRow: false },
                 orderNo: idx,
             };
@@ -19769,6 +23427,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             convertedAt: opts.bridgeConvertedAt || '',
             layout: JSON.parse(buildLayoutJson(buildLayout(schema))),
             templateBase64: opts.templateB64 || toBase64(JSON.stringify(template)),
+            ...(opts.statStorage ? { statStorage: opts.statStorage } : {}),
             installMvuShim: opts.installMvuShim !== false,
             statusPlaceholderNeeded: !!opts.statusPlaceholderNeeded,
         };
@@ -19839,11 +23498,26 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         } catch (e) { return false; }
     }
 
-    function createMvuRulePathResolver(schema, initvar) {
+    function createMvuRulePathResolver(schema, initvar, shapeInfo) {
         const layout = buildLayout(schema).entries;
-        const prefixOf = entry => entry.kind === 'pathArray' || entry.kind === 'nestedArray'
+        const prefixOf = entry => entry.rootContainer ? [] : entry.kind === 'pathArray' || entry.kind === 'nestedArray'
             ? entry.path : entry.kind === 'nestedRows' ? [...entry.parentPath, entry.childKey] : (entry.writePaths && entry.writePaths[0] || [entry.group]);
         const owners = layout.map(entry => ({ entry, prefix: prefixOf(entry), group: schema.find(g => g.tableName === entry.table) }));
+        const declaredRecord = path => {
+            const at = (node, parts) => {
+                for (const part of parts) node = node?.dynamic ? node.value : node?.fields?.[part];
+                return node;
+            };
+            let node = at(shapeInfo?.zodSchemaRoot, path);
+            if (!node) for (const rec of shapeInfo?.yamlTypePaths || []) {
+                if (rec.path.length <= path.length && rec.path.every((part, i) => part === path[i] ||
+                    part === '*' || /^<[^>]+>$/.test(part))) {
+                    node = at(rec.node, path.slice(rec.path.length));
+                    if (node) break;
+                }
+            }
+            return !!(node?.kind === 'object' && node.dynamic);
+        };
         const partMatches = (pattern, part) => part !== undefined && (pattern === part || pattern.includes('*') &&
             new RegExp('^' + pattern.split('*').map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$').test(part));
         const matches = (prefix, path) => prefix.every((part, i) => path[i] !== undefined && partMatches(path[i], part));
@@ -19856,6 +23530,13 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                     jsonValue: column && (column.isObject || /^json/.test(column.logicalType || '')) };
             }
             const suffix = path.slice(owner.prefix.length);
+            if (group.kind === 'singleton' && owner.entry.valueCol) {
+                const value = group.columns.find(c => c.zh === owner.entry.valueCol);
+                const mapped = owner.entry.cols.find(c => c.zh === owner.entry.valueCol);
+                if (value?.isObject && (owner.entry.rootContainer || mapped?.path?.length === owner.prefix.length
+                    && matches(owner.prefix, mapped.path))) return {
+                    label: `「${value.zh}」`, table: group.tableName, json: true, path: suffix };
+            }
             if (['array', 'pathArray', 'nestedArray'].includes(group.kind) && suffix.length === 1 && /^(?:-|\d+)$/.test(suffix[0]))
                 return { label: suffix[0] === '-' ? '本表的新记录' : `本表中原数组索引为 ${suffix[0]} 的记录`, table: group.tableName, json: false };
             if (['array', 'pathArray', 'nestedArray'].includes(group.kind) && suffix.length === 1 && /^(?:\{[^{}]+\}|<[^<>]+>|\*)$/.test(suffix[0]))
@@ -19874,6 +23555,14 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             // An opaque record value is one JSON cell per identity, not a
             // flattened object field named after the physical value column.
             if (row && owner.entry.scalarValueCol && suffix.length) {
+                const scalar = columns.find(c => c.zh === owner.entry.scalarValueCol);
+                if (scalar && !scalar.isObject && !/^json/.test(scalar.logicalType || '') && suffix.length === 1) {
+                    const record = suffix[0];
+                    if (!record) return null;
+                    const wildcard = /^(?:\{[^{}]+\}|<[^<>]+>|\*)$/.test(record);
+                    return { label: (wildcard ? '对应记录的' : `记录「${record}」的`) + `「${scalar.zh}」`,
+                        table: group.tableName, json: false, column: scalar, recordSpecific: wildcard ? '' : record };
+                }
                 const value = columns.find(c => c.zh === owner.entry.scalarValueCol &&
                     (c.isObject || c.logicalType === 'jsonObjectOptional'));
                 if (value) {
@@ -19892,7 +23581,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 const record = columnPath[0];
                 if (!/^(?:\{[^{}]+\}|<[^<>]+>|\*)$/.test(record)) {
                     const initial = owner.prefix.reduce((v, p) => v && v[p], initvar);
-                    if (!initial || !Object.prototype.hasOwnProperty.call(initial, record)) return null;
+                    if ((!initial || !Object.prototype.hasOwnProperty.call(initial, record)) && !declaredRecord(owner.prefix)) return null;
                     recordSpecific = record;
                 }
                 columnPath = columnPath.slice(1);
@@ -19900,6 +23589,12 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             const direct = columns.find(c => columnPathOf(c).length === columnPath.length && matches(columnPathOf(c), columnPath));
             if (direct) return { label: (recordSpecific ? `记录「${recordSpecific}」的` : '') + `「${direct.zh}」`,
                 table: group.tableName, json: false, jsonValue: direct.isObject || /^json/.test(direct.logicalType || ''), column: direct, recordSpecific };
+            if (row && suffix.length === 1 && !owner.entry.scalarValueCol) {
+                const initial = owner.prefix.reduce((v, p) => v && v[p], initvar);
+                if (declaredRecord(owner.prefix) || initial && Object.prototype.hasOwnProperty.call(initial, suffix[0])) return {
+                    label: `键名为「${suffix[0]}」的完整记录`, table: group.tableName, json: false,
+                    recordSpecific: suffix[0], objectFields: Object.fromEntries(columns.map(c => [columnPathOf(c).join('.'), c.zh])) };
+            }
             const containers = columns.filter(c => (c.isObject || c.logicalType === 'jsonObjectOptional') && matches(columnPathOf(c), columnPath))
                 .sort((a, b) => columnPathOf(b).length - columnPathOf(a).length);
             if (containers.length) return { label: (recordSpecific ? `记录「${recordSpecific}」的` : '') + `「${containers[0].zh}」`, table: group.tableName,
@@ -19916,7 +23611,21 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             const candidates = owners.filter(o => matches(o.prefix, path));
             const depth = Math.max(0, ...candidates.map(o => o.prefix.length));
             const results = candidates.filter(o => o.prefix.length === depth).map(owner => ({ owner, binding: bind(owner, path) }));
-            if (!depth || results.length !== 1 || !results[0].binding) return null;
+            if (!depth || results.length !== 1) return null;
+            if (!results[0].binding) {
+                const owner = results[0].owner;
+                const holes = path.map((p, i) => /^(?:\[[^\[\]]+\]|\{[^{}]+\}|<[^<>]+>)$/.test(p) ? i : -1).filter(i => i >= 0);
+                // A finite selector inside a fixed object can address known
+                // sibling branches, but cannot select a root, table or leaf.
+                if (holes.length !== 1 || holes[0] < depth || holes[0] === path.length - 1 ||
+                    owner.entry.kind === 'rows' || owner.entry.kind === 'nestedRows') return null;
+                const index = holes[0];
+                const columns = owner.group.columns.filter(c => !c.isOverflow && Array.isArray(c.path) &&
+                    c.path.length === path.length && c.path.every((p, i) => i === index || p === path[i]));
+                if (columns.length < 2 || columns.some(c => c.aiReadonly) && columns.some(c => !c.aiReadonly)) return null;
+                return { label: `「${owner.group.tableName}」中按「${path[index]}」选择对应的` + columns.map(c => `「${c.zh}」`).join('、') + '列',
+                    table: owner.group.tableName, json: false, readonly: !!(owner.group.aiReadonly || columns.every(c => c.aiReadonly)) };
+            }
             const { owner, binding } = results[0];
             return { ...binding, label: `「${owner.group.tableName}」的` + labelOf(binding, owner.group),
                 readonly: !!(owner.group.aiReadonly || binding.column && binding.column.aiReadonly) };
@@ -19924,11 +23633,10 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         return { owners, partMatches, matches, bind, labelOf, resolve };
     }
 
-    function attachProseMvuRules(schema, shapeInfo, entries, initvar, scripts = [], report) {
+    function attachProseMvuRules(schema, shapeInfo, entries, initvar, scripts = [], report, options = {}) {
         const { owners, partMatches, matches, bind, labelOf } = createMvuRulePathResolver(schema, initvar);
-        if (report) report.note('原变量路径映射（仅供核对，不注入填表说明）：' +
+        if (report && options.reportMapping !== false) report.note('原变量路径映射（仅供核对，不注入填表说明）：' +
             owners.map(o => '/' + o.prefix.join('/') + ' → ' + o.group.tableName).join('；') + '。');
-        for (const owner of owners) if (/^[_$]/.test(String(owner.prefix[0] || ''))) owner.group.aiReadonly = true;
         const specifications = (shapeInfo.proseRuleDocuments || []).flatMap(doc => doc.sections).filter(s => s.path && !s.unmapped);
         const conflicting = new Set();
         for (const readonly of specifications.filter(s => s.readonly)) for (const writable of specifications.filter(s => !s.readonly && !s.permissionUnresolved)) {
@@ -19952,7 +23660,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 for (const path of pointers) {
                     const candidates = owners.filter(o => o.prefix.every((part, i) => path[i] !== undefined && partMatches(path[i], part)));
                     const depth = Math.max(0, ...candidates.map(o => o.prefix.length));
-                    if (!depth) { unresolved = true; continue; }
+                    if (!candidates.length) { unresolved = true; continue; }
                     for (const o of candidates.filter(o => o.prefix.length === depth)) {
                         const binding = bind(o, path);
                         if (!binding) { unresolved = true; continue; }
@@ -19973,7 +23681,15 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                     }
                 }
                 if (!pointers.length) {
-                    const candidates = owners.filter(o => o.prefix.join('.') === section.heading);
+                    let candidates = owners.filter(o => o.prefix.join('.') === section.heading);
+                    if (candidates.length === 1) section.resolvedHeadingPath = candidates[0].prefix.slice();
+                    else if (Array.isArray(section.resolvedHeadingPath)) {
+                        // This heading was uniquely bound before ownership layout
+                        // planning. Rebind that exact path, without interpreting prose.
+                        candidates = owners.filter(o => matches(o.prefix, section.resolvedHeadingPath));
+                        const depth = Math.max(0, ...candidates.map(o => o.prefix.length));
+                        candidates = candidates.filter(o => o.prefix.length === depth);
+                    }
                     if (candidates.length === 1) targets.add(candidates[0].group);
                 }
                 if (!targets.size || unresolved) { section.tables = []; continue; }
@@ -19992,12 +23708,13 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                             (section.readonly && group.aiReadonly ? { label: '本表', table: group.tableName, json: false } : null);
                         if (!binding) continue;
                         group.pathSpecifications = [...(group.pathSpecifications || []), { ...section, label: labelOf(binding, group),
-                            jsonPath: binding.json, jsonValue: binding.jsonValue, recordSpecific: binding.recordSpecific }];
+                            jsonPath: binding.json, jsonValue: binding.jsonValue, recordSpecific: binding.recordSpecific,
+                            jsonBindingLabel: binding.label, jsonRelativePath: binding.path || [] }];
                         if (section.readonly && binding.column && !binding.recordSpecific) binding.column.aiReadonly = true;
                     } else {
                         group.proseChecks = [...new Set([...(group.proseChecks || []), section.text])];
                         const aliases = bindings.map(b => ({ path: '/' + b.path.join('/'), label: labelOf(b.binding, group),
-                            objectFields: b.binding.objectFields, singleton: b.owner.group.kind === 'singleton' }));
+                            objectFields: b.binding.objectFields, jsonPath: b.binding.json, singleton: b.owner.group.kind === 'singleton' }));
                         group.proseAliases = Object.assign(group.proseAliases || {}, { [section.text]: aliases });
                     }
                     if (!section.readonly && !section.permissionUnresolved) group.jsonAiWritable = true;
@@ -20011,144 +23728,6 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 !isDollarPrivateColumn(group, c) && !isUnderscoreReadonlyColumn(group, c));
             if (fields.length && fields.every(c => c.aiReadonly)) group.aiReadonly = true;
         }
-    }
-
-    function splitMigratedMvuRules(content, schema, shapeInfo, template) {
-        const prose = (shapeInfo.proseRuleDocuments || []).find(doc => doc.source === content);
-        if (prose) {
-            const kept = [], sheets = Object.values(template || {});
-            let removed = 0;
-            for (const section of prose.sections) {
-                const migrated = section.tables.length && section.tables.every(name => {
-                    const group = schema.find(g => g.tableName === name), sheet = sheets.find(s => s && s.name === name);
-                    return (group._emittedRules || []).some(r => r.text === section.text && String(sheet && sheet.sourceData && sheet.sourceData.note || '').includes(r.rendered));
-                });
-                if (migrated) removed++;
-                else kept.push(prose.outputDocument ? section.text : prose.body.slice(section.start, section.end));
-            }
-            const remainder = prose.prefix + kept.join(prose.outputDocument ? '\n' : '');
-            return { removed, content: kept.length ? prose.outputDocument ? remainder : getSchemaLayout().wrapMvuRuleDocument(content, remainder) : '' };
-        }
-        if (!isPureMvuRuleDocument(content)) return null;
-        try {
-            const YAML = getMvuYamlLibs().YAML;
-            const doc = YAML.parseDocument(prepareMvuRuleYaml(content), { merge: true });
-            if (doc.errors.length) return null;
-            const value = doc.toJS();
-            const wrapper = Object.keys(value).find(k => k === '变量更新规则' || k === 'variables_update_rules');
-            const rules = wrapper ? value[wrapper] : value;
-            const metadata = new Set(['type', 'range', 'format', 'enum']);
-            const sources = (shapeInfo && shapeInfo.ruleSources || []).filter(r => r.source === content);
-            const bindings = (shapeInfo && shapeInfo.ruleBindings || []).filter(r => r.source === content);
-            const samePath = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-            const knownMetadata = (key, child) => {
-                if (key === 'type') return typeof child === 'string' && (/^(?:string|number|boolean)(?:\[\])?$/.test(child.trim()) || !!getSchemaLayout().parseShapeString(child));
-                if (key === 'range') return !!getSchemaLayout().yamlParseRange(child);
-                if (key === 'enum') return Array.isArray(child) && child.length >= 2 && child.every(v => ['string', 'number', 'boolean'].includes(typeof v));
-                return key === 'format' && typeof child === 'string';
-            };
-            const normalize = path => (Array.isArray(path) ? path : String(path || '').split('.'))
-                .flatMap(seg => String(seg).split('.')).filter(seg => seg && !/^<[^>]+>$|^\$\{[^|}]+\}$|^\[[^\]]+\]$/.test(seg));
-            const matches = (source, target) => {
-                const a = normalize(source), b = normalize(target);
-                return a.length > 0 && a.length <= b.length && a.every((seg, i) => {
-                    const choices = /^\$\{.*\}$/.test(seg) ? seg.slice(2, -1).split('|').map(s => s.trim()) : [seg];
-                    return choices.includes(b[b.length - a.length + i]);
-                });
-            };
-            const coverage = path => {
-                const texts = new Set();
-                for (const group of schema) {
-                    const sheet = Object.values(template || {}).find(t => t && t.name === group.tableName);
-                    const note = String(sheet && sheet.sourceData && sheet.sourceData.note || '');
-                    const paths = group.writePaths && group.writePaths.length ? group.writePaths : [[group.parentGroup || group.name]];
-                    const tablePaths = [...paths, ...(group.columns || []).map(c => (c.path || []).slice(0, -1))];
-                    for (const receipt of group._emittedRules || []) {
-                        if (!note.includes(receipt.rendered)) continue;
-                        if (receipt.columnPath) {
-                            if (matches(path, receipt.columnPath)) texts.add(receipt.text);
-                        } else if (receipt.rulePath) {
-                            const rootedPath = [group.parentGroup || group.name, ...normalize(receipt.rulePath)];
-                            if (matches(path, receipt.rulePath) || matches(path, rootedPath)) texts.add(receipt.text);
-                        } else if (tablePaths.some(target => matches(path, target))) texts.add(receipt.text);
-                    }
-                }
-                return texts;
-            };
-            const migratedAt = (sourcePath, item, reminder = false) => {
-                const texts = getSchemaLayout().yamlCheckItems(reminder && typeof item === 'string' ? item.split('\n') : item)
-                    .map(text => reminder ? getSchemaLayout().yamlExpandTemplateKeys(text) : text);
-                const receipts = sources.filter(r => samePath(r.sourcePath, sourcePath) && texts.every(text => r.texts.includes(text)));
-                return texts.length > 0 && receipts.length > 0 && receipts.every(r => texts.every(text => coverage(r.path).has(text)));
-            };
-            const seen = new Set();
-            let removed = 0;
-            function prune(node, path) {
-                if (!isPlainObject(node)) return node;
-                // YAML 别名共享/循环节点不能按单一路径拆分，整条保守保留。
-                if (seen.has(node)) throw new Error('shared rule node');
-                seen.add(node);
-                const out = {};
-                const before = removed;
-                for (const [key, child] of Object.entries(node)) {
-                    if (key === 'check' || key === 'note') {
-                        const list = Array.isArray(child) ? child : [child];
-                        const kept = list.filter(item => {
-                            const migrated = migratedAt([...path, key], item);
-                            if (migrated) removed += getSchemaLayout().yamlCheckItems(item).length;
-                            return !migrated;
-                        });
-                        if (kept.length) out[key] = Array.isArray(child) ? kept : kept[0];
-                    } else if (/^_?强制更新/.test(key)) {
-                        const list = Array.isArray(child) ? child : [child];
-                        const kept = list.filter(item => {
-                            const migrated = migratedAt([...path, key], item, true);
-                            if (migrated) removed += getSchemaLayout().yamlCheckItems(item).length;
-                            return !migrated;
-                        });
-                        if (kept.length) out[key] = Array.isArray(child) ? kept : kept[0];
-                    } else if (metadata.has(key)) out[key] = child;
-                    else {
-                        const remaining = prune(child, [...path, key]);
-                        if (remaining !== undefined) out[key] = remaining;
-                    }
-                }
-                // 只有实际移除了已承接规则，才收起其附属声明；未知字段/说明仍保留。
-                if (removed > before) {
-                    const bindingKeys = new Set(bindings.filter(r => samePath(r.sourcePath, path)).flatMap(r => r.keys));
-                    if (Object.keys(out).every(key => bindingKeys.has(key) || metadata.has(key) && knownMetadata(key, out[key]))) return undefined;
-                }
-                return out;
-            }
-            const remaining = {};
-            for (const [key, node] of Object.entries(rules)) {
-                if (/^_?强制更新/.test(key)) {
-                    const list = Array.isArray(node) ? node : [node];
-                    const kept = list.filter(item => {
-                        const migrated = migratedAt([key], item, true);
-                        if (migrated) removed += getSchemaLayout().yamlCheckItems(item).length;
-                        return !migrated;
-                    });
-                    if (kept.length) remaining[key] = Array.isArray(node) ? kept : kept[0];
-                    continue;
-                }
-                const rest = prune(node, [key]);
-                if (rest !== undefined) remaining[key] = rest;
-            }
-            if (!removed) return { removed: 0, content };
-            const empty = Object.keys(remaining).length === 0;
-            function updateDocument(original, rest, path) {
-                for (const key of Object.keys(original)) {
-                    const nextPath = [...path, key];
-                    if (!Object.prototype.hasOwnProperty.call(rest, key)) doc.deleteIn(nextPath);
-                    else if (isPlainObject(original[key]) && key !== 'check' && key !== 'note' && !metadata.has(key)) {
-                        updateDocument(original[key], rest[key], nextPath);
-                    } else if (JSON.stringify(original[key]) !== JSON.stringify(rest[key])) doc.setIn(nextPath, rest[key]);
-                }
-            }
-            if (!empty) updateDocument(rules, remaining, wrapper ? [wrapper] : []);
-            return { removed, content: empty ? '' : getSchemaLayout().wrapMvuRuleDocument(content, doc.toString({ lineWidth: 0 })) };
-        } catch (e) { return null; }
     }
 
     // 这类正则不负责运行 MVU，只在显示/提示词阶段把原始更新块隐藏或折叠起来。
@@ -20668,9 +24247,14 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
     }
     function transformCard(card, opts = {}) {
         const report = opts.report || createReport();
-        const mode = opts.mode || 'both';
+        const mode = sqliteConversionMode(opts, report);
         const nameSuffix = opts.nameSuffix !== undefined ? opts.nameSuffix : '_数据库';
         const data = card.data || card;
+        const origName = data.name || '角色';
+        const convertedCardName = nameSuffix && !String(data.name || '').endsWith(nameSuffix)
+            ? String(data.name || '') + nameSuffix : data.name;
+        const rootTableCardName = nameSuffix && String(data.name || '').endsWith(nameSuffix)
+            ? String(data.name || '').slice(0, -nameSuffix.length) : data.name;
         const remoteSchemas = opts.remoteSchemaSources || [];
         const shapeCard = deepClone(card);
         for (const snapshot of remoteSchemas) {
@@ -20909,10 +24493,36 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             const dynamic = [...shapeInfo.wildcardFields].filter(path => /<[^>]+>|\$\{[^|/}]+\}|(?:^|\.)\*(?:\.|$)/.test(path));
             if (dynamic.length) report.note(`检测到动态键规则（如 ${dynamic.slice(0, 5).join('、')}${dynamic.length > 5 ? ' 等' : ''}）；键值由运行期数据决定，规则承接情况以各表说明及未承接规则报告为准。`);
         }
-        const schema = buildSchema(initvar, usage, report, shapeInfo, { vwdDescriptions: opts.vwdDescriptions, jsonContainers: opts.jsonContainers });
+        let storagePolicy = { version: 3 };
+        const statStorageService = getStatStorageFactory()({ readPolicy: () => storagePolicy });
+        // 原展示过滤不等于写权限。完整声明参与映射，值的隐藏只在发送阶段处理。
+        const layoutShape = shapeInfo;
+        const displayStorageService = getStatStorageFactory()();
+        const layoutInit = displayStorageService.split(initvar, true).database;
+        // 隐藏业务记录不参与普通列的 DEFAULT/示例采样。顶层隐藏组独立映射
+        // 为完整 JSON，DDL 不复制其初值；最终 content 从完整初值恢复。
+        for (const key of Object.keys(initvar)) if (key.startsWith('$') && key !== '$meta' && key !== '$internal') layoutInit[key] = initvar[key];
+        if (shapeInfo.dynamicPathSamples) shapeInfo.dynamicPathSamples = new Map([...shapeInfo.dynamicPathSamples]
+            .map(([path, sample]) => [path, displayStorageService.split(sample, true).database]));
+        let schema = buildSchema(layoutInit, usage, report, layoutShape, { vwdDescriptions: opts.vwdDescriptions, jsonContainers: opts.jsonContainers, originalInitvar: initvar });
         const sourceRegexScripts = (data.extensions && Array.isArray(data.extensions.regex_scripts)) ? data.extensions.regex_scripts : [];
         const helperScripts = data.extensions && data.extensions.tavern_helper && data.extensions.tavern_helper.scripts;
-        attachProseMvuRules(schema, shapeInfo, entries, initvar, [...(Array.isArray(helperScripts) ? helperScripts : []), ...sourceRegexScripts], report);
+        const ruleScripts = [...(Array.isArray(helperScripts) ? helperScripts : []), ...sourceRegexScripts];
+        // First apply declarations needed by layout planning (e.g. whole-group
+        // readonly). Labels and table targets must then bind to the final layout.
+        attachProseMvuRules(schema, shapeInfo, entries, initvar, ruleScripts, report, { reportMapping: false });
+        schema = getSchemaLayout().prepareStatStorageLayout(schema, initvar, layoutShape, report, { cardName: rootTableCardName });
+        for (const group of schema) {
+            delete group.pathSpecifications;
+            delete group.proseChecks;
+            delete group.proseAliases;
+        }
+        attachProseMvuRules(schema, shapeInfo, entries, initvar, ruleScripts, report);
+        const statStorage = statStorageService.plan(schema, shapeInfo, initvar, buildLayout(schema).entries, toIdent);
+        storagePolicy = statStorage;
+        const storageLayout = JSON.parse(buildLayoutJson(buildLayout(schema)));
+        statStorage.initial = statStorageService.split(initvar, storageLayout, statStorage).native;
+        report.note('已声明的 $ 字段保留数据库写入位置，发送当前状态时仍隐藏其值；对象内部隐藏字段随所属记录保存在完整 JSON 或扩展数据中。未映射的脚本根数据沿用原消息存储，不新增模型兜底表。');
         if ([data.first_mes, ...(data.alternate_greetings || [])].some(text => /<initvar\b/i.test(String(text || '')))) {
             report.warn('开场消息含 <initvar>：SP 独立填表会读取原始聊天正文，可能重复发送初始变量（包括已从表格隐藏的字段）。请在 SP 填表设置的标签排除规则中配置起始 <initvar、结束 </initvar>，并检查最终请求；酒馆显示正则不替代此设置。', 'template');
         }
@@ -20920,8 +24530,6 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         // 复用 group 上已经填好插槽的同一计划对象，因此顺序必须是先 generateTemplate
         // 再 buildLayout。布局本身不依赖模板内容，两者仍从同一 schema 派生。
         const template = opts.template || generateTemplate(schema, { mode, report, ddlIncludeCheck: opts.ddlIncludeCheck, targetSpVersion: opts.targetSpVersion });
-        for (const group of schema) for (const issue of group._unresolvedProtocolRules || [])
-            report.warn(`表格「${group.tableName}」的更新说明协议迁移未完成：${issue}；原说明保留，不视为已完整清理。`, 'schema');
         // 复用调用方已有模板时不会有新的 note，用同一规则现算一份插槽计划，避免布局里
         // 存下空计划而运行期无法按字段替换说明。
         if (opts.template) ensureVwdSlotPlans(schema, { template, mode, report, targetSpVersion: opts.targetSpVersion });
@@ -20956,7 +24564,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
 
         const convertedAt = new Date().toISOString();
         const bridgeOptions = {
-            mode,
+            mode, statStorage,
             template,
             installMvuShim,
             appendPlaceholder: opts.appendPlaceholder !== false,
@@ -20971,8 +24579,6 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
 
         // 3. 世界书处理
         const newEntries = [];
-        let generatedEntryId = entries.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1;
-        const rulePathResolver = createMvuRulePathResolver(schema, initvar);
         // MVU 剧情条目宏：{{get_message_variable::路径}} 改写为数据库表引用
         // （剧情条目保留；变量值由插件注入表格数据提供，宏本身在数据库环境无解析器）
         function rewritePlotMacros(text) {
@@ -20986,109 +24592,53 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 return rest ? `（数据库表「${table}」的「${rest}」）` : `（数据库表「${table}」）`;
             });
         }
+        const adaptation = getUpdateRuleMigration();
+        let generatedEntryId = entries.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1;
         for (const e of entries) {
             const comment = String(e.comment || '');
-            let content = String(e.content || '');
-            const isInit = /\[initvar\]/i.test(comment);
-            // [mvu_plot] 是 MVU 的“剧情 AI 专用”标记：内容是剧情/人设/地点等提示，
-            // 不属于变量更新规则，一律保留（内部 MVU 宏单独改写）。
-            const isPlot = /\[mvu[ _-]?plot\]|\[mvuplot\]/i.test(comment);
-            // MVU 写入/输出管道特征，用于区分“该删的管道”与“误标成
-            // [mvu_update] 的剧情/机制文本”。format_message_variable、
-            // get_message_variable、getvar(stat_data...) 都只是读取变量，常被业务规则
-            // 用作条件或插值；仅凭读取痕迹绝不能整条删除。
-            const explicitUpdateEntry = /\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/i.test(comment);
-            const entryTitle = comment.replace(/\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/ig, '').trim();
-            // 一部分 Zod 卡没有 [mvu_update] 前缀，只用中文专名区分规则与
-            // 输出协议。必须同时校验 comment 和正文结构，避免仅因普通剧情提到
-            // “变量更新规则”就删除整个条目。
-            const dedicatedRuleEntry = /^(?:变量(?:更新)?规则|变量规则)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(entryTitle);
-            const dedicatedProtocolEntry = /^变量(?:处理|更新|输出)(?:指令集|指令|协议)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(entryTitle);
-            const dedicatedOutputEntry = /^(?:variables?|output_format)(?:\s*\([^)]*\))?$/i.test(entryTitle) ||
-                /^(?:变量列表|变量(?:更新|输出)格式(?:强调)?|变量输出规则)(?:\s*\([^)]*\))?$/i.test(entryTitle) || dedicatedProtocolEntry;
-            // 状态展示是模型输入，不是模型的更新输出。只拆去专名条目中
-            // 独立可确认的旧更新协议，完整保留状态块（包括块内业务说明）。
-            const hasStatusMarkup = /<\/?status_current_variables?\b/i.test(content);
-            if (!isPlot && dedicatedOutputEntry && hasStatusMarkup) {
-                const statusBlocks = [];
-                const remainder = content.replace(/<(status_current_variables?)>(?:(?!<\/?status_current_variables?\b)[\s\S])*?<\/\1>/gi,
-                    block => { statusBlocks.push(block); return ''; });
-                if (statusBlocks.length && isPureMvuOutputMarkup(remainder)) content = statusBlocks.join('\n');
-            }
-            const ruleDocumentContent = /(?:^|\n)\s*(?:变量更新规则|variables_update_rules)\s*:|(?:^|\n)[ \t]+(?:type|range|check|format)\s*:/mi.test(content)
-                || (shapeInfo.proseRuleDocuments || []).some(doc => doc.source === content)
-                || ((dedicatedRuleEntry || explicitUpdateEntry) && isPureMvuRuleDocument(content));
-            const outputProtocolContent = /<status_current_variables?|get_message_variable\s*::\s*stat_data|<UpdateVariable|<JSONPatch|json\s*patch|每轮[^\n]{0,40}(?:必须)?输出|^\s*格式:\s*_\.set\s*\(/i.test(content);
-            // 某些卡用单个箭头/图标作为变量管线的起止占位。只识别这种
-            // 纯符号 marker；不再用“少于 60 字”猜测，避免删掉 lastUserMessage 等短上下文。
-            const purePipelineMarker = explicitUpdateEntry && /变量|更新|输出/i.test(comment) &&
-                /^\s*[🔻🔺▼▲↓↑⬇⬆⏬⏫─━—_=*#.:;\-]+\s*$/u.test(content);
-            const outputDocument = !isPlot && !hasStatusMarkup && (explicitUpdateEntry || dedicatedOutputEntry) && outputProtocolContent && isMvuOutputDocument(content);
-            const splitRules = !isPlot && !hasStatusMarkup && (dedicatedRuleEntry || dedicatedOutputEntry || explicitUpdateEntry) && ruleDocumentContent
-                ? splitMigratedMvuRules(content, schema, shapeInfo, template) : null;
-            const isMvuUpdate = !isPlot && (
-                (explicitUpdateEntry && (!String(content).trim() || purePipelineMarker)) ||
-                (splitRules && !splitRules.content) ||
-                // 输出文档必须是完整专名；有 EJS 的混合业务不能凭名称删除。
-                (outputDocument && splitRules && !splitRules.content) ||
-                (dedicatedOutputEntry && isPureMvuOutputMarkup(content)));
-            if (isInit || isMvuUpdate) {
-                report.note(`已删除 MVU 世界书条目「${comment}」（${isInit ? '初始变量已迁移为数据库模板' : outputDocument ? '输出格式由数据库宿主填表协议接管，不再注入正文' : '更新规则已迁移为数据库模板/规则'}）。`);
+            const content = String(e.content || '');
+            if (/\[initvar\]/i.test(comment)) {
+                report.note(`已删除 MVU 世界书条目「${comment}」（初始变量已迁移为数据库模板）。`);
                 continue;
             }
-            if (splitRules) {
-                if (outputDocument) report.note(`输出条目「${comment}」已移除确认的格式块，未识别的补充字段保留并报告；字段名属于支持的作者约定，不是 MVU 标准。`);
-                if (splitRules.removed) report.note(`规则条目「${comment}」已移除 ${splitRules.removed} 项迁入表格说明的规则，仅保留未承接内容。`);
-                // Remaining sections are offered to the worldbook routing pass
-                // below; a template receipt is never emitted for this second path.
-            } else if ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent) {
-                report.warn(`规则条目「${comment}」无法确认为完整静态规则文档，已保留原条目；已提取的规则可能不完整，请核对后决定是否停用原条目。`, 'schema');
-            }
-            const remaining = splitRules ? splitRules.content : content;
-            const routed = !isPlot ? migrateWorldbookUpdateRules(remaining, {
-                updateOnly: (explicitUpdateEntry || dedicatedRuleEntry) && isPureMvuRuleDocument(remaining) ||
-                    (explicitUpdateEntry || dedicatedOutputEntry) && isMvuOutputDocument(remaining),
-                resolvePath: rulePathResolver.resolve,
-            }) : { body: remaining, fill: '', migrated: 0, issues: [] };
-            for (const issue of routed.issues) report.warn(`条目「${comment}」更新规则迁移未完成：${issue}；未承接内容保留，不视为已完整清理。`, 'schema');
-            if (routed.migrated) report.note(`条目「${comment}」已将 ${routed.migrated} 个完整更新段落保留在世界书填表侧；原条件和触发设置保留，正文侧屏蔽，不重复写入表格说明。`);
-            if (splitRules && !routed.migrated) report.warn(`规则条目「${comment}」剩余内容未迁入填表侧，保留原条目中的未承接部分，仍按原世界书设置注入；请核对是否保留。`, 'schema');
-            if (!isPlot && !routed.migrated && /<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]/i.test(remaining))
-                report.note(`世界书条目「${comment}」含未承接的旧变量更新要求，已保留并报告；转换结果的更新提示尚未完整迁移。`);
-            // EJS 重写
-            const rw = rewriteEjsConditions(routed.migrated && !routed.body.trim() ? routed.fill : routed.body, layout, report, {
-                translateSimpleEjs: !!opts.translateSimpleEjs,
-            });
-            if (rw.items.length) {
-                for (const it of rw.items) {
-                    if (it.status === 'auto') {
-                        report.auto(`条目「${comment}」MVU 数据读取已改写为扩展注册的 mvu2shujukuGetAllVariables()：\`${it.rewritten}\``);
-                    }
-                }
-            }
+            // Re-conversion never stacks generated guides or template payloads.
+            if (e.extensions?.mvu2shujukuFillGuide === 1 || (Array.isArray(e.keys) && e.keys.includes('__ACU_TEMPLATE_DATA__'))) continue;
+            const isPlot = /\[mvu[ _-]?plot\]|\[mvuplot\]/i.test(comment);
+            const explicitUpdate = /\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/i.test(comment);
+            const title = comment.replace(/\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/ig, '').trim();
+            const dedicatedRule = /^(?:变量(?:更新)?规则|变量规则)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(title);
+            const dedicatedOutput = /^(?:variables?|output_format)(?:\s*\([^)]*\))?$/i.test(title) ||
+                /^(?:变量列表|变量(?:更新|输出)格式(?:强调)?|变量输出规则|变量(?:处理|更新|输出)(?:指令集|指令|协议))(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(title);
+            const statusDisplay = /<\/?status_current_variables?\b/i.test(content);
+            const fillOnly = !isPlot && !statusDisplay && (explicitUpdate || dedicatedOutput || dedicatedRule && isPureMvuRuleDocument(content));
+            // Only the established API/macro translation changes executable text.
+            // No prose/path substitution and no second executable copy.
+            const rw = rewriteEjsConditions(content, layout, report, { translateSimpleEjs: !!opts.translateSimpleEjs });
+            for (const it of rw.items) if (it.status === 'auto')
+                report.auto(`条目「${comment}」MVU 数据读取已改写为数据库兼容入口：\`${it.rewritten}\``);
             const copy = deepClone(e);
-            const afterFormatMacros = rewriteFormatMessageVariableMacros(rw.text, report, `条目「${comment}」`);
-            const afterMacros = rewritePlotMacros(afterFormatMacros);
-            if (afterMacros !== afterFormatMacros) {
-                report.auto(`条目「${comment}」的 MVU 宏 {{get_message_variable::…}} 已改写为数据库表引用（剧情条目保留）。`);
+            if (copy.id == null) copy.id = generatedEntryId++;
+            copy.content = rewritePlotMacros(rewriteFormatMessageVariableMacros(rw.text, report, `条目「${comment}」`));
+            const view = !isPlot ? adaptation.plan(copy.content, { outputOnly: dedicatedOutput }) : { excluded: [] };
+            if (fillOnly || view.excluded.length) {
+                copy.extensions = copy.extensions || {};
+                copy.extensions.mvu2shujukuFillView = { version: 1, outputOnly: dedicatedOutput };
             }
-            copy.content = afterMacros;
-            if (!isPlot && (routed.migrated && !routed.body.trim() || !routed.migrated && explicitUpdateEntry)) {
-                copy.comment = getUpdateRuleMigration().fillTitle(comment, copy.id);
-                if (copy.comment !== comment) report.note(`更新专用条目「${comment}」使用标题「${copy.comment}」；原名称保留在此报告，避免数据库配置页按名称隐藏并清除选择。`);
-            } else if (routed.migrated) copy.comment = comment.replace(/\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/ig, '').trim();
+            if (fillOnly) {
+                copy.comment = adaptation.fillTitle(comment, copy.id);
+                report.note(`更新专用条目「${comment}」保留业务原文，使用标题「${copy.comment}」供填表读取，正文侧屏蔽；不复制执行代码。`);
+            }
+            if (view.excluded.length) report.note(`条目「${comment}」保留源内容；请求视图排除 ${view.excluded.length} 个完整明确的纯旧格式区间，真实目标/值及混合业务保留。`);
             newEntries.push(copy);
-            if (routed.migrated && routed.body.trim()) {
-                const fillEntry = deepClone(e);
-                fillEntry.id = generatedEntryId++;
-                delete fillEntry.uid;
-                fillEntry.comment = getUpdateRuleMigration().fillTitle(comment, fillEntry.id, true);
-                report.note(`原条目「${comment}」的完整更新段落使用标题「${fillEntry.comment}」；原名称保留在此报告。`);
-                const fillRw = rewriteEjsConditions(routed.fill, layout, report, { translateSimpleEjs: !!opts.translateSimpleEjs });
-                fillEntry.content = rewritePlotMacros(rewriteFormatMessageVariableMacros(fillRw.text, report, `条目「${fillEntry.comment}」`));
-                newEntries.push(fillEntry);
-            }
         }
+        const guideId = newEntries.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1;
+        newEntries.push({
+            id: guideId, keys: [], comment: adaptation.guideTitle, content: adaptation.guideContent,
+            enabled: true, constant: true, selective: false, position: 'before_char',
+            insertion_order: 9991, depth: 2, prevent_recursion: true,
+            extensions: { mvu2shujukuFillGuide: 1 },
+        });
+        report.note('已在现有世界书新增「[M2SJK]填表适配说明」。填表世界书选择须包含此条目；作者业务原文保留，输出以宿主当前协议为准，不新增路径清单或分组说明。');
         isolateCrossEntryEjsFallbacks(newEntries, report);
         // 把模板以 base64 写入世界书条目（keys: __ACU_TEMPLATE_DATA__），供插件/开场页按需导入
         const tplB64 = toBase64(JSON.stringify(template));
@@ -21272,9 +24822,8 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
 
         // 6. 转换标记
         if (!data.extensions) data.extensions = {};
-        const origName = data.name || '角色';
         if (nameSuffix && !String(data.name || '').endsWith(nameSuffix)) {
-            data.name = String(data.name || '') + nameSuffix;
+            data.name = convertedCardName;
             report.note(`角色卡名已追加后缀：${origName} → ${data.name}。`);
         }
         // 世界书独立：内嵌世界书加后缀，避免同名覆盖原卡世界书。
@@ -21300,6 +24849,9 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         }
         data.extensions.mvu2shujuku = {
             converter: 'mvu2shujuku',
+            fillAdapterVersion: 1,
+            statStorage,
+            fillViewEntries: newEntries.filter(entry => entry.extensions?.mvu2shujukuFillView).map(entry => ({ id: entry.id, contentHash: stableHash(String(entry.content || '').replace(/\r\n/g, '\n').trim()), outputOnly: entry.extensions.mvu2shujukuFillView.outputOnly })),
             version: VERSION,
             mode,
             convertedAt,
@@ -21383,8 +24935,9 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         return Object.fromEntries(Object.keys(template).map(key => [key, JSON.stringify(template[key] && template[key].sourceData)]));
     }
     function conversionOptionKey(opts) {
-        const normalized = { mode: 'both', nameSuffix: '_数据库', appendPlaceholder: true,
+        const normalized = { nameSuffix: '_数据库', appendPlaceholder: true,
             ddlIncludeCheck: true, translateSimpleEjs: false, jsonContainers: false, ...opts };
+        normalized.mode = sqliteConversionMode(opts);
         return JSON.stringify(Object.keys(normalized).sort().filter(k =>
             !['template', 'asPng', 'report'].includes(k) && normalized[k] !== undefined
         ).map(k => [k, normalized[k]]));
@@ -21400,8 +24953,8 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 return buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50;
             } catch (e) { return false; }
         })();
-        const mode = opts.mode || 'both';
-        report.note(`模式：${mode === 'both' ? 'native + SQLite 双模式（DDL 与 DSL/SQL 说明都写入模板）' : mode === 'native' ? 'native（AI 输出 insertRow/updateRow/deleteRow DSL）' : 'sqlite（AI 输出 SQL）'}。`);
+        const mode = sqliteConversionMode(opts, report);
+        report.note('模式：SQLite（仅支持 SQL 填表）。');
 
         const sourceInput = isPngInput
             ? new Uint8Array(input instanceof ArrayBuffer ? input.slice(0) : new Uint8Array(input.buffer, input.byteOffset, input.byteLength))
@@ -21415,6 +24968,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         return result;
     }
     async function convertWithRemoteSchemas(input, opts = {}) {
+        sqliteConversionMode(opts);
         const sourceCard = parseCard(input);
         const remoteSchemaSources = await getRemoteSchemaService().resolve(sourceCard, opts);
         const schemaSnapshots = [];
@@ -21428,7 +24982,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
     // 产物装配与卡片分析分开；模板编辑无需重复解析 initvar、Schema、业务脚本和 EJS。
     function packageConversion(input, opts, transformed, isPngInput, metadata = {}) {
         const { card, schema, template, bridgeScript, report } = transformed;
-        const mode = opts.mode || 'both';
+        const mode = sqliteConversionMode(opts);
 
         const files = [];
         const cardName = ((card.data || card).name || 'converted').replace(/[\\/:*?"<>|]/g, '_');
@@ -21707,6 +25261,12 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         throw new Error('正文世界书过滤模块缺失');
     }
 
+    function getEjsEvalBridgeFactory() {
+        if (typeof root.__MVU2SHUJUKU_EJS_EVAL_BRIDGE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_EJS_EVAL_BRIDGE_FACTORY__;
+        if (typeof require === 'function') return require('./extension-runtime.js').createEjsEvalBridge;
+        throw new Error('填表模板上下文桥缺失');
+    }
+
     function getWorldbookSaveFactory() {
         if (typeof root.__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__;
         if (typeof require === 'function') return require('./worldbook-save.js');
@@ -21744,7 +25304,11 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             ['__MVU2SHUJUKU_TABLE_CODEC_FACTORY__', getTableCodecFactory],
             ['__MVU2SHUJUKU_INPUT_PARSER_FACTORY__', getInputParserFactory],
             ['__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__', getEjsTransformFactory],
+            ['__MVU2SHUJUKU_EJS_PARSER_FACTORY__', getEjsParserFactory],
             ['__MVU2SHUJUKU_CARD_API_FACTORY__', getCardApiFactory],
+            ['__MVU2SHUJUKU_STAT_STORAGE_FACTORY__', getStatStorageFactory],
+            ['__MVU2SHUJUKU_STATE_TRANSFER_FACTORY__', getStateTransferFactory],
+            ['__MVU2SHUJUKU_MVU_SCHEMA_FACTORY__', getMvuSchemaFactory],
             ['__MVU2SHUJUKU_JS_SOURCE_FACTORY__', getJsSourceFactory],
             ['__MVU2SHUJUKU_REMOTE_SCHEMA_FACTORY__', getRemoteSchemaFactory],
             ['__MVU2SHUJUKU_SCHEMA_EXECUTION_FACTORY__', getSchemaExecutionFactory],
@@ -21767,6 +25331,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
             ['__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__', getExtensionRuntimeInstaller],
             ['__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__', getCandidateBuilderFactory],
             ['__MVU2SHUJUKU_WORLDBOOK_REQUEST_FILTER_FACTORY__', getWorldbookRequestFilterFactory],
+            ['__MVU2SHUJUKU_EJS_EVAL_BRIDGE_FACTORY__', getEjsEvalBridgeFactory],
             ['__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__', getWorldbookSaveFactory],
             ['__MVU2SHUJUKU_WORLDBOOK_STORAGE_FACTORY__', getWorldbookStorageFactory],
             ['__MVU2SHUJUKU_CARD_BRIDGE_INSTALLER__', getCardBridgeInstaller],
@@ -21807,7 +25372,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
                 '',
                 '## 使用',
                 '1. 打开扩展设置面板。',
-                '2. 选择模式（双模式 / native / sqlite），从下拉栏选择角色卡或选择文件。',
+                '2. 从下拉栏选择角色卡或选择文件；转换结果仅支持数据库的 SQLite 模式。',
                 '3. 点击转换：保存为角色卡（直接进酒馆）或下载 角色卡 + 表格模板 + 转换报告。',
                 '',
                 '## 说明',
@@ -21837,6 +25402,7 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         parseRegisteredZodSchema,
         buildSchema,
         buildLayout,
+        buildLayoutJson,
         generateTemplate,
         migrateTemplatePromptRuntime,
         formatMessageVariableValue,
@@ -21857,7 +25423,13 @@ root.__MVU2SHUJUKU_BRIDGE_LIFECYCLE_FACTORY__ = function createBridgeLifecycle(h
         canWriteVwdDescriptions,
         vwdDescriptionDelta,
         getCandidateBuilderFactory,
+        getStateTransferFactory,
+        getMvuSchemaFactory,
         getWorldbookRequestFilterFactory,
+        getEjsEvalBridgeFactory,
+        prepareFillPrompt,
+        fillEntryRequestView,
+        fillAdaptationGuidance,
         getWorldbookSaveFactory,
         getWorldbookStorageFactory,
         setVwdExperimental,

@@ -163,6 +163,13 @@ function installExtensionRuntime(window) {
     });
     function captureRuntimeSession(validate) { return runtimeSessions.capture(validate); }
     function bindWriteTarget(session) { return runtimeSessions.bindWriteTarget(session, () => getContextSafe().chat); }
+    const nativeStatStorage = window.__MVU2SHUJUKU_STAT_STORAGE_FACTORY__({
+        readLayout: () => activeLayout || [],
+        readPolicy: () => readCardApiMetadata().statStorage || {},
+        enabled: () => readCardApiMetadata().statStorage?.version >= 1,
+        readChat: () => getContextSafe().chat || [],
+        bindSession: bindWriteTarget, assertCurrent: assertRuntimeSession,
+    });
     function isRuntimeSessionCurrent(session) { return runtimeSessions.isCurrent(session); }
     function runtimeScopedChatKey(chatKey) { return runtimeSessions.scopedChatKey(chatKey); }
     function assertRuntimeSession(session) { return runtimeSessions.assertCurrent(session); }
@@ -331,6 +338,7 @@ function installExtensionRuntime(window) {
         if (snapshot) {
             st.snapshot = snapshot;
             st.expiresAt = Date.now() + 30 * 60 * 1000;
+            dbg('[开场连续性] 已按本次提交更新恢复快照。');
         }
     }
     async function recoverOpeningContinuity(reason) {
@@ -397,7 +405,11 @@ function installExtensionRuntime(window) {
             assertRuntimeSession(session);
             if (!ready) throw new Error('数据库运行时未就绪');
             overlayFlushRetries = 0;
-            const ok = await scheduleWindowStatOverlay(snapshot, null, false, false, chatKey, session);
+            // This is a committed snapshot, not a new model candidate. MVU's
+            // replaceMvuData restores values without executing Schema again;
+            // transforms/default providers must not run a second time here.
+            const restoreSession = { ...session, rawAuthorWrite: true };
+            const ok = await scheduleWindowStatOverlay(snapshot, null, false, false, chatKey, restoreSession);
             assertRuntimeSession(session);
             if (!ok) throw new Error('开场数据重写未落定');
             st.recoveries += 1;
@@ -685,6 +697,7 @@ function installExtensionRuntime(window) {
                 const greetingState = greetingInitState(key);
                 greetingState.ready = true;
                 if (preparedOpening && preparedOpening.opening && !preparedOpening.opening.schemaDeferred) {
+                    greetingState.schemaInitialized = !!(readCardApiMetadata().schemaKeys || []).length;
                     greetingState.appliedFp = preparedOpening.opening.fp;
                     greetingState.appliedSourceFp = preparedOpening.opening.sourceFp || '';
                     greetingState.pendingFp = '';
@@ -692,7 +705,7 @@ function installExtensionRuntime(window) {
                     greetingState.pendingAt = 0;
                     scheduleGreetingMessageWrite(preparedOpening.opening, greetingState);
                 }
-                if (hadHistoricalCheckpointBeforeInit && !greetingState.appliedFp && !greetingState.pendingFp) {
+                if (hadHistoricalCheckpointBeforeInit && !greetingState.created && !greetingState.appliedFp && !greetingState.pendingFp) {
                     greetingState.baselineNext = true;
                 }
                 // 旧聊天已有数据库状态时，所有现存更新块都是历史，只登记不重放；
@@ -1076,6 +1089,8 @@ function installExtensionRuntime(window) {
             greetingInitStateByChat[key] = {
                 ready: false,
                 baselineNext: false,
+                created: false,
+                schemaInitialized: false,
                 appliedFp: '',
                 appliedSourceFp: '',
                 pendingFp: '',
@@ -1117,23 +1132,25 @@ function installExtensionRuntime(window) {
         const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
         const first = chat[0];
         if (!first || first.is_user) return null;
+        const hasSchema = !!(readCardApiMetadata().schemaKeys || []).length;
         const text = String(first.mes != null ? first.mes : (first.message || ''));
         let swipeId = '';
         try { swipeId = String(first.swipe_id == null ? 0 : first.swipe_id); } catch (e) {}
         const hit = greetingSourceSnapCache;
-        if (hit && hit.first === first && hit.text === text && hit.swipeId === swipeId) return hit.snap;
+        if (hit && hit.first === first && hit.text === text && hit.swipeId === swipeId && hit.hasSchema === hasSchema) return hit.snap;
         const m = text.match(/<initvar>\s*\n?([\s\S]*?)\n?\s*<\/initvar>/i);
         const updateSource = messageUpdateBlocks(text);
-        if (!m && !updateSource) {
-            // 无 initvar/更新块的首楼也缓存，避免常见卡每 2s 重跑正则后返回 null。
-            greetingSourceSnapCache = { first, text, swipeId, snap: null };
+        if (!m && !updateSource && !hasSchema) {
+            // 无初始化任务的首楼也缓存；Schema 元数据晚到时须重新检查。
+            greetingSourceSnapCache = { first, text, swipeId, hasSchema, snap: null };
             return null;
         }
-        const sourceText = (m ? String(m[1]) : 'no-initvar') + '\n' + String(updateSource || '');
+        const schemaOnly = !m && !updateSource;
+        const sourceText = (m ? String(m[1]) : (schemaOnly ? 'worldbook-schema-init' : 'no-initvar')) + '\n' + String(updateSource || '');
         const core = window.MVU2SHUJUKU_CORE;
         const sourceFp = core && typeof core.stableHash === 'function' ? core.stableHash(sourceText) : sourceText;
-        const snap = { first, text, m, updateSource, swipe: Number(first.swipe_id || 0), sourceFp: String(sourceFp || '') };
-        greetingSourceSnapCache = { first, text, swipeId, snap };
+        const snap = { first, text, m, updateSource, schemaOnly, swipe: Number(first.swipe_id || 0), sourceFp: String(sourceFp || '') };
+        greetingSourceSnapCache = { first, text, swipeId, hasSchema, snap };
         return snap;
     }
     function guardGreetingSource(session, source) {
@@ -1189,15 +1206,15 @@ function installExtensionRuntime(window) {
             await emitMvuEvent('mag_before_message_update', updateContext);
             finalWrap = updateContext.variables || finalWrap;
             messageContent = updateContext.message_content;
-        } else if (m && !options.deferSchema) {
-            // A pure InitVar swipe still passes through the registered author
-            // Schema. Run it at play time so clock-dependent transforms retain
-            // their real environment rather than freezing conversion-time data.
+        } else if ((m || source.schemaOnly) && !options.deferSchema) {
+            // Worldbook-seeded state needs the same author validation as inline
+            // InitVar. Run it after data is available, allowing scripts that
+            // register their Schema only after Mvu initialization to proceed.
             finalWrap.stat_data = await validateCardStat(finalWrap.stat_data);
             finalWrap.display_data = JSON.parse(JSON.stringify(finalWrap.stat_data));
         }
         return { first, text, messageContent, swipe: source.swipe, hasInitvar: !!m,
-            schemaDeferred: !!(m && !updateSource && options.deferSchema),
+            schemaDeferred: !!((m || source.schemaOnly) && !updateSource && options.deferSchema),
             updateSource, sourceFp, fp, baseStat: currentAll.stat_data || {}, finalWrap };
     }
 
@@ -1221,7 +1238,8 @@ function installExtensionRuntime(window) {
             greetingState.pendingAt = Date.now();
             activePendingState = greetingState;
             guardGreetingSource(session, sourceSnapshot);
-            const prepared = await computeActiveGreetingSnapshot(undefined, sourceSnapshot);
+            const prepared = await computeActiveGreetingSnapshot(undefined, sourceSnapshot,
+                { deferSchema: !!(greetingState.baselineNext && sourceSnapshot.schemaOnly) });
             if (!isRuntimeSessionCurrent(session)) {
                 greetingState.pendingSourceFp = '';
                 greetingState.pendingAt = 0;
@@ -1252,6 +1270,13 @@ function installExtensionRuntime(window) {
             greetingState.pendingFp = fp;
             activePendingFp = fp;
             const finalStat = (prepared.finalWrap && prepared.finalWrap.stat_data) || prepared.baseStat;
+            // The opening evaluator already ran the author's Schema/update cycle.
+            // Persist its complete result, as MVU does after initialization, rather
+            // than applying non-idempotent transforms again in the write adapter.
+            if (!prepared.schemaDeferred) {
+                session.rawAuthorWrite = true;
+                session.schemaProof = currentCardApi && currentCardApi.proofOf(finalStat);
+            }
             dbg('[开场分支] 按当前分支注入' + (prepared.hasInitvar ? ' <initvar>' : '') + (prepared.updateSource ? ' <UpdateVariable/JSONPatch>' : '') + '（swipe=' + String(prepared.first.swipe_id == null ? 0 : prepared.first.swipe_id) + '，顶层组 ' + Object.keys(finalStat).join('、') + '）。');
             scheduleWindowStatOverlay(finalStat, (ok) => {
                 if (greetingState.pendingFp !== fp) return;
@@ -1259,6 +1284,7 @@ function installExtensionRuntime(window) {
                 greetingState.pendingSourceFp = '';
                 greetingState.pendingAt = 0;
                 if (ok) {
+                    greetingState.schemaInitialized = !!(readCardApiMetadata().schemaKeys || []).length;
                     greetingState.appliedFp = fp;
                     greetingState.appliedSourceFp = sourceFp;
                     scheduleGreetingMessageWrite(prepared, greetingState);
@@ -1477,6 +1503,22 @@ function installExtensionRuntime(window) {
         if (!es || !et || typeof es.on !== 'function') return;
         try {
             if (!autoInitState.inited) {
+                if (et.CHAT_CREATED) es.on(et.CHAT_CREATED, async () => {
+                    // A database seed is already a checkpoint by the time ST emits
+                    // CHAT_CREATED. The explicit lifecycle event, rather than the
+                    // stored values or chat length, identifies unfinished new-chat
+                    // initialization. Existing chats never take this path.
+                    if (!(readCardApiMetadata().schemaKeys || []).length) return;
+                    const state = greetingInitState(autoInitChatId());
+                    if (state.created) return;
+                    state.created = true;
+                    if (state.schemaInitialized) return;
+                    state.baselineNext = false;
+                    state.appliedFp = '';
+                    state.appliedSourceFp = '';
+                    await autoInitDatabase();
+                    await applyActiveGreetingInitvar();
+                });
                 es.on(et.CHAT_CHANGED, () => {
                     cancelReplyStatusCleanups();
                     cancelMvuMessageWrites();
@@ -1682,7 +1724,7 @@ function installExtensionRuntime(window) {
         if (!context.extensionSettings) context.extensionSettings = {};
         if (!context.extensionSettings[SETTINGS_KEY]) {
             context.extensionSettings[SETTINGS_KEY] = {
-                mode: 'both',
+                mode: 'sqlite',
                 installMvuShim: 'auto',
                 appendPlaceholder: true,
                 asPng: 'auto',
@@ -2518,6 +2560,7 @@ function installExtensionRuntime(window) {
             // settledOk：本次写入是否真正落定（成功或与目标一致）；retryScheduled：
             // 是否已安排重试（重试会携带同一回调，最终落定时才通知调用方）。
             let settledOk = false;
+            let nativeWrite = null;
             let retryScheduled = false;
             let writeUnsettled = false;
             try {
@@ -2587,7 +2630,24 @@ function installExtensionRuntime(window) {
                         if (statWriteOverlayGen === gen) pendingStatWrite = null;
                         return;
                     }
-                    // SQL 读取能力不代表 CRUD 就绪：SP 9.2.5 在 native 模式下始终
+                    // New complete-object layouts require the host's published
+                    // SQLite runtime. A missing getter may mean loading or native;
+                    // retry without staging data, then fail rather than guessing.
+                    if (readCardApiMetadata().statStorage?.version >= 2
+                        && typeof api.querySql !== 'function' && typeof api.executeSqlQuery !== 'function') {
+                        if (overlayFlushRetries < 6) {
+                            overlayFlushRetries += 1;
+                            hostWindow.setTimeout(() => {
+                                if (statWriteOverlayGen === gen) scheduleWindowStatOverlay(target, null, true, isInitializationWrite, writeChatKey, writeSession);
+                            }, 800);
+                            retryScheduled = true;
+                            return;
+                        }
+                        toast('SQLite 运行时未就绪，已停止本次变量写入。请检查数据库模式与加载状态。', 'error');
+                        if (statWriteOverlayGen === gen) pendingStatWrite = null;
+                        return;
+                    }
+                    // SQL 读取能力不代表旧布局 CRUD 就绪：SP 9.2.5 在 native 模式下始终
                     // 隐藏 querySql/executeSqlQuery。SQLite CRUD 自身会等待 provider
                     // 发布，并在 commit 内核验 readiness/revision；此处只检查实际表格，
                     // 保留来源会话守卫和写入失败重试，不以 SQL getter 拦截原生写入。
@@ -2632,7 +2692,7 @@ function installExtensionRuntime(window) {
                     for (const g of rawGroups2) {
                         if (!layoutGroupSet2.has(g)) { hasForeignGroup2 = true; break; }
                     }
-                    if (hasForeignGroup2 && rawGroups2.length) {
+                    if (!(readCardApiMetadata().statStorage?.version >= 1) && hasForeignGroup2 && rawGroups2.length) {
                         if (lastForeignWriteDropChat !== chatKeyNow) {
                             lastForeignWriteDropChat = chatKeyNow;
                             dbgWarn('[切卡隔离] 检测到跨卡残留前端写库（target 混入布局外组：' + rawGroups2.join('、') + '），整笔丢弃，后续同类写入静默跳过。');
@@ -2644,8 +2704,11 @@ function installExtensionRuntime(window) {
                     // （如只有 系统.本轮APP操作，缺 主角 等）。把 target 叠到当前表状态（prev）上，
                     // 普通旧布局缺失的顶层组用现有数据补齐——否则快照/合并模板会把已有组清空，
                     // 最终 importTableAsJson 还可能存旧 checkpoint，导致“写入未保存”。
+                    const storageEnabled = readCardApiMetadata().statStorage?.version >= 1;
+                    const fullPrev = nativeStatStorage.merge({ stat_data: prev }).stat_data;
                     let effectiveTarget = (() => {
                         if (!target || typeof target !== 'object') return prev || {};
+                        if (storageEnabled) return JSON.parse(JSON.stringify(target));
                         const out = JSON.parse(JSON.stringify(prev || {}));
                         // 切卡隔离：前端可能缓存上一张卡的 stat_data（target 混入当前布局外的组）。
                         // 只接受当前布局内的顶层组，布局外的组一律丢弃，避免串卡数据写进当前聊天。
@@ -2660,7 +2723,7 @@ function installExtensionRuntime(window) {
                         }
                         for (const k of Object.keys(target)) {
                             if (k === '$internal') continue;
-                            if (allowedGroups.has(k)) {
+                            if (storageEnabled || allowedGroups.has(k)) {
                                 const tv = target[k];
                                 const pv = out[k];
                                 // 空组保护（行表 rows 与关系子表集合 nestedRows）：前端 target
@@ -2683,8 +2746,15 @@ function installExtensionRuntime(window) {
                         }
                         return out;
                     })();
-                    effectiveTarget = await validateCardStat(effectiveTarget, writeSession.schemaProof);
+                    if (storageEnabled) {
+                        // Native values follow complete replacement semantics.
+                        effectiveTarget = nativeStatStorage.combine(nativeStatStorage.split(effectiveTarget).database,
+                            nativeStatStorage.split(target).native);
+                    }
+                    if (!storageEnabled || !writeSession.rawAuthorWrite) effectiveTarget = await validateCardStat(effectiveTarget, writeSession.schemaProof);
                     assertRuntimeSession(writeSession);
+                    const fullEffectiveTarget = effectiveTarget;
+                    if (storageEnabled) effectiveTarget = nativeStatStorage.split(fullEffectiveTarget).database;
                     const unmappedAfterSchema = window.MVU2SHUJUKU_CORE.unmappedStatGroups(activeLayout, prev, effectiveTarget);
                     if (unmappedAfterSchema.length) throw new Error('Schema 产生未映射组：' + unmappedAfterSchema.join('、'));
                     // 诊断：打印实际到达写路径的 系统._hypnoos（成就/购买等内部状态），
@@ -2802,8 +2872,10 @@ function installExtensionRuntime(window) {
                             // 待全部落库后由下方统一广播一次。
                             sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) + 1;
                             tableBroadcastSuppressed = true;
+                            nativeWrite = nativeStatStorage.stage(fullEffectiveTarget, writeSession);
                             const needsReplySnapshot = replySnapshot || !!(writeSession.writeTarget && !writeSession.writeTarget.canUseCrud());
-                            const currentReplyBatch = !needsReplySnapshot && writeSession.writeTarget && writeSession.writeTarget.index > 0;
+                            const currentReplyBatch = !needsReplySnapshot && writeSession.writeTarget &&
+                                (writeSession.writeTarget.index > 0 || !isInitializationWrite);
                             replySnapshot = needsReplySnapshot || !!currentReplyBatch;
                             bulkInit = needsReplySnapshot
                                 ? await commitMessageUpdateSnapshot(api, prev, effectiveTarget, writeSession)
@@ -2922,28 +2994,32 @@ function installExtensionRuntime(window) {
                         // 整表快速路径内的 importTableAsJson/initGameSession 已由插件以
                         // strictSave 提交；此处再保存一次会与卡内重载争用宿主保存锁。
                         // 仅逐格 CRUD 路径需要这层等待。
-                        if (n > 0 && saveFn2 && bulkInit !== true) {
+                        if (nativeWrite?.changed && bulkInit !== true && !saveFn2) throw new Error('酒馆消息保存接口不可用');
+                        if (saveFn2 && (nativeWrite?.changed || n > 0) && bulkInit !== true) {
                             await Promise.resolve(saveFn2());
                             assertRuntimeSession(writeSession);
                             dbg('[保存] 写库后已等待酒馆保存完成。');
                         }
-                    } catch (eS) { writeUnsettled = true; }
+                    } catch (eS) { nativeWrite?.rollback(); writeUnsettled = true; }
                     assertRuntimeSession(writeSession);
                     // 只有真正写了差异（n>0）才广播 VARIABLE_UPDATE_ENDED：
                     // 无差异回声写（前端把整份 stat_data 原样写回）此前也会触发广播 →
                     // 前端收到后重渲染 → 再回声 → 再广播，形成“一直刷”循环。
                     // 与官方语义一致：状态没变就不发更新事件。
-                    if (n > 0 && !writeUnsettled) {
+                    const afterMvu = !writeUnsettled ? nativeStatStorage.merge(mvuDataFromCompleteTableSnapshot(api.exportTableAsJson()) || { stat_data: effectiveTarget, display_data: JSON.parse(JSON.stringify(effectiveTarget)), delta_data: {}, initialized_lorebooks: {} }) : null;
+                    // Include bulk imports and successful no-op commits: their state
+                    // can differ from the recovery cache even when n is zero. Refresh
+                    // before events can replace the checkpoint's message carrier.
+                    if (afterMvu) refreshOpeningContinuityAfterWrite(chatKeyNow, afterMvu.stat_data);
+                    if ((n > 0 || nativeWrite?.stateChanged) && !writeUnsettled) {
                         // 与官方 updateVariables 一致：VARIABLE_UPDATE_ENDED 期间 stat_data.$internal
                         // 临时携带 display_data/delta_data（事件后移除），供前端在事件回调里读取
-                        const afterMvu = mvuDataFromCompleteTableSnapshot(api.exportTableAsJson()) || { stat_data: effectiveTarget, display_data: JSON.parse(JSON.stringify(effectiveTarget)), delta_data: {}, initialized_lorebooks: {} };
-                        // 自有写入期间抑制了 SP 回调，旧的提交读窗口可能仍存着上一批数据。
-                        // 先发布本批已经提交的 after，保证事件内重读及 Promise 后 getter 一致。
+                        // 自有写入期间抑制了 SP 回调，先发布实际已提交状态。
                         stageFrontendCommittedMvuRead(afterMvu);
                         let hadInternal = false;
                         try { if (effectiveTarget && typeof effectiveTarget === 'object' && effectiveTarget.$internal === undefined) { effectiveTarget.$internal = { display_data: afterMvu.display_data, delta_data: afterMvu.delta_data }; hadInternal = true; } } catch (e) {}
-                        if (bulkInit && !replySnapshot) emitMvuEvent('mag_variable_initialized', afterMvu, 0);
-                        dispatchVariableUpdateEnded(afterMvu, { stat_data: prev, display_data: prev, delta_data: {}, initialized_lorebooks: {} }, !!writeSession.businessEventEmitted);
+                        if (bulkInit && !replySnapshot && !writeSession.rawAuthorWrite) emitMvuEvent('mag_variable_initialized', afterMvu, 0);
+                        dispatchVariableUpdateEnded(afterMvu, { stat_data: fullPrev, display_data: fullPrev, delta_data: {}, initialized_lorebooks: {} }, !!(writeSession.businessEventEmitted || writeSession.rawAuthorWrite));
                         try { if (hadInternal) delete effectiveTarget.$internal; } catch (e) {}
                     }
                     // 写入已落定（含“差异无操作”）：调用方（如开场分支注入）可在此时提交指纹
@@ -2954,6 +3030,7 @@ function installExtensionRuntime(window) {
             } catch (e) {
                 dbgWarn(' Mvu 合并写入异常:', e);
             } finally {
+                if (!settledOk) nativeWrite?.rollback();
                 if (statWriteOverlayGen === gen) {
                     pendingStatWrite = null;
                     if (!retryScheduled) pendingStatWriteIsInitialization = false;
@@ -2987,7 +3064,7 @@ function installExtensionRuntime(window) {
     // 只读：运行时为空/插件异步回放中/切卡残留时，从当前聊天持久化帧（V2 storageFrame）重建表格数据。
     // 仅用于读侧兜底，防止前端“空读 → schema 默认值 → 写回”把数据库重置成默认值；不写运行时。
     // 基底取最后一个 full checkpoint 或 data_replace 完整后态；随后按 logEntries 顺序应用
-    // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁），即“数据库原始真相”。
+    // row_upsert / row_delete；遇到 SQL 等其他操作交由宿主完成回放，不返回部分重建结果。
     let persistedReadCache = { key: '', data: null };
     function persistedFrameFingerprint(value) {
         let source = '';
@@ -3023,21 +3100,22 @@ function installExtensionRuntime(window) {
                 frontendCommittedMvuRead = null;
                 return null;
             }
-            return JSON.parse(JSON.stringify(item.value));
+            return nativeStatStorage.merge(JSON.parse(JSON.stringify(item.value)));
         } catch (e) { return null; }
     }
     // 只读：从当前聊天持久化帧（V2 storageFrame）重建表格数据——“数据库真相”。
     // 基底取最后一个 full checkpoint 或 data_replace 完整后态；只应用其后 logEntries 的
-    // row_upsert / row_delete（本转换器原生 CRUD 持久化的确定性补丁）。
-    // 用于读侧兜底：运行时只是缓存（异步回放中可能为空/旧值），持久化帧才是最新真相，
+    // row_upsert / row_delete；其余操作只信任宿主已完成的回放。
+    // 用于读侧兜底：运行时只是缓存（异步回放中可能为空/旧值），可完整重建的持久化帧才可作为备用读取，
     // 防止前端“空读/旧读 → schema 默认值 → 写回”把数据库重置成默认值。不写运行时。
     // 带按聊天缓存（key = 各消息 storage 帧长度和），写库/切聊天后自动失效。
-    function readPersistedTableData() {
+    function readPersistedTableData(endIndex) {
         try {
             const ctx = getContextSafe();
             const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-            let key = chat.length + ':';
-            for (let mi = 0; mi < chat.length; mi++) {
+            const count = endIndex == null ? chat.length : Math.max(0, Math.min(chat.length, endIndex + 1));
+            let key = count + ':';
+            for (let mi = 0; mi < count; mi++) {
                 const msg = chat[mi];
                 if (!msg || typeof msg !== 'object') continue;
                 const iso = msg.TavernDB_ACU_IsolatedData;
@@ -3046,7 +3124,7 @@ function installExtensionRuntime(window) {
             if (persistedReadCache.key === key) return persistedReadCache.data;
             let base = null;
             const ops = [];
-            for (let mi = 0; mi < chat.length; mi++) {
+            for (let mi = 0; mi < count; mi++) {
                 const msg = chat[mi];
                 if (!msg || typeof msg !== 'object') continue;
                 let iso = msg.TavernDB_ACU_IsolatedData;
@@ -3069,7 +3147,9 @@ function installExtensionRuntime(window) {
                             if (op.kind === 'data_replace' && op.data && typeof op.data === 'object') {
                                 base = JSON.parse(JSON.stringify(op.data));
                                 ops.length = 0;
-                            } else if (op.kind === 'row_upsert' || op.kind === 'row_delete' || op.kind === 'sql_sheet_batch') {
+                            } else {
+                                // Keep unsupported operations in sequence: ignoring one
+                                // would turn an older checkpoint into a false latest state.
                                 ops.push(op);
                             }
                         }
@@ -3080,7 +3160,10 @@ function installExtensionRuntime(window) {
             if (base) {
                 for (const op of ops) {
                     const sheet = base[op.sheetKey];
-                    if (!sheet || !Array.isArray(sheet.content)) continue;
+                    if (!sheet || !Array.isArray(sheet.content)) {
+                        persistedReadCache = { key, data: null };
+                        return null;
+                    }
                     if (op.kind === 'row_delete') {
                         const rid = String(op.rowId == null ? '' : op.rowId);
                         sheet.content = sheet.content.filter(function (row, idx) {
@@ -3094,12 +3177,12 @@ function installExtensionRuntime(window) {
                         });
                         if (idx >= 0) sheet.content[idx] = cells;
                         else sheet.content.push(cells);
-                    } else if (op.kind === 'sql_sheet_batch') {
-                        // SQLite 模式的原生 CRUD（updateCell/insertRow/deleteRow）持久化为
-                        // sql_sheet_batch（逐条 UPDATE/INSERT/DELETE 语句）。此前重建只认
-                        // row_upsert/row_delete，会漏掉这些写入，导致“运行时为空”窗口内读到
-                        // 陈旧 checkpoint（如充值后前端读到旧值并写回）。这里按语句回放。
-                        replaySqlBatchIntoSheet(sheet, op);
+                    } else {
+                        // SQL and other host operations require the host's real
+                        // replay engine. A synchronous fallback cannot execute
+                        // their semantics; wait for its published runtime instead.
+                        persistedReadCache = { key, data: null };
+                        return null;
                     }
                 }
                 result = base;
@@ -3107,114 +3190,6 @@ function installExtensionRuntime(window) {
             persistedReadCache = { key, data: result };
             return result;
         } catch (e) { return null; }
-    }
-
-    // 把插件 SQLite 模式持久化的 sql_sheet_batch（statements + params 数组）按序回放到
-    // 重建的 sheet 上。支持三种语句形状（与插件 createTableCrudApi 一致）：
-    //   UPDATE tbl SET col = ? WHERE row_id = ?;
-    //   INSERT INTO tbl (c1, ...) VALUES (?, ...);
-    //   DELETE FROM tbl WHERE row_id = ?;
-    // 物理列名是中文表头的拼音 slug（toPinyinSlug），与扩展/插件命名一致。
-    function replaySqlBatchIntoSheet(sheet, op) {
-        try {
-            const stmts = Array.isArray(op.statements) ? op.statements : [];
-            const paramsList = Array.isArray(op.params) ? op.params : [];
-            if (!Array.isArray(sheet.content) || !sheet.content.length) return;
-            const header = sheet.content[0] || [];
-            // 拼音 slug 助手：UI 运行副本（extensionIndexUi）的作用域里没有 toPinyinSlug，
-            // 但同文件核心副本把它导出在 MVU2SHUJUKU_CORE 上（转换器/核心共享同一字典）。
-            const slugOf = function (zh) {
-                try {
-                    if (typeof toPinyinSlug === 'function') return toPinyinSlug(String(zh));
-                } catch (e) {}
-                try {
-                    const holder = (typeof window !== 'undefined' ? window : root);
-                    if (holder && holder.MVU2SHUJUKU_CORE && typeof holder.MVU2SHUJUKU_CORE.toPinyinSlug === 'function') {
-                        return holder.MVU2SHUJUKU_CORE.toPinyinSlug(String(zh));
-                    }
-                } catch (e) {}
-                return '';
-            };
-            const colIndexBySlug = {};
-            for (let hi = 0; hi < header.length; hi++) {
-                const slug = slugOf(String(header[hi]));
-                if (slug && colIndexBySlug[slug] === undefined) colIndexBySlug[slug] = hi;
-            }
-            const findRow = (rid) => {
-                const s = String(rid == null ? '' : rid).trim();
-                if (!s) return -1;
-                for (let ri = 1; ri < sheet.content.length; ri++) {
-                    const r = sheet.content[ri];
-                    if (Array.isArray(r) && String(r[0] == null ? '' : r[0]).trim() === s) return ri;
-                }
-                return -1;
-            };
-            for (let si = 0; si < stmts.length; si++) {
-                const sql = String(stmts[si] || '');
-                const params = Array.isArray(paramsList[si]) ? paramsList[si] : [];
-                const up = /UPDATE\s+\`?[A-Za-z0-9_]+\`?\s+SET\s+\`?([A-Za-z0-9_]+)\`?\s*=\s*\?\s*WHERE\s+\`?row_id\`?\s*=\s*\?/i.exec(sql);
-                if (up) {
-                    const ci = colIndexBySlug[String(up[1]).toLowerCase()];
-                    if (ci === undefined) continue;
-                    const ri = findRow(params[1]);
-                    if (ri < 0) continue;
-                    sheet.content[ri][ci] = params[0];
-                    continue;
-                }
-                const del = /DELETE\s+FROM\s+\`?[A-Za-z0-9_]+\`?\s+WHERE\s+\`?row_id\`?\s*=\s*\?/i.exec(sql);
-                if (del) {
-                    const rid = String(params[0] == null ? '' : params[0]).trim();
-                    if (rid) {
-                        sheet.content = sheet.content.filter(function (row, idx) {
-                            return idx === 0 || !Array.isArray(row) || String(row[0] == null ? '' : row[0]).trim() !== rid;
-                        });
-                    }
-                    continue;
-                }
-                const ins = /INSERT\s+INTO\s+\`?[A-Za-z0-9_]+\`?\s*(?:\(([^)]*)\))?\s*(?:VALUES\s*\(([^)]*)\))?/i.exec(sql);
-                if (ins) {
-                    const colPart = String(ins[1] || '');
-                    const colNames = colPart.split(',').map(function (s) { return String(s).replace(/[\`\s]/g, '').toLowerCase(); }).filter(Boolean);
-                    const row = header.map(function () { return ''; });
-                    let hasRowId = false;
-                    let nameVal = null;
-                    let nameIdx = -1;
-                    for (let ci2 = 0; ci2 < colNames.length; ci2++) {
-                        const cn = colNames[ci2];
-                        let hIdx = -1;
-                        if (cn === 'row_id') hIdx = 0;
-                        else if (colIndexBySlug[cn] !== undefined) hIdx = colIndexBySlug[cn];
-                        if (hIdx >= 0) {
-                            if (hIdx === 0) hasRowId = true;
-                            if (hIdx > 0 && String(header[hIdx]) === '名称') { nameIdx = hIdx; nameVal = params[ci2]; }
-                            if (params[ci2] !== undefined) row[hIdx] = params[ci2];
-                        }
-                    }
-                    let targetRi = -1;
-                    if (nameIdx >= 0 && nameVal !== null && nameVal !== undefined) {
-                        for (let ri2 = 1; ri2 < sheet.content.length; ri2++) {
-                            const r2 = sheet.content[ri2];
-                            if (Array.isArray(r2) && String(r2[nameIdx] == null ? '' : r2[nameIdx]) === String(nameVal)) { targetRi = ri2; break; }
-                        }
-                    }
-                    if (targetRi >= 0) {
-                        for (let ci3 = 0; ci3 < row.length; ci3++) {
-                            if (row[ci3] !== '' && row[ci3] !== null && row[ci3] !== undefined) sheet.content[targetRi][ci3] = row[ci3];
-                        }
-                    } else {
-                        if (!hasRowId || row[0] === '' || row[0] === null || row[0] === undefined) {
-                            let maxId = 0;
-                            for (let ri3 = 1; ri3 < sheet.content.length; ri3++) {
-                                const r3 = sheet.content[ri3];
-                                if (Array.isArray(r3) && r3[0] !== undefined && r3[0] !== null && !isNaN(Number(r3[0]))) maxId = Math.max(maxId, Number(r3[0]));
-                            }
-                            row[0] = String(maxId + 1);
-                        }
-                        sheet.content.push(row);
-                    }
-                }
-            }
-        } catch (e) {}
     }
 
     // EJS 会在 CHAT_CHANGED 的同步提示词构建阶段执行，比 autoInitDatabase
@@ -3229,7 +3204,7 @@ function installExtensionRuntime(window) {
             const mk = ext && ext.mvu2shujuku;
             if (!mk || !mk.layout) return false;
             const parsed = typeof mk.layout === 'string' ? JSON.parse(mk.layout) : mk.layout;
-            if (!Array.isArray(parsed) || !parsed.length) return false;
+            if (!Array.isArray(parsed) || !parsed.length && !(mk.statStorage?.version >= 1)) return false;
             activeLayout = resolveRuntimeLayout(parsed);
             activeLayoutCardKey = cardCacheKey(ch);
             activePlaceholderNeeded = detectPlaceholderFor(ch);
@@ -3266,7 +3241,7 @@ function installExtensionRuntime(window) {
             // 运行时表尚未完整回放时，checkpoint/log 才是更可靠的当前聊天真相。
             try {
                 const persisted = readPersistedTableData();
-                if (persisted && tableSnapshotCoversLayout(persisted, activeLayout)) {
+                if (persisted && tableSnapshotCoversLayout(persisted, activeLayout, true)) {
                     return statDataFromTablesCached(activeLayout, persisted);
                 }
             } catch (e) {}
@@ -3304,10 +3279,10 @@ function installExtensionRuntime(window) {
         try { chatKey = autoInitChatId(); } catch (e) {}
         const now = Date.now();
         const hit = statProjectionCache;
-        if (hit && hit.chatKey === chatKey && hit.layout === layout && hit.tables === tables && (now - hit.at) < 1500) return hit.wrap;
+        if (hit && hit.chatKey === chatKey && hit.layout === layout && hit.tables === tables && (now - hit.at) < 1500) return nativeStatStorage.merge(hit.wrap);
         const wrap = core.statDataFromTables(layout, tables);
         statProjectionCache = { chatKey, layout, tables, wrap, at: now };
-        return wrap;
+        return nativeStatStorage.merge(wrap);
     }
 
     // 结构骨架只供只读模板兜底，不得作为脚本“读-改-写”的真实快照。
@@ -3350,7 +3325,7 @@ function installExtensionRuntime(window) {
                 if (!api || typeof api.exportTableAsJson !== 'function' || !activeLayout) {
                     try {
                         const persisted0 = readPersistedTableData();
-                        if (persisted0 && tableSnapshotCoversLayout(persisted0, activeLayout)) return statDataFromTablesCached(activeLayout || [], persisted0);
+                        if (persisted0 && tableSnapshotCoversLayout(persisted0, activeLayout, true)) return statDataFromTablesCached(activeLayout || [], persisted0);
                     } catch (e) {}
                     return unavailableMvuRead(core.statDataFromTables(activeLayout || [], {}));
                 }
@@ -3359,7 +3334,7 @@ function installExtensionRuntime(window) {
                 // 且每张单例/JSON 表都有数据行；只看“任意表有行”会把 V2 replay
                 // 中已物化一部分的半成品当成完整快照。此时若按运行时读，
                 // 单例表会退化成布局默认值（如 当前MC点=0/零花钱=6000），前端读到后既显示又写回；
-                // 必须先等 content 有行，或改用持久化重建（checkpoint + row_upsert/sql_sheet_batch）。
+                // 必须先等 content 有行，或改用能完整重建的持久化快照。
                 const cur = api.exportTableAsJson() || {};
                 // 切卡隔离必须早于“运行时不完整 → 持久化兜底”：切卡空窗内
                 // 运行时和聊天帧都可能还属于上一张卡，不得用新 layout 投影旧卡快照。
@@ -3367,7 +3342,7 @@ function installExtensionRuntime(window) {
                     const foreign = runtimeForeignTableNames(api, activeLayout);
                     if (foreign.length) {
                         const persisted2 = readPersistedTableData();
-                        if (persisted2 && tableSnapshotCoversLayout(persisted2, activeLayout)) {
+                        if (persisted2 && tableSnapshotCoversLayout(persisted2, activeLayout, true)) {
                             dbg(' [切卡隔离] 运行时含跨卡残留表：' + foreign.join('、') + '，改用当前卡持久化帧。');
                             return statDataFromTablesCached(activeLayout, persisted2);
                         }
@@ -3377,7 +3352,7 @@ function installExtensionRuntime(window) {
                 } catch (e) {}
                 if (!tableSnapshotCoversLayout(cur, activeLayout)) {
                     const persisted = readPersistedTableData();
-                    if (persisted && tableSnapshotCoversLayout(persisted, activeLayout)) return statDataFromTablesCached(activeLayout, persisted);
+                    if (persisted && tableSnapshotCoversLayout(persisted, activeLayout, true)) return statDataFromTablesCached(activeLayout, persisted);
                     // 无存档且尚未物化数据行时，读取卡内初始模板。JSON 可选列的
                     // 空单元格表示字段不存在，不能靠 codec 恢复默认值；已开始的
                     // 聊天仍按当前表读取，避免复活游玩中删除的字段。
@@ -3692,7 +3667,7 @@ function installExtensionRuntime(window) {
         }
         return false;
     }
-    function tableSnapshotCoversLayout(data, layout) {
+    function tableSnapshotCoversLayout(data, layout, allowEmptyRows = false) {
         if (!tableSnapshotHasSheets(data) || !Array.isArray(layout) || !layout.length) return false;
         const byName = {};
         for (const k in data) {
@@ -3709,26 +3684,27 @@ function installExtensionRuntime(window) {
         for (const name of Object.keys(requirements)) {
             const sheet = byName[name];
             if (!sheet) return false;
-            if (requirements[name].row && (!Array.isArray(sheet.content) || sheet.content.length <= 1)) return false;
+            if (!Array.isArray(sheet.content) || !sheet.content.length) return false;
+            if (!allowEmptyRows && requirements[name].row && sheet.content.length <= 1) return false;
         }
         return true;
     }
 
-    function mvuDataFromCompleteTableSnapshot(data) {
+    function mvuDataFromCompleteTableSnapshot(data, messageIndex, allowEmptyRows = false) {
         try {
-            if (!activeLayout || !tableSnapshotCoversLayout(data, activeLayout)) return null;
+            if (!activeLayout || !tableSnapshotCoversLayout(data, activeLayout, allowEmptyRows)) return null;
             const core = window.MVU2SHUJUKU_CORE;
             if (!core || typeof core.statDataFromTables !== 'function') return null;
             const after = core.statDataFromTables(activeLayout, data);
-            return after && after.stat_data ? after : null;
+            return after && after.stat_data ? nativeStatStorage.merge(after, messageIndex) : null;
         } catch (e) { return null; }
     }
 
     // 所有表格变化共用同一个前端出口：SP 的提交回调、聊天历史回放兜底都必须
     // 先暂存同一份权威 after，再驱动事件、无副作用的直接重读入口和明确刷新控件。
     // 整页 body.load/iframe reload 只允许手动执行，避免普通改单元格清空前端局部状态。
-    function publishCommittedTableSnapshot(data, source, force, eventAlreadyEmitted) {
-        const after = mvuDataFromCompleteTableSnapshot(data);
+    function publishCommittedTableSnapshot(data, source, force, eventAlreadyEmitted, allowEmptyRows = false) {
+        const after = mvuDataFromCompleteTableSnapshot(data, undefined, allowEmptyRows);
         if (!after) return false;
         try {
             const fp = autoInitChatId() + '|' + canonicalJsonForSync(after.stat_data);
@@ -3964,9 +3940,16 @@ function installExtensionRuntime(window) {
                 data = currentApi.exportTableAsJson() || {};
             }
         } catch (e2) { data = data || {}; }
-        // 切换聊天时 SP 会先通知“运行时已清空”。不广播空数据，
-        // 但给后续物化留一个有限重试窗口。
+        // 有完整持久化帧的空表是用户清空后的有效状态；缺表的回放窗口仍等待。
+        let persistedEmpty = false;
         if (!tableSnapshotCoversLayout(data, activeLayout)) {
+            const persisted = readPersistedTableData();
+            if (tableSnapshotCoversLayout(persisted, activeLayout, true)) {
+                data = persisted;
+                persistedEmpty = true;
+            }
+        }
+        if (!tableSnapshotCoversLayout(data, activeLayout, persistedEmpty)) {
             if (tableUpdateHookRetryCount < 8) {
                 tableUpdateHookRetryCount += 1;
                 tableUpdateHookTimer = hostWindow.setTimeout(flushTableUpdateHook, Math.min(1200, 300 * tableUpdateHookRetryCount));
@@ -3990,7 +3973,7 @@ function installExtensionRuntime(window) {
                 return;
             } finally { tableBusinessRunning = false; }
         }
-        publishCommittedTableSnapshot(data, '表格更新回调', false);
+        publishCommittedTableSnapshot(data, '表格更新回调', false, false, persistedEmpty);
     }
     const tableUpdateHookCallback = (latestTableData, meta) => {
         if (!activeLayout) return;
@@ -4010,6 +3993,7 @@ function installExtensionRuntime(window) {
         // SP 每次事务提交都代表运行时数据已变化（含被抑制广播的批量 CRUD），
         // 投影缓存必须立即失效。
         invalidateStatProjectionCache();
+        if (meta && meta.persisted === true) frontendCommittedMvuRead = null;
         if (tableSnapshotHasSheets(latestTableData)) tableUpdateHookPendingData = latestTableData;
         tableUpdateHookRetryCount = 0;
         if (tableUpdateHookTimer) hostWindow.clearTimeout(tableUpdateHookTimer);
@@ -4246,7 +4230,7 @@ function installExtensionRuntime(window) {
                 readMetadata: readCardApiMetadata, isCurrent: () => isRuntimeSessionCurrent(shimSession) && currentCardApi === sessionCardApi,
                 readMvu: () => sessionMvu,
                 wait: ms => new Promise(resolve => hostWindow.setTimeout(resolve, ms)),
-                unmapped: stat => core.unmappedStatGroups(activeLayout, {}, stat),
+                unmapped: stat => readCardApiMetadata().statStorage?.version >= 1 ? [] : core.unmappedStatGroups(activeLayout, {}, stat),
             });
             currentCardApi = sessionCardApi;
             sessionMvu.registerSchema = sessionCardApi.registerSchema;
@@ -4259,7 +4243,12 @@ function installExtensionRuntime(window) {
                 BEFORE_MESSAGE_UPDATE: 'mag_before_message_update',
                 SINGLE_VARIABLE_UPDATED: 'mag_variable_updated',
             };
-            windowMvuFake.getMvuData = function () {
+            windowMvuFake.getMvuData = function (options) {
+                if (options && options.type && options.type !== 'message') {
+                    const original = noteGlobalOriginals(window);
+                    return original.hasGet ? original.get.call(window, options) : {};
+                }
+                if (options && options.message_id != null && options.message_id !== 'latest') return readDatabaseVariables(options);
                 if (!isRuntimeSessionCurrent(shimSession)) return { stat_data: {}, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
                 // 有待写快照时直接返回，保证 写→读 一致（持久化由合并定时器落库）
                 if (pendingStatWrite) {
@@ -4346,8 +4335,13 @@ function installExtensionRuntime(window) {
                 }
                 return false;
             };
-            windowMvuFake.replaceMvuData = async function (data) {
+            windowMvuFake.replaceMvuData = async function (data, options) {
                 try {
+                    if (options && options.type && options.type !== 'message') {
+                        const original = noteGlobalOriginals(window);
+                        return original.hasRep ? await original.rep.call(window, data, options) : false;
+                    }
+                    assertDatabaseMessageWrite(options);
                     const callerSession = bindWriteTarget(shimSession);
                     assertRuntimeSession(callerSession);
                     let api = getAcuApi();
@@ -4379,9 +4373,8 @@ function installExtensionRuntime(window) {
                     const nextStat = (data && data.stat_data) || {};
                     const writeChatKey = autoInitChatId();
                     const writeSession = { ...callerSession, businessEventEmitted: !!(data && data.__mvu2shujukuBusinessProcessed),
-                        schemaProof: currentCardApi && currentCardApi.proofOf(nextStat) };
+                        schemaProof: currentCardApi && currentCardApi.proofOf(nextStat), rawAuthorWrite: true };
                     const ok = await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, writeSession);
-                    if (ok && isRuntimeSessionCurrent(shimSession)) refreshOpeningContinuityAfterWrite(writeChatKey, nextStat);
                     return !!ok;
                 } catch (e) {
                     dbgWarn(' Mvu.replaceMvuData 异常:', e);
@@ -4424,11 +4417,15 @@ function installExtensionRuntime(window) {
                 // 切卡还原时从共享注册表取回，绝不把桥/扩展自己的接管当原始值。
                 const originalRec = noteGlobalOriginals(w);
                 if (w.TavernHelper && w.TavernHelper.__mvu2shujukuCardApi !== currentCardApi) {
-                    const helper = currentCardApi.facade(runtimeGlobals.original(w, 'TavernHelper'));
+                    const helper = currentCardApi.facade(runtimeGlobals.original(w, 'TavernHelper'), {
+                        includeAliases: w !== window && w !== hostWindow,
+                    });
                     Object.defineProperty(helper, '__mvu2shujukuCardApi', { value: currentCardApi });
                     runtimeGlobals.patch(w, 'TavernHelper', helper);
                 }
-                currentCardApi.patchWorldbookGlobals(w, runtimeGlobals);
+                currentCardApi.patchWorldbookGlobals(w, runtimeGlobals, {
+                    includeAliases: w !== window && w !== hostWindow,
+                });
                 if (typeof w.createChatMessages === 'function' && w.createChatMessages.__mvu2shujukuCardApi !== currentCardApi) {
                     const create = currentCardApi.wrapCreate(runtimeGlobals.original(w, 'createChatMessages'), w);
                     create.__mvu2shujuku = true; create.__mvu2shujukuCardApi = currentCardApi; runtimeGlobals.patch(w, 'createChatMessages', create);
@@ -4523,6 +4520,13 @@ function installExtensionRuntime(window) {
                             : {};
                     } catch (e) { return {}; }
                 };
+                // 原消息现在保存独立的原生状态。辅助变量整份替换先保留它，
+                // 真正的 stat_data 变更仍由既有暂存/数据库提交/回滚流程接管。
+                const auxiliaryWithNativeState = (auxiliary, opts) => {
+                    if (!(readCardApiMetadata().statStorage?.version >= 1)) return auxiliary;
+                    const target = databaseVariableTarget(opts, false);
+                    return { ...auxiliary, stat_data: nativeStatStorage.read(target.index) };
+                };
                 const makeGetVariables = (opts) => {
                     try {
                         if (!isDbVariableScope(opts)) {
@@ -4531,20 +4535,10 @@ function installExtensionRuntime(window) {
                                 : {};
                         }
                         const auxiliary = readOriginalVariables(opts);
-                        // 与 getMvuData 一致：有待写快照时优先返回待写快照，
-                        // 保证前端连续“读-改-写”（如成就领取 updateResources + updateStoreWith）
-                        // 在 150ms 合并窗口内基于同一状态累积，不会互相覆盖丢标记。
-                        // MVU/TH 的 getVariables 返回的是 { stat_data, ... }，不能只返回裸 stat_data，
-                        // 否则 getVariables(...).stat_data 会拿不到数据，前端会回退默认值并反复写回。
-                        if (pendingStatWrite && typeof pendingStatWrite === 'object') {
-                            return Object.assign({}, auxiliary, { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} });
-                        }
-                        const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                        assertMvuReadReady(all);
-                        const dbView = all && typeof all === 'object' ? all : { stat_data: all || {} };
+                        const dbView = readDatabaseVariables(opts);
                         return Object.assign({}, auxiliary, dbView);
                     } catch (e) {
-                        if (e && e.code === 'MVU_DATA_NOT_READY') throw e;
+                        if (e && (e.code === 'MVU_DATA_NOT_READY' || String(e.code || '').startsWith('MVU_HISTORY'))) throw e;
                         return { stat_data: {} };
                     }
                 };
@@ -4581,6 +4575,7 @@ function installExtensionRuntime(window) {
                                 : false;
                         }
                         assertRuntimeSession(shimSession);
+                        assertDatabaseMessageWrite(opts);
                         const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
                         if (!pendingStatWrite) assertMvuReadReady(all);
                         const base = (pendingStatWrite && typeof pendingStatWrite === 'object')
@@ -4599,7 +4594,7 @@ function installExtensionRuntime(window) {
                         const oldAux = stripDbVariableKeys(readOriginalVariables(opts));
                         const nextAux = stripDbVariableKeys(result);
                         if (!deepEqualCanon(nextAux, oldAux) && originalRec && originalRec.hasRep) {
-                            await Promise.resolve(originalRec.rep.call(w, nextAux, opts));
+                            await Promise.resolve(originalRec.rep.call(w, auxiliaryWithNativeState(nextAux, opts), opts));
                             assertRuntimeSession(shimSession);
                         }
                         // 无变化不写库、不发事件：外部 UI 的自动清理/回写 effect 经常重复写相同数据，
@@ -4630,8 +4625,10 @@ function installExtensionRuntime(window) {
                         }
                         assertRuntimeSession(shimSession);
                         const input = variables && typeof variables === 'object' ? variables : {};
+                        if (Object.prototype.hasOwnProperty.call(input, 'stat_data')) assertDatabaseMessageWrite(opts);
                         if (originalRec && originalRec.hasRep) {
-                            await Promise.resolve(originalRec.rep.call(w, stripDbVariableKeys(input), opts));
+                            await Promise.resolve(originalRec.rep.call(w, Object.prototype.hasOwnProperty.call(input, 'stat_data')
+                                ? auxiliaryWithNativeState(stripDbVariableKeys(input), opts) : stripDbVariableKeys(input), opts));
                             assertRuntimeSession(shimSession);
                         }
                         if (Object.prototype.hasOwnProperty.call(input, 'stat_data')) {
@@ -4654,6 +4651,7 @@ function installExtensionRuntime(window) {
                         }
                         assertRuntimeSession(shimSession);
                         const input = variables && typeof variables === 'object' ? variables : {};
+                        if (Object.prototype.hasOwnProperty.call(input, 'stat_data')) assertDatabaseMessageWrite(opts);
                         const auxiliary = stripDbVariableKeys(input);
                         if (Object.keys(auxiliary).length && originalRec && originalRec.hasIns) {
                             await Promise.resolve(originalRec.ins.call(w, auxiliary, opts));
@@ -4931,9 +4929,7 @@ function installExtensionRuntime(window) {
         if (!core || typeof core.convert !== 'function') {
             throw new Error('转换核心未加载（MVU2SHUJUKU_CORE 不可用）');
         }
-        // AI 实际输出 insertRow DSL 还是 SQL 由 SP·数据库 插件自身的填表模式决定，
-        // 模板本身对三种模式产出完全一致（测试断言过），因此转换统一按双模式输出。
-        const mode = 'both';
+        const mode = 'sqlite';
         const opts = {
             mode,
             targetSpVersion: await readTargetSpVersion(),
@@ -5143,7 +5139,7 @@ function installExtensionRuntime(window) {
         dbg(' applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
         if (!merged.added.length) { toast('没有可并入的表（全部重名或无效）', 'error'); return; }
         const settings = getSettings();
-        const mode = 'both';
+        const mode = 'sqlite';
         const opts = {
             mode,
             template: merged.template,
@@ -5536,7 +5532,7 @@ function installExtensionRuntime(window) {
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.refreshConversion !== 'function') throw new Error('转换核心不可用');
         const opts = {
-            mode: 'both',
+            mode: 'sqlite',
             template: lastResult.template,
             asPng: settings.asPng === 'auto' ? !!lastResult.meta.isPngInput : settings.asPng === 'png',
             appendPlaceholder: settings.appendPlaceholder !== false,
@@ -5677,6 +5673,288 @@ function installExtensionRuntime(window) {
 
     function renderSettingsPanel(panel) { panel.innerHTML = window.__MVU2SHUJUKU_SETTINGS_VIEW__(getSettings()); }
 
+    const stateTransfer = window.MVU2SHUJUKU_CORE.getStateTransferFactory()();
+    let stateTransferBusy = false;
+    function stateTransferProgress(text) {
+        const panel = hostDocument.getElementById(PANEL_ID);
+        for (const id of ['mvu2shujuku-export-state', 'mvu2shujuku-import-state']) {
+            const button = panel?.querySelector('#' + id); if (button) button.disabled = stateTransferBusy;
+        }
+        const status = panel?.querySelector('#mvu2shujuku-state-progress');
+        if (status) status.textContent = text;
+    }
+    function stateTransferHelper() {
+        for (const w of [window, hostWindow]) {
+            const helper = runtimeGlobals.original(w, 'TavernHelper');
+            if (helper && typeof helper.getVariables === 'function' && typeof helper.replaceVariables === 'function') return helper;
+        }
+        throw new Error('需要酒馆助手的公开消息变量接口');
+    }
+    function assertStateTransferIdle() {
+        if (pendingStatWrite || statWriteFlushPromise || autoInitState.running || getContextSafe().streamingProcessor && !getContextSafe().streamingProcessor.isFinished) {
+            throw new Error('聊天或变量仍在更新，请等待完成后重试');
+        }
+        const stop = hostDocument.querySelector('#mes_stop');
+        if (stop && stop.getClientRects().length && hostWindow.getComputedStyle(stop).visibility !== 'hidden') throw new Error('正文正在生成，请等待完成后重试');
+    }
+    function stateTransferTableNames(tables) {
+        return Object.keys(tables || {}).filter(key => key.startsWith('sheet_') && tables[key]?.name).map(key => String(tables[key].name)).sort();
+    }
+    async function waitStateTransferTableRead(api, session, expected) {
+        const deadline = Date.now() + 15000;
+        while (true) {
+            assertRuntimeSession(session);
+            const tables = api?.exportTableAsJson?.() || {};
+            if (!expected.length || stateTransfer.equal(stateTransferTableNames(tables), expected)) return tables;
+            if (Date.now() >= deadline) throw new Error('数据库尚未发布目标聊天的完整状态，请稍后重试');
+            await new Promise(resolve => hostWindow.setTimeout(resolve, 100));
+        }
+    }
+    async function captureStateTransferSnapshot() {
+        assertStateTransferIdle();
+        const context = getContextSafe(), ch = currentCharacter();
+        if (!context.chatId || !Array.isArray(context.chat) || !context.chat.length) throw new Error('请先打开有消息的目标聊天');
+        const chatLength = context.chat.length;
+        const session = bindWriteTarget(captureRuntimeSession(() => getContextSafe().chat?.length === chatLength));
+        if (!session.writeTarget) throw new Error('聊天中没有可写的 AI 消息');
+        const helper = stateTransferHelper(), index = session.writeTarget.index;
+        let variableOption = { type: 'message', message_id: index };
+        const converted = isConvertedMvuCard(ch), api = getAcuApi();
+        const hasDatabase = converted || context.chatMetadata?.TavernDB_ACU_ScopedConfig || context.chat.some(row => row?.TavernDB_ACU_IsolatedData);
+        const template = hasDatabase && api?.getTableTemplate ? await api.getTableTemplate({ scope: 'chat' }) : null;
+        const tables = stateTransfer.clone(await waitStateTransferTableRead(api, session, stateTransferTableNames(template)));
+        assertStateTransferIdle();
+        let raw = stateTransfer.clone(helper.getVariables(variableOption));
+        let mvu, layout = [];
+        if (converted) {
+            if (!activeLayout || activeLayoutCardKey !== cardCacheKey(ch)) throw new Error('转换卡布局尚未就绪，请稍后重试');
+            layout = stateTransfer.clone(activeLayout);
+            mvu = mvuDataFromCompleteTableSnapshot(tables, index, true);
+            if (!mvu) throw new Error('当前数据库不包含转换卡完整表格，请先初始化正确模板');
+            mvu = { ...raw, ...mvu, ...(raw.schema !== undefined ? { schema: raw.schema } : {}), initialized_lorebooks: raw.initialized_lorebooks || {} };
+        } else {
+            // 与消息变量读取的选中 swipe 一致；没有新状态的楼层沿用最近一份 MVU 状态。
+            for (let i = index; i >= 0; i--) {
+                const row = context.chat[i]; if (!row || row.is_user) continue;
+                const vars = helper.getVariables({ type: 'message', message_id: i });
+                if (vars && vars.stat_data && typeof vars.stat_data === 'object' && !Array.isArray(vars.stat_data) && vars.schema !== undefined) { mvu = { ...stateTransfer.clone(vars), stat_data: stateTransfer.stat(vars.stat_data) }; break; }
+            }
+            if (!mvu) {
+                const vars = helper.getVariables({ type: 'chat' });
+                if (vars && vars.stat_data && typeof vars.stat_data === 'object' && !Array.isArray(vars.stat_data) && vars.schema !== undefined) {
+                    variableOption = { type: 'chat' }; raw = stateTransfer.clone(vars);
+                    mvu = { ...stateTransfer.clone(vars), stat_data: stateTransfer.stat(vars.stat_data) };
+                }
+            }
+            if (!mvu) throw new Error('当前聊天没有已初始化的 MVU 消息／聊天状态（stat_data / schema）');
+        }
+        const latestContext = getContextSafe();
+        const metadata = latestContext.chatMetadata || latestContext.chat_metadata || {};
+        const originalName = charExtensions(ch)?.mvu2shujuku?.originalName || characterDisplayName(ch) || context.name2 || '';
+        return { session, helper, index, variableOption, api, converted, layout, raw, mvu, tables, template: stateTransfer.clone(template || null),
+            chat: stateTransfer.clone(latestContext.chat), metadata: stateTransfer.clone(metadata),
+            source: { character: originalName, chat: String(context.chatId), message: index, swipe: Number(context.chat[index].swipe_id || 0),
+                backend: converted ? 'converted' : 'mvu', scope: variableOption.type, converterVersion: window.MVU2SHUJUKU_CORE.VERSION },
+        };
+    }
+    function assertStateTransferUnchanged(snapshot) {
+        assertRuntimeSession(snapshot.session); assertStateTransferIdle(); snapshot.schemaGuard?.();
+        const context = getContextSafe();
+        const changes = [];
+        if (!stateTransfer.equal(snapshot.chat, context.chat)) changes.push('消息');
+        if (!stateTransfer.equal(snapshot.metadata, context.chatMetadata || context.chat_metadata || {})) changes.push('聊天元数据');
+        if (!stateTransfer.equalRuntimeTables(snapshot.tables, snapshot.api?.exportTableAsJson() || {})) changes.push('表格');
+        if (snapshot.template && !stateTransfer.equal(snapshot.template, snapshot.api?.getTableTemplate?.({ scope: 'chat' }) || null)) changes.push('表格模板');
+        if (changes.length) {
+            const error = new Error('预览后' + changes.join('、') + '已更新，请重新导入');
+            error.stateTransferChanges = changes;
+            throw error;
+        }
+    }
+    function stateTransferFilename(name, suffix) {
+        return String(name || '聊天').replace(/[\x00-\x1f\x7f<>:"/\\|?*]/g, '_').replace(/[. ]+$/g, '').slice(0, 100) + '-' + new Date().toISOString().replace(/[:.]/g, '-') + suffix;
+    }
+    async function saveStateTransferChat(snapshot) {
+        assertRuntimeSession(snapshot.session);
+        const context = getContextSafe();
+        const save = context.saveChatConditional || context.saveChat;
+        if (typeof save !== 'function') throw new Error('酒馆聊天保存接口不可用');
+        await save.call(context); assertRuntimeSession(snapshot.session);
+        await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(snapshot.tables));
+    }
+    async function exportStateTransferChat(snapshot) {
+        assertRuntimeSession(snapshot.session);
+        const context = getContextSafe();
+        const filename = String(context.chatId).replace(/\.jsonl$/i, '');
+        const avatar = currentCharacter()?.avatar;
+        if (!context.groupId && !avatar) throw new Error('无法确定聊天备份的角色身份');
+        const response = await hostWindow.fetch('/api/chats/export', { method: 'POST', headers: context.getRequestHeaders(),
+            body: JSON.stringify({ is_group: !!context.groupId, avatar_url: avatar, file: filename + '.jsonl', exportfilename: filename + '.jsonl', format: 'jsonl' }) });
+        assertRuntimeSession(snapshot.session);
+        if (!response.ok) throw new Error('聊天备份导出失败：HTTP ' + response.status);
+        const result = await response.json();
+        if (typeof result.result !== 'string') throw new Error('酒馆未返回聊天备份');
+        return result.result;
+    }
+    async function prepareStateTransferImport(input) {
+        const session = captureRuntimeSession();
+        for (let attempt = 0; ; attempt++) {
+            try { return await prepareStateTransferImportOnce(input); }
+            catch (error) {
+                assertRuntimeSession(session);
+                // 尚未展示预览，允许用初始化后最新的元数据/表格重新准备。
+                // 消息变化、切换会话及确认后的变化仍拒绝，不能覆盖用户操作。
+                if (attempt >= 2 || !error.stateTransferChanges || error.stateTransferChanges.includes('消息')) throw error;
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        }
+    }
+    async function prepareStateTransferImportOnce(input) {
+        const archive = stateTransfer.parse(input), snapshot = await captureStateTransferSnapshot();
+        const extras = stateTransfer.matchExtras(archive.extraTables, snapshot.tables, snapshot.layout);
+        if (snapshot.converted || extras.matches.length) {
+            stateTransfer.assertPersistentDbVersion(await readTargetSpVersion());
+            assertStateTransferUnchanged(snapshot);
+        }
+        const rules = snapshot.converted && (readCardApiMetadata().schemaKeys || []).length
+            ? await currentCardApi?.stateImportRules() : null;
+        if (snapshot.converted && (readCardApiMetadata().schemaKeys || []).length && !rules) throw new Error('目标 Schema 接口尚未就绪');
+        snapshot.schemaGuard = rules?.assertCurrent;
+        const schemaReconciler = window.MVU2SHUJUKU_CORE.getMvuSchemaFactory()(window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash);
+        const schema = rules?.schema || stateTransfer.resolveImportSchema(snapshot.mvu.schema, schemaReconciler.generateSchema);
+        const target = stateTransfer.stat(snapshot.mvu.stat_data);
+        const accept = async (path, value) => {
+            if (rules) return rules.accept(path, value);
+            if (!schema && !snapshot.converted) return '目标没有公开可独立校验的字段规则，保留目标值';
+            return '';
+        };
+        async function project(value) {
+            if (!snapshot.converted) return snapshot.tables;
+            const candidate = await buildUpdatedTemplateFromStat(snapshot.layout, nativeStatStorage.split(target).database,
+                nativeStatStorage.split(value).database, snapshot.tables);
+            if (!candidate) throw new Error('无法将状态映射到目标表格');
+            const readback = window.MVU2SHUJUKU_CORE.statDataFromTables(snapshot.layout, candidate);
+            const merged = nativeStatStorage.combine(readback?.stat_data || {}, nativeStatStorage.split(value).native);
+            if (!stateTransfer.equal(stateTransfer.stat(merged), value)) throw new Error('目标布局无法无损保存这份 stat_data');
+            return candidate;
+        }
+        const candidate = await stateTransfer.prepareImport(archive.stat_data, target, {
+            schema, accept, project, layoutOnly: snapshot.converted && !schema && !rules,
+            validateComplete: rules ? value => rules.validateComplete(value) : null,
+        });
+        const fields = candidate.fields, importedStat = candidate.stat_data;
+        let tables = candidate.tables;
+        if (fields?.partial && !fields.imported.length && !extras.matches.length) throw new Error('没有可安全导入的兼容字段或额外表格；未写入数据');
+        assertStateTransferUnchanged(snapshot);
+        tables = stateTransfer.applyExtras(tables, extras.matches);
+        const targetMvu = { ...snapshot.mvu, stat_data: stateTransfer.clone(importedStat) };
+        schemaReconciler.reconcileAndApplySchema(targetMvu);
+        const nativeStat = snapshot.converted ? nativeStatStorage.split(importedStat).native : importedStat;
+        const variables = { ...snapshot.raw, stat_data: stateTransfer.clone(nativeStat),
+            ...(targetMvu.schema !== undefined ? { schema: targetMvu.schema } : {}),
+            initialized_lorebooks: stateTransfer.clone(snapshot.mvu.initialized_lorebooks || {}), display_data: stateTransfer.clone(nativeStat), delta_data: {} };
+        return { archive, snapshot, tables, variables, extras, fields, importedStat, backup: true, writeTables: snapshot.converted || extras.matches.length > 0 };
+    }
+    async function commitStateTransferImport(plan) {
+        const { snapshot } = plan;
+        let broadcastSuppressed = false;
+        const rollbackStage = async () => {
+            const current = snapshot.helper.getVariables(snapshot.variableOption);
+            if (stateTransfer.equal(current, snapshot.raw)) return;
+            if (!stateTransfer.equal(current, plan.variables)) throw new Error('消息变量已被其他操作修改，未强制覆盖');
+            snapshot.helper.replaceVariables(stateTransfer.clone(snapshot.raw), snapshot.variableOption);
+        };
+        if (plan.writeTables && typeof snapshot.api?.importTableAsJson !== 'function') throw new Error('数据库公开状态导入接口不可用');
+        await stateTransfer.execute(plan, {
+            rollbackStage,
+            assertCurrent: () => { assertRuntimeSession(snapshot.session); snapshot.schemaGuard?.(); },
+            assertUnchanged: () => assertStateTransferUnchanged(snapshot),
+            backup: async () => {
+                stateTransferProgress('正在保存并备份完整聊天…');
+                await saveStateTransferChat(snapshot);
+                assertStateTransferUnchanged(snapshot);
+                const jsonl = await exportStateTransferChat(snapshot);
+                assertStateTransferUnchanged(snapshot);
+                stateTransfer.verifyBackup(jsonl, snapshot.chat, snapshot.metadata);
+                download(stateTransferFilename(snapshot.source.chat, '-覆盖前备份.jsonl'), 'application/jsonl', jsonl);
+            },
+            stage: async () => {
+                stateTransferProgress('正在导入状态…');
+                sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) + 1;
+                broadcastSuppressed = true;
+                snapshot.helper.replaceVariables(stateTransfer.clone(plan.variables), snapshot.variableOption);
+                return rollbackStage;
+            },
+            importTables: tables => snapshot.api.importTableAsJson(JSON.stringify(tables), { persist: true }),
+            restoreTables: async () => {
+                const current = await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(snapshot.tables));
+                if (stateTransfer.equalRuntimeTables(current, snapshot.tables)) return;
+                if (!stateTransfer.equalRuntimeTables(current, plan.tables)) throw new Error('表格状态与本次候选不一致，未强制覆盖；请检查并手动恢复');
+                const result = await snapshot.api.importTableAsJson(JSON.stringify(snapshot.tables), { persist: true });
+                if (result !== true && result?.success !== true) throw new Error('数据库拒绝回退');
+            },
+            // importTableAsJson 的持久提交已保存同一份暂存变量；沿用现有批量写入
+            // 契约，成功时不再次保存并触发宿主重新加载。失败回退仍明确保存。
+            save: recovering => !plan.writeTables || recovering ? saveStateTransferChat(snapshot) : Promise.resolve(),
+            verify: async () => {
+                const variables = snapshot.helper.getVariables(snapshot.variableOption);
+                if (!stateTransfer.equal(variables, plan.variables)) throw new Error('消息变量读回不一致');
+                if (plan.writeTables) {
+                    const current = await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(plan.tables));
+                    if (snapshot.converted) {
+                        const wrap = mvuDataFromCompleteTableSnapshot(current, snapshot.index, true);
+                        if (!wrap || !stateTransfer.equal(stateTransfer.stat(wrap.stat_data), plan.importedStat)) throw new Error('数据库状态读回不一致');
+                    }
+                    for (const match of plan.extras.matches) if (!stateTransfer.equal(current[match.key]?.content, match.content)) throw new Error('额外表格读回不一致：' + match.name);
+                }
+                const context = getContextSafe(), chat = stateTransfer.clone(context.chat), metadata = stateTransfer.clone(context.chatMetadata || context.chat_metadata || {});
+                stateTransferProgress('正在确认聊天已保存…');
+                const jsonl = await exportStateTransferChat(snapshot);
+                stateTransfer.verifyBackup(jsonl, chat, metadata);
+                if (!stateTransfer.equal(chat, getContextSafe().chat)) throw new Error('保存核对期间聊天又发生更新');
+            },
+        }).finally(() => {
+            if (broadcastSuppressed) sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = Math.max(0, (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) - 1);
+            invalidateStatProjectionCache();
+        });
+        if (snapshot.converted) {
+            refreshOpeningContinuityAfterWrite(snapshot.source.chat, plan.importedStat);
+            publishCommittedTableSnapshot(snapshot.api.exportTableAsJson(), '手动导入状态', true, true, true);
+        }
+    }
+    async function confirmStateTransferImport(plan) {
+        const context = getContextSafe(), text = [];
+        text.push('目标角色：' + plan.snapshot.source.character, '目标聊天：' + plan.snapshot.source.chat,
+            '目标存储：' + (plan.snapshot.variableOption.type === 'chat' ? '聊天变量（沿用原卡位置）' : '消息变量（最新 AI 消息的选中分支）'),
+            '覆盖当前状态，保留其他消息和分支。',
+            (plan.snapshot.converted ? 'stat_data 已通过目标布局的无损读回预检。' : '已检查 stat_data JSON 结构。') + '沿用目标 Schema 规则和初始化标记，不重跑作者初始化或变换。');
+        if (plan.archive.source?.character && plan.archive.source.character !== plan.snapshot.source.character) text.push('源角色与目标角色名称不同，请确认变量含义相容。');
+        text.push('额外表格匹配：' + (plan.extras.matches.map(t => t.name).join('、') || '无'));
+        for (const skip of plan.extras.skipped) text.push('跳过 ' + skip.name + '：' + skip.reason);
+        if (plan.fields?.partial) {
+            text.push('无法完整导入，将仅导入兼容字段。未匹配或不相容的字段保留目标值；不会猜测字段改名或拼接数组。',
+                '可导入字段：' + (plan.fields.imported.join('、') || '无'),
+                '旧存档缺少，保留目标字段：' + (plan.fields.retained.join('、') || '无'));
+            for (const skip of plan.fields.skipped) text.push('跳过 ' + skip.path + '：' + skip.reason);
+        }
+        text.push('聊天备份为可选项；选中时，写入前保存并下载完整 JSONL（不包含外置世界书、角色脚本或全局设置）。');
+        if (!context.callGenericPopup || !context.POPUP_TYPE) throw new Error('酒馆确认弹窗接口不可用');
+        const escaped = text.join('\n\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const html = '<h3>导入状态预览</h3><div style="text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;max-height:55vh;overflow-y:auto">' + escaped + '</div>'
+            + '<label style="display:flex;align-items:center;gap:.5em;text-align:left;margin-top:1em"><input type="checkbox" id="mvu2shujuku-state-backup" checked>导入前下载完整聊天备份</label>';
+        return await context.callGenericPopup(html, context.POPUP_TYPE.CONFIRM, '', {
+            okButton: plan.fields?.partial ? '仅导入兼容字段' : '导入', cancelButton: '取消',
+            onClosing: popup => { plan.backup = popup.content.querySelector('#mvu2shujuku-state-backup')?.checked !== false; return true; },
+        }) === 1;
+    }
+    async function stateTransferAction(task) {
+        if (stateTransferBusy) return;
+        stateTransferBusy = true; stateTransferProgress('正在读取状态…');
+        try { await task(); }
+        catch (e) { stateTransferProgress('操作失败：' + e.message); toast('状态存档：' + e.message, 'error'); }
+        finally { stateTransferBusy = false; stateTransferProgress(hostDocument.querySelector('#mvu2shujuku-state-progress')?.textContent || ''); }
+    }
+
     function bindSettingsPanel(panel, context) {
         const bind = (id, fn) => {
             const el = panel.querySelector(id);
@@ -5685,6 +5963,30 @@ function installExtensionRuntime(window) {
                 el.addEventListener('click', fn);
             }
         };
+        bind('#mvu2shujuku-export-state', () => stateTransferAction(async () => {
+            const snapshot = await captureStateTransferSnapshot();
+            const archive = stateTransfer.archive(snapshot);
+            assertStateTransferUnchanged(snapshot);
+            download(stateTransferFilename(snapshot.source.character, '-状态.json'), 'application/json', JSON.stringify(archive, null, 2));
+            stateTransferProgress('状态已导出，额外表格 ' + archive.extraTables.length + ' 张。');
+        }));
+        bind('#mvu2shujuku-import-state', () => { if (!stateTransferBusy) panel.querySelector('#mvu2shujuku-state-file')?.click(); });
+        const stateFile = panel.querySelector('#mvu2shujuku-state-file');
+        if (stateFile && stateFile.dataset.bound !== 'true') {
+            stateFile.dataset.bound = 'true';
+            stateFile.addEventListener('change', () => {
+                const file = stateFile.files?.[0]; stateFile.value = ''; if (!file) return;
+                stateTransferAction(async () => {
+                    if (file.size > 64 * 1024 * 1024) throw new Error('状态存档超过 64 MiB');
+                    const plan = await prepareStateTransferImport(await file.text());
+                    stateTransferProgress('等待确认导入…');
+                    if (!await confirmStateTransferImport(plan)) { stateTransferProgress('已取消导入。'); return; }
+                    await commitStateTransferImport(plan);
+                    stateTransferProgress((plan.fields?.partial ? '兼容字段导入完成；跳过字段 ' + plan.fields.skipped.length + ' 个，保留目标字段 ' + plan.fields.retained.length + ' 个；' : '状态导入完成；') + '匹配额外表格 ' + plan.extras.matches.length + ' 张，跳过 ' + plan.extras.skipped.length + ' 张。');
+                });
+            });
+        }
+        stateTransferProgress(panel.querySelector('#mvu2shujuku-state-progress')?.textContent || '');
         populateCharacterSelect(panel);
         startCharacterListRefresh(panel);
         populateProfileSelect(panel);
@@ -5920,40 +6222,50 @@ function installExtensionRuntime(window) {
         } catch (e) {}
         return original;
     }
-    function templateDatabaseDefines() {
-        const safeDefine = function () { return ejsVariablesSafe(); };
-        const getMessageDefine = function (path, options) {
-                    const defaultValue = options && typeof options === 'object' && Object.prototype.hasOwnProperty.call(options, 'defaults')
-                        ? options.defaults
-                        : options;
-                    try {
-                        const parts = String(path || '').split('.').filter(Boolean);
-                        let cur = ejsVariablesSafe();
-                        for (const p of parts) { if (cur == null) return defaultValue; cur = cur[p]; }
-                        return cur === undefined ? defaultValue : cur;
-                    } catch (e) { return defaultValue; }
-        };
+    function hasDatabaseMessageData(index) {
+        const chat = getContextSafe().chat || [];
+        // Unchanged AI replies and user messages inherit the preceding database
+        // state even when no new storage frame was required on that floor.
+        for (let i = index; i >= 0; i--) {
+            let isolated = chat[i] && chat[i].TavernDB_ACU_IsolatedData;
+            if (typeof isolated === 'string') { try { isolated = JSON.parse(isolated); } catch (_) { continue; } }
+            if (isolated && typeof isolated === 'object' && Object.values(isolated).some(tag =>
+                tag && tag.storageFrame && tag.storageFrame.version === 2)) return true;
+        }
+        return false;
+    }
+    function readDatabaseMessageHistory(index) {
+        const tables = readPersistedTableData(index);
+        const wrap = tables ? mvuDataFromCompleteTableSnapshot(tables, index) : null;
+        return wrap ? nativeStatStorage.merge(wrap, index) : undefined;
+    }
+    function databaseVariableTarget(options, writing) {
+        const messageId = options && options.message_id;
+        return ejsEvalBridge.selectMessage(messageId == null || messageId === 'latest'
+            ? {} : { withMsg: { id: messageId } }, {}, writing);
+    }
+    function readDatabaseVariables(options) {
+        const target = databaseVariableTarget(options, false);
+        if (target.missing) return {};
+        if (!target.current) return readDatabaseMessageHistory(target.index) || {};
+        const all = pendingStatWrite ? { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} }
+            : window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+        assertMvuReadReady(all);
+        return all;
+    }
+    function assertDatabaseMessageWrite(options) {
+        ejsEvalBridge.assertWritable(databaseVariableTarget(options, true));
+    }
+    function templateDatabaseDefines(context, execution) {
+        const safeDefine = function () { return variables.getvar(null); };
+        const variables = ejsEvalBridge.createVariableContext(ejsVariablesSafe, scheduleWindowStatOverlay, context || {}, execution || { refreshReads: !context });
+        const getMessageDefine = variables.getMessageVar;
+        const setMessageDefine = variables.setMessageVar;
         const formatMessageDefine = function (path) {
                     const coreNow = window.MVU2SHUJUKU_CORE;
                     return coreNow && typeof coreNow.formatMessageVariableValue === 'function'
                         ? coreNow.formatMessageVariableValue(getMessageDefine(path))
                         : '';
-        };
-        const setMessageDefine = function (path, value) {
-                    try {
-                        const parts = String(path || '').split('.').filter(Boolean);
-                        if (parts[0] !== 'stat_data' || parts.length < 2) return value;
-                        const all = ejsVariablesSafe();
-                        const next = JSON.parse(JSON.stringify((all && all.stat_data) || {}));
-                        let cur = next;
-                        for (let i = 1; i < parts.length - 1; i++) {
-                            if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object' || Array.isArray(cur[parts[i]])) cur[parts[i]] = {};
-                            cur = cur[parts[i]];
-                        }
-                        cur[parts[parts.length - 1]] = value;
-                        scheduleWindowStatOverlay(next);
-                        return value;
-                    } catch (e) { return value; }
         };
         const resolveMacroDefine = function (body) { return resolvePromptMacroRuntime(body); };
         const applyWorldInfoRegexDefine = function (name, original, encodedReplacement, initiallyEnabled) {
@@ -5962,6 +6274,8 @@ function installExtensionRuntime(window) {
         const defines = {
             mvu2shujukuGetAllVariables: safeDefine,
             mvu2shujukuGetMessageVar: getMessageDefine,
+            mvu2shujukuGetVar: variables.getvar,
+            mvu2shujukuSetVar: variables.setvar,
             mvu2shujukuFormatMessageVariable: formatMessageDefine,
             mvu2shujukuVwdDescriptions: function (table, fieldIds) {
                 if (!ensureActiveLayoutLazy()) throw new Error('动态说明布局尚未就绪');
@@ -5979,41 +6293,31 @@ function installExtensionRuntime(window) {
             mvu2shujukuResolveMacro: resolveMacroDefine,
             mvu2shujukuApplyWorldInfoRegex: applyWorldInfoRegexDefine,
         };
+        if (context && isConvertedMvuCard(currentCharacter())) {
+            Object.assign(defines, variables);
+            const descriptor = Object.getOwnPropertyDescriptor(context, 'variables');
+            if (!descriptor || descriptor.configurable) Object.defineProperty(context, 'variables', {
+                configurable: true, enumerable: true, get: () => variables.variableView(),
+            });
+        }
         for (const fn of Object.values(defines)) fn.__mvu2shujuku = true;
         return defines;
     }
-    function ensureEjsEvalContextBridge(ejs) {
-        try {
-            if (!ejs || typeof ejs.evalTemplate !== 'function') return false;
-            if (ejs.evalTemplate.__mvu2shujukuContextBridge) return true;
-            const originalEvalTemplate = ejs.evalTemplate;
-            const wrappedEvalTemplate = async function (code, context, options) {
-                // 只介入包含本转换器 helper 的模板，其他卡/模板完全走原调用。
-                if (!/\bmvu2shujuku(?:GetAllVariables|GetMessageVar|FormatMessageVariable|VwdDescriptions|SetMessageVar|ResolveMacro|ApplyWorldInfoRegex)\b/.test(String(code || ''))) {
-                    return originalEvalTemplate.apply(this, arguments);
-                }
-                const defines = templateDatabaseDefines();
-                let actualContext = context;
-                if (!actualContext || typeof actualContext !== 'object') {
-                    // SP·数据库 v8.9.2 直接 evalTemplate(finalContent)，不传 context。
-                    // 显式 prepare 才能保证本次执行环境拿到 helper，不依赖
-                    // defines 何时被复制，也不依赖 prompt_template_prepare 事件是否对外发布。
-                    actualContext = typeof ejs.prepareContext === 'function'
-                        ? await ejs.prepareContext(defines)
-                        : defines;
-                } else {
-                    Object.assign(actualContext, defines);
-                }
-                if (actualContext && typeof actualContext === 'object') Object.assign(actualContext, defines);
-                return originalEvalTemplate.call(this, code, actualContext, options);
-            };
-            wrappedEvalTemplate.__mvu2shujuku = true;
-            wrappedEvalTemplate.__mvu2shujukuContextBridge = true;
-            wrappedEvalTemplate.__mvu2shujukuOriginal = originalEvalTemplate;
-            ejs.evalTemplate = wrappedEvalTemplate;
-            return true;
-        } catch (e) { return false; }
-    }
+    const ejsEvalBridge = window.MVU2SHUJUKU_CORE.getEjsEvalBridgeFactory()({
+        readCharacter: currentCharacter,
+        isConverted: () => isConvertedMvuCard(currentCharacter()),
+        readCore: () => window.MVU2SHUJUKU_CORE,
+        makeDefines: templateDatabaseDefines,
+        pathParts: mvuVariablePathParts,
+        readChat: () => getContextSafe().chat || [],
+        readSessionKey: () => { const session = captureRuntimeSession(); return session.key + ":" + session.epoch; },
+        hasMessageData: hasDatabaseMessageData,
+        readHistory: readDatabaseMessageHistory,
+        readTemplate: () => window.EjsTemplate || hostWindow.EjsTemplate,
+        onWriteError: error => dbgWarn(' EJS 数据库变量写入失败:', error),
+        lodash: window._ || hostWindow._,
+    });
+    function ensureEjsEvalContextBridge(ejs) { return ejsEvalBridge.install(ejs); }
     function ensureTemplateDefine() {
         try {
             const roots = [];
@@ -6065,7 +6369,7 @@ function installExtensionRuntime(window) {
                 // evalTemplate(finalContent)，不同窗口/缓存时它可能不带当前 defines。
                 // prepare 事件上再直接注入实际执行上下文，避免任意一个 helper
                 // ReferenceError 使 SP 整份提示退回未处理原文。
-                if (prepared && typeof prepared === 'object') Object.assign(prepared, templateDatabaseDefines());
+                if (prepared && typeof prepared === 'object') Object.assign(prepared, templateDatabaseDefines(prepared));
                 installFrontendEjsLiteralGuard(prepared);
                 if (firstPreparedLogged) return;
                 firstPreparedLogged = true;
@@ -6365,6 +6669,364 @@ function createCandidateBuilderFactory(deps) {
 
 // 酒馆的请求级 lore 列表与数据库直接读取的原世界书互相独立。
 // 工厂同时供真实运行时与无外部作用域的 VM 回归使用。
+function createEjsEvalBridgeFactory(deps) {
+    'use strict';
+    const { readCharacter, readCore, makeDefines } = deps;
+    const lodash = deps.lodash || (typeof globalThis !== 'undefined' && globalThis._)
+        || (typeof require === 'function' ? require('./vendor/schema-engine-libs').lodash : null);
+    const pathParts = deps.pathParts || (path => lodash.toPath(path));
+    const own = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
+    function failure(code, message) {
+        const error = new Error(message);
+        error.code = code;
+        return error;
+    }
+    function optionObject(value) {
+        if (typeof value === 'boolean') return { dryRun: value };
+        if (typeof value === 'string') {
+            if (['old', 'new', 'fullcache'].includes(value)) return { results: value };
+            if (['n', 'nx', 'xx', 'nxs', 'xxs'].includes(value)) return { flags: value };
+            if (['cache', 'initial', 'global', 'local', 'message'].includes(value)) return { scope: value };
+            return {};
+        }
+        return value && typeof value === 'object' ? { ...value } : {};
+    }
+    function jsonIndex(value) {
+        const numeric = Number(value);
+        return Number.isNaN(numeric) ? value : numeric;
+    }
+    function selectMessage(options = {}, context = {}, writing = false) {
+        const chat = deps.readChat ? deps.readChat() : null;
+        const filter = options.withMsg;
+        if (!Array.isArray(chat)) {
+            if (filter || context.message_id != null) throw failure('MVU_HISTORY_UNAVAILABLE', '数据库消息历史尚未就绪');
+            return { current: true };
+        }
+        let latest = -1;
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (chat[i] && !chat[i].is_user && !chat[i].is_system) { latest = i; break; }
+        }
+        let index = latest;
+        if (filter && filter.id != null) {
+            index = Number(filter.id);
+            if (index < 0) index += chat.length;
+        } else if (filter && filter.role != null) {
+            // Retain the host selector's boolean-role matching contract, including
+            // its overlapping user/system tests; do not silently tighten it here.
+            const eligible = msg => filter.role === 'any'
+                || msg.is_system === (filter.role === 'system')
+                || msg.is_user === (filter.role === 'user')
+                || (filter.role === 'assistant' && !msg.is_user && !msg.is_system);
+            index = -1;
+            for (let i = chat.length - 1; i >= 0; i--) {
+                if (chat[i] && eligible(chat[i]) && (writing || !deps.hasMessageData || deps.hasMessageData(i))) { index = i; break; }
+            }
+        } else if (context.message_id != null) {
+            index = Number(context.message_id);
+            if (index < 0) index += chat.length;
+            if (index > chat.length) index = chat.length - 1;
+            if (!writing && deps.hasMessageData) {
+                while (index >= 0 && !deps.hasMessageData(index)) index--;
+            }
+        }
+        if (!Number.isInteger(index) || index < 0 || index >= chat.length) return { missing: true, current: false };
+        const message = chat[index];
+        let swipe = filter && filter.swipe_id != null ? Number(filter.swipe_id)
+            : context.swipe_id != null ? Number(context.swipe_id) : Number(message.swipe_id || 0);
+        if (swipe < 0) swipe += Array.isArray(message.swipes) ? message.swipes.length : 0;
+        if (!Number.isInteger(swipe) || swipe < 0) return { missing: true, current: false };
+        if (swipe !== Number(message.swipe_id || 0)) {
+            throw failure('MVU_HISTORY_SWIPE_UNSUPPORTED', '数据库未提供未选中 swipe 的独立快照，不能改读当前 swipe');
+        }
+        return { index, swipe, current: index === latest };
+    }
+    function assertWritable(target) {
+        if (!target || target.missing || !target.current) {
+            throw failure('MVU_HISTORY_WRITE_UNSUPPORTED', '数据库公开接口不支持任意历史消息写入；已阻止修改当前状态');
+        }
+    }
+    function createVariableContext(readVariables, writeStat, context = {}, execution = {}) {
+        const original = {};
+        for (const name of ['getvar', 'getMessageVar', 'setvar', 'setMessageVar', 'incvar', 'incMessageVar', 'decvar', 'decMessageVar', 'delvar', 'delMessageVar', 'insvar', 'insertMessageVar', 'patchVariables']) {
+            const fn = context[name];
+            original[name] = fn && fn.__mvu2shujukuVariableAdapter ? fn.__mvu2shujukuVariableOriginal : fn;
+        }
+        const sessionKey = deps.readSessionKey && deps.readSessionKey();
+        const assertSession = () => {
+            if (deps.readSessionKey && deps.readSessionKey() !== sessionKey) throw failure('MVU_VARIABLE_CONTEXT_STALE', '变量执行上下文所属聊天已改变，已停止数据库操作');
+        };
+        let cache = null;
+        const currentData = () => readVariables() || {};
+        const selectionContext = options => execution.publicEval && !options.withMsg ? {} : context;
+        const read = (options, writing = false) => {
+            assertSession();
+            // withMsg selects a persisted message only for message-scoped reads
+            // or writes. Native cache reads/cache-only writes ignore this filter.
+            const selected = options.scope === 'cache' || (!writing && options.scope !== 'message')
+                ? { ...options, withMsg: undefined } : options;
+            const target = selectMessage(selected, selectionContext(selected), writing);
+            if (target.missing) return undefined;
+            if (!target.current) {
+                if (!deps.readHistory) throw failure('MVU_HISTORY_UNAVAILABLE', '数据库消息历史尚未就绪');
+                return deps.readHistory(target.index, target.swipe);
+            }
+            if (!writing && options.scope === 'message' && options.withMsg) return lodash.cloneDeep(currentData());
+            if (options.noCache || execution.refreshReads || !cache) cache = lodash.cloneDeep(currentData());
+            return cache;
+        };
+        const delegate = (name, args) => {
+            if (typeof original[name] !== 'function') throw failure('MVU_NATIVE_VARIABLE_API_UNAVAILABLE', '宿主原变量接口尚未就绪：' + name);
+            return original[name].apply(context, args);
+        };
+        const databasePath = path => {
+            if (typeof path !== 'string' && !Array.isArray(path)) return null;
+            const parts = pathParts(path, {});
+            return parts[0] === 'stat_data' ? parts : null;
+        };
+        const useDatabase = (parts, options) => parts && !['global', 'local', 'initial'].includes(options.scope);
+        function getter(name, forcedScope) {
+            const fn = function (path, rawOptions) {
+                const options = optionObject(rawOptions);
+                if (forcedScope) options.scope = forcedScope;
+                if (path == null && !['global', 'local', 'initial'].includes(options.scope)) {
+                    const native = typeof original[name] === 'function' ? delegate(name, arguments) : {};
+                    return { ...(native || {}), ...(read(options) || {}) };
+                }
+                const parts = databasePath(path);
+                if (!useDatabase(parts, options)) return delegate(name, arguments);
+                const all = read(options);
+                let result = lodash.get(all, parts, options.defaults);
+                if (options.index != null) {
+                    const data = JSON.parse(result || '{}');
+                    // The host cache branch uses Number(index) even for named keys;
+                    // explicit message scope falls back to the original string.
+                    return lodash.get(data, options.scope === 'message' ? jsonIndex(options.index) : Number(options.index), options.defaults);
+                }
+                return options.clone && options.scope === 'message' ? lodash.cloneDeep(result) : result;
+            };
+            fn.__mvu2shujukuVariableOriginal = original[name];
+            fn.__mvu2shujukuVariableAdapter = true;
+            return fn;
+        }
+        function setter(name, forcedScope) {
+            const fn = function (path, value, rawOptions) {
+                const options = optionObject(rawOptions);
+                if (forcedScope) options.scope = forcedScope;
+                if (path == null && value && own(value, 'stat_data') && !['global', 'local', 'initial'].includes(options.scope)) {
+                    throw failure('MVU_BULK_VARIABLE_WRITE_UNSUPPORTED', '整份变量表包含数据库变量，不能通过原生批量写入绕过数据库');
+                }
+                const parts = databasePath(path);
+                if (!useDatabase(parts, options)) return delegate(name, arguments);
+                if (parts.some(key => ['__proto__', 'constructor', 'prototype'].includes(key))) {
+                    throw failure('MVU_VARIABLE_PATH_UNSAFE', '禁止写入原型属性');
+                }
+                assertSession();
+                if (!options.dryRun && (execution.publicEval ? false : context.isDryRun)) return undefined;
+                const scope = options.scope || 'message';
+                if (!['message', 'cache'].includes(scope)) throw failure('MVU_VARIABLE_SCOPE_UNSUPPORTED', '不支持的数据库变量作用域：' + scope);
+                if (scope === 'message') assertWritable(selectMessage(options, selectionContext(options), true));
+                const all = read(options, true) || {};
+                let container = all, field = parts;
+                if (options.index != null) {
+                    container = JSON.parse(lodash.get(all, parts, '{}') || '{}');
+                    field = lodash.toPath(jsonIndex(options.index));
+                    if (field.some(key => ['__proto__', 'constructor', 'prototype'].includes(key))) throw failure('MVU_VARIABLE_PATH_UNSAFE', '禁止写入原型属性');
+                }
+                const previous = lodash.get(container, field);
+                const exists = lodash.has(container, field);
+                if ((options.flags === 'nx' && exists) || (options.flags === 'xx' && !exists)
+                    || (options.flags === 'nxs' && getter('getvar')(path, options) !== undefined)
+                    || (options.flags === 'xxs' && getter('getvar')(path, options) === undefined)) return undefined;
+                let nextValue = value;
+                if (options.merge) {
+                    nextValue = Array.isArray(value) && (previous === undefined || Array.isArray(previous))
+                        ? lodash.concat(previous ?? [], value)
+                        : lodash.mergeWith(lodash.cloneDeep(previous ?? {}), value, (_old, incoming) => Array.isArray(incoming) ? incoming : undefined);
+                }
+                const next = lodash.cloneDeep(all);
+                if (options.index != null) {
+                    if (nextValue === undefined) lodash.unset(container, field);
+                    else lodash.set(container, field, nextValue);
+                    lodash.set(next, parts, JSON.stringify(container));
+                } else if (nextValue === undefined) lodash.unset(next, parts);
+                else lodash.set(next, parts, nextValue);
+                if (scope === 'message' && (!next.stat_data || typeof next.stat_data !== 'object' || Array.isArray(next.stat_data))) {
+                    throw failure('MVU_VARIABLE_ROOT_INVALID', 'stat_data 必须是对象，不能删除或写成标量');
+                }
+                if (scope === 'message') {
+                    // Cache-only edits and mutations of cached references must not
+                    // hitchhike on a later write to an unrelated field.
+                    const persisted = lodash.cloneDeep(currentData());
+                    if (options.index != null && options.withMsg) {
+                        const stored = JSON.parse(lodash.get(persisted, parts, '{}') || '{}');
+                        if (nextValue === undefined) lodash.unset(stored, field);
+                        else lodash.set(stored, field, nextValue);
+                        const encoded = JSON.stringify(stored);
+                        lodash.set(persisted, parts, encoded);
+                        lodash.set(next, parts, encoded);
+                    } else if (options.index != null) lodash.set(persisted, parts, lodash.get(next, parts));
+                    else if (nextValue === undefined) lodash.unset(persisted, parts);
+                    else lodash.set(persisted, parts, nextValue);
+                    // The native setter is synchronous. Keep read-after-write visible;
+                    // persistence uses the existing guarded, coalesced write pipeline.
+                    const pending = writeStat(persisted.stat_data);
+                    if (pending && typeof pending.catch === 'function') pending.catch(error => { if (deps.onWriteError) deps.onWriteError(error); });
+                    cache = next;
+                } else cache = next;
+                if (options.results === 'old') return previous;
+                if (options.results === 'fullcache') {
+                    const nativeVariables = context.variables || {};
+                    return { ...nativeVariables, ...(cache || currentData()) };
+                }
+                return nextValue;
+            };
+            fn.__mvu2shujukuVariableOriginal = original[name];
+            fn.__mvu2shujukuVariableAdapter = true;
+            return fn;
+        }
+        const result = { getvar: getter('getvar'), getMessageVar: getter('getMessageVar', 'message'),
+            setvar: setter('setvar'), setMessageVar: setter('setMessageVar', 'message') };
+        function shortcut(name, operation, forcedScope) {
+            const fn = function (path, value, indexOrOptions, rawOptions) {
+                const raw = operation === 'insert' ? rawOptions : indexOrOptions;
+                const options = optionObject(raw);
+                if (name === 'delMessageVar') value = { ...(value || {}), scope: 'message' };
+                if (forcedScope && name !== 'delMessageVar') {
+                    if (operation === 'increase' || operation === 'decrease') options.outscope = forcedScope;
+                    else options.scope = forcedScope;
+                }
+                const parts = databasePath(path);
+                const outputScope = options.outscope || options.scope;
+                if (!parts || ['global', 'local', 'initial'].includes(outputScope)) return delegate(name, arguments);
+                if (operation === 'increase' || operation === 'decrease') {
+                    const lookup = { index: options.index, withMsg: options.withMsg, scope: options.inscope, noCache: options.noCache };
+                    const current = result.getvar(path, lookup);
+                    const present = lodash.has(read({ noCache: options.noCache }), parts);
+                    const shouldWrite = { n: true, nx: !present, xx: present, nxs: current === undefined, xxs: current !== undefined }[options.flags || 'n'];
+                    if (!shouldWrite) return undefined;
+                    let next = result.getvar(path, { ...lookup, defaults: options.defaults || 0 })
+                        + (operation === 'decrease' ? -(value === undefined ? 1 : value) : value === undefined ? 1 : value);
+                    if (options.min != null) next = Math.max(next, options.min);
+                    if (options.max != null) next = Math.min(next, options.max);
+                    return result.setvar(path, next, { ...options, scope: options.outscope, flags: 'n' });
+                }
+                if (operation === 'delete' && value == null) return result.setvar(path, undefined, options);
+                const current = lodash.cloneDeep(result.getvar(path, options));
+                if (operation === 'delete') {
+                    if (Array.isArray(current)) {
+                        const index = current.indexOf(value);
+                        if (index < 0) return undefined;
+                        current.splice(index, 1);
+                    } else if (current && typeof current === 'object') {
+                        delete current[String(value)];
+                    } else if (typeof current === 'string' && typeof value === 'string') {
+                        if (!current.includes(value)) return undefined;
+                        throw new TypeError('宿主 delvar 的字符串分支调用了不存在的 splice 方法');
+                    } else return undefined;
+                } else {
+                    const index = indexOrOptions;
+                    if (Array.isArray(current)) {
+                        if (index == null) current.push(value);
+                        else current.splice(Number(index) < 0 ? current.length + Number(index) : Number(index), 0, value);
+                    } else if (current && typeof current === 'object' && index != null) {
+                        if (['__proto__', 'constructor', 'prototype'].includes(String(index))) throw failure('MVU_VARIABLE_PATH_UNSAFE', '禁止写入原型属性');
+                        const exists = own(current, String(index));
+                        if ((String(options.flags).includes('nx') && exists) || (String(options.flags).includes('xx') && !exists)) return undefined;
+                        current[String(index)] = value;
+                    } else if (typeof current === 'string') {
+                        if (index == null) return result.setvar(path, current + value.toString(), options);
+                        if (typeof index === 'string' && !current.includes(index)) return result.setvar(path, current, options);
+                        throw new TypeError('宿主 insvar 的字符串分支调用了不存在的 splice 方法');
+                    } else return undefined;
+                }
+                return result.setvar(path, current, options);
+            };
+            fn.__mvu2shujukuVariableOriginal = original[name];
+            fn.__mvu2shujukuVariableAdapter = true;
+            return fn;
+        }
+        for (const [name, operation, scope] of [
+            ['incvar', 'increase'], ['incMessageVar', 'increase', 'message'],
+            ['decvar', 'decrease'], ['decMessageVar', 'decrease', 'message'],
+            ['delvar', 'delete'], ['delMessageVar', 'delete', 'message'],
+            ['insvar', 'insert'], ['insertMessageVar', 'insert', 'message'],
+        ]) result[name] = shortcut(name, operation, scope);
+        result.patchVariables = function (path, patch, options) {
+            if (path == null && !['global', 'local', 'initial'].includes(optionObject(options).scope)) {
+                const ejs = deps.readTemplate && deps.readTemplate();
+                const operations = typeof patch === 'string' && ejs ? ejs.parseJSON(patch) : patch;
+                if (!Array.isArray(operations) || operations.some(op => [op && op.path, op && op.from].some(value => typeof value === 'string' && /^\/stat_data(?:\/|$)/.test(value)))) {
+                    throw failure('MVU_BULK_VARIABLE_WRITE_UNSUPPORTED', '整份变量表补丁包含数据库变量，不能通过原生写入绕过数据库');
+                }
+            }
+            if (!useDatabase(databasePath(path), optionObject(options))) return delegate('patchVariables', arguments);
+            const ejs = deps.readTemplate && deps.readTemplate();
+            if (!ejs || typeof ejs.jsonPatch !== 'function') throw failure('MVU_NATIVE_JSON_PATCH_UNAVAILABLE', '宿主公开 jsonPatch 接口尚未就绪');
+            return result.setvar(path, ejs.jsonPatch(result.getvar(path, options), typeof patch === 'string' ? ejs.parseJSON(patch) : patch), options);
+        };
+        result.patchVariables.__mvu2shujukuVariableOriginal = original.patchVariables;
+        result.patchVariables.__mvu2shujukuVariableAdapter = true;
+        Object.defineProperty(result, 'variableView', { value: () => {
+            const native = typeof original.getvar === 'function' ? delegate('getvar', [null]) : {};
+            const target = native && typeof native === 'object' ? native : {};
+            return new Proxy(target, {
+                get: (object, key) => key === 'stat_data' ? result.getvar('stat_data') : Reflect.get(object, key),
+                set: (object, key, value) => {
+                    if (key === 'stat_data') { result.setvar('stat_data', value, { scope: 'cache' }); return true; }
+                    return Reflect.set(object, key, value);
+                },
+                deleteProperty: (object, key) => {
+                    if (key === 'stat_data') { result.setvar('stat_data', undefined, { scope: 'cache' }); return true; }
+                    return Reflect.deleteProperty(object, key);
+                },
+                ownKeys: object => [...new Set([...Reflect.ownKeys(object), 'stat_data'])],
+                getOwnPropertyDescriptor: (object, key) => key === 'stat_data'
+                    ? { configurable: true, enumerable: true, writable: true, value: result.getvar('stat_data') }
+                    : Reflect.getOwnPropertyDescriptor(object, key),
+            });
+        } });
+        return result;
+    }
+    function createMessageGetter(readVariables, context = {}) {
+        return createVariableContext(readVariables, () => {}, context, { refreshReads: true }).getMessageVar;
+    }
+    function createMessageSetter(readVariables, writeStat, context = {}) {
+        return createVariableContext(readVariables, writeStat, context).setMessageVar;
+    }
+    function install(ejs) {
+        if (!ejs || typeof ejs.evalTemplate !== 'function') return false;
+        if (ejs.evalTemplate.__mvu2shujukuContextBridge) return true;
+        const original = ejs.evalTemplate;
+        const wrapped = async function (code, context, options) {
+            const core = readCore();
+            // DB calls evalTemplate(finalContent) without a context. The private
+            // guide call and current converted-card metadata must also agree.
+            // Body/preview/world_info calls supply their own execution context.
+            const view = context == null && core && typeof core.prepareFillPrompt === 'function'
+                ? core.prepareFillPrompt(code, readCharacter()) : { text: code, adapted: false };
+            if (!view.adapted && !/\bmvu2shujuku(?:GetAllVariables|GetMessageVar|GetVar|SetVar|FormatMessageVariable|VwdDescriptions|SetMessageVar|ResolveMacro|ApplyWorldInfoRegex)\b/.test(String(code || ''))
+                && !(deps.isConverted && deps.isConverted() && String(code || '').includes('<%')))
+                return original.apply(this, arguments);
+            const defines = makeDefines();
+            let actualContext = context;
+            if (!actualContext || typeof actualContext !== 'object') {
+                // Public EjsTemplate API: prepareContext(context, end=-1).
+                // The internal function reverses these arguments.
+                actualContext = typeof ejs.prepareContext === 'function' ? await ejs.prepareContext(defines, -1) : {};
+            }
+            // Per invocation: no shared mutable group, dice or guide cache.
+            Object.assign(actualContext, makeDefines(actualContext, { publicEval: true }));
+            return original.call(this, view.text, actualContext, options);
+        };
+        wrapped.__mvu2shujuku = true;
+        wrapped.__mvu2shujukuContextBridge = true;
+        wrapped.__mvu2shujukuOriginal = original;
+        ejs.evalTemplate = wrapped;
+        return true;
+    }
+    return { install, createMessageGetter, createMessageSetter, createVariableContext, selectMessage, assertWritable };
+}
+
 function createWorldbookRequestFilterFactory(deps) {
     'use strict';
     const { readCharacter, readExtensions = ch => ch && ((ch.data || ch).extensions || ch.extensions),
@@ -6407,3 +7069,4 @@ module.exports = installExtensionRuntime;
 module.exports.createCandidateBuilder = createCandidateBuilderFactory;
 
 module.exports.createWorldbookRequestFilter = createWorldbookRequestFilterFactory;
+module.exports.createEjsEvalBridge = createEjsEvalBridgeFactory;

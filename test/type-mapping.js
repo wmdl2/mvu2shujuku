@@ -5,6 +5,33 @@ const engine = require('../src/schema-execution-node');
 const createCardApi = require('../src/card-api');
 const z = require('../src/vendor/schema-engine-libs').zod;
 const clone = value => JSON.parse(JSON.stringify(value));
+test('类型契约：原Zod静态回退输出可存入SQLite，普通列和完整JSON仍拒绝其他越界值',async()=>{
+    for(const complex of [false,true]){
+        const members={枚举:z.enum(['甲','乙']).catch(''),数:z.number().min(0).max(5).catch(-1),整数:z.int().catch(0.5)};
+        if(complex)members.列表=z.array(z.number());
+        const original=z.object({组:z.object(members)}),first={组:{枚举:'甲',数:2,整数:2,...(complex?{列表:[]}: {})}};
+        const after=original.parse({组:{枚举:'错误',数:10,整数:1.25,...(complex?{列表:[]}: {})}});
+        const schema='{组:z.object({枚举:z.enum(["甲","乙"]).catch(""),数:z.number().min(0).max(5).catch(-1),整数:z.int().catch(0.5)'+(complex?',列表:z.array(z.number())':'')+'})}';
+        const result=core.convert(card(first,schema)),{layout,tables}=state(result),group=result.schema.find(g=>g.name==='组');
+        assert.strictEqual((await core.writeStatDiffToDbResult(applyingApi(tables),layout,first,after,tables)).ok,true);
+        const sheet=Object.values(tables).find(t=>t?.name===group.tableName),column=group.columns.find(c=>c.zh===(complex?'内容':'数'));
+        const script=`import json,sqlite3,sys
+p=json.load(sys.stdin); db=sqlite3.connect(':memory:'); db.execute(p['ddl'])
+cols=db.execute('pragma table_info('+p['table']+')').fetchall()
+q='insert into '+p['table']+' values ('+','.join('?' for c in cols)+')'
+for row in p['rows']: db.execute(q,row)
+rejected=False
+try: db.execute('update '+p['table']+' set '+p['column']+'='+p['invalid'])
+except sqlite3.IntegrityError: rejected=True
+print(json.dumps({'rows':db.execute('select * from '+p['table']).fetchall(),'rejected':rejected}))`;
+        const invalid=complex?`json_set(${column.ident}, '$."数"', 10)`:'10';
+        const out=JSON.parse(require('child_process').execFileSync(pythonExecutable,['-c',script],{encoding:'utf8',timeout:15000,input:JSON.stringify({ddl:sheet.sourceData.ddl,table:group.ident,column:column.ident,invalid,rows:sheet.content.slice(1)})}));
+        assert.strictEqual(out.rejected,true);
+        sheet.content=[sheet.content[0],...out.rows.map(row=>row.map(v=>typeof v==='number'?String(v):v))];
+        assert.deepStrictEqual(core.statDataFromTables(layout,tables).stat_data,after);
+        assert(!sheet.sourceData.note.includes('原 Schema 回退值'));
+    }
+});
 function card(initial, schema, rules) {
     return { name: '公开类型契约', character_book: { entries: [
         { comment: '[InitVar]', enabled: false, content: JSON.stringify(initial) },
@@ -56,17 +83,21 @@ for (const [label, first, next] of [
 ]) test('类型契约：无 Schema 嵌套' + label + '数组保留每项类型及小数', async () => {
     await roundTrip(card({ 组: { 数组: first } }), { 组: { 数组: first } }, { 组: { 数组: next } });
 });
-test('类型契约：关系数组复用 JSON 标量协议，布尔写成 0/1', async () => {
+test('类型契约：关系数组完整JSON保留元素类型，内部布尔仍是JSON布尔', async () => {
     const first = { 人物: { 甲: { 混合: [1, null, false], 布尔: [true, false] }, 乙: { 混合: ['字'], 布尔: [false] } } };
     const next = { 人物: { 甲: { 混合: [null, '字', {}, 2.75], 布尔: [false, true] }, 乙: { 混合: [false], 布尔: [true] } } };
     const schema = '{人物:z.record(z.string(),z.object({混合:z.array(z.any()),布尔:z.array(z.boolean())}))}';
     const result = await roundTrip(card(first, schema), first, next);
-    assert.strictEqual(result.schema.find(g => g.kind === 'nestedArray' && g.name === '布尔').columns.find(c => c.zh === '内容').type, 'INTEGER');
+    const group = result.schema.find(g => g.name === '人物');
+    assert.equal(group.valueCol, '内容');
+    assert.equal(group.columns[0].type, 'TEXT');
+    const row = Object.values(result.template).find(s => s?.name === group.tableName).content[1];
+    assert.deepStrictEqual(JSON.parse(row[1]).甲.布尔, first.人物.甲.布尔);
 });
-test('类型契约：JSON 标量列不被其他组的同名 number 提示改变物理类型', () => {
+test('类型契约：完整JSON不被其他组的同名 number 提示改变物理类型或元素类型', () => {
     const first = { 记录: { 列表: [0, false, null, '0'] } };
     const result = core.convert(card(first, undefined, '其他组:\n  内容:\n    type: number\n    range: 0~5'));
-    const column = result.schema.flatMap(g => g.columns).find(c => c.logicalType === 'jsonScalar');
+    const column = result.schema.find(g => g.name === '记录').columns.find(c => c.zh === '内容');
     assert(column); assert.strictEqual(column.type, 'TEXT');
     const { layout, tables } = state(result);
     assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, first);

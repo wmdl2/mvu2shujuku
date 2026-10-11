@@ -108,7 +108,7 @@ test('字段扫描作用域：浏览器构建内联扫描模块，无 require �
     const factoryEnd = index.indexOf('\n})(typeof globalThis', index.indexOf('const VERSION ='));
     assert.ok(factoryEnd > 0);
     const end = index.indexOf('\n', factoryEnd + 1);
-    const context = vm.createContext({ console });
+    const context = vm.createContext({ console, __MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__: require('../src/vendor/schema-engine-libs') });
     vm.runInContext(index.slice(0, end) + '\n})(globalThis);', context);
     const usage = context.MVU2SHUJUKU_CORE.scanStatusUsage({ name: '浏览器扫描', first_mes: 'function a(s){const i=s.stat_data.通讯录;i.备注;}function b(i){i.错误;}' }, ['通讯录']);
     assert.deepStrictEqual(JSON.parse(JSON.stringify(usage)), { 通讯录: ['备注'] });

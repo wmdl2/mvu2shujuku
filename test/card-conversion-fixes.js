@@ -53,7 +53,7 @@ test('规则迁移：英文外壳和 TS 字面量联合进入提示词与 CHECK'
     assert.ok(table.sourceData.note.includes('可选值：高 / 中 / 低'));
     assert.match(table.sourceData.ddl, /CHECK\(guanzhudu IN \('高', '中', '低'\)\)/);
     assert.ok(table.sourceData.note.includes('领取奖励后删除'));
-    assert.ok(!(result.card.data || result.card).character_book.entries.some(e => /\[M2SJK\]/.test(e.comment)));
+    assert.ok((result.card.data || result.card).character_book.entries.some(e => e.content === rule));
 });
 
 test('规则迁移：TS 枚举按路径归属，不污染别组同名字段', () => {
@@ -63,14 +63,14 @@ test('规则迁移：TS 枚举按路径归属，不污染别组同名字段', ()
     assert.ok(!/CHECK\(guanzhudu IN/.test(table.sourceData.ddl));
 });
 
-test('规则迁移：check 行内操作说明按文本解析，完整迁移后移除旧规则条目', () => {
+test('规则迁移：check 行内操作说明按文本解析，映射后继续保留源规则条目', () => {
     const checks = ['本轮推进时减1（op: delta, value: -1）', '触发事件时重置为15(op: replace, value: 15)'];
     const card = input(`变量更新规则:\n  状态:\n    冷却:\n      type: number\n      check:\n${checks.map(s => '        - ' + s).join('\n')}\n`, { 状态: { 冷却: 20 } });
     const shapes = core.parseMvuShapes(card);
     assert.deepStrictEqual(shapes.checks.状态.冷却, checks, '解析阶段保留业务原文，不吞掉冒号后的内容');
     const result = core.convert(card);
     const data = result.card.data || result.card;
-    assert.ok(!data.character_book.entries.some(e => /\[M2SJK\]/.test(e.comment)));
+    assert.ok(data.character_book.entries.some(e => checks.every(text => e.content.includes(text))));
     assert.ok(!result.report.warnings.some(w => /YAML 解析失败|完整静态规则/.test(w.message)));
     const note = Object.values(result.template).find(t => t.name === '状态表').sourceData.note;
     assert.match(note, /本轮推进时减1/);
@@ -163,7 +163,7 @@ test('顶层数字：数值 DDL、默认值和示例保留数字，小数往返�
     assert.match(t.sourceData.ddl, /neirong REAL NOT NULL DEFAULT 0 CHECK\(typeof\(neirong\) IN \('integer', 'real'\)\)/);
     assert.ok(!t.sourceData.ddl.includes('json_valid'));
     assert.match(t.sourceData.updateNode, /SET neirong = 1 WHERE/);
-    assert.match(t.sourceData.note, /不得直接照抄示例值/);
+    assert.doesNotMatch(t.sourceData.note, /SQL 示例仅在本次输出要求 SQL 脚本时适用/);
     assert.ok(!t.sourceData.note.includes('可写路径'));
     assert.ok(t.sourceData.note.includes('不可为负数'));
     const layout = JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout);
@@ -231,7 +231,7 @@ test('删除边界：显式更新标记不能删除混合业务，无法完整�
     const entries = (result.card.data || result.card).character_book.entries;
     for (const e of card.character_book.entries.filter(e => e.comment !== '[InitVar]')) {
         const expected = e.comment === '[mvu_update]变量输出格式'
-            ? '<% if (mvu2shujukuGetMessageVar("stat_data.开关")) { %>必须记住誓言。<UpdateVariable>[]</UpdateVariable><% } %>'
+            ? '<% if (getvar("stat_data.开关")) { %>必须记住誓言。<UpdateVariable>[]</UpdateVariable><% } %>'
             : e.content;
         const retained = entries.find(x => x.id === e.id);
         assert.ok(retained, e.comment + '：未承接正文必须完整保留');
@@ -241,7 +241,7 @@ test('删除边界：显式更新标记不能删除混合业务，无法完整�
     }
 });
 
-test('删除边界：专名变量处理指令集含限额业务时保留，纯输出标签仍删除', () => {
+test('删除边界：专名变量处理指令集含限额业务时保留，纯输出仅在请求视图排除', () => {
     const business = '积分每次最多增加 2 点；日期变化时先清零今日增量。';
     const output = '<UpdateVariable><JSONPatch>[]</JSONPatch></UpdateVariable>';
     const card = input('', { 状态: { 积分: 0, 今日增量: 0 } });
@@ -251,9 +251,10 @@ test('删除边界：专名变量处理指令集含限额业务时保留，纯�
     for (const mode of ['native', 'sqlite', 'both']) {
         const result = core.convert(card, { mode });
         const entries = (result.card.data || result.card).character_book.entries;
-        const mixed = entries.find(e => e.comment === '变量处理指令集');
+        const mixed = entries.find(e => e.content.includes(business));
         assert.ok(mixed && mixed.content.includes(business), mode + ' 保留未承接的业务限额');
         assert.strictEqual(mixed.enabled, true);
-        assert.ok(!entries.some(e => e.comment === '变量输出格式'), mode + ' 删除纯输出标签');
+        const pure = entries.find(e => e.content === output); assert(pure);
+        assert.strictEqual(core.fillEntryRequestView(pure), '', mode + ' 仅请求视图排除纯输出');
     }
 });

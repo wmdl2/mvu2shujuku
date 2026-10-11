@@ -11,10 +11,13 @@ function createTableWriter(dependencies) {
         debugOn: mvu2shujukuDebugOn = () => false,
         // 调用方验证对应布局、真实 note 和运行期渲染能力。缺少能力仍整笔拒绝。
         vwdNoteSyncSupported: vwdNoteSync = () => false,
-        debug: dbg = () => {}, warn: dbgWarn = () => {} } = dependencies;
+        debug: dbg = () => {}, warn: dbgWarn = () => {}, projectStat = value => value } = dependencies;
     if (typeof safeParseJson !== 'function') throw new Error('写入模块需要 JSON 解析函数');
     let statWriteHadFailure = false;
     function unmappedStatGroups(layout, previous, next) {
+        // A declared root container owns the source root itself. Its display
+        // group name is not a source variable; callers may pass raw stat_data.
+        if ((layout || []).some(entry => entry.publicFallback || entry.rootContainer)) return [];
         const mapped = new Set((Array.isArray(layout) ? layout : []).flatMap(entry => {
             const kind = entry.kind;
             const paths = entry.writePaths && entry.writePaths.length ? entry.writePaths : [entry.path && entry.path.length ? entry.path : [entry.group]];
@@ -36,6 +39,8 @@ function createTableWriter(dependencies) {
             else dbgWarn(' ' + label + ' 返回失败结果。');
         };
         const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
+        try { prevStat = projectStat(prevStat, entries); nextStat = projectStat(nextStat, entries); }
+        catch (error) { noteWriteFailure(error.message); return 0; }
         const unmapped = unmappedStatGroups(entries, prevStat, nextStat);
         if (unmapped.length) { noteWriteFailure('存在未映射的变量组：' + unmapped.join('、')); return 0; }
         // 登记、更新和新增共用同一判定，避免标量化的数字/布尔 pair 只在更新路径识别。
@@ -908,7 +913,7 @@ function createTableWriter(dependencies) {
                 continue;
             }
             if (op.overflowRemove) {
-                const ovcIdx = header.indexOf('_扩展数据');
+                const ovcIdx = header.indexOf(L.overflowCol || '_扩展数据');
                 if (ovcIdx === -1) continue;
                 let ovRow = 1;
                 if (E.kind === 'rows' || E.kind === 'nestedRows') {
@@ -924,7 +929,7 @@ function createTableWriter(dependencies) {
                 continue;
             }
             if (op.overflow) {
-                const ovcIdx = header.indexOf('_扩展数据');
+                const ovcIdx = header.indexOf(L.overflowCol || '_扩展数据');
                 if (ovcIdx === -1) {
                     dbgWarn(' 表「' + L.table + '」缺少「_扩展数据」列（旧模板/旧聊天），动态字段写入已跳过；请重新转换角色卡并新开聊天。');
                     continue;
@@ -955,11 +960,11 @@ function createTableWriter(dependencies) {
                         const ovObj = {};
                         setNestedValue(ovObj, op.mergePath || [op.mergeKey], op.value);
                         const ovCell = JSON.stringify(ovObj);
-                        const prevOv = nr2.cells['_扩展数据'];
+                        const prevOv = nr2.cells[L.overflowCol || '_扩展数据'];
                         if (prevOv) {
-                            try { const m = JSON.parse(prevOv); setNestedValue(m, op.mergePath || [op.mergeKey], op.value); nr2.cells['_扩展数据'] = JSON.stringify(m); } catch (e) { nr2.cells['_扩展数据'] = ovCell; }
+                            try { const m = JSON.parse(prevOv); setNestedValue(m, op.mergePath || [op.mergeKey], op.value); nr2.cells[L.overflowCol || '_扩展数据'] = JSON.stringify(m); } catch (e) { nr2.cells[L.overflowCol || '_扩展数据'] = ovCell; }
                         } else {
-                            nr2.cells['_扩展数据'] = ovCell;
+                            nr2.cells[L.overflowCol || '_扩展数据'] = ovCell;
                         }
                         continue;
                     }
@@ -1580,14 +1585,14 @@ function createTableWriter(dependencies) {
                         // 同一次写入可能同时有“改动态字段”和“删动态字段”：必须读当前单元格再
                         // 合并/删除，不能直接覆盖整列（否则先写后删会把本次新增也抹掉）。
                         const curRow = d.sheet && d.sheet.content && d.sheet.content[d.rowIndex];
-                        const ovcIdx = curRow && Array.isArray(d.header) ? d.header.indexOf('_扩展数据') : -1;
+                        const ovcIdx = curRow && Array.isArray(d.header) ? d.header.indexOf(d.layout.overflowCol || '_扩展数据') : -1;
                         if (curRow && ovcIdx !== -1) {
                             const cur = parseObj(curRow[ovcIdx]);
                             if (d.kind === 'overflow-remove') delete cur[d.removeKey];
                             else setNestedValue(cur, d.mergePath || [d.mergeKey], d.value);
                             const out = JSON.stringify(cur);
                             if (!sameValue(curRow[ovcIdx], out)) {
-                                const ook = await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, '_扩展数据', out));
+                                const ook = await Promise.resolve(api.updateCell(d.layout.table, d.rowIndex, d.layout.overflowCol || '_扩展数据', out));
                                 if (!ook) markWriteFailure('溢出列 updateCell(' + d.layout.table + ')');
                                 else curRow[ovcIdx] = out;
                             }

@@ -45,8 +45,8 @@ test('字段说明保真：只读业务描述可读，关联标识的独有说�
     const result = core.convert({ name: '说明职责', first_mes: '', character_book: { entries: [{ comment: '[InitVar]',
         content: JSON.stringify({ 状态: { _冷却: [2, '单位为回合；由脚本倒数'], 备注: '无' } }) }] } });
     const sheet = Object.values(result.template).find(s => s.name === '状态表');
-    assert.match(sheet.sourceData.note, /只读字段「_冷却」说明：单位为回合；由脚本倒数/);
-    assert.match(sheet.sourceData.note, /严禁更新/);
+    assert.match(sheet.sourceData.note, /_冷却：单位为回合；由脚本倒数/);
+    assert.doesNotMatch(sheet.sourceData.note, /下划线开头字段.*严禁更新/);
     const g = result.schema[0];
     g.kind = 'nestedRows'; g.keyCol = '备注'; g.parentKeyCol = '_冷却';
     g.ancestorKeyCols = [{ col: '_冷却', parentTable: '来源表', parentKeyCol: '标识' }];
@@ -70,12 +70,12 @@ test('表格提示：移除纯列映射但保留自定义规则，三种模式�
     }
 });
 
-test('表格提示：统一关联字段名称，完整定位并明确同步删除和标识变更', () => {
+test('旧布局表格提示：统一关联字段名称，完整定位并明确同步删除和标识变更', () => {
     const card = { name: '关系提示测试', first_mes: '开场', character_book: { entries: [
         { comment: '[InitVar]', content: JSON.stringify({ 关系: { 甲: { 背包: { 药: { 效果: { 疗愈: { 描述: '好' } } } } } } }) },
         { comment: '[mvu_update]', content: '变量更新规则:\n  关系:\n    type: |-\n      { [名称: string]: { 背包: { [物品: string]: { 效果: { [效果: string]: { 描述: string; } } } } } }' },
     ] } };
-    const result = core.convert(card, { mode: 'native' });
+    const result = require('./legacy-layout-fixture')(card, { mode: 'sqlite' });
     const child = Object.values(result.template).find(t => t && typeof t.name === 'string' && t.name.includes('背包'));
     assert.ok(child, '应生成关系子表');
     assert.match(child.sourceData.note, /关联字段：/);
@@ -86,6 +86,7 @@ test('表格提示：统一关联字段名称，完整定位并明确同步删�
         const sheet = Object.values(result.template).find(t => t.name === group.tableName);
         const locator = sheet.sourceData.note.split('\n').find(line => line.startsWith('定位记录须'));
         for (const key of [...group.ancestorKeyCols.map(a => a.col), group.keyCol]) assert.ok(locator.includes(`「${key}」`));
-        assert.doesNotMatch(Object.values(sheet.sourceData).join('\n'), /父键|祖先键|关系键|父表|子表|FOREIGN KEY/);
+        assert.doesNotMatch(sheet.sourceData.note, /父键|祖先键|关系键|父表|子表/);
+        assert.doesNotMatch(sheet.sourceData.ddl, /FOREIGN KEY/);
     }
 });

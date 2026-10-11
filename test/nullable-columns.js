@@ -113,7 +113,8 @@ test('nullable 列：嵌套关系行的 null、缺失与后续写入保持独立
     const stat = { 关系: { 甲: { 好感: 0, 背包: { 钥匙: { 备注: null }, 钱包: {} } } } };
     const rule = '变量更新规则:\n  关系:\n    type: |-\n      { [名称: string]: { 好感: number; 背包: { [物品: string]: { 备注: string; } }; } }';
     const { layout, template } = convert(stat, rule);
-    assert.ok(layout.some(l => l.kind === 'nestedRows'));
+    assert.ok(layout.some(l => l.group === '关系' && l.kind === 'singleton' && l.valueCol === '内容'),
+        '复杂关系保存在完整 JSON 中；以下继续验证各记录的 null、缺失和类型');
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, stat);
     const next = structuredClone(stat);
     next.关系.甲.背包.钥匙.备注 = '';

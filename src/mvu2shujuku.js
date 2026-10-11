@@ -87,6 +87,21 @@
         if (typeof require === 'function') return require('./result-view.js');
         throw new Error('转换结果视图未加载，请使用构建后的 index.js');
     }
+    function getStatStorageFactory() {
+        if (typeof root.__MVU2SHUJUKU_STAT_STORAGE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_STAT_STORAGE_FACTORY__;
+        if (typeof require === 'function') return require('./stat-storage.js');
+        throw new Error('变量存储模块未加载');
+    }
+    function getStateTransferFactory() {
+        if (typeof root.__MVU2SHUJUKU_STATE_TRANSFER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_STATE_TRANSFER_FACTORY__;
+        if (typeof require === 'function') return require('./state-transfer.js');
+        throw new Error('状态存档模块未加载');
+    }
+    function getMvuSchemaFactory() {
+        if (typeof root.__MVU2SHUJUKU_MVU_SCHEMA_FACTORY__ === 'function') return root.__MVU2SHUJUKU_MVU_SCHEMA_FACTORY__;
+        if (typeof require === 'function') return require('./vendor/mvu-schema.js');
+        throw new Error('MVU Schema 模块未加载');
+    }
     function getCardApiFactory() {
         if (typeof root.__MVU2SHUJUKU_CARD_API_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CARD_API_FACTORY__;
         if (typeof require === 'function') return require('./card-api.js');
@@ -167,23 +182,31 @@
     let sharedUpdateRuleMigration;
     function getUpdateRuleMigration() {
         if (!sharedUpdateRuleMigration) {
-            const libraries = root.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__ || (typeof require === 'function' && require('./vendor/schema-engine-libs.js'));
-            sharedUpdateRuleMigration = getUpdateRuleMigrationFactory()({ parseJs: libraries.acorn.parse });
+            sharedUpdateRuleMigration = getUpdateRuleMigrationFactory()({
+                YAML: getMvuYamlLibs().YAML,
+                isProtocolRule: getSchemaLayout().isMvuOutputProtocolRule,
+            });
         }
         return sharedUpdateRuleMigration;
     }
-    function migrateWorldbookUpdateRules(content, options) { return getUpdateRuleMigration().migrate(content, options); }
-    function normalizeUpdateRuleText(text, context) {
-        if (!context.group) return text;
-        const resolver = createMvuRulePathResolver([context.group], {});
-        const result = getUpdateRuleMigration().normalizeRule(text, { resolvePath: resolver.resolve,
-            jsonLocal: !!(context.jsonContainer || context.pathSpecification && context.pathSpecification.jsonPath) });
-        if (result.issues.length) {
-            if (!context.group._unresolvedProtocolRules) Object.defineProperty(context.group, '_unresolvedProtocolRules', { value: new Set(), configurable: true });
-            result.issues.forEach(issue => context.group._unresolvedProtocolRules.add(issue));
-        }
-        return result.text;
+    function normalizeUpdateRuleText(text) { return text; }
+    function prepareFillPrompt(code, card) {
+        const data = card && (card.data || card);
+        if (data?.extensions?.mvu2shujuku?.fillAdapterVersion !== 1) return { text: code, adapted: false };
+        const views = new Map((data.extensions.mvu2shujuku.fillViewEntries || []).map(item => [item.contentHash, item]));
+        const entries = (data.character_book?.entries || []).map(entry => {
+            if (entry.enabled === false || /\[mvu[ _-]?plot\]|\[mvuplot\]/i.test(String(entry.comment || ''))) return entry;
+            const view = views.get(stableHash(String(entry.content || '').replace(/\r\n/g, '\n').trim())) || entry.extensions?.mvu2shujukuFillView;
+            return view ? { ...entry, extensions: { ...entry.extensions, mvu2shujukuFillView: view } } : entry;
+        });
+        return getUpdateRuleMigration().preparePrompt(code, entries);
     }
+    function fillAdaptationGuidance() { return getUpdateRuleMigration().guidance; }
+    function fillEntryRequestView(entry) {
+        if (!entry?.extensions?.mvu2shujukuFillView) return String(entry?.content || '');
+        return getUpdateRuleMigration().plan(entry.content, { outputOnly: entry.extensions.mvu2shujukuFillView.outputOnly }).text;
+    }
+
     let sharedSheetIdentity;
     function physicalTableName(name) {
         if (!sharedSheetIdentity) sharedSheetIdentity = getSheetIdentityFactory()();
@@ -193,20 +216,30 @@
         if (!sharedSchemaLayout) sharedSchemaLayout = getSchemaLayoutFactory()({
             createJsSource: getJsSourceFactory(), getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf,
             physicalTableName,
-            maskJsStringsAndComments, createStatusUsage: getStatusUsageFactory(), isPromptVisibleColumn, isMvuOutputDocument,
+            maskJsStringsAndComments, ejsScriptBlocks, createStatusUsage: getStatusUsageFactory(), isPromptVisibleColumn, isMvuOutputDocument,
             vwdExperimental: isVwdExperimental,
             canValidateRegisteredSchema: source => connectRegisteredSchema(source).count > 0,
         });
         return sharedSchemaLayout;
     }
     let sharedEjsTransform = null;
+    let sharedEjsParser = null;
+    function getEjsParserFactory() {
+        if (typeof root.__MVU2SHUJUKU_EJS_PARSER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_EJS_PARSER_FACTORY__;
+        if (typeof require === 'function') return require('./vendor/ejs-parser.js');
+        throw new Error('EJS 解析库未加载，请使用构建后的 index.js');
+    }
+    function getEjsParser() { return sharedEjsParser || (sharedEjsParser = getEjsParserFactory()()); }
     function getEjsTransformFactory() {
         if (typeof root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__ === 'function') return root.__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__;
         if (typeof require === 'function') return require('./ejs-transform.js');
         throw new Error('EJS 转换模块未加载，请使用构建后的 index.js');
     }
     function getEjsTransform() {
-        if (!sharedEjsTransform) sharedEjsTransform = getEjsTransformFactory()();
+        if (!sharedEjsTransform) sharedEjsTransform = getEjsTransformFactory()({
+            ejs: getEjsParser(),
+            acorn: (root.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__ || (typeof require === 'function' ? require('./vendor/schema-engine-libs.js') : {})).acorn,
+        });
         return sharedEjsTransform;
     }
     function findJsCallEnd(...args) { return getEjsTransform().findJsCallEnd(...args); }
@@ -226,7 +259,7 @@
         if (!sharedTableCodec) sharedTableCodec = getTableCodecFactory()(source => {
             const libs = getMvuYamlLibs();
             return libs && typeof libs.jsonrepair === 'function' ? libs.jsonrepair(source) : null;
-        });
+        }, getStatStorageFactory()());
         return sharedTableCodec;
     }
     let sharedTableWriter = null;
@@ -244,6 +277,7 @@
         if (!sharedTableWriter) sharedTableWriter = getTableWriterFactory()({
             parseJson: safeParseJson, debugOn: mvu2shujukuDebugOn, debug: dbg, warn: dbgWarn,
             vwdNoteSyncSupported: canWriteVwdDescriptions,
+            projectStat: (stat, layout) => getStatStorageFactory()().project(stat, layout),
             readCachedTemplate: () => {
                 const holder = typeof window !== 'undefined' ? window : root;
                 return holder && holder.__mvu2shujukuTemplateCache;
@@ -844,23 +878,37 @@
         return String(v == null ? '' : v).replace(/'/g, "''");
     }
 
+    // 提示宿主使用字符串替换插入 SQL；避免 SQL 字面量被 JS 的 $ 替换标记解释。
+    // SQLite 自身执行表达式；普通字面量保持原写法，不另实现 SQL 语义。
+    function sqlTextLiteral(value) {
+        const text = String(value == null ? '' : value);
+        const quoted = `'${sqlQuote(text)}'`;
+        if (!/\$['&`$]/.test(quoted)) return quoted;
+        const terms = [];
+        text.split('$').forEach((part, index) => {
+            if (index) terms.push('char(36)');
+            if (part) terms.push(`'${sqlQuote(part)}'`);
+        });
+        return '(' + terms.join(' || ') + ')';
+    }
+
     function jsonPathChecksSql(column) {
         if (!Array.isArray(column.jsonPathChecks) || !column.jsonPathChecks.length) return '';
         let initial;
         try { initial = JSON.parse(column.value); } catch (_) {}
         const initialValues = Array.isArray(column.initialJsonValues) ? column.initialJsonValues : [initial];
-        const literal = v => typeof v === 'number' ? String(v) : typeof v === 'boolean' ? (v ? '1' : '0') : `'${sqlQuote(v)}'`;
+        const literal = v => typeof v === 'number' ? String(v) : typeof v === 'boolean' ? (v ? '1' : '0') : sqlTextLiteral(v);
         const checks = [];
         for (const check of column.jsonPathChecks || []) {
             const path = '$' + check.path.map(key => typeof key === 'number' && Number.isInteger(key) && key >= 0
                 ? '[' + key + ']' : '.' + JSON.stringify(String(key))).join('');
-            const value = `json_extract(${column.ident}, '${sqlQuote(path)}')`;
-            const type = `json_type(${column.ident}, '${sqlQuote(path)}')`;
+            const value = `json_extract(${column.ident}, ${sqlTextLiteral(path)})`;
+            const type = `json_type(${column.ident}, ${sqlTextLiteral(path)})`;
             const fallbacks = [...new Set(initialValues.map(initial => {
                 let value = initial;
                 for (const key of check.path) value = value == null ? undefined : value[key];
                 return value;
-            }).filter(value => value !== undefined && value !== null && ['string', 'number', 'boolean'].includes(typeof value)))];
+            }).filter(value => value !== undefined && value !== null && ['string', 'number', 'boolean'].includes(typeof value)).concat(check.outputFallbacks || []))];
             const wrap = expr => ` CHECK(CASE WHEN ${column.ident} = '' OR NOT json_valid(${column.ident}) THEN 1 WHEN ${type} IS NULL OR ${type} = 'null' THEN 1 ELSE (${expr}) END)`;
             if (check.range && check.range.length === 2 && check.range.every(Number.isFinite)) {
                 let expr = `${value} BETWEEN ${check.range[0]} AND ${check.range[1]}`;
@@ -893,7 +941,7 @@
             const isKey = i === 0 && group.kind === 'rows';
             let def = `  ${c.ident} ${c.type}`;
             const range = c.range || null;
-            const extras = Array.isArray(group.extraAllowed && group.extraAllowed[c.ident]) ? group.extraAllowed[c.ident] : [];
+            const extras = [...new Set([...(Array.isArray(group.extraAllowed && group.extraAllowed[c.ident]) ? group.extraAllowed[c.ident] : []), ...(c.outputFallbacks || [])])];
             let dv = c.value;
             // 默认值若越界也加入放行列表（不修改初始值）；非数字哨兵（如“无”）同样放行
             if (range) {
@@ -909,23 +957,23 @@
             }
             if ((c.logicalType === 'jsonScalarOptional' || c.logicalType === 'jsonPairOptional')) {
                 const encodedDefault = dv === undefined ? '' : JSON.stringify(dv);
-                def += ` NOT NULL DEFAULT '${sqlQuote(encodedDefault)}'`;
+                def += ` NOT NULL DEFAULT ${sqlTextLiteral(encodedDefault)}`;
                 if (includeCheck) {
                     def += ` CHECK(${c.ident} = '' OR (json_valid(${c.ident}) AND json_type(${c.ident}) IN ('null', 'text', 'integer', 'real', 'true', 'false')))`;
-                    const valueExpr = `json_extract(${c.ident}, '$')`;
+                    const valueExpr = `json_extract(${c.ident}, ${sqlTextLiteral("$")})`;
                     const emptyExpr = `${c.ident} = '' OR json_type(${c.ident}) = 'null'`;
                     if (range) {
-                        const allowed = extras.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`);
+                        const allowed = extras.map(v => typeof v === 'number' ? v : sqlTextLiteral(v));
                         def += ` CHECK(${emptyExpr} OR ${valueExpr} BETWEEN ${range[0]} AND ${range[1]}${allowed.length ? ` OR ${valueExpr} IN (${allowed.join(', ')})` : ''})`;
                     }
                     if (c.enum && c.enum.length <= 8) {
                         const allowed = [...new Set([...c.enum, ...(dv === undefined || dv === null ? [] : [dv]), ...extras])];
-                        if (allowed.length) def += ` CHECK(${emptyExpr} OR ${valueExpr} IN (${allowed.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`).join(', ')}))`;
+                        if (allowed.length) def += ` CHECK(${emptyExpr} OR ${valueExpr} IN (${allowed.map(v => typeof v === 'number' ? v : sqlTextLiteral(v)).join(', ')}))`;
                     }
                 }
             } else if (c.logicalType === 'jsonObjectOptional') {
                 const encodedDefault = c.jsonDefaultMissing === true || dv === undefined ? '' : (typeof dv === 'string' ? dv : JSON.stringify(dv));
-                def += ` NOT NULL DEFAULT '${sqlQuote(encodedDefault)}'`;
+                def += ` NOT NULL DEFAULT ${sqlTextLiteral(encodedDefault)}`;
                 if (includeCheck) {
                     const kinds = c.jsonKind === 'any' ? "'array', 'object', 'text', 'integer', 'real', 'true', 'false'" : c.jsonKind === 'array' ? "'array'" : "'object'";
                     def += ` CHECK(${c.ident} = '' OR (json_valid(${c.ident}) AND json_type(${c.ident}) IN ('null', ${kinds})))`;
@@ -939,7 +987,7 @@
                     defaultExpr = dv;
                 } else if (typeof dv === 'string' && dv.trim() !== '') {
                     const nv = Number(dv);
-                    defaultExpr = Number.isFinite(nv) ? nv : `'${sqlQuote(dv)}'`;
+                    defaultExpr = Number.isFinite(nv) ? nv : sqlTextLiteral(dv);
                 } else if (range) {
                     // 空/缺省值不能用 0 做默认，否则 CHECK(1~100) 会在 INSERT 省略该列时失败；
                     // 改为合法区间下限作为安全默认。
@@ -951,7 +999,7 @@
                 if (range && includeCheck) {
                     def += ` CHECK(${c.ident} BETWEEN ${range[0]} AND ${range[1]}`;
                     if (extras.length) {
-                        const allowed = extras.map(v => typeof v === 'number' ? v : `'${sqlQuote(v)}'`);
+                        const allowed = extras.map(v => typeof v === 'number' ? v : sqlTextLiteral(v));
                         def += ` OR ${c.ident} IN (${allowed.join(', ')})`;
                     }
                     def += ')';
@@ -959,7 +1007,7 @@
             } else {
                 let dvs = dv === undefined || dv === null ? '' : String(dv);
                 if (c.isObject && dvs === '') dvs = c.jsonKind === 'array' ? '[]' : '{}';
-                def += ` NOT NULL DEFAULT '${sqlQuote(dvs)}'`;
+                def += ` NOT NULL DEFAULT ${sqlTextLiteral(dvs)}`;
                 if (isKey) def += ' UNIQUE';
                 // 整组 JSON 表的内容列：SQLite 模式下用 json_valid CHECK 保证整列 JSON 合法
                 // （updateCell/insertRow 的 SQL 由 SQLite 执行时会真正校验；native 模式不生效，见报告）
@@ -976,7 +1024,7 @@
                     const allowed = [...c.enum];
                     if (dvs !== '' && !allowed.includes(dvs)) allowed.push(dvs);
                     for (const ex of extras) if (!allowed.includes(ex)) allowed.push(ex);
-                    def += ` CHECK(${c.ident} IN (${allowed.map(v => `'${sqlQuote(v)}'`).join(', ')}))`;
+                    def += ` CHECK(${c.ident} IN (${allowed.map(v => sqlTextLiteral(v)).join(', ')}))`;
                 }
             }
             // 插件校验要求 DDL 列注释与 content 表头逐字一致，描述只写进 note，不拼进注释；
@@ -1016,14 +1064,14 @@
             || (Array.isArray(column.path) && column.path.some(part => String(part).startsWith('$')));
     }
     function isUnderscoreReadonlyColumn(group, column) {
-        return column && (String(column.zh || '').startsWith('_')
-            || (!isRelationshipKeyColumn(group, column) && Array.isArray(column.path)
-                && column.path.some(part => String(part).startsWith('_'))));
+        // Names do not establish ownership. Only resolved original declarations
+        // contribute a readonly prompt; no physical write permission is added.
+        return false;
     }
     function isAiPromptColumn(group, column) {
         return column && !group.aiReadonly && !column.aiReadonly && column.zh !== '_扩展数据'
             && !isUnderscoreReadonlyColumn(group, column)
-            && !isDollarPrivateColumn(group, column);
+            && (group.privateRoot || !isDollarPrivateColumn(group, column));
     }
 
     // 模型确实能看到该列说明（= 会进 buildNote 的【字段说明与规则】）。VWD 只登记
@@ -1040,7 +1088,7 @@
     function getTablePrompts() {
         if (!sharedTablePrompts) sharedTablePrompts = getTablePromptsFactory()({
             describeGroup, isRelationshipKeyColumn, isDollarPrivateColumn,
-            isUnderscoreReadonlyColumn, isAiPromptColumn, sqlQuote, schemaExample, vwdToken,
+            isUnderscoreReadonlyColumn, isAiPromptColumn, sqlTextLiteral, schemaExample, vwdToken,
             normalizeUpdateRuleText,
         });
         return sharedTablePrompts;
@@ -1196,8 +1244,19 @@
             || (Number(parts[1]) === 8 && Number(parts[2]) >= 5);
     }
 
+    function sqliteConversionMode(opts = {}, report) {
+        if (opts.mode && !['sqlite', 'native', 'both'].includes(opts.mode)) {
+            throw new Error('不支持的转换模式：' + opts.mode + '；转换结果仅支持 SQLite。');
+        }
+        // 旧调用参数只作为迁移入口接受，不再生成原生或双模式模板。
+        if (opts.mode && opts.mode !== 'sqlite' && report) {
+            report.warn('转换模式 ' + opts.mode + ' 已停用，本次生成 SQLite 模板；使用时请将数据库设为 SQLite 模式。');
+        }
+        return 'sqlite';
+    }
+
     function generateTemplate(schema, opts = {}) {
-        const mode = opts.mode || 'both';
+        const mode = sqliteConversionMode(opts, opts.report);
         const includeCheck = opts.ddlIncludeCheck !== false;
         const report = opts.report || createReport();
         const targetVersion = opts.targetSpVersion === undefined ? '9.2.5' : opts.targetSpVersion;
@@ -1253,7 +1312,7 @@
                 }
             }
             g.extraAllowed = extraAllowed;
-            const hiddenColumns = g.columns.filter(c => c.zh === '_扩展数据' || isDollarPrivateColumn(g, c));
+            const hiddenColumns = g.columns.filter(c => c.zh === '_扩展数据' || !g.privateRoot && isDollarPrivateColumn(g, c));
             if (hiddenColumns.length && !canHidePhysicalColumns && !warnedHiddenColumnGate) {
                 const knownVersion = /^v?\d+\.\d+(?:\.\d+){0,2}$/.test(String(targetVersion || '').trim());
                 report.warn(knownVersion
@@ -1277,7 +1336,7 @@
             }
             for (let ci = 0; ci < g.columns.length; ci++) {
                 const column = g.columns[ci];
-                if (hiddenColumns.includes(column) || !(column.isObject || g.kind === 'json')) continue;
+                if (g.fullStatContainer || hiddenColumns.includes(column) || !(column.isObject || g.kind === 'json')) continue;
                 const hasPrivate = (g.rows || []).some(row => {
                     try { const value = row[ci + 1]; return hasPrivateJsonKey(typeof value === 'string' ? JSON.parse(value) : value); }
                     catch (_) { return false; }
@@ -1320,12 +1379,9 @@
                 return mode === 'native' ? prose.split('\nSQL示例:')[0] : prose;
             };
             const triggerNodes = Object.fromEntries(['delete', 'update', 'insert'].map(kind => [kind, trigger(kind)]));
-            // 使用范围与禁止照抄的说明每表只写一次，各操作仍保留具体 SQL。
-            const sqlNotice = Object.values(triggerNodes).some(text => text.includes('\nSQL示例:'))
-                ? `\nSQL 示例仅在本次输出要求 SQL 脚本时适用；记录标识和新值必须按当前表格、正文及字段规则确定，不得直接照抄示例值。` : '';
             const vwdSlotPlan = vwdAllowed ? vwdSlotPlanForGroup(g) : null;
             const ruleReceipts = [];
-            const noteText = buildNote(g, { mode, vwdSlotPlan, onRule: receipt => ruleReceipts.push(receipt) }) + sqlNotice;
+            const noteText = buildNote(g, { mode, vwdSlotPlan, onRule: receipt => ruleReceipts.push(receipt) });
             Object.defineProperty(g, '_emittedRules', { value: ruleReceipts, configurable: true });
             // 落进 sourceData/卡的是静态说明版：没有运行期覆盖时与旧版逐字节相同，
             // 插槽只存在于内部布局，模型请求不会看到 \u0000VWD·n\u0000。
@@ -1345,7 +1401,8 @@
                     ddl: buildDdl(g, { includeCheck }),
                 },
                 content,
-                updateConfig: { skipFloors: -1, ...(g.aiReadonly ? { updateFrequency: 0 } : {}) },
+                updateConfig: { skipFloors: -1, ...(g.aiReadonly ? { updateFrequency: 0 } : {}),
+                    ...(g.fullStatContainer ? { sendRowsSqlTemplate: getStatStorageFactory()().sendRowsSql(g) } : {}) },
                 exportConfig: { enabled: false, splitByRow: false },
                 orderNo: idx,
             };
@@ -1572,6 +1629,7 @@
             convertedAt: opts.bridgeConvertedAt || '',
             layout: JSON.parse(buildLayoutJson(buildLayout(schema))),
             templateBase64: opts.templateB64 || toBase64(JSON.stringify(template)),
+            ...(opts.statStorage ? { statStorage: opts.statStorage } : {}),
             installMvuShim: opts.installMvuShim !== false,
             statusPlaceholderNeeded: !!opts.statusPlaceholderNeeded,
         };
@@ -1642,11 +1700,26 @@
         } catch (e) { return false; }
     }
 
-    function createMvuRulePathResolver(schema, initvar) {
+    function createMvuRulePathResolver(schema, initvar, shapeInfo) {
         const layout = buildLayout(schema).entries;
-        const prefixOf = entry => entry.kind === 'pathArray' || entry.kind === 'nestedArray'
+        const prefixOf = entry => entry.rootContainer ? [] : entry.kind === 'pathArray' || entry.kind === 'nestedArray'
             ? entry.path : entry.kind === 'nestedRows' ? [...entry.parentPath, entry.childKey] : (entry.writePaths && entry.writePaths[0] || [entry.group]);
         const owners = layout.map(entry => ({ entry, prefix: prefixOf(entry), group: schema.find(g => g.tableName === entry.table) }));
+        const declaredRecord = path => {
+            const at = (node, parts) => {
+                for (const part of parts) node = node?.dynamic ? node.value : node?.fields?.[part];
+                return node;
+            };
+            let node = at(shapeInfo?.zodSchemaRoot, path);
+            if (!node) for (const rec of shapeInfo?.yamlTypePaths || []) {
+                if (rec.path.length <= path.length && rec.path.every((part, i) => part === path[i] ||
+                    part === '*' || /^<[^>]+>$/.test(part))) {
+                    node = at(rec.node, path.slice(rec.path.length));
+                    if (node) break;
+                }
+            }
+            return !!(node?.kind === 'object' && node.dynamic);
+        };
         const partMatches = (pattern, part) => part !== undefined && (pattern === part || pattern.includes('*') &&
             new RegExp('^' + pattern.split('*').map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$').test(part));
         const matches = (prefix, path) => prefix.every((part, i) => path[i] !== undefined && partMatches(path[i], part));
@@ -1659,6 +1732,13 @@
                     jsonValue: column && (column.isObject || /^json/.test(column.logicalType || '')) };
             }
             const suffix = path.slice(owner.prefix.length);
+            if (group.kind === 'singleton' && owner.entry.valueCol) {
+                const value = group.columns.find(c => c.zh === owner.entry.valueCol);
+                const mapped = owner.entry.cols.find(c => c.zh === owner.entry.valueCol);
+                if (value?.isObject && (owner.entry.rootContainer || mapped?.path?.length === owner.prefix.length
+                    && matches(owner.prefix, mapped.path))) return {
+                    label: `「${value.zh}」`, table: group.tableName, json: true, path: suffix };
+            }
             if (['array', 'pathArray', 'nestedArray'].includes(group.kind) && suffix.length === 1 && /^(?:-|\d+)$/.test(suffix[0]))
                 return { label: suffix[0] === '-' ? '本表的新记录' : `本表中原数组索引为 ${suffix[0]} 的记录`, table: group.tableName, json: false };
             if (['array', 'pathArray', 'nestedArray'].includes(group.kind) && suffix.length === 1 && /^(?:\{[^{}]+\}|<[^<>]+>|\*)$/.test(suffix[0]))
@@ -1677,6 +1757,14 @@
             // An opaque record value is one JSON cell per identity, not a
             // flattened object field named after the physical value column.
             if (row && owner.entry.scalarValueCol && suffix.length) {
+                const scalar = columns.find(c => c.zh === owner.entry.scalarValueCol);
+                if (scalar && !scalar.isObject && !/^json/.test(scalar.logicalType || '') && suffix.length === 1) {
+                    const record = suffix[0];
+                    if (!record) return null;
+                    const wildcard = /^(?:\{[^{}]+\}|<[^<>]+>|\*)$/.test(record);
+                    return { label: (wildcard ? '对应记录的' : `记录「${record}」的`) + `「${scalar.zh}」`,
+                        table: group.tableName, json: false, column: scalar, recordSpecific: wildcard ? '' : record };
+                }
                 const value = columns.find(c => c.zh === owner.entry.scalarValueCol &&
                     (c.isObject || c.logicalType === 'jsonObjectOptional'));
                 if (value) {
@@ -1695,7 +1783,7 @@
                 const record = columnPath[0];
                 if (!/^(?:\{[^{}]+\}|<[^<>]+>|\*)$/.test(record)) {
                     const initial = owner.prefix.reduce((v, p) => v && v[p], initvar);
-                    if (!initial || !Object.prototype.hasOwnProperty.call(initial, record)) return null;
+                    if ((!initial || !Object.prototype.hasOwnProperty.call(initial, record)) && !declaredRecord(owner.prefix)) return null;
                     recordSpecific = record;
                 }
                 columnPath = columnPath.slice(1);
@@ -1703,6 +1791,12 @@
             const direct = columns.find(c => columnPathOf(c).length === columnPath.length && matches(columnPathOf(c), columnPath));
             if (direct) return { label: (recordSpecific ? `记录「${recordSpecific}」的` : '') + `「${direct.zh}」`,
                 table: group.tableName, json: false, jsonValue: direct.isObject || /^json/.test(direct.logicalType || ''), column: direct, recordSpecific };
+            if (row && suffix.length === 1 && !owner.entry.scalarValueCol) {
+                const initial = owner.prefix.reduce((v, p) => v && v[p], initvar);
+                if (declaredRecord(owner.prefix) || initial && Object.prototype.hasOwnProperty.call(initial, suffix[0])) return {
+                    label: `键名为「${suffix[0]}」的完整记录`, table: group.tableName, json: false,
+                    recordSpecific: suffix[0], objectFields: Object.fromEntries(columns.map(c => [columnPathOf(c).join('.'), c.zh])) };
+            }
             const containers = columns.filter(c => (c.isObject || c.logicalType === 'jsonObjectOptional') && matches(columnPathOf(c), columnPath))
                 .sort((a, b) => columnPathOf(b).length - columnPathOf(a).length);
             if (containers.length) return { label: (recordSpecific ? `记录「${recordSpecific}」的` : '') + `「${containers[0].zh}」`, table: group.tableName,
@@ -1719,7 +1813,21 @@
             const candidates = owners.filter(o => matches(o.prefix, path));
             const depth = Math.max(0, ...candidates.map(o => o.prefix.length));
             const results = candidates.filter(o => o.prefix.length === depth).map(owner => ({ owner, binding: bind(owner, path) }));
-            if (!depth || results.length !== 1 || !results[0].binding) return null;
+            if (!depth || results.length !== 1) return null;
+            if (!results[0].binding) {
+                const owner = results[0].owner;
+                const holes = path.map((p, i) => /^(?:\[[^\[\]]+\]|\{[^{}]+\}|<[^<>]+>)$/.test(p) ? i : -1).filter(i => i >= 0);
+                // A finite selector inside a fixed object can address known
+                // sibling branches, but cannot select a root, table or leaf.
+                if (holes.length !== 1 || holes[0] < depth || holes[0] === path.length - 1 ||
+                    owner.entry.kind === 'rows' || owner.entry.kind === 'nestedRows') return null;
+                const index = holes[0];
+                const columns = owner.group.columns.filter(c => !c.isOverflow && Array.isArray(c.path) &&
+                    c.path.length === path.length && c.path.every((p, i) => i === index || p === path[i]));
+                if (columns.length < 2 || columns.some(c => c.aiReadonly) && columns.some(c => !c.aiReadonly)) return null;
+                return { label: `「${owner.group.tableName}」中按「${path[index]}」选择对应的` + columns.map(c => `「${c.zh}」`).join('、') + '列',
+                    table: owner.group.tableName, json: false, readonly: !!(owner.group.aiReadonly || columns.every(c => c.aiReadonly)) };
+            }
             const { owner, binding } = results[0];
             return { ...binding, label: `「${owner.group.tableName}」的` + labelOf(binding, owner.group),
                 readonly: !!(owner.group.aiReadonly || binding.column && binding.column.aiReadonly) };
@@ -1727,11 +1835,10 @@
         return { owners, partMatches, matches, bind, labelOf, resolve };
     }
 
-    function attachProseMvuRules(schema, shapeInfo, entries, initvar, scripts = [], report) {
+    function attachProseMvuRules(schema, shapeInfo, entries, initvar, scripts = [], report, options = {}) {
         const { owners, partMatches, matches, bind, labelOf } = createMvuRulePathResolver(schema, initvar);
-        if (report) report.note('原变量路径映射（仅供核对，不注入填表说明）：' +
+        if (report && options.reportMapping !== false) report.note('原变量路径映射（仅供核对，不注入填表说明）：' +
             owners.map(o => '/' + o.prefix.join('/') + ' → ' + o.group.tableName).join('；') + '。');
-        for (const owner of owners) if (/^[_$]/.test(String(owner.prefix[0] || ''))) owner.group.aiReadonly = true;
         const specifications = (shapeInfo.proseRuleDocuments || []).flatMap(doc => doc.sections).filter(s => s.path && !s.unmapped);
         const conflicting = new Set();
         for (const readonly of specifications.filter(s => s.readonly)) for (const writable of specifications.filter(s => !s.readonly && !s.permissionUnresolved)) {
@@ -1755,7 +1862,7 @@
                 for (const path of pointers) {
                     const candidates = owners.filter(o => o.prefix.every((part, i) => path[i] !== undefined && partMatches(path[i], part)));
                     const depth = Math.max(0, ...candidates.map(o => o.prefix.length));
-                    if (!depth) { unresolved = true; continue; }
+                    if (!candidates.length) { unresolved = true; continue; }
                     for (const o of candidates.filter(o => o.prefix.length === depth)) {
                         const binding = bind(o, path);
                         if (!binding) { unresolved = true; continue; }
@@ -1776,7 +1883,15 @@
                     }
                 }
                 if (!pointers.length) {
-                    const candidates = owners.filter(o => o.prefix.join('.') === section.heading);
+                    let candidates = owners.filter(o => o.prefix.join('.') === section.heading);
+                    if (candidates.length === 1) section.resolvedHeadingPath = candidates[0].prefix.slice();
+                    else if (Array.isArray(section.resolvedHeadingPath)) {
+                        // This heading was uniquely bound before ownership layout
+                        // planning. Rebind that exact path, without interpreting prose.
+                        candidates = owners.filter(o => matches(o.prefix, section.resolvedHeadingPath));
+                        const depth = Math.max(0, ...candidates.map(o => o.prefix.length));
+                        candidates = candidates.filter(o => o.prefix.length === depth);
+                    }
                     if (candidates.length === 1) targets.add(candidates[0].group);
                 }
                 if (!targets.size || unresolved) { section.tables = []; continue; }
@@ -1795,12 +1910,13 @@
                             (section.readonly && group.aiReadonly ? { label: '本表', table: group.tableName, json: false } : null);
                         if (!binding) continue;
                         group.pathSpecifications = [...(group.pathSpecifications || []), { ...section, label: labelOf(binding, group),
-                            jsonPath: binding.json, jsonValue: binding.jsonValue, recordSpecific: binding.recordSpecific }];
+                            jsonPath: binding.json, jsonValue: binding.jsonValue, recordSpecific: binding.recordSpecific,
+                            jsonBindingLabel: binding.label, jsonRelativePath: binding.path || [] }];
                         if (section.readonly && binding.column && !binding.recordSpecific) binding.column.aiReadonly = true;
                     } else {
                         group.proseChecks = [...new Set([...(group.proseChecks || []), section.text])];
                         const aliases = bindings.map(b => ({ path: '/' + b.path.join('/'), label: labelOf(b.binding, group),
-                            objectFields: b.binding.objectFields, singleton: b.owner.group.kind === 'singleton' }));
+                            objectFields: b.binding.objectFields, jsonPath: b.binding.json, singleton: b.owner.group.kind === 'singleton' }));
                         group.proseAliases = Object.assign(group.proseAliases || {}, { [section.text]: aliases });
                     }
                     if (!section.readonly && !section.permissionUnresolved) group.jsonAiWritable = true;
@@ -1814,144 +1930,6 @@
                 !isDollarPrivateColumn(group, c) && !isUnderscoreReadonlyColumn(group, c));
             if (fields.length && fields.every(c => c.aiReadonly)) group.aiReadonly = true;
         }
-    }
-
-    function splitMigratedMvuRules(content, schema, shapeInfo, template) {
-        const prose = (shapeInfo.proseRuleDocuments || []).find(doc => doc.source === content);
-        if (prose) {
-            const kept = [], sheets = Object.values(template || {});
-            let removed = 0;
-            for (const section of prose.sections) {
-                const migrated = section.tables.length && section.tables.every(name => {
-                    const group = schema.find(g => g.tableName === name), sheet = sheets.find(s => s && s.name === name);
-                    return (group._emittedRules || []).some(r => r.text === section.text && String(sheet && sheet.sourceData && sheet.sourceData.note || '').includes(r.rendered));
-                });
-                if (migrated) removed++;
-                else kept.push(prose.outputDocument ? section.text : prose.body.slice(section.start, section.end));
-            }
-            const remainder = prose.prefix + kept.join(prose.outputDocument ? '\n' : '');
-            return { removed, content: kept.length ? prose.outputDocument ? remainder : getSchemaLayout().wrapMvuRuleDocument(content, remainder) : '' };
-        }
-        if (!isPureMvuRuleDocument(content)) return null;
-        try {
-            const YAML = getMvuYamlLibs().YAML;
-            const doc = YAML.parseDocument(prepareMvuRuleYaml(content), { merge: true });
-            if (doc.errors.length) return null;
-            const value = doc.toJS();
-            const wrapper = Object.keys(value).find(k => k === '变量更新规则' || k === 'variables_update_rules');
-            const rules = wrapper ? value[wrapper] : value;
-            const metadata = new Set(['type', 'range', 'format', 'enum']);
-            const sources = (shapeInfo && shapeInfo.ruleSources || []).filter(r => r.source === content);
-            const bindings = (shapeInfo && shapeInfo.ruleBindings || []).filter(r => r.source === content);
-            const samePath = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-            const knownMetadata = (key, child) => {
-                if (key === 'type') return typeof child === 'string' && (/^(?:string|number|boolean)(?:\[\])?$/.test(child.trim()) || !!getSchemaLayout().parseShapeString(child));
-                if (key === 'range') return !!getSchemaLayout().yamlParseRange(child);
-                if (key === 'enum') return Array.isArray(child) && child.length >= 2 && child.every(v => ['string', 'number', 'boolean'].includes(typeof v));
-                return key === 'format' && typeof child === 'string';
-            };
-            const normalize = path => (Array.isArray(path) ? path : String(path || '').split('.'))
-                .flatMap(seg => String(seg).split('.')).filter(seg => seg && !/^<[^>]+>$|^\$\{[^|}]+\}$|^\[[^\]]+\]$/.test(seg));
-            const matches = (source, target) => {
-                const a = normalize(source), b = normalize(target);
-                return a.length > 0 && a.length <= b.length && a.every((seg, i) => {
-                    const choices = /^\$\{.*\}$/.test(seg) ? seg.slice(2, -1).split('|').map(s => s.trim()) : [seg];
-                    return choices.includes(b[b.length - a.length + i]);
-                });
-            };
-            const coverage = path => {
-                const texts = new Set();
-                for (const group of schema) {
-                    const sheet = Object.values(template || {}).find(t => t && t.name === group.tableName);
-                    const note = String(sheet && sheet.sourceData && sheet.sourceData.note || '');
-                    const paths = group.writePaths && group.writePaths.length ? group.writePaths : [[group.parentGroup || group.name]];
-                    const tablePaths = [...paths, ...(group.columns || []).map(c => (c.path || []).slice(0, -1))];
-                    for (const receipt of group._emittedRules || []) {
-                        if (!note.includes(receipt.rendered)) continue;
-                        if (receipt.columnPath) {
-                            if (matches(path, receipt.columnPath)) texts.add(receipt.text);
-                        } else if (receipt.rulePath) {
-                            const rootedPath = [group.parentGroup || group.name, ...normalize(receipt.rulePath)];
-                            if (matches(path, receipt.rulePath) || matches(path, rootedPath)) texts.add(receipt.text);
-                        } else if (tablePaths.some(target => matches(path, target))) texts.add(receipt.text);
-                    }
-                }
-                return texts;
-            };
-            const migratedAt = (sourcePath, item, reminder = false) => {
-                const texts = getSchemaLayout().yamlCheckItems(reminder && typeof item === 'string' ? item.split('\n') : item)
-                    .map(text => reminder ? getSchemaLayout().yamlExpandTemplateKeys(text) : text);
-                const receipts = sources.filter(r => samePath(r.sourcePath, sourcePath) && texts.every(text => r.texts.includes(text)));
-                return texts.length > 0 && receipts.length > 0 && receipts.every(r => texts.every(text => coverage(r.path).has(text)));
-            };
-            const seen = new Set();
-            let removed = 0;
-            function prune(node, path) {
-                if (!isPlainObject(node)) return node;
-                // YAML 别名共享/循环节点不能按单一路径拆分，整条保守保留。
-                if (seen.has(node)) throw new Error('shared rule node');
-                seen.add(node);
-                const out = {};
-                const before = removed;
-                for (const [key, child] of Object.entries(node)) {
-                    if (key === 'check' || key === 'note') {
-                        const list = Array.isArray(child) ? child : [child];
-                        const kept = list.filter(item => {
-                            const migrated = migratedAt([...path, key], item);
-                            if (migrated) removed += getSchemaLayout().yamlCheckItems(item).length;
-                            return !migrated;
-                        });
-                        if (kept.length) out[key] = Array.isArray(child) ? kept : kept[0];
-                    } else if (/^_?强制更新/.test(key)) {
-                        const list = Array.isArray(child) ? child : [child];
-                        const kept = list.filter(item => {
-                            const migrated = migratedAt([...path, key], item, true);
-                            if (migrated) removed += getSchemaLayout().yamlCheckItems(item).length;
-                            return !migrated;
-                        });
-                        if (kept.length) out[key] = Array.isArray(child) ? kept : kept[0];
-                    } else if (metadata.has(key)) out[key] = child;
-                    else {
-                        const remaining = prune(child, [...path, key]);
-                        if (remaining !== undefined) out[key] = remaining;
-                    }
-                }
-                // 只有实际移除了已承接规则，才收起其附属声明；未知字段/说明仍保留。
-                if (removed > before) {
-                    const bindingKeys = new Set(bindings.filter(r => samePath(r.sourcePath, path)).flatMap(r => r.keys));
-                    if (Object.keys(out).every(key => bindingKeys.has(key) || metadata.has(key) && knownMetadata(key, out[key]))) return undefined;
-                }
-                return out;
-            }
-            const remaining = {};
-            for (const [key, node] of Object.entries(rules)) {
-                if (/^_?强制更新/.test(key)) {
-                    const list = Array.isArray(node) ? node : [node];
-                    const kept = list.filter(item => {
-                        const migrated = migratedAt([key], item, true);
-                        if (migrated) removed += getSchemaLayout().yamlCheckItems(item).length;
-                        return !migrated;
-                    });
-                    if (kept.length) remaining[key] = Array.isArray(node) ? kept : kept[0];
-                    continue;
-                }
-                const rest = prune(node, [key]);
-                if (rest !== undefined) remaining[key] = rest;
-            }
-            if (!removed) return { removed: 0, content };
-            const empty = Object.keys(remaining).length === 0;
-            function updateDocument(original, rest, path) {
-                for (const key of Object.keys(original)) {
-                    const nextPath = [...path, key];
-                    if (!Object.prototype.hasOwnProperty.call(rest, key)) doc.deleteIn(nextPath);
-                    else if (isPlainObject(original[key]) && key !== 'check' && key !== 'note' && !metadata.has(key)) {
-                        updateDocument(original[key], rest[key], nextPath);
-                    } else if (JSON.stringify(original[key]) !== JSON.stringify(rest[key])) doc.setIn(nextPath, rest[key]);
-                }
-            }
-            if (!empty) updateDocument(rules, remaining, wrapper ? [wrapper] : []);
-            return { removed, content: empty ? '' : getSchemaLayout().wrapMvuRuleDocument(content, doc.toString({ lineWidth: 0 })) };
-        } catch (e) { return null; }
     }
 
     // 这类正则不负责运行 MVU，只在显示/提示词阶段把原始更新块隐藏或折叠起来。
@@ -2471,9 +2449,14 @@
     }
     function transformCard(card, opts = {}) {
         const report = opts.report || createReport();
-        const mode = opts.mode || 'both';
+        const mode = sqliteConversionMode(opts, report);
         const nameSuffix = opts.nameSuffix !== undefined ? opts.nameSuffix : '_数据库';
         const data = card.data || card;
+        const origName = data.name || '角色';
+        const convertedCardName = nameSuffix && !String(data.name || '').endsWith(nameSuffix)
+            ? String(data.name || '') + nameSuffix : data.name;
+        const rootTableCardName = nameSuffix && String(data.name || '').endsWith(nameSuffix)
+            ? String(data.name || '').slice(0, -nameSuffix.length) : data.name;
         const remoteSchemas = opts.remoteSchemaSources || [];
         const shapeCard = deepClone(card);
         for (const snapshot of remoteSchemas) {
@@ -2712,10 +2695,36 @@
             const dynamic = [...shapeInfo.wildcardFields].filter(path => /<[^>]+>|\$\{[^|/}]+\}|(?:^|\.)\*(?:\.|$)/.test(path));
             if (dynamic.length) report.note(`检测到动态键规则（如 ${dynamic.slice(0, 5).join('、')}${dynamic.length > 5 ? ' 等' : ''}）；键值由运行期数据决定，规则承接情况以各表说明及未承接规则报告为准。`);
         }
-        const schema = buildSchema(initvar, usage, report, shapeInfo, { vwdDescriptions: opts.vwdDescriptions, jsonContainers: opts.jsonContainers });
+        let storagePolicy = { version: 3 };
+        const statStorageService = getStatStorageFactory()({ readPolicy: () => storagePolicy });
+        // 原展示过滤不等于写权限。完整声明参与映射，值的隐藏只在发送阶段处理。
+        const layoutShape = shapeInfo;
+        const displayStorageService = getStatStorageFactory()();
+        const layoutInit = displayStorageService.split(initvar, true).database;
+        // 隐藏业务记录不参与普通列的 DEFAULT/示例采样。顶层隐藏组独立映射
+        // 为完整 JSON，DDL 不复制其初值；最终 content 从完整初值恢复。
+        for (const key of Object.keys(initvar)) if (key.startsWith('$') && key !== '$meta' && key !== '$internal') layoutInit[key] = initvar[key];
+        if (shapeInfo.dynamicPathSamples) shapeInfo.dynamicPathSamples = new Map([...shapeInfo.dynamicPathSamples]
+            .map(([path, sample]) => [path, displayStorageService.split(sample, true).database]));
+        let schema = buildSchema(layoutInit, usage, report, layoutShape, { vwdDescriptions: opts.vwdDescriptions, jsonContainers: opts.jsonContainers, originalInitvar: initvar });
         const sourceRegexScripts = (data.extensions && Array.isArray(data.extensions.regex_scripts)) ? data.extensions.regex_scripts : [];
         const helperScripts = data.extensions && data.extensions.tavern_helper && data.extensions.tavern_helper.scripts;
-        attachProseMvuRules(schema, shapeInfo, entries, initvar, [...(Array.isArray(helperScripts) ? helperScripts : []), ...sourceRegexScripts], report);
+        const ruleScripts = [...(Array.isArray(helperScripts) ? helperScripts : []), ...sourceRegexScripts];
+        // First apply declarations needed by layout planning (e.g. whole-group
+        // readonly). Labels and table targets must then bind to the final layout.
+        attachProseMvuRules(schema, shapeInfo, entries, initvar, ruleScripts, report, { reportMapping: false });
+        schema = getSchemaLayout().prepareStatStorageLayout(schema, initvar, layoutShape, report, { cardName: rootTableCardName });
+        for (const group of schema) {
+            delete group.pathSpecifications;
+            delete group.proseChecks;
+            delete group.proseAliases;
+        }
+        attachProseMvuRules(schema, shapeInfo, entries, initvar, ruleScripts, report);
+        const statStorage = statStorageService.plan(schema, shapeInfo, initvar, buildLayout(schema).entries, toIdent);
+        storagePolicy = statStorage;
+        const storageLayout = JSON.parse(buildLayoutJson(buildLayout(schema)));
+        statStorage.initial = statStorageService.split(initvar, storageLayout, statStorage).native;
+        report.note('已声明的 $ 字段保留数据库写入位置，发送当前状态时仍隐藏其值；对象内部隐藏字段随所属记录保存在完整 JSON 或扩展数据中。未映射的脚本根数据沿用原消息存储，不新增模型兜底表。');
         if ([data.first_mes, ...(data.alternate_greetings || [])].some(text => /<initvar\b/i.test(String(text || '')))) {
             report.warn('开场消息含 <initvar>：SP 独立填表会读取原始聊天正文，可能重复发送初始变量（包括已从表格隐藏的字段）。请在 SP 填表设置的标签排除规则中配置起始 <initvar、结束 </initvar>，并检查最终请求；酒馆显示正则不替代此设置。', 'template');
         }
@@ -2723,8 +2732,6 @@
         // 复用 group 上已经填好插槽的同一计划对象，因此顺序必须是先 generateTemplate
         // 再 buildLayout。布局本身不依赖模板内容，两者仍从同一 schema 派生。
         const template = opts.template || generateTemplate(schema, { mode, report, ddlIncludeCheck: opts.ddlIncludeCheck, targetSpVersion: opts.targetSpVersion });
-        for (const group of schema) for (const issue of group._unresolvedProtocolRules || [])
-            report.warn(`表格「${group.tableName}」的更新说明协议迁移未完成：${issue}；原说明保留，不视为已完整清理。`, 'schema');
         // 复用调用方已有模板时不会有新的 note，用同一规则现算一份插槽计划，避免布局里
         // 存下空计划而运行期无法按字段替换说明。
         if (opts.template) ensureVwdSlotPlans(schema, { template, mode, report, targetSpVersion: opts.targetSpVersion });
@@ -2759,7 +2766,7 @@
 
         const convertedAt = new Date().toISOString();
         const bridgeOptions = {
-            mode,
+            mode, statStorage,
             template,
             installMvuShim,
             appendPlaceholder: opts.appendPlaceholder !== false,
@@ -2774,8 +2781,6 @@
 
         // 3. 世界书处理
         const newEntries = [];
-        let generatedEntryId = entries.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1;
-        const rulePathResolver = createMvuRulePathResolver(schema, initvar);
         // MVU 剧情条目宏：{{get_message_variable::路径}} 改写为数据库表引用
         // （剧情条目保留；变量值由插件注入表格数据提供，宏本身在数据库环境无解析器）
         function rewritePlotMacros(text) {
@@ -2789,109 +2794,53 @@
                 return rest ? `（数据库表「${table}」的「${rest}」）` : `（数据库表「${table}」）`;
             });
         }
+        const adaptation = getUpdateRuleMigration();
+        let generatedEntryId = entries.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1;
         for (const e of entries) {
             const comment = String(e.comment || '');
-            let content = String(e.content || '');
-            const isInit = /\[initvar\]/i.test(comment);
-            // [mvu_plot] 是 MVU 的“剧情 AI 专用”标记：内容是剧情/人设/地点等提示，
-            // 不属于变量更新规则，一律保留（内部 MVU 宏单独改写）。
-            const isPlot = /\[mvu[ _-]?plot\]|\[mvuplot\]/i.test(comment);
-            // MVU 写入/输出管道特征，用于区分“该删的管道”与“误标成
-            // [mvu_update] 的剧情/机制文本”。format_message_variable、
-            // get_message_variable、getvar(stat_data...) 都只是读取变量，常被业务规则
-            // 用作条件或插值；仅凭读取痕迹绝不能整条删除。
-            const explicitUpdateEntry = /\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/i.test(comment);
-            const entryTitle = comment.replace(/\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/ig, '').trim();
-            // 一部分 Zod 卡没有 [mvu_update] 前缀，只用中文专名区分规则与
-            // 输出协议。必须同时校验 comment 和正文结构，避免仅因普通剧情提到
-            // “变量更新规则”就删除整个条目。
-            const dedicatedRuleEntry = /^(?:变量(?:更新)?规则|变量规则)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(entryTitle);
-            const dedicatedProtocolEntry = /^变量(?:处理|更新|输出)(?:指令集|指令|协议)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(entryTitle);
-            const dedicatedOutputEntry = /^(?:variables?|output_format)(?:\s*\([^)]*\))?$/i.test(entryTitle) ||
-                /^(?:变量列表|变量(?:更新|输出)格式(?:强调)?|变量输出规则)(?:\s*\([^)]*\))?$/i.test(entryTitle) || dedicatedProtocolEntry;
-            // 状态展示是模型输入，不是模型的更新输出。只拆去专名条目中
-            // 独立可确认的旧更新协议，完整保留状态块（包括块内业务说明）。
-            const hasStatusMarkup = /<\/?status_current_variables?\b/i.test(content);
-            if (!isPlot && dedicatedOutputEntry && hasStatusMarkup) {
-                const statusBlocks = [];
-                const remainder = content.replace(/<(status_current_variables?)>(?:(?!<\/?status_current_variables?\b)[\s\S])*?<\/\1>/gi,
-                    block => { statusBlocks.push(block); return ''; });
-                if (statusBlocks.length && isPureMvuOutputMarkup(remainder)) content = statusBlocks.join('\n');
-            }
-            const ruleDocumentContent = /(?:^|\n)\s*(?:变量更新规则|variables_update_rules)\s*:|(?:^|\n)[ \t]+(?:type|range|check|format)\s*:/mi.test(content)
-                || (shapeInfo.proseRuleDocuments || []).some(doc => doc.source === content)
-                || ((dedicatedRuleEntry || explicitUpdateEntry) && isPureMvuRuleDocument(content));
-            const outputProtocolContent = /<status_current_variables?|get_message_variable\s*::\s*stat_data|<UpdateVariable|<JSONPatch|json\s*patch|每轮[^\n]{0,40}(?:必须)?输出|^\s*格式:\s*_\.set\s*\(/i.test(content);
-            // 某些卡用单个箭头/图标作为变量管线的起止占位。只识别这种
-            // 纯符号 marker；不再用“少于 60 字”猜测，避免删掉 lastUserMessage 等短上下文。
-            const purePipelineMarker = explicitUpdateEntry && /变量|更新|输出/i.test(comment) &&
-                /^\s*[🔻🔺▼▲↓↑⬇⬆⏬⏫─━—_=*#.:;\-]+\s*$/u.test(content);
-            const outputDocument = !isPlot && !hasStatusMarkup && (explicitUpdateEntry || dedicatedOutputEntry) && outputProtocolContent && isMvuOutputDocument(content);
-            const splitRules = !isPlot && !hasStatusMarkup && (dedicatedRuleEntry || dedicatedOutputEntry || explicitUpdateEntry) && ruleDocumentContent
-                ? splitMigratedMvuRules(content, schema, shapeInfo, template) : null;
-            const isMvuUpdate = !isPlot && (
-                (explicitUpdateEntry && (!String(content).trim() || purePipelineMarker)) ||
-                (splitRules && !splitRules.content) ||
-                // 输出文档必须是完整专名；有 EJS 的混合业务不能凭名称删除。
-                (outputDocument && splitRules && !splitRules.content) ||
-                (dedicatedOutputEntry && isPureMvuOutputMarkup(content)));
-            if (isInit || isMvuUpdate) {
-                report.note(`已删除 MVU 世界书条目「${comment}」（${isInit ? '初始变量已迁移为数据库模板' : outputDocument ? '输出格式由数据库宿主填表协议接管，不再注入正文' : '更新规则已迁移为数据库模板/规则'}）。`);
+            const content = String(e.content || '');
+            if (/\[initvar\]/i.test(comment)) {
+                report.note(`已删除 MVU 世界书条目「${comment}」（初始变量已迁移为数据库模板）。`);
                 continue;
             }
-            if (splitRules) {
-                if (outputDocument) report.note(`输出条目「${comment}」已移除确认的格式块，未识别的补充字段保留并报告；字段名属于支持的作者约定，不是 MVU 标准。`);
-                if (splitRules.removed) report.note(`规则条目「${comment}」已移除 ${splitRules.removed} 项迁入表格说明的规则，仅保留未承接内容。`);
-                // Remaining sections are offered to the worldbook routing pass
-                // below; a template receipt is never emitted for this second path.
-            } else if ((dedicatedRuleEntry || explicitUpdateEntry) && ruleDocumentContent) {
-                report.warn(`规则条目「${comment}」无法确认为完整静态规则文档，已保留原条目；已提取的规则可能不完整，请核对后决定是否停用原条目。`, 'schema');
-            }
-            const remaining = splitRules ? splitRules.content : content;
-            const routed = !isPlot ? migrateWorldbookUpdateRules(remaining, {
-                updateOnly: (explicitUpdateEntry || dedicatedRuleEntry) && isPureMvuRuleDocument(remaining) ||
-                    (explicitUpdateEntry || dedicatedOutputEntry) && isMvuOutputDocument(remaining),
-                resolvePath: rulePathResolver.resolve,
-            }) : { body: remaining, fill: '', migrated: 0, issues: [] };
-            for (const issue of routed.issues) report.warn(`条目「${comment}」更新规则迁移未完成：${issue}；未承接内容保留，不视为已完整清理。`, 'schema');
-            if (routed.migrated) report.note(`条目「${comment}」已将 ${routed.migrated} 个完整更新段落保留在世界书填表侧；原条件和触发设置保留，正文侧屏蔽，不重复写入表格说明。`);
-            if (splitRules && !routed.migrated) report.warn(`规则条目「${comment}」剩余内容未迁入填表侧，保留原条目中的未承接部分，仍按原世界书设置注入；请核对是否保留。`, 'schema');
-            if (!isPlot && !routed.migrated && /<UpdateVariable|<JSONPatch|\.set\s*\(\s*['"]/i.test(remaining))
-                report.note(`世界书条目「${comment}」含未承接的旧变量更新要求，已保留并报告；转换结果的更新提示尚未完整迁移。`);
-            // EJS 重写
-            const rw = rewriteEjsConditions(routed.migrated && !routed.body.trim() ? routed.fill : routed.body, layout, report, {
-                translateSimpleEjs: !!opts.translateSimpleEjs,
-            });
-            if (rw.items.length) {
-                for (const it of rw.items) {
-                    if (it.status === 'auto') {
-                        report.auto(`条目「${comment}」MVU 数据读取已改写为扩展注册的 mvu2shujukuGetAllVariables()：\`${it.rewritten}\``);
-                    }
-                }
-            }
+            // Re-conversion never stacks generated guides or template payloads.
+            if (e.extensions?.mvu2shujukuFillGuide === 1 || (Array.isArray(e.keys) && e.keys.includes('__ACU_TEMPLATE_DATA__'))) continue;
+            const isPlot = /\[mvu[ _-]?plot\]|\[mvuplot\]/i.test(comment);
+            const explicitUpdate = /\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/i.test(comment);
+            const title = comment.replace(/\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/ig, '').trim();
+            const dedicatedRule = /^(?:变量(?:更新)?规则|变量规则)(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(title);
+            const dedicatedOutput = /^(?:variables?|output_format)(?:\s*\([^)]*\))?$/i.test(title) ||
+                /^(?:变量列表|变量(?:更新|输出)格式(?:强调)?|变量输出规则|变量(?:处理|更新|输出)(?:指令集|指令|协议))(?:\s*[_-]?(?:zod|mvu)(?:版)?)?$/i.test(title);
+            const statusDisplay = /<\/?status_current_variables?\b/i.test(content);
+            const fillOnly = !isPlot && !statusDisplay && (explicitUpdate || dedicatedOutput || dedicatedRule && isPureMvuRuleDocument(content));
+            // Only the established API/macro translation changes executable text.
+            // No prose/path substitution and no second executable copy.
+            const rw = rewriteEjsConditions(content, layout, report, { translateSimpleEjs: !!opts.translateSimpleEjs });
+            for (const it of rw.items) if (it.status === 'auto')
+                report.auto(`条目「${comment}」MVU 数据读取已改写为数据库兼容入口：\`${it.rewritten}\``);
             const copy = deepClone(e);
-            const afterFormatMacros = rewriteFormatMessageVariableMacros(rw.text, report, `条目「${comment}」`);
-            const afterMacros = rewritePlotMacros(afterFormatMacros);
-            if (afterMacros !== afterFormatMacros) {
-                report.auto(`条目「${comment}」的 MVU 宏 {{get_message_variable::…}} 已改写为数据库表引用（剧情条目保留）。`);
+            if (copy.id == null) copy.id = generatedEntryId++;
+            copy.content = rewritePlotMacros(rewriteFormatMessageVariableMacros(rw.text, report, `条目「${comment}」`));
+            const view = !isPlot ? adaptation.plan(copy.content, { outputOnly: dedicatedOutput }) : { excluded: [] };
+            if (fillOnly || view.excluded.length) {
+                copy.extensions = copy.extensions || {};
+                copy.extensions.mvu2shujukuFillView = { version: 1, outputOnly: dedicatedOutput };
             }
-            copy.content = afterMacros;
-            if (!isPlot && (routed.migrated && !routed.body.trim() || !routed.migrated && explicitUpdateEntry)) {
-                copy.comment = getUpdateRuleMigration().fillTitle(comment, copy.id);
-                if (copy.comment !== comment) report.note(`更新专用条目「${comment}」使用标题「${copy.comment}」；原名称保留在此报告，避免数据库配置页按名称隐藏并清除选择。`);
-            } else if (routed.migrated) copy.comment = comment.replace(/\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/ig, '').trim();
+            if (fillOnly) {
+                copy.comment = adaptation.fillTitle(comment, copy.id);
+                report.note(`更新专用条目「${comment}」保留业务原文，使用标题「${copy.comment}」供填表读取，正文侧屏蔽；不复制执行代码。`);
+            }
+            if (view.excluded.length) report.note(`条目「${comment}」保留源内容；请求视图排除 ${view.excluded.length} 个完整明确的纯旧格式区间，真实目标/值及混合业务保留。`);
             newEntries.push(copy);
-            if (routed.migrated && routed.body.trim()) {
-                const fillEntry = deepClone(e);
-                fillEntry.id = generatedEntryId++;
-                delete fillEntry.uid;
-                fillEntry.comment = getUpdateRuleMigration().fillTitle(comment, fillEntry.id, true);
-                report.note(`原条目「${comment}」的完整更新段落使用标题「${fillEntry.comment}」；原名称保留在此报告。`);
-                const fillRw = rewriteEjsConditions(routed.fill, layout, report, { translateSimpleEjs: !!opts.translateSimpleEjs });
-                fillEntry.content = rewritePlotMacros(rewriteFormatMessageVariableMacros(fillRw.text, report, `条目「${fillEntry.comment}」`));
-                newEntries.push(fillEntry);
-            }
         }
+        const guideId = newEntries.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1;
+        newEntries.push({
+            id: guideId, keys: [], comment: adaptation.guideTitle, content: adaptation.guideContent,
+            enabled: true, constant: true, selective: false, position: 'before_char',
+            insertion_order: 9991, depth: 2, prevent_recursion: true,
+            extensions: { mvu2shujukuFillGuide: 1 },
+        });
+        report.note('已在现有世界书新增「[M2SJK]填表适配说明」。填表世界书选择须包含此条目；作者业务原文保留，输出以宿主当前协议为准，不新增路径清单或分组说明。');
         isolateCrossEntryEjsFallbacks(newEntries, report);
         // 把模板以 base64 写入世界书条目（keys: __ACU_TEMPLATE_DATA__），供插件/开场页按需导入
         const tplB64 = toBase64(JSON.stringify(template));
@@ -3075,9 +3024,8 @@
 
         // 6. 转换标记
         if (!data.extensions) data.extensions = {};
-        const origName = data.name || '角色';
         if (nameSuffix && !String(data.name || '').endsWith(nameSuffix)) {
-            data.name = String(data.name || '') + nameSuffix;
+            data.name = convertedCardName;
             report.note(`角色卡名已追加后缀：${origName} → ${data.name}。`);
         }
         // 世界书独立：内嵌世界书加后缀，避免同名覆盖原卡世界书。
@@ -3103,6 +3051,9 @@
         }
         data.extensions.mvu2shujuku = {
             converter: 'mvu2shujuku',
+            fillAdapterVersion: 1,
+            statStorage,
+            fillViewEntries: newEntries.filter(entry => entry.extensions?.mvu2shujukuFillView).map(entry => ({ id: entry.id, contentHash: stableHash(String(entry.content || '').replace(/\r\n/g, '\n').trim()), outputOnly: entry.extensions.mvu2shujukuFillView.outputOnly })),
             version: VERSION,
             mode,
             convertedAt,
@@ -3186,8 +3137,9 @@
         return Object.fromEntries(Object.keys(template).map(key => [key, JSON.stringify(template[key] && template[key].sourceData)]));
     }
     function conversionOptionKey(opts) {
-        const normalized = { mode: 'both', nameSuffix: '_数据库', appendPlaceholder: true,
+        const normalized = { nameSuffix: '_数据库', appendPlaceholder: true,
             ddlIncludeCheck: true, translateSimpleEjs: false, jsonContainers: false, ...opts };
+        normalized.mode = sqliteConversionMode(opts);
         return JSON.stringify(Object.keys(normalized).sort().filter(k =>
             !['template', 'asPng', 'report'].includes(k) && normalized[k] !== undefined
         ).map(k => [k, normalized[k]]));
@@ -3203,8 +3155,8 @@
                 return buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50;
             } catch (e) { return false; }
         })();
-        const mode = opts.mode || 'both';
-        report.note(`模式：${mode === 'both' ? 'native + SQLite 双模式（DDL 与 DSL/SQL 说明都写入模板）' : mode === 'native' ? 'native（AI 输出 insertRow/updateRow/deleteRow DSL）' : 'sqlite（AI 输出 SQL）'}。`);
+        const mode = sqliteConversionMode(opts, report);
+        report.note('模式：SQLite（仅支持 SQL 填表）。');
 
         const sourceInput = isPngInput
             ? new Uint8Array(input instanceof ArrayBuffer ? input.slice(0) : new Uint8Array(input.buffer, input.byteOffset, input.byteLength))
@@ -3218,6 +3170,7 @@
         return result;
     }
     async function convertWithRemoteSchemas(input, opts = {}) {
+        sqliteConversionMode(opts);
         const sourceCard = parseCard(input);
         const remoteSchemaSources = await getRemoteSchemaService().resolve(sourceCard, opts);
         const schemaSnapshots = [];
@@ -3231,7 +3184,7 @@
     // 产物装配与卡片分析分开；模板编辑无需重复解析 initvar、Schema、业务脚本和 EJS。
     function packageConversion(input, opts, transformed, isPngInput, metadata = {}) {
         const { card, schema, template, bridgeScript, report } = transformed;
-        const mode = opts.mode || 'both';
+        const mode = sqliteConversionMode(opts);
 
         const files = [];
         const cardName = ((card.data || card).name || 'converted').replace(/[\\/:*?"<>|]/g, '_');
@@ -3510,6 +3463,12 @@
         throw new Error('正文世界书过滤模块缺失');
     }
 
+    function getEjsEvalBridgeFactory() {
+        if (typeof root.__MVU2SHUJUKU_EJS_EVAL_BRIDGE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_EJS_EVAL_BRIDGE_FACTORY__;
+        if (typeof require === 'function') return require('./extension-runtime.js').createEjsEvalBridge;
+        throw new Error('填表模板上下文桥缺失');
+    }
+
     function getWorldbookSaveFactory() {
         if (typeof root.__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__;
         if (typeof require === 'function') return require('./worldbook-save.js');
@@ -3547,7 +3506,11 @@
             ['__MVU2SHUJUKU_TABLE_CODEC_FACTORY__', getTableCodecFactory],
             ['__MVU2SHUJUKU_INPUT_PARSER_FACTORY__', getInputParserFactory],
             ['__MVU2SHUJUKU_EJS_TRANSFORM_FACTORY__', getEjsTransformFactory],
+            ['__MVU2SHUJUKU_EJS_PARSER_FACTORY__', getEjsParserFactory],
             ['__MVU2SHUJUKU_CARD_API_FACTORY__', getCardApiFactory],
+            ['__MVU2SHUJUKU_STAT_STORAGE_FACTORY__', getStatStorageFactory],
+            ['__MVU2SHUJUKU_STATE_TRANSFER_FACTORY__', getStateTransferFactory],
+            ['__MVU2SHUJUKU_MVU_SCHEMA_FACTORY__', getMvuSchemaFactory],
             ['__MVU2SHUJUKU_JS_SOURCE_FACTORY__', getJsSourceFactory],
             ['__MVU2SHUJUKU_REMOTE_SCHEMA_FACTORY__', getRemoteSchemaFactory],
             ['__MVU2SHUJUKU_SCHEMA_EXECUTION_FACTORY__', getSchemaExecutionFactory],
@@ -3570,6 +3533,7 @@
             ['__MVU2SHUJUKU_EXTENSION_RUNTIME_INSTALLER__', getExtensionRuntimeInstaller],
             ['__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__', getCandidateBuilderFactory],
             ['__MVU2SHUJUKU_WORLDBOOK_REQUEST_FILTER_FACTORY__', getWorldbookRequestFilterFactory],
+            ['__MVU2SHUJUKU_EJS_EVAL_BRIDGE_FACTORY__', getEjsEvalBridgeFactory],
             ['__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__', getWorldbookSaveFactory],
             ['__MVU2SHUJUKU_WORLDBOOK_STORAGE_FACTORY__', getWorldbookStorageFactory],
             ['__MVU2SHUJUKU_CARD_BRIDGE_INSTALLER__', getCardBridgeInstaller],
@@ -3610,7 +3574,7 @@
                 '',
                 '## 使用',
                 '1. 打开扩展设置面板。',
-                '2. 选择模式（双模式 / native / sqlite），从下拉栏选择角色卡或选择文件。',
+                '2. 从下拉栏选择角色卡或选择文件；转换结果仅支持数据库的 SQLite 模式。',
                 '3. 点击转换：保存为角色卡（直接进酒馆）或下载 角色卡 + 表格模板 + 转换报告。',
                 '',
                 '## 说明',
@@ -3640,6 +3604,7 @@
         parseRegisteredZodSchema,
         buildSchema,
         buildLayout,
+        buildLayoutJson,
         generateTemplate,
         migrateTemplatePromptRuntime,
         formatMessageVariableValue,
@@ -3660,7 +3625,13 @@
         canWriteVwdDescriptions,
         vwdDescriptionDelta,
         getCandidateBuilderFactory,
+        getStateTransferFactory,
+        getMvuSchemaFactory,
         getWorldbookRequestFilterFactory,
+        getEjsEvalBridgeFactory,
+        prepareFillPrompt,
+        fillEntryRequestView,
+        fillAdaptationGuidance,
         getWorldbookSaveFactory,
         getWorldbookStorageFactory,
         setVwdExperimental,

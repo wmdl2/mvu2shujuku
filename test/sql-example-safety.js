@@ -10,7 +10,7 @@ function card(initial, schema) {
 function execute(sheet, kind) {
     const sql = sheet.sourceData[kind].split('\nSQL示例: ')[1];
     assert.ok(sql, kind + ' 应保留可执行示例');
-    assert.match(sheet.sourceData.note, /不得直接照抄示例值/);
+    assert.doesNotMatch(sheet.sourceData.note, /SQL 示例仅在本次输出要求/);
     const result = spawnSync(require('./helpers').pythonExecutable, ['-c', `
 import json,sqlite3,sys
 x=json.load(sys.stdin);s=x['sheet'];db=sqlite3.connect(':memory:')
@@ -44,14 +44,14 @@ test('SQL示例保真：双模式与 SQLite 的 UPDATE 实际执行遵守枚举�
     }
 });
 
-test('SQL示例保真：数组插入和更新的 JSON 编码维持元素类型', () => {
+test('旧布局SQL示例保真：数组插入和更新的 JSON 编码维持元素类型', () => {
     for (const [initial, schema, expected] of [
         [[null, 2], 'z.number().nullable()', 3],
         [[false, true], 'z.boolean()', true],
         [['旧文本'], 'z.string()', '新值'],
         [[null], 'z.number().nullable()', null],
     ]) {
-        const result = core.convert(card({ 列表: initial }, `z.object({列表:z.array(${schema})})`), { mode: 'sqlite' });
+        const result = require('./legacy-layout-fixture')(card({ 列表: initial }, `z.object({列表:z.array(${schema})})`), { mode: 'sqlite' });
         const sheet = Object.values(result.template).find(s => s.name === '列表表');
         assert.match(sheet.sourceData.note, /单元格保存完整 JSON 值/);
         for (const kind of ['updateNode', 'insertNode']) {
@@ -102,6 +102,64 @@ test('SQL示例保真：长初值只存在数据行，新增示例按类型生�
         const sheet = Object.values(result.template).find(s => s.name === '记录表');
         assert.ok(sheet.content.some(row => row.some(value => String(value).includes(marker))), '真实初值保存在数据行');
         assert.ok(!Object.values(sheet.sourceData).some(value => String(value).includes(marker)), 'DDL、说明和示例均不重复初值');
-        assert.strictEqual(execute(sheet, 'insertNode').at(-1).at(-2), 'null', '可空 JSON 标量示例保存合法 JSON null');
+        const header = sheet.content[0];
+        assert.strictEqual(execute(sheet, 'insertNode').at(-1)[header.indexOf('内容')], 'null', '按实际物理值列读取合法 JSON null');
+    }
+});
+
+// 按宿主字符串替换插入实际产品 SQL，再由 SQLite 验证值和约束，不能只查源模板。
+test('SQL宿主边界：可空枚举 DDL、默认值与操作示例经过字符串替换后仍可执行', () => {
+    const { DatabaseSync } = require('node:sqlite');
+    const values = ["$'", '$&', '$`', '$$', '末尾$', "O'Brien"];
+    const schema = 'z.object({状态:z.object({评分:z.number().min(0).max(5).nullable(),称号:z.enum(' + JSON.stringify(values) + ').nullable(),标记:z.string()})})';
+    const result = core.convert(card({ 状态: { 评分: null, 称号: null, 标记: '末尾$' } }, schema), { mode: 'sqlite' });
+    const sheet = Object.values(result.template).find(sheet => sheet.name === '状态表');
+    const group = result.schema.find(group => group.tableName === sheet.name);
+    const inject = sql => {
+        const inserted = '头部\n$0\n尾部'.replace('$0', sql);
+        assert.strictEqual(inserted, '头部\n' + sql + '\n尾部', '生成 SQL 必须逐字插入宿主提示');
+        return inserted.slice(3, -3);
+    };
+    const db = new DatabaseSync(':memory:');
+    try {
+        db.exec(inject(sheet.sourceData.ddl));
+        db.exec('INSERT INTO ' + group.ident + ' DEFAULT VALUES');
+        const ident = label => group.columns.find(column => column.zh === label).ident;
+        assert.strictEqual(db.prepare('SELECT ' + ident('标记') + ' FROM ' + group.ident).get()[ident('标记')], '末尾$');
+        for (const value of values) {
+            db.prepare('UPDATE ' + group.ident + ' SET ' + ident('称号') + ' = ?').run(JSON.stringify(value));
+            assert.strictEqual(JSON.parse(db.prepare('SELECT ' + ident('称号') + ' FROM ' + group.ident).get()[ident('称号')]), value);
+        }
+        assert.throws(() => db.prepare('UPDATE ' + group.ident + ' SET ' + ident('称号') + ' = ?').run('"非法"'), /CHECK/);
+        db.prepare('UPDATE ' + group.ident + ' SET ' + ident('评分') + ' = ?').run('2.5');
+        assert.throws(() => db.prepare('UPDATE ' + group.ident + ' SET ' + ident('评分') + ' = ?').run('5.1'), /CHECK/);
+        const sql = sheet.sourceData.updateNode.split('\nSQL示例: ')[1];
+        assert.ok(sql);
+        db.exec(inject(sql));
+    } finally { db.close(); }
+});
+
+test('SQL宿主边界：记录键与 JSON 叶路径含美元替换标记时示例保持原值', () => {
+    const { DatabaseSync } = require('node:sqlite');
+    for (const marker of ["$'", '$&', '$`', '$$', '末尾$']) {
+        const key = '记录' + marker;
+        const result = core.convert(card({ 记录: { [key]: { 字段: marker, 数量: 1 } } },
+            'z.object({记录:z.record(z.string(),z.object({字段:z.string(),数量:z.number()}))})'), { mode: 'sqlite' });
+        const sheet = Object.values(result.template).find(sheet => sheet.name === '记录表');
+        const group = result.schema.find(group => group.tableName === sheet.name);
+        const db = new DatabaseSync(':memory:');
+        try {
+            const insert = sql => { assert.strictEqual('头$0尾'.replace('$0', sql), '头' + sql + '尾'); return sql; };
+            db.exec(insert(sheet.sourceData.ddl));
+            const rows = sheet.content.slice(1);
+            const bind = db.prepare('INSERT INTO ' + group.ident + ' VALUES (' + rows[0].map(() => '?').join(',') + ')');
+            rows.forEach(row => bind.run(...row));
+            for (const kind of ['updateNode', 'deleteNode']) {
+                const sql = sheet.sourceData[kind].split('\nSQL示例: ')[1];
+                assert.ok(sql);
+                db.exec(insert(sql));
+            }
+            assert.strictEqual(db.prepare('SELECT count(*) AS n FROM ' + group.ident).get().n, 0);
+        } finally { db.close(); }
     }
 });

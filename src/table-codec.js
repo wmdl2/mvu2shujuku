@@ -5,7 +5,7 @@
  * 不读取 window、宿主 API 或缓存；JSON 修复能力由调用方注入。
  * 工厂保持自包含，构建时把同一函数内联进扩展与旧卡桥。
  */
-function createTableCodec(repairJson) {
+function createTableCodec(repairJson, statStorage) {
     const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
     const assignOwn = (obj, key, value) => Object.defineProperty(obj, key, { value, enumerable: true, configurable: true, writable: true });
     function parseObject(v) {
@@ -173,6 +173,7 @@ function createTableCodec(repairJson) {
     function statDataFromTables(layoutEntries, tables) {
         const data = { stat_data: {} };
         const sd = data.stat_data;
+        const publicExtras = [];
         const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
         const tbl = tables && typeof tables === 'object' ? tables : {};
         // 一次读快照只建一次表名索引；重复表名沿用旧扫描的“首次匹配”语义。
@@ -200,7 +201,9 @@ function createTableCodec(repairJson) {
                 const row = rows && rows.slice(1).find(r => r && String(r[0]) === '1');
                 const raw = rows ? (row && ci >= 0 ? row[ci] : undefined) : (c[6] === true ? undefined : c[2]);
                 const value = convertCell(c[1], raw, c[2], c[5], c[7]);
-                if (value !== undefined) sd[L.group] = value;
+                if (L.rootContainer && value && typeof value === 'object' && !Array.isArray(value)) {
+                    for (const key of Object.keys(value)) assignOwn(sd, key, value[key]);
+                } else if (value !== undefined) sd[L.group] = value;
                 continue;
             }
             if (!s || !Array.isArray(s.content) || !s.content.length) {
@@ -210,7 +213,7 @@ function createTableCodec(repairJson) {
                     // stat_data.世界运转.场景 在加载窗口因中间组 undefined 直接抛错。
                     sd[L.group] = {};
                     for (const c of L.cols || []) {
-                        if (c[0] === '_扩展数据' || isMetaCol(c)) continue;
+                        if (c[0] === (L.overflowCol || '_扩展数据') || isMetaCol(c)) continue;
                         const cp = Array.isArray(c[3]) && c[3].length ? c[3] : [L.group, c[0]];
                         setPath(sd, cp, ((c[1] === 'jsonScalarOptional' || c[1] === 'jsonPairOptional') || c[1] === 'jsonObjectOptional') ? (c[6] === true ? undefined : convertCell(c[1], c[1] === 'jsonObjectOptional' ? c[2] : JSON.stringify(c[2]), c[2], c[5], c[7])) : convertCell(c[1], undefined, c[2], c[5], c[7]), (L.omitMissingParents || []).includes(c[0]));
                     }
@@ -220,7 +223,7 @@ function createTableCodec(repairJson) {
                 else if (L.kind === 'pathArray') { setPath(sd, L.path || [L.group], []); }
                 else if (L.kind === 'nestedArray') { /* 同上，不虚构关联键 */ }
                 else if (L.kind === 'array') { sd[L.group] = []; for (const m of L.mirrors || []) setPath(sd, m.path, ''); }
-                else if (L.kind === 'json') { sd[L.group] = L.scalarType === 'number' ? ((L.cols || [])[0] || [])[2] ?? 0 : {}; }
+                else if (L.kind === 'json' && !L.publicFallback) { sd[L.group] = L.scalarType === 'number' ? ((L.cols || [])[0] || [])[2] ?? 0 : {}; }
                 if (L.kind === 'singleton' && vwdMetaCol) vwdPending.push({ entry: L, header: [], row: [] });
                 continue;
             }
@@ -235,7 +238,7 @@ function createTableCodec(repairJson) {
                 sd[L.group] = {};
                 for (let j = 0; j < (L.cols || []).length; j++) {
                     const c = L.cols[j];
-                    if (c[0] === '_扩展数据' || isMetaCol(c)) continue;
+                    if (c[0] === (L.overflowCol || '_扩展数据') || isMetaCol(c)) continue;
                     const vj = idxs[j] >= 0 ? row[idxs[j]] : undefined;
                     const cp = c.length > 3 && c[3] && c[3].length ? c[3] : [L.group, c[0]];
                     // 兼容旧布局里值为空的容器列（如 主角.资产）：它只是“该对象已拆
@@ -246,7 +249,7 @@ function createTableCodec(repairJson) {
                     setPath(sd, cp, convertCell(c[1], vj, c[2], c[5], c[7]), (L.omitMissingParents || []).includes(c[0]));
                 }
                 if (vwdMetaCol) vwdPending.push({ entry: L, header, row });
-                const sovIdx = header.indexOf('_扩展数据');
+                const sovIdx = header.indexOf(L.overflowCol || '_扩展数据');
                 if (sovIdx >= 0 && row[sovIdx]) {
                     const sov = parseObject(row[sovIdx]);
                     mergeMissing(sd[L.group], sov);
@@ -299,7 +302,10 @@ function createTableCodec(repairJson) {
                 const fallback = ((L.cols || [])[0] || [])[2] ?? 0;
                 const n = (typeof jv === 'number' || (typeof jv === 'string' && jv.trim())) ? Number(jv) : NaN;
                 const jparsed = numeric ? (Number.isFinite(n) ? n : fallback) : parseObject(jv);
-                sd[L.group] = jparsed === undefined ? {} : jparsed;
+                if (L.publicFallback) {
+                    if (!statStorage) throw new Error('动态变量编解码模块未加载');
+                    publicExtras.push(jparsed || {});
+                } else sd[L.group] = jparsed === undefined ? {} : jparsed;
                 for (const m of L.mirrors || []) setPath(sd, m.path, m.mode === 'first' ? (jparsed && typeof jparsed === 'object' && !Array.isArray(jparsed) ? jparsed : '') : jparsed);
             } else if (L.kind === 'nestedRows') {
                 const ancestorCols = Array.isArray(L.ancestorKeyCols) && L.ancestorKeyCols.length ? L.ancestorKeyCols : [L.parentKeyCol];
@@ -352,12 +358,12 @@ function createTableCodec(repairJson) {
                     const item = {};
                     for (let j2 = 0; j2 < (L.cols || []).length; j2++) {
                         const c2 = L.cols[j2];
-                        if (ancestorCols.includes(c2[0]) || c2[0] === L.keyCol || c2[0] === '_扩展数据') continue;
+                        if (ancestorCols.includes(c2[0]) || c2[0] === L.keyCol || c2[0] === (L.overflowCol || '_扩展数据')) continue;
                         const vj2 = idxs[j2] >= 0 ? rw2[idxs[j2]] : undefined;
                         const cp2 = c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : [c2[0]];
                         setPath(item, cp2, convertCell(c2[1], vj2, c2[2], c2[5], c2[7]), (L.omitMissingParents || []).includes(c2[0]));
                     }
-                    const ovIdx = header.indexOf('_扩展数据');
+                    const ovIdx = header.indexOf(L.overflowCol || '_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) mergeMissing(item, parseObject(rw2[ovIdx]) || {});
                     assignOwn(childDict, text(kv), item);
                 }
@@ -381,7 +387,7 @@ function createTableCodec(repairJson) {
                     const item = {};
                     for (let j2 = 0; j2 < (L.cols || []).length; j2++) {
                         const c2 = L.cols[j2];
-                        if (c2[0] === '_扩展数据' || c2[0] === L.keyCol) continue;
+                        if (c2[0] === (L.overflowCol || '_扩展数据') || c2[0] === L.keyCol) continue;
                         const vj2 = idxs[j2] >= 0 ? rw2[idxs[j2]] : undefined;
                         // 条目对象键优先用列 path 末尾的原始中文：列名因拼音冲突被
                         // 消歧改名（山西→山西2）时，读回仍还原 stat_data.<组>.<山西>，
@@ -389,7 +395,7 @@ function createTableCodec(repairJson) {
                         const cp2 = c2 && c2.length > 3 && Array.isArray(c2[3]) && c2[3].length ? c2[3] : null;
                         setPath(item, cp2 || [c2[0]], convertCell(c2[1], vj2, c2[2], c2[5], c2[7]), (L.omitMissingParents || []).includes(c2[0]));
                     }
-                    const ovIdx = header.indexOf('_扩展数据');
+                    const ovIdx = header.indexOf(L.overflowCol || '_扩展数据');
                     if (ovIdx >= 0 && rw2[ovIdx]) {
                         const ov = parseObject(rw2[ovIdx]);
                         mergeMissing(item, ov);
@@ -406,7 +412,8 @@ function createTableCodec(repairJson) {
             const overrides = vwdOverridesFromRow(item.entry, item.header, item.row);
             applyVwdDescriptions(item.entry, overrides, sd);
         }
-        try { data.display_data = JSON.parse(JSON.stringify(sd)); } catch (e) {}
+        for (const extra of publicExtras) data.stat_data = statStorage.combine(data.stat_data, extra);
+        try { data.display_data = JSON.parse(JSON.stringify(data.stat_data)); } catch (e) {}
         return data;
     }
 

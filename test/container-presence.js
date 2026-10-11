@@ -47,7 +47,7 @@ test('整组空值：有值、null、空容器、缺失往返且重复更新无�
     }
 });
 test('整组空值：模型直接修改单元格能表示三态，不依赖隐藏状态列', () => {
-    const { layout, template } = fixture({ 状态: { 存量: 1 }, Stable: { text: '普通字段' } });
+    const { result, layout, template } = fixture({ 状态: { 存量: 1 }, Stable: { text: '普通字段' } });
     const entry = layout.find(e => e.group === '状态'), sheet = Object.values(template).find(t => t.name === entry.table);
     const ci = sheet.content[0].indexOf(entry.valueCol);
     for (const [cell, expected] of [['null', { 状态: null }], ['{}', { 状态: {} }], ['', {}], ['{"存量":4}', { 状态: { 存量: 4 } }]]) {
@@ -57,7 +57,8 @@ test('整组空值：模型直接修改单元格能表示三态，不依赖隐�
     assert.match(sheet.sourceData.note, /完成任务后增加存量/);
     assert.match(sheet.sourceData.note, /仅在取得线索后登记/);
     assert.match(sheet.sourceData.note, /存量/);
-    assert.match(sheet.sourceData.note, /0.*10/);
+    const group = result.schema.find(g => g.name === '状态');
+    assert.deepStrictEqual(group.columns[0].jsonPathChecks.find(c => c.path.join('.') === '存量').range, [0, 10]);
     assert.match(sheet.sourceData.note, /json_set/);
 });
 test('整组空值：错误容器和不可序列化内容在宿主写入前拒绝', async () => {
@@ -111,16 +112,19 @@ print('OK')
     assert.strictEqual(output.stdout.trim(), 'OK');
 });
 
-test('整组空值：结构声明的内部约束有说明，动态约束不能冒充 SQL 已校验', () => {
+test('整组空值：结构声明保留实际约束，不额外生成说明清单或承诺动态SQL校验', () => {
     const { result, layout } = fixture({ Stable: { text: '原值' } });
     const root = result.schema.find(g => g.name === '状态');
     assert.ok(root.columns[0].jsonPathChecks.some(c => c.path.join('.') === '存量'));
-    assert.match(Object.values(result.template).find(t => t.name === root.tableName).sourceData.note, /模式.*甲.*乙/);
+    assert.deepStrictEqual(root.columns[0].jsonPathChecks.find(c => c.path.join('.') === '模式').enum, ['甲', '乙']);
+    assert.doesNotMatch(Object.values(result.template).find(t => t.name === root.tableName).sourceData.note, /模式.*甲.*乙/);
     assert.ok(layout.find(e => e.group === '状态').cols[0][6], '初始缺失不应造默认对象');
     const source = { name: '动态约束告知', extensions: { tavern_helper: { scripts: [{ name: '结构',
         content: 'const S = z.object({ 记录: z.record(z.string(), z.object({ 数量: z.number().min(0).max(3) })).nullish() }); registerMvuSchema(S);' }] } },
         character_book: { entries: [{ comment: '[InitVar]', content: '{"记录":{"甲":{"数量":1}}}' }] } };
     const converted = core.convert(source);
-    assert.match(converted.reportText, /CHECK 无法遍历任意元素/);
-    assert.match(Object.values(converted.template).find(t => t.name === '记录表').sourceData.note, /数量.*0.*3/);
+    assert.match(converted.reportText, /CHECK 不遍历任意元素/);
+    assert.doesNotMatch(Object.values(converted.template).find(t => t.name === '记录表').sourceData.note, /数量.*0.*3/);
+    const declared = core.parseMvuShapes(source).zodDefaultsRoot.fields.记录.value.fields.数量;
+    assert.deepStrictEqual([declared.min, declared.max], [0, 3]);
 });

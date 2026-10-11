@@ -2,7 +2,7 @@
 
 // 结构推导与布局生成；解析库、命名及词法服务由调用方注入。
 function createSchemaLayout(dependencies) {
-    const { createJsSource, getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, physicalTableName, maskJsStringsAndComments, createStatusUsage, isPromptVisibleColumn, isMvuOutputDocument = () => false, vwdExperimental = () => false, canValidateRegisteredSchema = () => false } = dependencies;
+    const { createJsSource, getMvuYamlLibs, splitJsTopLevelArgs, parseInitVar, analyzeMvuInitMetadata, isPlainObject, toIdent, pinyinOf, physicalTableName, maskJsStringsAndComments, ejsScriptBlocks, createStatusUsage, isPromptVisibleColumn, isMvuOutputDocument = () => false, vwdExperimental = () => false, canValidateRegisteredSchema = () => false } = dependencies;
     function leafInfo(v) {
             if (Array.isArray(v)) {
                 return { value: v.length > 0 ? v[0] : '', desc: v.length > 1 ? String(v[1]) : '' };
@@ -1579,7 +1579,7 @@ function createSchemaLayout(dependencies) {
                 if (incoming.value) out.value = mergeZodSchemaNodes(out.value, incoming.value) || incoming.value;
                 if (incoming.keySchema) out.keySchema = mergeZodSchemaNodes(out.keySchema, incoming.keySchema) || incoming.keySchema;
             }
-            for (const key of ['min', 'max', 'enum', 'desc', 'integer', 'hasDefault', 'defaultValue', 'defaultKind', 'dynamicDefault', 'unresolved', 'passthrough', 'coerce', 'clampTransform', 'nullable', 'optional']) {
+            for (const key of ['min', 'max', 'enum', 'desc', 'integer', 'outputFallbacks', 'hasDefault', 'defaultValue', 'defaultKind', 'dynamicDefault', 'unresolved', 'passthrough', 'coerce', 'clampTransform', 'nullable', 'optional']) {
                 if (incoming[key] !== undefined) out[key] = incoming[key];
             }
             return out;
@@ -2264,7 +2264,7 @@ function createSchemaLayout(dependencies) {
             return blobs;
         }
     
-    const scanStatusUsage = createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSchemaFieldName, cardTextBlobs });
+    const scanStatusUsage = createStatusUsage({ maskJsStringsAndComments, ejsScriptBlocks, splitJsTopLevelArgs, isSchemaFieldName, cardTextBlobs });
 
     function isPairLeaf(v) {
             return Array.isArray(v) && v.length === 2 && typeof v[1] === 'string';
@@ -2277,6 +2277,7 @@ function createSchemaLayout(dependencies) {
     function collectColumns(obj, prefixPath, report, opts = {}) {
             const cols = [];
             const usedIdents = new Set(['row_id']);
+            const flattenColumns = opts.flattenObjectColumns || flattenFixedObjectColumns;
             for (const key of Object.keys(obj)) {
                 const v = obj[key];
                 const li = leafInfo(v);
@@ -2286,12 +2287,15 @@ function createSchemaLayout(dependencies) {
                     cols.push(optionalJsonContainerColumn(key, v, path, fixedSchema, usedIdents));
                     continue;
                 }
-                if (fixedObjectSchema(fixedSchema) && isPlainObject(v) && Object.keys(v).length === 0) {
-                    for (const c of flattenFixedObjectColumns(key, v, fixedSchema, { rootPath: prefixPath, relativeRoot: [key] })) {
+                if (fixedObjectSchema(fixedSchema) && isPlainObject(v)) {
+                    const fixedCols = flattenColumns(key, v, fixedSchema, { rootPath: prefixPath, relativeRoot: [key] });
+                    if (Object.keys(v).length === 0 || fixedCols.length === 1 && fixedCols[0].isObject && fixedCols[0].zh === key) {
+                      for (const c of fixedCols) {
                         c.ident = toIdent(c.zh, usedIdents, 'column');
                         cols.push(c);
+                      }
+                      continue;
                     }
-                    continue;
                 }
                 // 普通数组是明确的值形状（日志/勋章列表等），优先按 JSON 单元格保留；
                 // 不能被宽泛的动态字典规则改造成行对象。二元 [value, desc] 仍走叶子分支。
@@ -2377,7 +2381,7 @@ function createSchemaLayout(dependencies) {
                 }
                 const looksLikeEntryDict = allObject && sharedChildFields && sharedChildFields.size > 0;
                 if (fixedObjectFromValue(v) && !looksLikeEntryDict) {
-                    const fixedCols = flattenFixedObjectColumns(key, v, null, { rootPath: prefixPath, relativeRoot: [key] });
+                    const fixedCols = flattenColumns(key, v, null, { rootPath: prefixPath, relativeRoot: [key] });
                     for (const c of fixedCols) {
                         c.ident = toIdent(c.zh, usedIdents, 'column');
                         cols.push(c);
@@ -2488,6 +2492,7 @@ function createSchemaLayout(dependencies) {
                 path,
                 value,
                 desc: desc || '对象（JSON 存储，读取时还原）',
+                _generatedDescription: !desc,
                 type: 'TEXT',
                 range: null,
                 ident: toIdent(key, usedIdents, 'column'),
@@ -2501,7 +2506,9 @@ function createSchemaLayout(dependencies) {
         if (value !== undefined) {
             try { encoded = JSON.stringify(value); } catch (e) { encoded = undefined; }
         }
-        return { zh: key, path, value: encoded, desc: describeObjectSchema(node) || '可空对象/数组（JSON 整体存储）',
+        return { zh: key, path, value: encoded, desc: describeObjectSchema(node)
+                || (node && node.kind === 'unknown' ? '完整 JSON 值（类型遵循原字段规则）' : '可空对象/数组（JSON 整体存储）'),
+            _schemaDescription: true,
             type: 'TEXT', range: null, ident: toIdent(key, usedIdents, 'column'), isObject: true,
             jsonDefaultMissing: !!(node && node.kind === 'unknown'),
             logicalType: 'jsonObjectOptional', jsonKind: node && node.kind === 'unknown' ? 'any' : node && node.kind === 'array' ? 'array' : 'object', objectSchema: node || null };
@@ -2523,18 +2530,23 @@ function createSchemaLayout(dependencies) {
             return out;
         }
     
-    function describeObjectSchema(node) {
-            if (!node) return '';
-            if (node.kind === 'array') return 'JSON 数组；示例：[]';
-            if (node.kind !== 'object') return '';
-            const fields = Object.entries(node.fields || {});
-            const allowed = fields.map(([key, child]) => `${key}(${schemaTypeLabel(child)})`).join('、');
-            const parts = ['JSON 对象'];
-            if (allowed) parts.push(`允许键：${allowed}`);
-            if (node.dynamic) parts.push('可使用运行期动态键');
-            if (fields.length) parts.push(`示例：${JSON.stringify(schemaExample(node))}`);
-            return parts.join('；');
+    // Keep text the author supplied, without synthesizing a second schema manual.
+    // SQL examples and executable constraints are generated separately.
+    function authoredSchemaDescriptions(node, path = []) {
+        if (!node) return [];
+        const descriptions = node.desc ? [(path.length ? path.join('.') + '：' : '') + node.desc] : [];
+        if (node.dynamic) descriptions.push(...authoredSchemaDescriptions(node.value, [...path, '<动态键>']));
+        else for (const [key, child] of Object.entries(node.fields || {})) {
+            if (!key.startsWith('$')) descriptions.push(...authoredSchemaDescriptions(child, [...path, key]));
         }
+        if (node.kind === 'array') descriptions.push(...authoredSchemaDescriptions(node.element, [...path, '<数组元素>']));
+        return descriptions;
+    }
+
+    function describeObjectSchema(node) {
+        if (!node || !['object', 'array'].includes(node.kind)) return '';
+        return [node.kind === 'array' ? 'JSON 数组' : 'JSON 对象', ...authoredSchemaDescriptions(node)].join('\n');
+    }
     
     function fixedObjectFromValue(value) {
             if (!isPlainObject(value) || Object.keys(value).length === 0) return false;
@@ -2553,6 +2565,31 @@ function createSchemaLayout(dependencies) {
             const out = [];
             const rootPath = Array.isArray(opts.rootPath) ? opts.rootPath : [];
             const relativeRoot = Array.isArray(opts.relativeRoot) ? opts.relativeRoot : [rootName];
+            // Decide the boundary from structure, not a sampled record's size or
+            // field names. Keep mixed containers together so object operations
+            // retain dynamic, missing and private descendants.
+            const needsWholeJson = (node, sample, seen = new Set()) => {
+                if (node) {
+                    if (seen.has(node)) return true;
+                    if (node.kind === 'unknown' || node.kind === 'array' || node.dynamic || node.passthrough
+                        || node.kind === 'object' && (node.optional || node.nullable)) return true;
+                    seen.add(node);
+                    const result = Object.entries(node.fields || {}).some(([key, child]) =>
+                        key.startsWith('$') || needsWholeJson(child, undefined, seen));
+                    seen.delete(node);
+                    if (result) return true;
+                }
+                if (Array.isArray(sample)) return true;
+                return isPlainObject(sample) && Object.entries(sample).some(([key, child]) =>
+                    key.startsWith('$') || needsWholeJson(null, child, seen));
+            };
+            if (opts.hasHiddenFields || needsWholeJson(schema, value)) {
+                const column = optionalJsonContainerColumn(rootName, value, [...rootPath, rootName], schema
+                    || { kind: 'object' }, new Set());
+                column.itemPath = relativeRoot;
+                column.jsonDefaultMissing = true;
+                return [column];
+            }
             const walk = (displayParts, pathParts, relativeParts, currentValue, currentSchema) => {
                 const schemaFields = fixedObjectSchema(currentSchema) ? currentSchema.fields : null;
                 const valueFields = fixedObjectFromValue(currentValue) ? currentValue : null;
@@ -2587,6 +2624,7 @@ function createSchemaLayout(dependencies) {
                         itemPath: [...relativeParts, key],
                         value: v,
                         desc: isJson ? (describeObjectSchema(childSchema) || '动态/未知结构（JSON 存储）') : '',
+                        _schemaDescription: isJson,
                         type: kind === 'number' || kind === 'boolean' || typeof childValue === 'number' || typeof childValue === 'boolean' ? 'INTEGER' : 'TEXT',
                         logicalType: kind || (typeof childValue === 'boolean' ? 'boolean' : (typeof childValue === 'number' ? 'number' : '')),
                         range: null,
@@ -2687,6 +2725,23 @@ function createSchemaLayout(dependencies) {
                 const node = nullableNodeAt(pathArr);
                 if (node) return node.kind === 'array';
                 return ((shapeFieldTypes[pathArr[0]] || {})[pathArr[1]] === 'array');
+            };
+            // Public samples omit $ values. Inspect only their presence in the
+            // original objects; never feed private values into DEFAULT/examples.
+            const hasPrivateDescendant = value => value && typeof value === 'object'
+                && Object.entries(value).some(([key, child]) => key.startsWith('$') || hasPrivateDescendant(child));
+            const flattenObjectColumns = (name, value, node, opts = {}) => {
+                const path = [...(opts.rootPath || []), name];
+                let candidates = options.originalInitvar ? [options.originalInitvar] : [];
+                for (let index = 0; index < path.length; index++) {
+                    const prefix = path.slice(0, index);
+                    if (isDynamicPath(prefix) || opts.rootRows && index === 1) {
+                        candidates = candidates.flatMap(v => isPlainObject(v) ? Object.values(v) : []);
+                    }
+                    candidates = candidates.map(v => v && v[path[index]]).filter(v => v !== undefined);
+                }
+                return flattenFixedObjectColumns(name, value, node, { ...opts,
+                    hasHiddenFields: candidates.some(hasPrivateDescendant) });
             };
             const groupNameSet = new Set(Object.keys(initvar));
             for (const name of Object.keys(shapeInfo && shapeInfo.branchRootNodes || {})) groupNameSet.add(name);
@@ -2801,7 +2856,7 @@ function createSchemaLayout(dependencies) {
                     column.jsonKind = kind;
                     column.objectSchema = schema || null;
                     const schemaDesc = describeObjectSchema(schema);
-                    if (schemaDesc) column.desc = schemaDesc;
+                    if (schemaDesc) { column.desc = schemaDesc; column._schemaDescription = true; }
                     if (zodField && (zodField.nullable || zodField.optional)) {
                         column.logicalType = 'jsonObjectOptional';
                         if (column.value !== undefined && typeof column.value !== 'string') column.value = JSON.stringify(column.value);
@@ -2892,6 +2947,7 @@ function createSchemaLayout(dependencies) {
             };
             function recordScalarColumn(name, path, node, kind, used) {
                 return { zh: name, path, value: '',
+                    _generatedDescription: !(node && node.desc),
                     desc: node && node.desc || (kind === 'number' ? '条目数值' : kind === 'boolean' ? '条目布尔值（1=true，0=false）'
                         : kind === 'mixed' ? '条目值（JSON 标量，保留字符串/数字/布尔/null 类型）' : '条目描述'),
                     type: scalarSqlType(kind, node),
@@ -3063,7 +3119,7 @@ function createSchemaLayout(dependencies) {
                 // 不从顶层收集子表，避免“每角色一张字段相同的重复表”。
                 const columns = kind === 'rows'
                     ? []
-                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, hasDeclaredDescendant, isArrayPath, objectSchemaAt: nullableNodeAt,
+                    : collectColumns(raw, prefixPath, report, { childTables, isDynamicPath, hasDynamicDescendant, hasDeclaredDescendant, isArrayPath, objectSchemaAt: nullableNodeAt, flattenObjectColumns,
                         isFixedPath: path => (objectDynamicOverrides && objectDynamicOverrides.get(path.join('.')) === false) ||
                             (!isDynamicPath(path) && fixedFieldParents.has(path.join('.'))) });
                 if (kind !== 'rows') {
@@ -3075,7 +3131,7 @@ function createSchemaLayout(dependencies) {
                             try { actual = JSON.parse(c.value); } catch (e) { actual = undefined; }
                         }
                         if (c.isObject && c.logicalType !== 'jsonObjectOptional' && (fixedObjectSchema(declaredSchema) || ((!declaredSchema || !declaredSchema.dynamic) && fixedObjectFromValue(actual)))) {
-                            const flatCols = flattenFixedObjectColumns(c.zh, actual, declaredSchema, {
+                            const flatCols = flattenObjectColumns(c.zh, actual, declaredSchema, {
                                 rootPath: [groupName],
                                 relativeRoot: [c.zh],
                             });
@@ -3158,9 +3214,10 @@ function createSchemaLayout(dependencies) {
                             }
                             const declaredObjectSchema = (shapeObjectSchemas[groupName] || {})[subKey];
                             if (!(declaredObjectSchema && (declaredObjectSchema.nullable || declaredObjectSchema.optional)) && (fixedObjectSchema(declaredObjectSchema) || ((!declaredObjectSchema || !declaredObjectSchema.dynamic) && fixedObjectFromValue(sv)))) {
-                                const flatCols = flattenFixedObjectColumns(subKey, sv, declaredObjectSchema, {
+                                const flatCols = flattenObjectColumns(subKey, sv, declaredObjectSchema, {
                                     rootPath: [groupName],
                                     relativeRoot: [subKey],
+                                    rootRows: true,
                                 });
                                 if (flatCols.length) {
                                     flattenedRoots.add(subKey);
@@ -3221,7 +3278,7 @@ function createSchemaLayout(dependencies) {
                         }
                         const fixedSamples = samples.filter(fixedObjectFromValue);
                         if (!fixedSamples.length) continue;
-                        const flatCols = flattenFixedObjectColumns(rootField, fixedSamples[0], declared, { rootPath: [groupName], relativeRoot: [rootField] });
+                        const flatCols = flattenObjectColumns(rootField, fixedSamples[0], declared, { rootPath: [groupName], relativeRoot: [rootField] });
                         if (!flatCols.length) continue;
                         flattenedRoots.add(rootField);
                         objFields.delete(rootField);
@@ -3267,7 +3324,7 @@ function createSchemaLayout(dependencies) {
                     // 固定嵌套结构必须直接从 type schema 生成展平列。
                     for (const [rootField, rootSchema] of Object.entries(shapeObjectSchemas[groupName] || {})) {
                         if (!fixedObjectSchema(rootSchema) || rootSchema.nullable || rootSchema.optional || flattenedRoots.has(rootField)) continue;
-                        const flatCols = flattenFixedObjectColumns(rootField, undefined, rootSchema, {
+                        const flatCols = flattenObjectColumns(rootField, undefined, rootSchema, {
                             rootPath: [groupName],
                             relativeRoot: [rootField],
                         });
@@ -3541,7 +3598,7 @@ function createSchemaLayout(dependencies) {
                         const rootField = c.path && c.path.length >= 2 ? c.path[1] : c.zh;
                         const declaredSchema = (shapeObjectSchemas[groupName] || {})[rootField];
                         if (c.isObject && c.logicalType !== 'jsonObjectOptional' && fixedObjectSchema(declaredSchema)) {
-                            const flat = flattenFixedObjectColumns(rootField, undefined, declaredSchema, {
+                            const flat = flattenObjectColumns(rootField, undefined, declaredSchema, {
                                 rootPath: [groupName], relativeRoot: [rootField],
                             });
                             if (flat.length) { finalSingletonCols.push(...flat); continue; }
@@ -4052,6 +4109,7 @@ function createSchemaLayout(dependencies) {
                     : ['INTEGER', 'REAL'].includes(c.type) ? 'number' : 'text';
                 c.type = scalarSqlType(kind, node || c);
                 if (!c.isPair) c.logicalType = kind;
+                if (node?.outputFallbacks) c.outputFallbacks = node.outputFallbacks.slice();
                 if (node && ['text', 'boolean'].includes(node.kind)) c.range = null;
                 if (kind === 'number' && node && Number.isFinite(node.min) && Number.isFinite(node.max)) c.range = [node.min, node.max];
             }
@@ -4101,9 +4159,50 @@ function createSchemaLayout(dependencies) {
 
     // 在已有规则/列推导完成后合并，复用其完整路径与规则归属，不另猜一套结构。
     // true 选择全部顶层容器；路径列表用于只选择指定顶层组。既有完整 JSON 组直接复用。
+    // Keep one ownership boundary wherever separate rows cannot identify an
+    // original object operation. Stable dictionary records remain ordinary rows.
+    function prepareStatStorageLayout(schema, initvar, shapeInfo, report, options = {}) {
+        const root = shapeInfo.zodDefaultsRoot;
+        // MVU generateSchema defaults to a closed root; only the actual root
+        // metadata can open it. A template by itself is not an open declaration.
+        const mvuRoot = shapeInfo.mvuMetadata?.get('');
+        const mvuRootOpen = mvuRoot?.kind === 'object' && mvuRoot.extensible === true;
+        const openRoot = root?.kind === 'object' && (root.dynamic || root.passthrough) ? root
+            : mvuRootOpen ? { ...(root?.kind === 'object' ? root : { kind: 'object', fields: {} }),
+                dynamic: true, value: root?.value || { kind: 'unknown' } } : null;
+        if (openRoot) {
+            const cardName = String(options.cardName || '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '').trim();
+            const name = (cardName || '角色') + '表', tableName = name;
+            const column = optionalJsonContainerColumn('内容', initvar, [], openRoot, new Set(['row_id']));
+            column.jsonDefaultMissing = true;
+            column.desc = '本列完整保存原 stat_data（JSON）；字段名和嵌套结构保持原样，按原变量更新要求修改。';
+            const descriptions = authoredSchemaDescriptions(openRoot);
+            if (descriptions.length) column.desc += '\n' + descriptions.join('\n');
+            const checks = schema.flatMap(g => g.groupChecks || []);
+            report.note('原 Schema 或 MVU 根元数据允许根对象动态键；直接映射完整根对象，不另建未映射变量兜底表。');
+            return [{ name, tableName, ident: physicalTableName(tableName), kind: 'singleton',
+                keyCol: '', keyValue: '', valueCol: column.zh, rootContainer: true,
+                columns: [column], rows: [[1, column.value]], childTables: [],
+                source: 'declared-root-container', containerSchema: openRoot, groupChecks: checks }];
+        }
+        const entries = buildLayout(schema).entries;
+        const selected = new Set();
+        for (const entry of entries) {
+            const group = schema.find(g => g.tableName === entry.table);
+            const rootKey = (entry.path?.length ? entry.path : entry.writePaths?.[0] || [entry.group])[0];
+            if (String(rootKey).startsWith('$')) selected.add(rootKey);
+            if (['array', 'pathArray', 'nestedArray', 'nestedRows'].includes(entry.kind)
+                || group.childTables?.length || group.vwdMetaZh) {
+                selected.add((entry.path?.length ? entry.path : entry.writePaths?.[0] || [entry.group])[0]);
+            }
+        }
+        return preserveJsonContainers(schema, initvar, [...selected], report);
+    }
+
     function preserveJsonContainers(schema, initvar, selection, report) {
-        const selected = new Set(Object.keys(initvar || {}).filter(key => key !== '$meta'
-            && (isPlainObject(initvar[key]) || Array.isArray(initvar[key]))
+        const candidates = [...new Set([...Object.keys(initvar || {}), ...(Array.isArray(selection) ? selection.filter(key => String(key).startsWith('$')) : [])])];
+        const selected = new Set(candidates.filter(key => key !== '$meta'
+            && (isPlainObject(initvar[key]) || Array.isArray(initvar[key]) || String(key).startsWith('$'))
             && (selection === true || Array.isArray(selection) && selection.includes(key))));
         if (!selected.size) return schema;
         const layout = buildLayout(schema), byTable = new Map(layout.entries.map(e => [e.table, e]));
@@ -4114,14 +4213,14 @@ function createSchemaLayout(dependencies) {
         for (const root of selected) {
             const members = schema.filter(g => owners.get(g) === root);
             if (!members.length) continue;
-            if (members.length === 1 && members[0].valueCol) {
+            if (!root.startsWith('$') && members.length === 1 && members[0].valueCol && !members[0].vwdMetaZh) {
                 const group = members[0];
                 replacements.set(root, { ...group, columns: group.columns.map(c => c.zh === group.valueCol
                     ? { ...c, jsonDefaultMissing: true } : c) });
                 continue;
             }
             const first = members.find(g => prefixOf(byTable.get(g.tableName)).length === 1) || members[0];
-            const raw = initvar[root], node = { kind: Array.isArray(raw) ? 'array' : 'object' };
+            const raw = initvar[root], node = { kind: root.startsWith('$') ? 'unknown' : Array.isArray(raw) ? 'array' : 'object' };
             const column = optionalJsonContainerColumn('内容', raw, [root], node, new Set(['row_id']));
             // 初始数据由 content/seedRows 保存。DDL 不再复制完整 JSON 初值；
             // 新增空身份行的 SQL 默认值表示缺失，和已有完整容器协议一致。
@@ -4144,19 +4243,20 @@ function createSchemaLayout(dependencies) {
                     else if (entry.kind === 'rows' || entry.kind === 'nestedRows')
                         path = [...prefix, '*', ...(entry.scalarValueCol === col.zh ? [] : registered.path || [col.zh])];
                     else path = [...prefix, '*'];
+                    if (path.some(key => String(key).startsWith('$'))) continue;
                     const pair = col.isPair === true;
                     const hints = [];
                     if (pair) hints.push('[当前值, 说明]，当前说明直接保存在 JSON 第二项');
-                    else if (col.desc) hints.push(col.desc);
+                    else if (col._schemaDescription) hints.push(...authoredSchemaDescriptions(col.objectSchema));
+                    else if (col.desc && !col._generatedDescription) hints.push(col.desc);
                     if (col.format) hints.push('格式 ' + col.format);
-                    if (Array.isArray(col.range)) hints.push('范围 ' + col.range.join('～'));
-                    if (Array.isArray(col.enum) && col.enum.length) hints.push('取值 ' + JSON.stringify(col.enum));
+                    if (col.aiReadonly) hints.push('只读（作者脚本仍可更新）');
                     hints.push(...(Array.isArray(col.check) ? col.check : col.check ? [col.check] : []));
                     if (hints.length) descriptions.push(path.join('.') + '：' + hints.join('；'));
                     const valuePath = [...path.slice(1), ...(pair ? [0] : [])];
                     const constraints = [];
                     if (col.range || Array.isArray(col.enum) && col.enum.length <= 8)
-                        constraints.push({ path: valuePath, range: col.range, enum: col.enum });
+                        constraints.push({ path: valuePath, range: col.range, enum: col.enum, outputFallbacks: col.outputFallbacks });
                     for (const check of col.jsonPathChecks || [])
                         constraints.push({ ...check, path: [...valuePath, ...check.path] });
                     for (const check of constraints) {
@@ -4167,14 +4267,22 @@ function createSchemaLayout(dependencies) {
             }
             column.desc = '完整保存 ' + root + ' 的 JSON 数据；字段名和嵌套结构保持原样。'
                 + '\n缺失用空单元格，null 用 JSON null，空容器用 {} 或 []。'
-                + (descriptions.length ? '\n字段说明与规则：\n' + [...new Set(descriptions)].join('\n') : '');
+                + (descriptions.length ? '\n' + [...new Set(descriptions)].join('\n') : '');
             if (jsonChecks.length) column.jsonPathChecks = jsonChecks;
+            const whollyReadonly = g => {
+                if (g.aiReadonly) return true;
+                const fields = g.columns.filter(c => c.zh !== '_扩展数据' && !isVwdMetaColumn(c)
+                    && !(c.path || c.itemPath || []).some(key => String(key).startsWith('$')));
+                return g.kind === 'singleton' && fields.length > 0 && fields.every(c => c.aiReadonly);
+            };
             replacements.set(root, { name: root, tableName: first.tableName, ident: first.ident,
                 kind: 'singleton', keyCol: '', keyValue: root, valueCol: column.zh,
+                ...(root.startsWith('$') ? { privateRoot: true } : {}),
                 columns: [column], rows: [[1, column.value]], childTables: [], source: 'full-json-container',
-                containerSchema: node, groupChecks: [...new Set(checks)], reminders: [...new Set(reminders)], wildcardRules: [] });
+                containerSchema: node, groupChecks: [...new Set(checks)], reminders: [...new Set(reminders)], wildcardRules: [],
+                aiReadonly: members.every(whollyReadonly) });
             report.note(`完整 JSON 容器「${root}」合并 ${members.length} 张来源表；空状态和嵌套数据原样保存，SQLite 可用 JSON 路径局部更新。`);
-            if (dynamicConstraints) report.note(`完整 JSON 容器「${root}」的动态记录/数组元素约束保留在说明中；SQLite CHECK 不遍历任意元素。`);
+            if (dynamicConstraints) report.note(`完整 JSON 容器「${root}」的 SQLite CHECK 不遍历任意元素；原运行时校验与业务要求保持原有处理。`);
         }
         const emitted = new Set(), out = [];
         for (const group of schema) {
@@ -4410,43 +4518,41 @@ function createSchemaLayout(dependencies) {
                 const collectionChecks = allWildcardRules.filter(e =>
                     groupWritePaths.some(path => rulePathMatch(e.path, path))).flatMap(e => e.checks || []);
                 g.groupChecks = [...new Set([...g.groupChecks, ...containerChecks, ...collectionChecks])];
-                if (g.containerSchema && (g.valueCol || g.scalarValueCol)) {
-                    // 容器没有拆列，字段的说明和约束仍需出现在 note 中。
-                    // 直接保留来源路径，不能把内部字段规则误挂成对「内容」整列的数值约束。
-                    const descriptions = [], jsonPathChecks = [];
-                    const containerPath = g.containerPath || [g.name];
-                    const column = g.columns.find(c => c.zh === (g.valueCol || g.scalarValueCol));
+                const containerColumns = g.columns.filter(column =>
+                    g.containerSchema && column.zh === (g.valueCol || g.scalarValueCol)
+                    || column.isObject && ['object', 'array'].includes(column.objectSchema?.kind));
+                for (const column of containerColumns) {
+                    // Author descriptions remain bound to the container. Executable
+                    // constraints do not require a synthesized prompt inventory.
+                    const jsonPathChecks = [];
+                    const standalone = !!(g.containerSchema && column.zh === (g.valueCol || g.scalarValueCol));
+                    const containerPath = standalone ? g.containerPath || [g.name] : column.path;
+                    const containerSchema = standalone ? g.containerSchema : column.objectSchema;
                     let dynamicConstraints = false;
                     const visit = (node, path, dynamic = false) => {
                         if (!node) return;
-                        const info = [schemaTypeLabel(node)];
-                        if (node.nullable) info.push('可为 null');
-                        if (node.optional) info.push('可缺失');
-                        if (Number.isFinite(node.min)) info.push('最小值/长度 ' + node.min);
-                        if (Number.isFinite(node.max)) info.push('最大值/长度 ' + node.max);
-                        if (Array.isArray(node.enum) && node.enum.length) info.push('取值 ' + JSON.stringify(node.enum));
-                        if (node.desc) info.push(node.desc);
                         const field = path[path.length - 1];
-                        const format = (ruleFormats[g.name] || {})[field];
-                        if (format) info.push('格式 ' + format);
                         const range = node.kind === 'number' && Number.isFinite(node.min) && Number.isFinite(node.max)
                             ? [node.min, node.max] : (node.kind === 'number' || ruleNumeric.has(field) ? ruleRanges[field] : null);
                         const enumValues = node.enum || ruleEnums[field];
-                        if (range) info.push('范围 ' + range.join('～'));
-                        if (!node.enum && Array.isArray(enumValues)) info.push('取值 ' + JSON.stringify(enumValues));
                         if (path.length > containerPath.length && !['object', 'array'].includes(node.kind) && (range || Array.isArray(enumValues) && enumValues.length <= 8)) {
                             if (dynamic) dynamicConstraints = true;
-                            else jsonPathChecks.push({ path: path.slice(containerPath.length), range, enum: enumValues });
+                            else jsonPathChecks.push({ path: path.slice(containerPath.length), range, enum: enumValues, outputFallbacks: node.outputFallbacks });
                         }
-                        descriptions.push(path.join('.') + '：' + info.join('；'));
                         if (node.dynamic) visit(node.value, [...path, '<动态键>'], true);
                         else for (const [key, child] of Object.entries(node.fields || {})) visit(child, [...path, key], dynamic);
                         if (node.kind === 'array') visit(node.element, [...path, '<数组元素>'], true);
                     };
-                    visit(g.containerSchema, containerPath);
-                    column.desc = '本列保存整个 ' + containerPath.join('.') + '，JSON 内部结构与约束：\n' + descriptions.join('\n');
+                    visit(containerSchema, containerPath);
+                    if (standalone) {
+                        column.desc = '本列完整保存 ' + containerPath.join('.') + ' 的 JSON 数据；字段名和嵌套结构保持原样。';
+                        column._schemaDescription = true;
+                        const descriptions = authoredSchemaDescriptions(containerSchema, containerPath);
+                        if (descriptions.length) column.desc += '\n' + descriptions.join('\n');
+                    }
                     if (jsonPathChecks.length) column.jsonPathChecks = jsonPathChecks;
-                    if (dynamicConstraints) report.note(`可空容器「${containerPath.join('.')}」的动态键/数组元素范围与枚举保留在字段说明；SQLite CHECK 无法遍历任意元素，本表不承诺执行这些内部约束。`);
+                    if (dynamicConstraints) report.note(`可空容器「${containerPath.join('.')}」的 SQLite CHECK 不遍历任意元素；原运行时校验与业务要求保持原有处理。`);
+                    if (!standalone) continue;
                     const checks = ruleCheckPaths.filter(e => {
                         const path = Array.isArray(e.path) ? e.path : String(e.path || '').split('.');
                         const prefix = containerPath.slice(0, g.scalarValueCol ? -1 : undefined);
@@ -4619,6 +4725,7 @@ function createSchemaLayout(dependencies) {
                     const entry = {
                         kind: 'json',
                         scalarType: g.scalarType,
+                        ...(g.publicFallback ? { publicFallback: true } : {}),
                         group: g.name,
                         table: g.tableName,
                         keyCol: g.keyCol,
@@ -4781,6 +4888,9 @@ function createSchemaLayout(dependencies) {
                 if (!group) continue;
                 const names = group.columns.filter(c => c.omitMissingParents).map(c => c.zh);
                 if (names.length) entry.omitMissingParents = names;
+                if (group.overflowCol) entry.overflowCol = group.overflowCol;
+                if (group.statStorageVersion) entry.statStorageVersion = group.statStorageVersion;
+                if (group.rootContainer) entry.rootContainer = true;
             }
             return { entries, pathIndex, tableByName };
         }
@@ -4801,6 +4911,7 @@ function createSchemaLayout(dependencies) {
                 valueCol: e.valueCol || '',
                 scalarValueCol: e.scalarValueCol || '',
                 scalarType: e.scalarType,
+                ...(e.publicFallback ? { publicFallback: true } : {}),
                 emptyValue: Object.prototype.hasOwnProperty.call(e, 'emptyValue') ? e.emptyValue : undefined,
                 cols: (e.cols || []).map(c => {
                     const col = [c.zh, c.type, c.fallback === undefined ? '' : c.fallback, c.path || [], !!c.isPair, c.desc || ''];
@@ -4816,6 +4927,9 @@ function createSchemaLayout(dependencies) {
             for (let i = 0; i < safe.length; i++) {
                 const src = layout.entries[i];
                 if (src?.omitMissingParents) safe[i].omitMissingParents = src.omitMissingParents;
+                if (src?.overflowCol) safe[i].overflowCol = src.overflowCol;
+                if (src?.statStorageVersion) safe[i].statStorageVersion = src.statStorageVersion;
+                if (src?.rootContainer) safe[i].rootContainer = true;
                 if (src && src.vwd) safe[i].vwd = src.vwd;
             }
             return JSON.stringify(safe);
@@ -4868,7 +4982,7 @@ function createSchemaLayout(dependencies) {
             }
             return entries;
         }
-    return { unwrapMvuRuleDocument, wrapMvuRuleDocument, parseProseMvuRules, leafInfo, maskYamlBlockScalarBodies, yamlStripQuotes, parseInlineEnumValues, yamlCheckItems, yamlExpandTemplateKeys, expandYamlTemplateFieldKey, protectYamlTemplateScalarValues, prepareMvuRuleYaml, yamlCollectCheckRanges, collectRulesFromYaml, yamlParseRange, isMvuRulePathKey, registerYamlWildcard, registerWildcardTypeShape, registerYamlField, parseMvuShapes, parseRegisteredZodSchema, mergeZodSchemaNodes, countZodSchemaFlag, mergeRegisteredZodIntoShapeInfo, applyRegisteredZodDefaults, missingRegisteredZodDefaults, scanGreetingShapeVariation, extractListItems, stripRuleQuotes, scanDynamicKeyNamesFromRules, parseZodStyleRules, isSchemaFieldName, mergeShapeMetadata, parseTypeSchema, parseShapeString, extractYamlBlockScalar, cardTextBlobs, scanStatusUsage, isPairLeaf, isLeaf, collectColumns, inferType, jsonColumnFromObject, schemaTypeLabel, schemaExample, describeObjectSchema, fixedObjectFromValue, fixedObjectSchema, flattenFixedObjectColumns, buildSchema, rowFirstValue, attachFieldRules, sanitizeMacroColumnZh, disambiguateColumnSlugs, isVwdMetaColumn, vwdFieldId, columnLayoutType, buildLayout, buildLayoutJson, resolveLayoutMacros };
+    return { isMvuOutputProtocolRule, unwrapMvuRuleDocument, wrapMvuRuleDocument, parseProseMvuRules, leafInfo, maskYamlBlockScalarBodies, yamlStripQuotes, parseInlineEnumValues, yamlCheckItems, yamlExpandTemplateKeys, expandYamlTemplateFieldKey, protectYamlTemplateScalarValues, prepareMvuRuleYaml, yamlCollectCheckRanges, collectRulesFromYaml, yamlParseRange, isMvuRulePathKey, registerYamlWildcard, registerWildcardTypeShape, registerYamlField, parseMvuShapes, parseRegisteredZodSchema, mergeZodSchemaNodes, countZodSchemaFlag, mergeRegisteredZodIntoShapeInfo, applyRegisteredZodDefaults, missingRegisteredZodDefaults, scanGreetingShapeVariation, extractListItems, stripRuleQuotes, scanDynamicKeyNamesFromRules, parseZodStyleRules, isSchemaFieldName, mergeShapeMetadata, parseTypeSchema, parseShapeString, extractYamlBlockScalar, cardTextBlobs, scanStatusUsage, isPairLeaf, isLeaf, collectColumns, inferType, jsonColumnFromObject, schemaTypeLabel, schemaExample, describeObjectSchema, fixedObjectFromValue, fixedObjectSchema, flattenFixedObjectColumns, buildSchema, prepareStatStorageLayout, preserveJsonContainers, rowFirstValue, attachFieldRules, sanitizeMacroColumnZh, disambiguateColumnSlugs, isVwdMetaColumn, vwdFieldId, columnLayoutType, buildLayout, buildLayoutJson, resolveLayoutMacros };
 }
 
 module.exports = createSchemaLayout;
