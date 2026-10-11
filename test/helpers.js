@@ -45,6 +45,9 @@ function requireFixture() {
 function applyingApi(tables, opts = {}) {
     return {
         getTemplatePresetNames: () => [],
+        // Readiness capability only: this CRUD substitute is not a SQLite
+        // engine. SQL behavior must use a separate real-engine fixture.
+        querySql: () => { throw new Error('CRUD test substitute cannot execute SQL'); },
         exportTableAsJson: () => tables,
         initGameSession: async () => {
             if (opts.onInit) await opts.onInit();

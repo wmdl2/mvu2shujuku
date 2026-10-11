@@ -40,7 +40,7 @@ test('有限绑定：固定同形字段声明不猜成字典行，简单对象�
     const stat = { 面板: { 气力: { 当前: 1 }, 精力: { 当前: 2 } } };
     const r = convert(stat, '变量更新规则:\n  面板:\n    ${气力|精力}:\n      type: "{ 当前: number }"\n');
     assert.strictEqual(r.schema.find(g => g.name === '面板').kind, 'singleton');
-    assert.deepStrictEqual(r.schema.find(g => g.name === '面板').columns.filter(c => c.zh !== '_扩展数据').map(c => c.zh), ['气力_当前', '精力_当前']);
+    assert.deepStrictEqual(r.schema.find(g => g.name === '面板').columns.filter(c => c.zh !== r.schema.find(g => g.name === '面板').overflowCol).map(c => c.zh), ['气力_当前', '精力_当前']);
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, stat);
 });
 

@@ -7,6 +7,18 @@
  */
 const { test } = require('./runner');
 const { core, assert, applyingApi } = require('./helpers');
+const legacyLayoutFixture = require('./legacy-layout-fixture');
+// Old frozen fixtures remain evidence for legacy cards. New conversion removes
+// their fallback columns; compare business cells here, current prompt hashes in
+// table-prompt-output.js, and legacy read/write in hidden-columns.js.
+function businessContent(content, overflowCol = '_扩展数据') {
+    const indices = content[0].map((key, index) => key === overflowCol ? -1 : index).filter(index => index >= 0);
+    return content.map(row => indices.map(index => row[index]));
+}
+function businessSheets(template) {
+    return Object.fromEntries(Object.values(template).filter(sheet => sheet?.content && sheet.name !== '动态变量表').map(sheet => [sheet.name, businessContent(sheet.content)]));
+}
+
 
 const DEFAULT_SCHEMA = `const S = z.object({
   A: z.object({ str: z.string(), other: z.string() }),
@@ -26,7 +38,7 @@ function convert(stat = DEFAULT_STAT, schema = DEFAULT_SCHEMA, mode = 'both', ta
     const previous = core.isVwdExperimental();
     core.setVwdExperimental(true);
     try {
-    const result = core.convert({
+    const result = legacyLayoutFixture({
         name: 'VWD动态说明合成卡', first_mes: '',
         extensions: { tavern_helper: { scripts: [{ name: '变量结构', content: schema }] } },
         character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify(stat) }] },
@@ -64,7 +76,7 @@ function currentDescription(stat, group, field) {
 
 /* ---------------- A. 布局与存储 ---------------- */
 
-test('VWD动态说明：只为合格的单例 pair 字段生成隐藏元数据列，普通结构不新增列', () => {
+test('旧布局 VWD动态说明：只为合格的单例 pair 字段生成隐藏元数据列，普通结构不新增列', () => {
     const { layout, template } = convert();
     const a = entryOf(layout, 'A');
     const rows = entryOf(layout, 'Rows');
@@ -84,7 +96,7 @@ test('VWD动态说明：只为合格的单例 pair 字段生成隐藏元数据�
     assert.deepStrictEqual(a.cols.find(c => c[0] === 'other').slice(0, 6), ['other', 'pair', 'x', ['A', 'other'], true, '相同说明']);
 });
 
-test('VWD动态说明：元数据列隐藏、不进业务投影、不进 note/DDL 更新示例', () => {
+test('旧布局 VWD动态说明：元数据列隐藏、不进业务投影、不进 note/DDL 更新示例', () => {
     for (const mode of ['native', 'both', 'sqlite']) {
         const { layout, template, result } = convert(DEFAULT_STAT, DEFAULT_SCHEMA, mode);
         const sheet = sheetOf(template, 'A表');
@@ -102,7 +114,7 @@ test('VWD动态说明：元数据列隐藏、不进业务投影、不进 note/DD
     }
 });
 
-test('VWD动态说明：数字/布尔 pair 叶子仍是普通标量，不误启用 VWD', () => {
+test('旧布局 VWD动态说明：数字/布尔 pair 叶子仍是普通标量，不误启用 VWD', () => {
     const schema = 'const S = z.object({ N: z.object({ num: z.number(), flag: z.boolean(), str: z.string() }) }); registerMvuSchema(S);';
     const stat = { N: { num: [1, '数字说明'], flag: [true, '布尔说明'], str: ['s', '文本说明'] } };
     const { layout, template } = convert(stat, schema);
@@ -115,27 +127,28 @@ test('VWD动态说明：数字/布尔 pair 叶子仍是普通标量，不误启�
     assert.deepStrictEqual(read, { N: { num: 1, flag: true, str: ['s', '文本说明'] } });
 });
 
-test('VWD动态说明：私有/只读 pair 列不进入说明范围，越权覆盖被忽略', () => {
+test('旧布局 VWD动态说明：私有/只读 pair 列不进入说明范围，越权覆盖被忽略', () => {
     const schema = 'const S = z.object({ A: z.object({ pub: z.string(), _priv: z.string(), $hidden: z.string() }) }); registerMvuSchema(S);';
     const stat = { A: { pub: ['v', '公开说明'], _priv: ['s', '私有说明'], $hidden: ['h', '隐藏说明'] } };
     const { layout, template } = convert(stat, schema);
     const a = entryOf(layout, 'A');
-    assert.deepStrictEqual(a.vwd.fields.map(f => f.col), ['pub']);
+    assert.deepStrictEqual(a.vwd.fields.map(f => f.col), ['pub', '_priv']);
     assert.doesNotMatch(sheetOf(template, 'A表').sourceData.note, /VWD/, '私有列不参与插槽');
     const api = applyingApi(template);
     // 私有列的越权说明变化不参与 VWD：既不触发拒绝，也不会改变任何说明。
     const next = JSON.parse(JSON.stringify(stat));
-    next.A._priv = ['s', '越权覆盖'];
+    next.A._priv = ['新值', '私有说明'];
     next.A.$hidden = ['h', '越权覆盖'];
     return core.writeStatDiffToDb(api, layout, stat, next).then(() => {
         assert.strictEqual(core.lastStatWriteFailed, false, '私有列不进入 VWD，不应触发说明拒绝');
         const read = core.statDataFromTables(layout, template).stat_data;
         assert.strictEqual(currentDescription(read, 'A', '_priv'), '私有说明');
-        assert.strictEqual(currentDescription(read, 'A', '$hidden'), '隐藏说明');
+        assert.strictEqual(read.A.$hidden, undefined);
+        assert.strictEqual(read.A._priv[0], '新值');
     });
 });
 
-test('VWD动态说明：jsonPairOptional 字段同样登记，值列类型与缺省语义不变', () => {
+test('旧布局 VWD动态说明：jsonPairOptional 字段同样登记，值列类型与缺省语义不变', () => {
     const schema = 'const S = z.object({ A: z.object({ opt: z.string().nullable() }) }); registerMvuSchema(S);';
     const stat = { A: { opt: ['值', '可空说明'] } };
     const { layout, template } = convert(stat, schema);
@@ -152,7 +165,7 @@ test('VWD动态说明：jsonPairOptional 字段同样登记，值列类型与缺
 
 /* ---------------- B. 读回：覆盖 → 默认回退 ---------------- */
 
-test('VWD动态说明：说明覆盖只影响目标字段，未登记键与非法元数据不改变读回', () => {
+test('旧布局 VWD动态说明：说明覆盖只影响目标字段，未登记键与非法元数据不改变读回', () => {
     const { layout, template } = convert();
     const put = raw => {
         const t = JSON.parse(JSON.stringify(template));
@@ -189,7 +202,7 @@ test('VWD动态说明：说明覆盖只影响目标字段，未登记键与非�
     assert.deepStrictEqual(mixed.A.other, ['x', '相同说明'], '非法项不得覆盖该字段');
 });
 
-test('VWD动态说明：缺表回退时也按布局重建 pair 形状，不因 VWD 造出内部键', () => {
+test('旧布局 VWD动态说明：缺表回退时也按布局重建 pair 形状，不因 VWD 造出内部键', () => {
     const { layout } = convert();
     const fallback = core.statDataFromTables(layout, {}).stat_data;
     assert.deepStrictEqual(fallback.A, DEFAULT_STAT.A);
@@ -200,7 +213,7 @@ test('VWD动态说明：缺表回退时也按布局重建 pair 形状，不因 V
     }
 });
 
-test('VWD动态说明：无 VWD 字段的表不产生槽位，note 与旧版逐字节一致', () => {
+test('旧布局 VWD动态说明：无 VWD 字段的表不产生槽位，note 与旧版逐字节一致', () => {
     const schema = 'const S = z.object({ P: z.object({ plain: z.string(), other: z.string() }) }); registerMvuSchema(S);';
     const stat = { P: { plain: '文字', other: ['v', '文字说明'] } };
     const { layout, template } = convert(stat, schema, 'both');
@@ -214,7 +227,7 @@ test('VWD动态说明：无 VWD 字段的表不产生槽位，note 与旧版逐�
     assert.match(note, /- other：文字说明/);
 });
 
-test('VWD动态说明：整表没有合格 VWD 字段时不产生元数据列与槽位', () => {
+test('旧布局 VWD动态说明：整表没有合格 VWD 字段时不产生元数据列与槽位', () => {
     const schema = 'const S = z.object({ P: z.object({ plain: z.string(), num: z.number() }) }); registerMvuSchema(S);';
     const stat = { P: { plain: '文字', num: 3 } };
     const { layout, template } = convert(stat, schema, 'both');
@@ -226,7 +239,7 @@ test('VWD动态说明：整表没有合格 VWD 字段时不产生元数据列与
 
 /* ---------------- C. note 插槽 ---------------- */
 
-test('VWD动态说明：两个字段初始说明相同也各自替换，不靠全局 replace 猜位置', () => {
+test('旧布局 VWD动态说明：两个字段初始说明相同也各自替换，不靠全局 replace 猜位置', () => {
     const { layout, template } = convert();
     const a = entryOf(layout, 'A');
     assert.strictEqual(a.vwd.tokens.length, 2, '两个字段各自一个插槽');
@@ -245,7 +258,7 @@ test('VWD动态说明：两个字段初始说明相同也各自替换，不靠�
     assert.strictEqual(rebuilt.split('\n').length, note.split('\n').length, '替换不改变行数');
 });
 
-test('VWD动态说明：多行/引号/Unicode 与空说明在 note 中正确渲染', () => {
+test('旧布局 VWD动态说明：多行/引号/Unicode 与空说明在 note 中正确渲染', () => {
     const { layout, template } = convert();
     const a = entryOf(layout, 'A');
     const rebuild = raw => {
@@ -269,7 +282,7 @@ test('VWD动态说明：多行/引号/Unicode 与空说明在 note 中正确渲�
     assert.strictEqual(rebuild('{ bad'), sheetOf(template, 'A表').sourceData.note);
 });
 
-test('VWD动态说明：初始没有说明的字段本批不补 note 说明行（已声明边界）', () => {
+test('旧布局 VWD动态说明：初始没有说明的字段本批不补 note 说明行（已声明边界）', () => {
     const schema = 'const S = z.object({ A: z.object({ bare: z.string() }) }); registerMvuSchema(S);';
     const stat = { A: { bare: ['v', ''] } };
     const { layout, template } = convert(stat, schema);
@@ -289,7 +302,7 @@ test('VWD动态说明：初始没有说明的字段本批不补 note 说明行�
     assert.strictEqual(currentDescription(core.statDataFromTables(layout, t).stat_data, 'A', 'bare'), '新补的说明');
 });
 
-test('VWD动态说明：插槽计划不进入模型请求，note/DDL/示例均无内部 token', () => {
+test('旧布局 VWD动态说明：插槽计划不进入模型请求，note/DDL/示例均无内部 token', () => {
     const { template, layout } = convert(DEFAULT_STAT, DEFAULT_SCHEMA, 'sqlite');
     const sheet = sheetOf(template, 'A表');
     for (const field of ['note', 'initNode', 'insertNode', 'updateNode', 'deleteNode', 'ddl']) {
@@ -300,7 +313,7 @@ test('VWD动态说明：插槽计划不进入模型请求，note/DDL/示例均�
     assert.match(entryOf(layout, 'A').vwd.plan, /\u0000VWD/);
 });
 
-test('VWD动态说明：说明宏与列说明同一次替换，运行期回退不会拿到未替换原文', () => {
+test('旧布局 VWD动态说明：说明宏与列说明同一次替换，运行期回退不会拿到未替换原文', () => {
     const schema = 'const S = z.object({ A: z.object({ who: z.string() }) }); registerMvuSchema(S);';
     const stat = { A: { who: ['v', '说明给 {{char}}'] } };
     const { layout, template } = convert(stat, schema);
@@ -316,7 +329,7 @@ test('VWD动态说明：说明宏与列说明同一次替换，运行期回退�
 
 /* ---------------- D. 与旧布局共存 ---------------- */
 
-test('VWD动态说明：旧布局（无 vwd 槽位）行为完全不变', () => {
+test('旧布局 VWD动态说明：旧布局（无 vwd 槽位）行为完全不变', () => {
     const { layout, template } = convert();
     const legacy = JSON.parse(JSON.stringify(layout)).map(e => {
         if (e.vwd) delete e.vwd;
@@ -335,19 +348,19 @@ test('VWD动态说明：旧布局（无 vwd 槽位）行为完全不变', () => 
     assert.deepStrictEqual(core.statDataFromTables(legacy, template).stat_data, DEFAULT_STAT);
 });
 
-test('VWD动态说明：元数据列名与业务字段碰撞时统一消歧，业务列不被顶替', () => {
+test('旧布局 VWD动态说明：元数据列名与业务字段碰撞时统一消歧，业务列不被顶替', () => {
     const schema = 'const S = z.object({ A: z.object({ $说明覆盖: z.string(), str: z.string() }) }); registerMvuSchema(S);';
     const stat = { A: { $说明覆盖: '作者自己的字段', str: ['v', '说明'] } };
     const { layout, template } = convert(stat, schema);
     const a = entryOf(layout, 'A');
-    assert.notStrictEqual(a.vwd.metaCol, '$说明覆盖', '撞名时内部列必须改名');
+    assert.notStrictEqual(a.vwd.metaCol, '$说明覆盖', '已分配的元数据名称保留，避免与原字段混淆');
     const header = sheetOf(template, 'A表').content[0];
-    assert.ok(header.includes('$说明覆盖'), '作者的业务列名必须保留');
+    assert.strictEqual(header.filter(name => name === '$说明覆盖').length, 0, '只保留适配内部元数据列');
     assert.ok(header.includes(a.vwd.metaCol), '内部列用消歧后的物理名');
-    assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, stat);
+    assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, { A: { str: stat.A.str } });
 });
 
-test('VWD动态说明：目标 SP 未通过隐藏列兼容确认时不新增可见内部列并给出降级警告', () => {
+test('旧布局 VWD动态说明：目标 SP 未通过隐藏列兼容确认时不新增可见内部列并给出降级警告', () => {
     for (const targetSpVersion of ['8.4', '8.4.9', 'unknown']) {
         const { layout, template, result } = convert(DEFAULT_STAT, DEFAULT_SCHEMA, 'both', targetSpVersion);
         assert.match(result.reportText, targetSpVersion === 'unknown' ? /无法识别目标龙血玄黄·数据库/ : /低于官方标准版本的隐藏列支持门槛/);
@@ -360,7 +373,7 @@ test('VWD动态说明：目标 SP 未通过隐藏列兼容确认时不新增可�
     }
 });
 
-test('VWD动态说明：SP 无公开 note 更新接口时，说明变化在第一次写之前整体拒绝', async () => {
+test('旧布局 VWD动态说明：SP 无公开 note 更新接口时，说明变化在第一次写之前整体拒绝', async () => {
     const { layout, template } = convert();
     const api = applyingApi(template);
     const calls = [];
@@ -387,7 +400,7 @@ test('VWD动态说明：SP 无公开 note 更新接口时，说明变化在第�
     assert.deepStrictEqual(read, DEFAULT_STAT, '拒绝后不得留下“新值 + 旧说明”');
 });
 
-test('VWD动态说明：说明未变化的普通填表零影响（只改值不写元数据列）', async () => {
+test('旧布局 VWD动态说明：说明未变化的普通填表零影响（只改值不写元数据列）', async () => {
     const { layout, template } = convert();
     const written = [];
     const api = applyingApi(template);
@@ -405,7 +418,7 @@ test('VWD动态说明：说明未变化的普通填表零影响（只改值不�
 
 // 说明差量的“值 + 说明一次提交”形状只在宿主具备 note 同步能力后启用；
 // 这里通过注入的能力开关固定该提交契约，避免将来启用时退化成两次可部分成功的写入。
-test('VWD动态说明：宿主具备 note 同步能力时，说明差量与值走同一次提交', async () => {
+test('旧布局 VWD动态说明：宿主具备 note 同步能力时，说明差量与值走同一次提交', async () => {
     const createWriter = require('../src/table-writer');
     const writer = createWriter({ parseJson: v => { try { return JSON.parse(v); } catch (e) { return null; } }, vwdNoteSyncSupported: () => true });
     const singleton = {
@@ -450,7 +463,7 @@ test('VWD动态说明：宿主具备 note 同步能力时，说明差量与值�
     assert.deepStrictEqual(JSON.parse(tables.sheet_a.content[1][4]), { v: 1, o: { [id]: '再改说明' } });
 });
 
-test('VWD动态说明：宿主不具备 note 同步能力时，说明差量在写库前整体拒绝', async () => {
+test('旧布局 VWD动态说明：宿主不具备 note 同步能力时，说明差量在写库前整体拒绝', async () => {
     const createWriter = require('../src/table-writer');
     const writer = createWriter({ parseJson: v => { try { return JSON.parse(v); } catch (e) { return null; } }, vwdNoteSyncSupported: () => false });
     const { layout, template } = convert();
@@ -488,7 +501,7 @@ function convertWithFlag(stat, schema, vwd) {
     const previous = core.isVwdExperimental();
     core.setVwdExperimental(vwd);
     try {
-        const result = core.convert({
+        const result = legacyLayoutFixture({
             name: 'VWD默认关闭对照', first_mes: '',
             extensions: { tavern_helper: { scripts: [{ name: '变量结构', content: schema }] } },
             character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify(stat) }] },
@@ -497,7 +510,7 @@ function convertWithFlag(stat, schema, vwd) {
     } finally { core.setVwdExperimental(previous); }
 }
 
-test('VWD动态说明：默认关闭时不新增元数据列、vwd 布局或说明拒绝', async () => {
+test('旧布局 VWD动态说明：默认关闭时不新增元数据列、vwd 布局或说明拒绝', async () => {
     const { layout, template, result } = convertWithFlag(DEFAULT_OFF_STAT, DEFAULT_OFF_SCHEMA, false);
     // 结构：没有内部列，也没有可选槽位。
     for (const sheet of Object.values(template)) {
@@ -529,49 +542,22 @@ test('VWD动态说明：默认关闭时不新增元数据列、vwd 布局或说�
     assert.strictEqual(now.failed, base.failed);
     // 旧冻结 n=3 含两个未变化 pair 的重复写入；内容仍与冻结一致，实际只需一次修改。
     assert.strictEqual(now.n, 1);
-    assert.deepStrictEqual(now.sheet.content, base.sheet.content, '默认关闭时的表格内容应与重新冻结结果一致');
+    assert.deepStrictEqual(now.sheet.content, businessContent(base.sheet.content), '业务值与旧冻结一致，仅移除内部兜底列');
     const strIdx = now.sheet.content[0].indexOf('str');
     assert.strictEqual(now.sheet.content[1][strIdx], '新值', 'pair 列只应写入当前值，不得是整段数组的拼接文本');
     const read = core.statDataFromTables(layout, { sheet_test: now.sheet }).stat_data;
     assert.deepStrictEqual(read.A.str, ['新值', '静态说明'], '读回应恢复值 + 静态说明，说明未被数组文本污染');
 });
 
-test('VWD动态说明：默认关闭模板保留冻结基线，逐项对照协议说明、SQL 示例和列名前缀', () => {
+test('旧布局 VWD动态说明：默认关闭模板保留冻结基线，逐项对照协议说明、SQL 示例和列名前缀', () => {
     const baseline = require('./vwd-static-before.json');
     const base = baseline.conversion;
     const now = convertWithFlag(DEFAULT_OFF_STAT, DEFAULT_OFF_SCHEMA, false);
-    const baseLayout = base.layout;
-    // 保留原冻结数据；剔除后续新增的 SQL 示例，再逐项调整本次列名前缀与只读例子。
-    // 表数据、DDL 其余部分、原 note 和业务触发原文仍逐字节对照。
-    const comparable = JSON.parse(JSON.stringify(now.template));
-    for (const sheet of Object.values(comparable)) {
-        if (!sheet.sourceData) continue;
-        sheet.sourceData.note = sheet.sourceData.note.replace(/\nSQL 示例[^\n]*$/, '');
-        for (const field of ['insertNode', 'updateNode', 'deleteNode']) {
-            sheet.sourceData[field] = sheet.sourceData[field].split('\nSQL示例:')[0];
-        }
-    }
-    const expected = JSON.parse(JSON.stringify(base.template));
-    for (const sheet of Object.values(expected)) {
-        if (!sheet.sourceData) continue;
-        // 只更新本次明确变化的 _扩展数据物理名与只读例子；其余 DDL/数据继续完整对照。
-        sheet.sourceData.ddl = sheet.sourceData.ddl.replaceAll('kuozhanshuju', '_kuozhanshuju');
-        if (sheet.sourceData.hiddenPhysicalColumns) {
-            sheet.sourceData.hiddenPhysicalColumns = sheet.sourceData.hiddenPhysicalColumns
-                .map(ident => ident === 'kuozhanshuju' ? '_kuozhanshuju' : ident);
-        }
-        sheet.sourceData.note = sheet.sourceData.note.replace('如 _xxx', '如 _扩展数据');
-        // 已审核的协议文案变化：业务限制保留，编号与语法交由当前宿主请求提供。
-        sheet.sourceData.note = sheet.sourceData.note
-            .replace('本表唯一记录已由开局模板初始化（row_id=1）；填表时禁止 INSERT / DELETE，只允许按需 UPDATE。', '本表唯一记录已由开局模板初始化；禁止新增或删除记录，只允许按需更新现有记录。')
-            .replace('数组表：每行一个数组元素，行号即数组顺序；按行新增、移除或更新元素。', '数组表：每行一个数组元素，按当前表格中的元素顺序维护；按行新增、移除或更新元素。')
-            .replace('\nnative 使用本表提示中方括号里的行号（从 0 开始），不填 SQL row_id；SQL 使用当前数据中的 row_id，不按显示顺序推算。', '')
-            .replace('SQL 字符串外围的单引号只是 SQL 写法，不属于单元格内容。', '本次要求 SQL 脚本时，SQL 字符串外围的单引号不属于单元格内容。');
-        sheet.sourceData.initNode = sheet.sourceData.initNode.replace('开局模板已初始化唯一记录（row_id=1）；自动填表阶段禁止再次初始化，只允许按需 UPDATE。', '开局模板已初始化唯一记录；自动填表阶段禁止再次初始化，只允许按需更新现有记录。');
-        sheet.sourceData.updateNode = sheet.sourceData.updateNode.replace('只允许 UPDATE（单例固定 row_id=1，禁止 INSERT / DELETE）；', '只允许更新现有记录，禁止新增或删除记录；');
-    }
-    assert.deepStrictEqual(comparable, expected, '除已审核的协议说明、SQL 示例、下划线物理列名和只读例子外，默认模板应与冻结基线一致');
-    assert.deepStrictEqual(now.layout, baseLayout, '默认布局应与冻结基线一致');
+    assert.deepStrictEqual(businessSheets(now.template), businessSheets(base.template), '旧冻结业务值不变');
+    const layoutColumns = layout => Object.fromEntries(layout.filter(entry => !entry.publicFallback).map(entry =>
+        [entry.table, entry.cols.filter(column => column[0] !== '_扩展数据')]));
+    assert.deepStrictEqual(layoutColumns(now.layout), layoutColumns(base.layout), '旧字段路径和类型不变');
+
 });
 
 /* ---------------- F. 候选快照构造入口（R1） ----------------
@@ -596,7 +582,7 @@ function readStr(template, layout) {
     return core.statDataFromTables(layout, template).stat_data.A.str;
 }
 
-test('VWD动态说明：候选构造对只改说明整笔拒绝，不产出“新值 + 旧说明”', async () => {
+test('旧布局 VWD动态说明：候选构造对只改说明整笔拒绝，不产出“新值 + 旧说明”', async () => {
     const { layout, template } = convert();
     const next = withDescription(DEFAULT_STAT, 'A', 'str', '新说明');
     const warnings = [];
@@ -608,7 +594,7 @@ test('VWD动态说明：候选构造对只改说明整笔拒绝，不产出“�
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, DEFAULT_STAT);
 });
 
-test('VWD动态说明：候选构造对同时改值与说明整笔拒绝', async () => {
+test('旧布局 VWD动态说明：候选构造对同时改值与说明整笔拒绝', async () => {
     const { layout, template } = convert();
     const next = withDescription(DEFAULT_STAT, 'A', 'str', '两项都改');
     next.A.str[0] = '新值';
@@ -617,7 +603,7 @@ test('VWD动态说明：候选构造对同时改值与说明整笔拒绝', async
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, DEFAULT_STAT);
 });
 
-test('VWD动态说明：候选构造对只改值放行并保留静态说明', async () => {
+test('旧布局 VWD动态说明：候选构造对只改值放行并保留静态说明', async () => {
     const { layout, template } = convert();
     const next = JSON.parse(JSON.stringify(DEFAULT_STAT));
     next.A.str[0] = '只改值';
@@ -630,7 +616,7 @@ test('VWD动态说明：候选构造对只改值放行并保留静态说明', as
     assert.strictEqual(read.A.other[0], '其他也改');
 });
 
-test('VWD动态说明：初始为空说明的字段改说明也被拒绝，不写入永不呈现的说明', async () => {
+test('旧布局 VWD动态说明：初始为空说明的字段改说明也被拒绝，不写入永不呈现的说明', async () => {
     const schema = 'const S = z.object({ A: z.object({ str: z.string().nullable() }) }); registerMvuSchema(S);';
     const stat = { A: { str: ['初始', ''] } };
     // 初始说明为空字符串：字段仍是合格的 pair 列，但没有可用的 note 说明行。
@@ -647,7 +633,7 @@ test('VWD动态说明：初始为空说明的字段改说明也被拒绝，不�
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, before);
 });
 
-test('VWD动态说明：候选构造对字段缺失/说明缺失不误判为说明变化', async () => {
+test('旧布局 VWD动态说明：候选构造对字段缺失/说明缺失不误判为说明变化', async () => {
     const { layout, template } = convert();
     // 整个可选字段从 stat 中消失：不是说明变化。
     const removed = { A: { other: DEFAULT_STAT.A.other } };
@@ -659,7 +645,7 @@ test('VWD动态说明：候选构造对字段缺失/说明缺失不误判为说�
     assert.ok(candidate2 && typeof candidate2 === 'object', '非 pair 形状不应被当成说明变化');
 });
 
-test('VWD动态说明：说明变化在候选路径也不产生任何宿主写入', async () => {
+test('旧布局 VWD动态说明：说明变化在候选路径也不产生任何宿主写入', async () => {
     const { layout, template } = convert();
     const calls = [];
     const api = applyingApi(template);
@@ -678,7 +664,7 @@ test('VWD动态说明：说明变化在候选路径也不产生任何宿主写�
     assert.deepStrictEqual(calls, [], '候选拒绝同样不得产生 CRUD');
 });
 
-test('VWD动态说明：默认关闭时 pair 写入只落当前值（重新冻结对照，R2.3）', async () => {
+test('旧布局 VWD动态说明：默认关闭时 pair 写入只落当前值（重新冻结对照，R2.3）', async () => {
     const baseline = require('./vwd-static-pair-fixed.json');
     const card = () => ({
         name: 'pair写入对照', first_mes: '',
@@ -704,19 +690,20 @@ test('VWD动态说明：默认关闭时 pair 写入只落当前值（重新冻�
             const prev = { R: { 甲: { 好感: [1, '好感说明'], 名称: ['甲', '名'] } }, 其他: 'x' };
             const next = { R: { 甲: { 好感: [2, '好感说明'], 名称: ['乙', '名'] } }, 其他: 'x' };
             const n = await mod.writeStatDiffToDb(spy, layout, prev, next);
-            return { n, failed: mod.lastStatWriteFailed, calls, row: Object.values(template).find(s => s && s.name === 'R表').content[1] };
+            const sheet = Object.values(template).find(s => s && s.name === 'R表');
+            return { n, failed: mod.lastStatWriteFailed, calls, row: businessContent(sheet.content, layout.find(e => e.group === 'R').overflowCol)[1] };
         } finally { if (mod === core) core.setVwdExperimental(previous); }
     };
     const base = baseline.rowWrite;
     const now = await runOnce(core, false);
     assert.deepStrictEqual(now.calls, base.calls, '写入调用应与重新冻结结果一致');
-    assert.deepStrictEqual(now.row, base.row, '表格内容应与重新冻结结果一致');
+    assert.deepStrictEqual(now.row, base.row.slice(0, -1), '业务值与旧冻结一致');
     assert.strictEqual(now.failed, base.failed);
-    assert.deepStrictEqual(now.row, [1, '甲', '2', '乙', '{}'], '数字 pair 与文本 pair 都只写当前值');
+    assert.deepStrictEqual(now.row, [1, '甲', '2', '乙'], '数字 pair 与文本 pair 都只写当前值');
     assert.deepStrictEqual(base.read.甲, { 好感: 2, 名称: ['乙', '名'] }, '读回应恢复数字 2 与 pair 形状');
 });
 
-test('VWD动态说明：默认关闭时整段 pair 写入只落当前值（含先改说明再改值）', async () => {
+test('旧布局 VWD动态说明：默认关闭时整段 pair 写入只落当前值（含先改说明再改值）', async () => {
     const baseline = require('./vwd-static-pair-fixed.json');
     const card = () => ({
         name: 'pair序列对照', first_mes: '',
@@ -742,7 +729,7 @@ test('VWD动态说明：默认关闭时整段 pair 写入只落当前值（含�
         return {
             afterDesc: afterDesc.A,
             afterValue: afterValue.A,
-            row: Object.values(template).find(s => s && s.name === 'A表').content[1],
+            row: businessContent(Object.values(template).find(s => s && s.name === 'A表').content, layout.find(e => e.group === 'A').overflowCol)[1],
         };
     };
     const previous = core.isVwdExperimental();
@@ -750,11 +737,11 @@ test('VWD动态说明：默认关闭时整段 pair 写入只落当前值（含�
     try {
         const base = baseline.pairSequence;
         const now = await runSequence(core);
-        assert.deepStrictEqual(now.row, base.row, '表格内容应与重新冻结结果一致');
+        assert.deepStrictEqual(now.row, base.row.slice(0, -1), '业务值与旧冻结一致');
         assert.deepStrictEqual(now.afterDesc, base.afterDesc, '改说明后的读回应与重新冻结结果一致');
         assert.deepStrictEqual(now.afterValue, base.afterValue, '改值后的读回应与重新冻结结果一致');
         // 修复后的正确语义：值列是标量文本，读回恢复 [值, 说明]；不再出现数组拼接文本。
-        assert.deepStrictEqual(now.row, [1, '小乙二', 'x', '{}']);
+        assert.deepStrictEqual(now.row, [1, '小乙二', 'x']);
         assert.deepStrictEqual(now.afterValue.str, ['小乙二', '旧说明']);
         assert.deepStrictEqual(now.afterValue.other, ['x', '其他说明']);
     } finally { core.setVwdExperimental(previous); }
@@ -811,7 +798,7 @@ function convertDefault(stat, schema) {
     const previous = core.isVwdExperimental();
     core.setVwdExperimental(false);
     try {
-        const result = core.convert({
+        const result = legacyLayoutFixture({
             name: 'pair写入边界', first_mes: '',
             extensions: { tavern_helper: { scripts: [{ name: '变量结构', content: schema }] } },
             character_book: { entries: [{ comment: '[InitVar]', content: JSON.stringify(stat) }] },

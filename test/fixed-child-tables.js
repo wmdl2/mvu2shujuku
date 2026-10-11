@@ -20,27 +20,25 @@ const fixed = `z.object({
     右:z.object({_维护:z.string().describe('只由脚本维护'),数值:z.number().transform(v=>_.clamp(v,20,30)),标记:z.enum(['丙','丁']),开启:z.boolean(),$隐藏:z.string()})
 })`;
 
-test('附属子表合并：明确固定对象回到父表，独立范围枚举、隐藏列与嵌套读写保留', async () => {
+test('附属子表合并：含隐藏字段的固定对象保留JSON，独立范围枚举与嵌套读写保留', async () => {
     const r = convert(fixed);
-    assert.strictEqual(r.schema.length, 1, '不再为固定左右两侧单独建立行表');
+    assert.strictEqual(r.schema.filter(group => !group.publicFallback).length, 1, '不再为固定左右两侧单独建立行表');
     const group = r.schema[0], sheet = Object.values(r.template).find(s => s.name === group.tableName);
+    const container = group.columns.find(c => c.zh === '附属');
+    assert(container?.isObject);
     for (const [side, range, options] of [['左', [0, 10], ['甲', '乙']], ['右', [20, 30], ['丙', '丁']]]) {
-        const number = group.columns.find(c => c.zh === `附属_${side}_数值`);
-        const label = group.columns.find(c => c.zh === `附属_${side}_标记`);
-        const secret = group.columns.find(c => c.zh === `附属_${side}_$隐藏`);
+        const number = container.jsonPathChecks.find(c => c.path.join('.') === `${side}.数值`);
+        const label = container.jsonPathChecks.find(c => c.path.join('.') === `${side}.标记`);
         assert.deepStrictEqual(number.range, range);
         assert.deepStrictEqual(label.enum, options);
-        assert.ok(sheet.sourceData.ddl.includes(`CHECK(${number.ident} BETWEEN ${range[0]} AND ${range[1]})`));
-        assert.ok(sheet.sourceData.hiddenPhysicalColumns.includes(secret.ident));
+        assert.ok(sheet.sourceData.ddl.includes(`BETWEEN ${range[0]} AND ${range[1]}`));
     }
-    assert.match(sheet.sourceData.note, /只读字段「附属_左_维护」说明：只由脚本维护/);
-    assert.match(sheet.sourceData.note, /只读字段「附属_右_维护」说明：只由脚本维护/);
-    assert.match(sheet.sourceData.note, /只读状态/);
-    const readonly = group.columns.find(c => c.path.join('.') === '状态.附属.左._维护');
-    assert.ok(readonly && sheet.content[0].includes(readonly.zh), '脚本只读状态保留原逻辑路径和物理列');
-    assert.ok(sheet.sourceData.note.includes(`只读列：「${readonly.zh}」`), '展平后的实际表头必须明确标为只读，不能只靠原路径的下划线');
+    assert.match(sheet.sourceData.note, /左\._维护：只由脚本维护/);
+    assert.match(sheet.sourceData.note, /右\._维护：只由脚本维护/);
+    assert.doesNotMatch(sheet.sourceData.note, /下划线开头字段.*只读/);
+    assert(!group.columns.some(c => c.zh.startsWith('附属_')), '混合对象不再拆列');
     assert.doesNotMatch(sheet.sourceData.note, /\$隐藏/, '只读范围不暴露私有列名');
-    assert.ok(!sheet.sourceData.hiddenPhysicalColumns.includes(readonly.ident), '脚本只读状态仍作为业务列展示');
+    assert.ok(!(sheet.sourceData.hiddenPhysicalColumns || []).includes(container.ident), '公开内容仍作为业务列展示');
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, r.stat);
     const next = structuredClone(r.stat);
     next.状态.附属.左.数值 = 9; next.状态.附属.右.标记 = '丁';
@@ -51,18 +49,19 @@ test('附属子表合并：明确固定对象回到父表，独立范围枚举�
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, next);
 });
 
-test('附属子表合并：明确动态字典及仅凭样本猜测的条目字典保留子表', () => {
+test('附属子表合并：复杂动态后代完整保存，隐藏字段随对象而不另拆子表', () => {
     for (const declaration of ['', 'z.record(z.string(),z.object({数值:z.number(),标记:z.string(),开启:z.boolean(),$隐藏:z.string()}))']) {
         const r = convert(declaration);
-        assert.ok(r.schema.some(g => g.tableName === '状态_附属表' && g.kind === 'rows'));
+        assert.equal(r.schema.length, 1);
+        assert.equal(r.schema[0].valueCol, '内容');
         assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, r.stat);
     }
 });
 
-test('附属子表合并：固定对象内的数组后代仍单独存储，不丢顺序与重复值', async () => {
+test('附属子表合并：数组后代完整保存，不丢顺序、重复值和隐藏数据', async () => {
     const declaration = fixed.replace('左:z.object({', '左:z.object({日志:z.array(z.string()),');
     const r = convert(declaration, {}, stat => { stat.状态.附属.左.日志 = ['甲', '甲', '乙']; });
-    assert.ok(r.schema.some(g => g.kind === 'pathArray' || g.kind === 'array'));
+    assert(r.schema[0].columns.some(c => c.zh === '附属' && c.isObject));
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, r.stat);
     const next = structuredClone(r.stat);
     next.状态.附属.左.日志 = ['甲', '乙', '丙'];

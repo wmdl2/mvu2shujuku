@@ -1,15 +1,21 @@
 'use strict';
 
 // 前端字段扫描仅补充可识别的静态读取；不执行卡内代码。
-function createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSchemaFieldName, cardTextBlobs }) {
-    function sourceTexts(text) {
+function createStatusUsage({ maskJsStringsAndComments, ejsScriptBlocks, splitJsTopLevelArgs, isSchemaFieldName, cardTextBlobs }) {
+    function sourceTexts(text, label) {
         const source = String(text || '').replace(/^```(?:html|javascript|js)?[ \t]*\r?$/gm, '');
-        if (!/^\s*<(?:!doctype|html|head|body|div|style|script)\b/i.test(source)) return [source];
+        // TH 脚本是原始 JS；世界书、开场和正则替换可能是混合模板。
+        // 它们的实际 EJS 代码必须由同一解析器提取，不能把模板全文交给 JS lexer。
+        const startsHtml = /^\s*<(?:!doctype|html|head|body|div|style|script)\b/i.test(source);
+        const isScript = String(label || '').startsWith('script:');
+        if (isScript && !startsHtml) return [source];
+        const isHtml = startsHtml || /<script\b/i.test(source);
+        if (!isHtml && !source.includes('<%')) return [source];
         // HTML/Markdown 不是 JS；先提取可执行片段，避免把围栏当模板字符串吞掉整个前端。
         const scripts = [...source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)]
             .filter(m => !/\btype\s*=/.test(m[1]) || /\btype\s*=\s*["']?(?:module|(?:text|application)\/javascript)\b/i.test(m[1]))
             .map(m => m[2]);
-        const ejs = [...source.matchAll(/<%[-=]?([\s\S]*?)%>/g)].map(m => m[1]);
+        const ejs = ejsScriptBlocks(source);
         return [...scripts, ...(ejs.length ? [ejs.join('\n')] : [])];
     }
 
@@ -142,7 +148,7 @@ function createStatusUsage({ maskJsStringsAndComments, splitJsTopLevelArgs, isSc
             // 已知组名来自 initvar 顶层键（扫描只针对这些组做归属）
             const knownGroups = new Set(Array.isArray(groupNames) ? groupNames : []);
 
-            const blobs = cardTextBlobs(card).flatMap(blob => sourceTexts(blob.text).map(text => ({ text, bindings: createBindings(text) })));
+            const blobs = cardTextBlobs(card).flatMap(blob => sourceTexts(blob.text, blob.label).map(text => ({ text, bindings: createBindings(text) })));
 
             // 阶段1：直接 stat 映射（只跑一轮即可稳定）
             for (const { text, bindings } of blobs) {

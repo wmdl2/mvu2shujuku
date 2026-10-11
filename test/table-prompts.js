@@ -3,36 +3,40 @@ const {test} = require('./runner');
 const {core, assert} = require('./helpers');
 const promptGuidanceCard = require('./prompt-guidance-card');
 
-test('表格协议：双模式与 SQLite 保留 SQL 示例，每表说明一次，native 专用不混入示例', () => {
+test('SQL转换：默认和停用模式参数统一生成 SQLite 模板，报告说明迁移', () => {
     const card = {name: '协议测试', first_mes: '你好', character_book: {entries: [{
-        comment: '[InitVar]', content: JSON.stringify({A: {x: 1, _内部: 2, y: 3, bag: [1,2,3]}}),
+        comment: '[InitVar]', content: JSON.stringify({A: {x: 1, _内部: 2, y: 3}}),
     }]}};
     const converted = Object.fromEntries(['native','both','sqlite'].map(mode => [mode, core.convert(card, {mode})]));
-    const withoutNotice = text => text.replace(/\nSQL 示例[^\n]*$/, '');
+    const defaultResult = core.convert(card);
+    assert.strictEqual(defaultResult.meta.mode, 'sqlite');
+    assert.strictEqual(defaultResult.card.extensions.mvu2shujuku.mode, 'sqlite');
+    assert.deepStrictEqual(defaultResult.template, converted.sqlite.template);
+    for (const mode of ['native', 'both']) {
+        assert.strictEqual(converted[mode].meta.mode, 'sqlite');
+        assert.strictEqual(converted[mode].card.extensions.mvu2shujuku.mode, 'sqlite');
+        assert.match(converted[mode].reportText, /已停用.*SQLite 模板/);
+    }
+    assert.throws(() => core.convert(card, { mode: 'unknown' }), /不支持的转换模式/);
     for (const mode of ['native','both','sqlite']) {
         for (const sheet of Object.values(converted[mode].template).filter(s => s.content)) {
             assert.doesNotMatch(sheet.sourceData.note, /列\d+:/, '编号仅由宿主的列投影决定');
             const nodes = ['insertNode','updateNode','deleteNode'].map(kind => sheet.sourceData[kind]);
-            const hasSql = nodes.some(text => text.includes('SQL示例:'));
-            assert.strictEqual(sheet.sourceData.note.split('SQL 示例仅在本次输出要求 SQL 脚本时适用').length - 1, hasSql ? 1 : 0);
+            assert.doesNotMatch(sheet.sourceData.note, /SQL 示例仅在本次输出要求 SQL 脚本时适用|不得直接照抄示例值/);
             assert.doesNotMatch(sheet.sourceData.note, /native|sqlite|row_id=1|结构化 where/);
             assert.doesNotMatch(sheet.sourceData.initNode, /row_id=1|只允许 UPDATE/);
             assert.doesNotMatch(sheet.sourceData.updateNode.split('\nSQL示例:')[0], /row_id=1|只允许 UPDATE|禁止 INSERT/);
-            if (hasSql) {
-                assert.match(sheet.sourceData.note, /不得直接照抄示例值/);
-                assert.match(sheet.sourceData.note, /仅在本次输出要求 SQL 脚本时适用/);
-            }
             for (const node of nodes) {
-                if (mode === 'native') assert.doesNotMatch(node, /SQL示例:|INSERT INTO|DELETE FROM| SET /);
-                assert.doesNotMatch(node, /不得直接照抄示例值/, '共用说明只在 note 中出现一次');
+                assert.doesNotMatch(node, /不得直接照抄示例值/);
             }
         }
     }
     const native = Object.values(converted.native.template).find(s => s.name === 'A表');
     const sql = Object.values(converted.sqlite.template).find(s => s.name === 'A表');
     assert.match(sql.sourceData.ddl, /_neibu\s+REAL/);
-    assert.ok(sql.sourceData.note.includes('如 _扩展数据'));
-    assert.strictEqual(native.sourceData.note, withoutNotice(sql.sourceData.note));
+    assert.ok(!sql.sourceData.note.includes('如 _扩展数据'));
+    assert.strictEqual(converted.sqlite.schema.find(g => g.tableName === 'A表').columns.find(c => c.zh === '_内部').aiReadonly === true, false);
+    assert.strictEqual(native.sourceData.note, sql.sourceData.note);
     assert.doesNotMatch(native.sourceData.note, /- x x|- y y/, '宿主表头/DDL 已提供字段映射');
     assert.deepStrictEqual(native.content[0].slice(1, 4), ['x', '_内部', 'y']);
     assert.doesNotMatch(native.sourceData.note, /- _内部/);
@@ -45,7 +49,7 @@ test('表格协议：双模式与 SQLite 保留 SQL 示例，每表说明一次�
         assert.strictEqual(sheet.sourceData.ddl, nativeSheet.sourceData.ddl);
         for (const kind of ['insertNode', 'updateNode', 'deleteNode']) {
             assert.strictEqual(sheet.sourceData[kind], sqlSheet.sourceData[kind], '双模式沿用已验证的 SQL 示例');
-            assert.strictEqual(sheet.sourceData[kind].split('\nSQL示例:')[0], nativeSheet.sourceData[kind], '业务触发条件不因示例变化');
+            assert.strictEqual(sheet.sourceData[kind], nativeSheet.sourceData[kind], '停用参数不再生成另一种填表协议');
         }
     }
 });
@@ -80,8 +84,8 @@ test('特殊操作提示：完整关联组合与数组定位示例按两种模�
     }
 });
 
-test('特殊操作提示：多层关联的示例保留所有来源字段', () => {
-    const group = core.convert(promptGuidanceCard()).schema.find(g => g.kind === 'nestedRows');
+test('旧布局特殊操作提示：多层关联的示例保留所有来源字段', () => {
+    const group = require('./legacy-layout-fixture')(promptGuidanceCard()).schema.find(g => g.kind === 'nestedRows');
     group.ancestorKeyCols.push({ col: '区域', parentTable: '区域表', parentKeyCol: '名称' });
     const sheet = Object.values(core.generateTemplate([group])).find(s => s.sourceData);
     const example = sheet.sourceData.note.split('\n').find(line => line.startsWith('定位示例'));

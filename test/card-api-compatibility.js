@@ -23,11 +23,11 @@ test('转换接入：正则、模板、除法和参数辅助函数不吞登记�
     assert.ok(parsed); assert.strictEqual(parsed.root.fields.enabled.defaultValue, false);
     const count = parsed.root.fields.rows.value.fields.child.value.fields.count;
     assert.strictEqual(count.min, 1); assert.strictEqual(count.max, 8);
-    const lexical = vm.runInNewContext('(' + createJsSource.toString() + ')')();
+    const lexical = vm.runInNewContext('(' + createJsSource.toString() + ')')({ acorn: require('../src/vendor/schema-engine-libs').acorn });
     assert.deepStrictEqual(clone(lexical.split("/[,)]/, `x${')'}`, 12 / 3")), ["/[,)]/", "`x${')'}`", '12 / 3']);
 });
 
-test('转换接入：声明的缺失根组和未知字段有物理存储，分叉引擎移除', async () => {
+test('转换接入：声明的缺失根组有物理存储，未声明根不新增兜底，分叉引擎移除', async () => {
     const source = require('./synthetic-card')();
     source.data.extensions.tavern_helper.scripts.push({ name: 'reference', enabled: false,
         content: 'const Schema=z.object({ enabled:z.boolean(), optional:z.object({value:z.number()}).optional(), unknown:z.union([z.string(),z.object({})]) });registerMvuSchema(Schema);' });
@@ -40,8 +40,10 @@ test('转换接入：声明的缺失根组和未知字段有物理存储，分�
     const written = await core.writeStatDiffToDbResult(applyingApi(tables), layout, previous, next, tables);
     assert.strictEqual(written.ok, true); assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, next);
     const before = JSON.stringify(tables);
-    const rejected = await core.writeStatDiffToDbResult(applyingApi(tables), layout, next, { ...next, newGroup: {} }, tables);
-    assert.strictEqual(rejected.ok, false); assert.strictEqual(rejected.plannedChanges, 0); assert.match(rejected.failureReason, /newGroup/);
+    const accepted = await core.writeStatDiffToDbResult(applyingApi(tables), layout, next, { ...next, newGroup: {} }, tables);
+    assert.strictEqual(accepted.ok, false);
+    assert.match(accepted.failureReason, /未映射.*newGroup/);
+    assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, next);
     assert.strictEqual(JSON.stringify(tables), before);
 });
 
@@ -74,6 +76,27 @@ test('转换接入：世界书别名仅路由绑定书，原 API 不变，过期
     assert.strictEqual(facade.getWorldbook('book'), 'book_DB'); facade.replaceWorldbook('other', []);
     assert.deepStrictEqual(calls, ['book_DB', 'other']); assert.deepStrictEqual(original.getWorldbookNames(), ['book_DB', 'other']);
     current = false; assert.throws(() => facade.replaceWorldbook('book', []), /会话已变化/);
+});
+
+test('转换接入：世界书别名不伪造宿主绑定，作者窗口仍能使用原名', () => {
+    for (const factory of [createCardApi, vm.runInNewContext('(' + createCardApi.toString() + ')')]) {
+        const names = ['book_DB', 'other'], binding = { primary: 'book_DB', additional: ['other'] };
+        const original = {
+            getWorldbookNames() { assert.strictEqual(this, original); return names; },
+            getCharWorldbookNames() { assert.strictEqual(this, original); return binding; },
+            getWorldbook(name) { assert.strictEqual(this, original); return name; },
+        };
+        const api = factory({ readMetadata: () => ({ worldbookAliases: { book: 'book_DB' } }), isCurrent: () => true });
+        const host = api.facade(original, { includeAliases: false });
+        assert.strictEqual(host.getWorldbookNames(), names);
+        assert.strictEqual(host.getCharWorldbookNames(), binding);
+        assert.strictEqual(host.getWorldbook('book'), 'book_DB');
+        assert.deepStrictEqual(Array.from(api.facade(original).getCharWorldbookNames().additional), ['other', 'book']);
+        const window = { getWorldbookNames: () => names, getCharWorldbookNames: () => binding };
+        api.patchWorldbookGlobals(window, createRuntimeGlobals({ hostWindow: window }), { includeAliases: false });
+        assert.strictEqual(window.getWorldbookNames(), names);
+        assert.strictEqual(window.getCharWorldbookNames(), binding);
+    }
 });
 
 test('转换接入：直接世界书函数复用别名、保留接收者、切卡精确还原', () => {

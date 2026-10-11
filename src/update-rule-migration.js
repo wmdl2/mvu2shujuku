@@ -1,314 +1,185 @@
 'use strict';
 
-// Route complete update sections. Natural-language conditions are preserved,
-// never interpreted; source spans keep the author's EJS control flow intact.
-function createUpdateRuleMigration({ parseJs }) {
-    const contract = '以下规则描述更新条件和目标变化；实际更新必须使用本次数据库填表协议，操作列表不作为输出格式。';
-    // DB 1.2.5 / 1a5ffdb: its configuration UI hides these title substrings
-    // and removes their selected UIDs. Keep safe author names without guessing
-    // synonyms for blocked ones; the converter report retains the source name.
+// Business prose and executable templates stay at their original locations.
+// Only complete, static format examples are omitted from request copies.
+function createUpdateRuleMigration({ YAML, isProtocolRule = () => false }) {
+    const guideCall = '<% /* mvu2shujuku:fill-adaptation:v1 */ %>';
+    const guideTitle = '[M2SJK]填表适配说明';
+    const guidance = '本次任务是根据当前对话、数据库状态和作者业务要求更新数据库。输出格式、表列名称和记录定位遵循本次数据库填表协议及提供的表结构、列说明。\n' +
+        '保留作者要求中的条件、数值、阈值、例外和禁止事项。原文要求使用 JSONPatch、UpdateVariable 等旧格式时，执行其业务要求，输出改用本次数据库协议。具体操作列表中的目标和值仍是变更要求；这些名称若属于业务数据，保留原值。';
+    const guideContent = guideCall + '\n' + guidance;
     const blockedTitleTerms = ['规则', '思维链', 'cot', 'MVU', 'mvu', '变量', '状态',
         'Status', 'Rule', 'rule', '检定', '判断', '叙事', '文风', 'InitVar', '格式'];
-    function fillTitle(comment, id, split = false) {
+    function fillTitle(comment, id) {
         const name = String(comment || '').replace(/\[(?:mvu[ _-]?update|mvuupdate|M2SJK)\]/ig, '').trim();
         if (!name || blockedTitleTerms.some(term => name.includes(term))) {
             const number = Number(id);
-            const ordinal = id != null && Number.isInteger(number) && number >= 0 ? String(number) : '未编号';
-            return `[M2SJK]更新要求（${ordinal}）`;
+            return `[M2SJK]更新要求（${id != null && Number.isInteger(number) && number >= 0 ? number : '未编号'}）`;
         }
-        return `[M2SJK]${name}${split ? '（更新要求）' : ''}`;
+        return '[M2SJK]' + name;
     }
-    const protocol = /<\/?(?:JSON_?Patch|UpdateVariable)\b[^>]*>|\bJSON\s*Patch\b|\bRFC\s*6902\b/i;
-    const updateKey = /^(?:checks?|instructions?|update_rules?|update_instructions?|variables?_update_rules?|variables?_update_format|variable_output_protocol|force_structured_output|output_format|mandatory_patch(?:_template)?|json_?patch|更新要求|更新指令|强制更新|变量更新规则|变量输出格式)$/i;
-    const quotedKey = /^(?:examples?|samples?|dialogue|quotes?|code|narrative|story|示例|样例|台词|引用|代码|正文|剧情|故事)$/i;
-    const patchKey = /^(?:mandatory_patch(?:_template)?|json_?patch)$/i;
-    const pointer = /(?<![\p{L}\p{N}_$}])\/[\p{L}\p{N}_$](?:<[^<>\n]+>|[^\s，。、；;:："'<>()[\]（）|=≤≥])*/gu;
-    function protocolReferences(literal) {
-        // An exact quoted protocol name may be a business value, not a format.
-        const data = [], protectedText = literal.replace(/(["'`])(?:JSON\s*Patch|<\/?(?:JSON_?Patch|UpdateVariable)>)(?:\1)/gi,
-            value => { data.push(value); return '\u0000' + (data.length - 1) + '\u0000'; });
-        return protectedText.replace(/<\/(?:JSON_?Patch|UpdateVariable)\s*>/gi, '')
-            .replace(/<(?:JSON_?Patch|UpdateVariable)\s*>/gi, '本次数据库填表')
-            .replace(/\bJSON\s*Patch\b|\bRFC\s*6902\b/gi, '数据库填表协议')
-            .replace(/\u0000(\d+)\u0000/g, (_, index) => data[Number(index)]);
-    }
-    function segment(source) {
-        const tokens = [], mask = source.split('');
-        for (const match of source.matchAll(/<%([_=#-]?)([\s\S]*?)([-_]?)%>/g)) {
-            const token = { start: match.index, end: match.index + match[0].length, raw: match[0],
-                mode: match[1], code: match[2], close: match[3] };
-            tokens.push(token);
-            for (let i = token.start; i < token.end; i++) if (mask[i] !== '\n' && mask[i] !== '\r') mask[i] = ' ';
+    const formatKey = /^(?:format(?:_template)?|output_format|格式)$/i;
+    const documentKey = /^(?:Force_Structured_Output|variables?_update_format|output_format|变量(?:输出(?:规则|格式)|更新格式)(?:强调)?)$/i;
+    const quoteKey = /^(?:examples?|samples?|dialogue|quotes?|code|narrative|story|示例|样例|台词|引用|代码|正文|剧情|故事)$/i;
+    const placeholder = value => typeof value === 'string' &&
+        /^\$\{\/[^{}\n]+\}$/.test(value);
+    // Recognize syntax and placeholder targets; never interpret Analysis prose.
+    function formatParts(value) {
+        if (typeof value !== 'string' || /<%|%>|&lt;%/.test(value)) return null;
+        let text = value.trim();
+        const update = /^<UpdateVariable>\s*([\s\S]*?)\s*<\/UpdateVariable>$/i.exec(text);
+        if (!update) return false;
+        text = update[1];
+        // The slot can contain business rules. Preserve its contents verbatim.
+        const analysis = /<Analysis>([\s\S]*?)<\/Analysis>/i.exec(text);
+        if (analysis) text = text.replace(analysis[0], '');
+        const patch = /^\s*<JSON_?Patch>\s*([\s\S]*?)\s*<\/JSON_?Patch>\s*$/i.exec(text);
+        if (!patch) return false;
+        let operations;
+        try { operations = JSON.parse(patch[1]); }
+        catch (_) {
+            const lines = patch[1].trim().split('\n').map(s => s.trim());
+            if (lines.shift() !== '[' || lines.pop() !== ']') return false;
+            try { operations = lines.filter(s => s && s !== '...' && s !== '...,').map(s => JSON.parse(s.replace(/,$/, ''))); }
+            catch (_) { return false; }
         }
-        const visible = mask.join('');
-        if (/<%|%>|&lt;%/.test(visible)) throw new Error('模板含无法完整识别的 EJS 边界');
-        return { tokens, visible };
+        const placeholders = Array.isArray(operations) && operations.every(op => op && typeof op === 'object' &&
+            ['add', 'remove', 'replace', 'move', 'copy', 'test', 'delta', 'insert'].includes(op.op) &&
+            placeholder(op.path || op.from) && (!('path' in op) || placeholder(op.path)) &&
+            (!('from' in op) || placeholder(op.from)) && (!('to' in op) || placeholder(op.to)) &&
+            Object.keys(op).every(k => ['op', 'path', 'from', 'to', 'value'].includes(k)));
+        return placeholders ? { pure: !analysis || !analysis[1].trim() || /^(?:\.{3}|…)$/.test(analysis[1].trim()) } : null;
     }
-    function safeTemplate(tokens) {
-        if (!tokens.length) return;
-        const code = tokens.filter(t => t.mode !== '#').map(t => t.mode === '=' || t.mode === '-'
-            ? '__emit((' + t.code + '));' : t.code).join('\n');
-        const ast = parseJs(code, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true });
-        const locals = new Set(), functions = new Set();
-        function walk(node, callback) {
-            if (!node || typeof node !== 'object') return;
-            if (typeof node.type === 'string') callback(node);
-            for (const value of Object.values(node)) {
-                if (Array.isArray(value)) value.forEach(child => walk(child, callback));
-                else if (value && typeof value === 'object') walk(value, callback);
-            }
+    function syntaxCuts(source, start, end) {
+        const raw = source.slice(start, end), cuts = [];
+        const opening = /<UpdateVariable>/i.exec(raw), closings = [...raw.matchAll(/<\/UpdateVariable>/gi)];
+        if (opening) cuts.push([start + opening.index, start + opening.index + opening[0].length]);
+        const closing = closings.at(-1);
+        if (closing) cuts.push([start + closing.index, start + closing.index + closing[0].length]);
+        const analysis = /<Analysis>([\s\S]*?)<\/Analysis>/i.exec(raw);
+        let visible = raw;
+        if (analysis) {
+            cuts.push([start + analysis.index, start + analysis.index + '<Analysis>'.length]);
+            const closeStart = analysis.index + analysis[0].length - '</Analysis>'.length;
+            cuts.push([start + closeStart, start + closeStart + '</Analysis>'.length]);
+            // Protocol names inside opaque business text are data, not tags to cut.
+            visible = raw.slice(0, analysis.index) + ' '.repeat(analysis[0].length) + raw.slice(analysis.index + analysis[0].length);
         }
-        walk(ast, n => {
-            if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier') {
-                locals.add(n.id.name);
-                if (n.init && /Function/.test(n.init.type)) functions.add(n.id.name);
-            }
-            if (n.type === 'FunctionDeclaration' && n.id) { locals.add(n.id.name); functions.add(n.id.name); }
-            if (/Function/.test(n.type)) for (const param of n.params || []) if (param.type === 'Identifier') locals.add(param.name);
-        });
-        const bare = new Set(['__emit', 'getvar', 'getAllVariables', 'mvu2shujukuGetAllVariables',
-            'mvu2shujukuFormatMessageVariable', 'String', 'Number', 'Boolean', 'parseInt', 'parseFloat', 'isNaN', 'isFinite']);
-        const globals = new Set([...bare, '_', 'Object', 'JSON', 'Math', 'Array', 'NaN', 'Infinity', 'undefined']);
-        // Validate references in their lexical scope. A parameter in one function
-        // does not establish that a same-named host object elsewhere is safe.
-        function scoped(node, inherited = new Set()) {
-            const scope = new Set(inherited);
-            if (/Function/.test(node.type)) {
-                if (node.id) scope.add(node.id.name);
-                for (const param of node.params || []) {
-                    if (param.type !== 'Identifier') throw new Error('EJS 参数绑定无法确认为只读计算');
-                    scope.add(param.name);
+        const patch = /<JSON_?Patch>[\s\S]*?<\/JSON_?Patch>/i.exec(visible);
+        if (patch) cuts.push([start + patch.index, start + patch.index + patch[0].length]);
+        return cuts.sort((a, b) => a[0] - b[0]);
+    }
+    function envelope(source) {
+        let start = 0, end = source.length;
+        for (let depth = 0; depth < 8; depth++) {
+            const raw = source.slice(start, end), text = raw.trim(), trimStart = raw.indexOf(text);
+            start += trimStart; end = start + text.length;
+            const xml = /^<([\p{L}_][\p{L}\p{N}_.:-]*)[ \t]*>([\s\S]*?)<\/\1[ \t]*>$/iu.exec(text);
+            if (xml && !/^(?:script|style|template|html|head|body|UpdateVariable|JSON_?Patch|initvar|status_current_variables?)$/i.test(xml[1])) {
+                const tag = xml[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                if (!new RegExp('<\\/?' + tag + '(?:\\s|>)', 'iu').test(xml[2])) {
+                    start += text.indexOf('>') + 1; end = start + xml[2].length; continue;
                 }
             }
-            function gather(n) {
-                if (!n || typeof n !== 'object') return;
-                if (n.type === 'FunctionDeclaration' && n.id) scope.add(n.id.name);
-                if (n !== node && (/Function/.test(n.type || '') || n.type === 'BlockStatement')) return;
-                if (n.type === 'VariableDeclarator') {
-                    if (n.id.type !== 'Identifier') throw new Error('EJS 变量绑定无法确认为只读计算');
-                    scope.add(n.id.name);
-                }
-                for (const value of Object.values(n)) {
-                    if (Array.isArray(value)) value.forEach(gather);
-                    else if (value && typeof value === 'object') gather(value);
-                }
+            const fence = /^(`{3,}|~{3,})[ \t]*(?:yaml|yml|json|json5)?[ \t]*\r?\n([\s\S]*?)\r?\n\1[ \t]*$/i.exec(text);
+            if (fence && !new RegExp('^' + fence[1] + '[ \\t]*$', 'm').test(fence[2])) {
+                start += text.indexOf('\n') + 1; end = start + fence[2].length; continue;
             }
-            gather(node);
-            function visit(n, parent, key) {
-                if (!n || typeof n !== 'object') return;
-                if (n !== node && (/Function/.test(n.type || '') || n.type === 'BlockStatement')) { scoped(n, scope); return; }
-                if (n.type === 'Identifier') {
-                    const binding = parent && ((parent.type === 'VariableDeclarator' && key === 'id') ||
-                        /Function/.test(parent.type) && (key === 'id' || key === 'params'));
-                    const property = parent && !parent.computed &&
-                        (parent.type === 'MemberExpression' && key === 'property' || parent.type === 'Property' && key === 'key');
-                    if (!binding && !property && !scope.has(n.name) && !globals.has(n.name))
-                        throw new Error('EJS 含无法确认为只读的外部依赖');
-                }
-                for (const [childKey, value] of Object.entries(n)) {
-                    if (Array.isArray(value)) value.forEach(child => visit(child, n, childKey));
-                    else if (value && typeof value === 'object') visit(value, n, childKey);
-                }
-            }
-            visit(node, null, '');
+            break;
         }
-        scoped(ast);
-        const methods = new Set(['get', 'has', 'clamp', 'round', 'floor', 'ceil', 'max', 'min', 'sum', 'sumBy',
-            'keys', 'values', 'entries', 'isArray', 'isFinite', 'isInteger', 'parse', 'stringify',
-            'map', 'filter', 'reduce', 'find', 'some', 'every', 'includes', 'join', 'slice', 'concat',
-            'startsWith', 'endsWith', 'trim', 'replace', 'match', 'test', 'toLowerCase', 'toUpperCase', 'indexOf', 'forEach']);
-        walk(ast, n => {
-            if (['ImportExpression', 'NewExpression', 'AwaitExpression', 'WithStatement', 'ThisExpression'].includes(n.type))
-                throw new Error('EJS 含无法安全拆分的宿主或异步依赖');
-            if (n.type === 'AssignmentExpression' || n.type === 'UpdateExpression' ||
-                n.type === 'UnaryExpression' && n.operator === 'delete')
-                throw new Error('EJS 含无法安全拆分的写入或重绑定');
-            if (n.type !== 'CallExpression') return;
-            if (n.callee.type === 'Identifier' && (bare.has(n.callee.name) || functions.has(n.callee.name))) return;
-            if (n.callee.type === 'MemberExpression' && !n.callee.computed && methods.has(n.callee.property.name)) {
-                let base = n.callee.object;
-                while (base.type === 'MemberExpression') base = base.object;
-                if (base.type === 'Identifier' && (locals.has(base.name) || ['_', 'Object', 'JSON', 'Math', 'Array', 'Number'].includes(base.name))) return;
-            }
-            throw new Error('EJS 调用的行为无法确认为只读计算');
-        });
+        return { start, end };
     }
-    function fields(visible, tokens = []) {
-        const lines = [], nodes = [], stack = [];
-        let offset = 0;
-        for (const line of visible.split('\n')) { lines.push({ text: line, start: offset, end: offset + line.length + 1 }); offset += line.length + 1; }
-        for (const line of lines) {
-            if (!line.text.trim() || /^\s*#/.test(line.text)) continue;
-            let indent = line.text.match(/^[ \t]*/)[0].length;
-            const leadingCode = tokens.find(t => t.start >= line.start && t.start < line.start + indent);
-            if (leadingCode) indent = leadingCode.start - line.start;
-            while (stack.length && indent <= stack.at(-1).indent) stack.pop().end = line.start;
-            const match = /^([ \t]*)([\p{L}\p{N}_$.-]+)[ \t]*:[ \t]*(.*)$/u.exec(line.text);
-            if (!match) continue;
-            const node = { key: match[2], indent, start: line.start, end: visible.length,
-                parent: stack.at(-1) || null, lineEnd: Math.min(line.end, visible.length), value: match[3] };
-            nodes.push(node); stack.push(node);
-        }
-        return nodes;
-    }
-    function literals(source, tokens, start, end, callback) {
-        let cursor = start, out = '';
-        for (const token of tokens.filter(t => t.end > start && t.start < end)) {
-            if (token.start < start || token.end > end) throw new Error('更新段落与 EJS 标签交叉');
-            out += callback(source.slice(cursor, token.start)); out += token.raw; cursor = token.end;
-        }
-        return out + callback(source.slice(cursor, end));
-    }
-    function migrate(source, { updateOnly = false, resolvePath }) {
-        const result = { body: source, fill: '', migrated: 0, issues: [] };
-        if (!protocol.test(source) && !/mandatory_patch|json_?patch\s*:/i.test(source)) return result;
-        const issue = text => { if (!result.issues.includes(text)) result.issues.push(text); };
-        let parts;
-        try { parts = segment(source); safeTemplate(parts.tokens); }
-        catch (error) { issue(error.message); return result; }
-        const { visible, tokens } = parts;
-        if (/(?:^|[\s:])[&*][A-Za-z_][\w-]*/m.test(visible)) { issue('含 YAML 共享节点，不能拆开其定义与引用'); return result; }
-        if (/<(?:script|style|iframe)\b/i.test(visible)) { issue('含前端代码，不能作为更新段落拆分'); return result; }
-        const nodes = fields(visible, tokens);
-        let candidates = [];
-        if (updateOnly && !/<\/?status_current_variables?\b/i.test(visible))
-            candidates = [{ start: 0, end: source.length, key: '', parent: null, patch: false }];
-        else for (const node of nodes) {
-            let quoted = quotedKey.test(node.key);
-            for (let parent = node.parent; parent; parent = parent.parent) quoted ||= quotedKey.test(parent.key);
-            if (quoted || !updateKey.test(node.key)) continue;
-            const text = visible.slice(node.start, node.end);
-            if (protocol.test(text) || patchKey.test(node.key)) candidates.push({ ...node, patch: patchKey.test(node.key) });
-        }
-        // A complete source span is the migration unit, including every operation
-        // of a patch list. Nested matches belong to their enclosing section.
-        candidates = candidates.filter(n => !candidates.some(p => p !== n && p.start <= n.start && p.end >= n.end));
-        const accepted = [];
-        for (const candidate of candidates) {
-            const text = visible.slice(candidate.start, candidate.end), mappings = new Map();
-            const siblings = candidates.filter(n => n.parent === candidate.parent);
-            const related = siblings.some(n => n.patch) ? siblings : [candidate];
-            const bindingText = related.map(n => visible.slice(n.start, n.end)).join('\n');
-            let unresolved = false;
-            for (const tag of ['JSONPatch', 'JSON_Patch', 'UpdateVariable']) {
-                const opens = [...text.matchAll(new RegExp('<'+tag+'\\b[^>]*>', 'gi'))].length;
-                const closes = [...text.matchAll(new RegExp('</'+tag+'\\s*>', 'gi'))].length;
-                if (opens !== closes && new RegExp('</'+tag+'\\s*>', 'i').test(visible)) unresolved = true;
-            }
-            if (unresolved) { issue('更新段落与旧协议标签边界交叉，整段保留'); continue; }
-            const pathText = bindingText.replace(/<\/?[A-Za-z_][^>]*>/g, (markup, offset) => bindingText[offset - 1] === '/' ? markup : ' '.repeat(markup.length));
-            for (const match of pathText.matchAll(pointer)) {
-                const path = match[0];
-                if (/~(?![01])/.test(path)) { unresolved = true; break; }
-                const binding = resolvePath(path.slice(1).split('/').map(p => p.replace(/~1/g, '/').replace(/~0/g, '~')));
-                if (!binding) { issue('无法绑定更新路径：' + path); unresolved = true; break; }
-                mappings.set(path, binding.label);
-            }
-            if (unresolved) { issue('更新段落含无法绑定到实际表列的路径，整段保留'); continue; }
-            if (!mappings.size && !/<\/?(?:JSON_?Patch|UpdateVariable)\b|\bJSON\s+Patch\b|\bRFC\s*6902\b|mandatory_patch|json_?patch\s*:/i.test(text)) {
-                issue('仅有协议名称提及，不能确认为旧更新协议要求'); continue;
-            }
-            // An unmarked instruction mentioning the protocol without any target
-            // cannot establish that it is an independent update requirement.
-            if (!updateOnly && !mappings.size && !candidate.patch && !/update_|更新|输出格式|output_format|output_protocol|force_structured_output/i.test(candidate.key)) {
-                issue('无法确认该段落的更新目标或独立更新职责'); continue;
-            }
-            const payloadNodes = nodes.filter(n => patchKey.test(n.key) && n.start >= candidate.start && n.end <= candidate.end);
-            const payload = candidate.patch || payloadNodes.length > 0;
-            const rewrite = literal => {
-                let value = literal;
-                value = value.replace(/^([ \t]*)(?:format|output_format|格式)([ \t]*:)/gim, '$1变更要求说明（非输出格式）$2');
-                if (!payload) for (const [path, label] of [...mappings].sort((a, b) => b[0].length - a[0].length)) {
-                    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    value = value.replace(new RegExp(escaped + '(?![\\p{L}\\p{N}_$/])', 'gu'), () => label);
-                }
-                // Payload strings are data, including a literal named JSONPatch.
-                // A patch list keeps its contents and gains a local binding guide.
-                return protocolReferences(value);
+    function plan(source, { outputOnly = false } = {}) {
+        source = String(source || '');
+        const result = { text: source, excluded: [], issues: [] };
+        // Preserve offsets while shielding all executable blocks from parsing.
+        const tokens = [...source.matchAll(/<%[\s\S]*?%>/g)].map(m => [m.index, m.index + m[0].length]);
+        const masked = source.replace(/<%[\s\S]*?%>/g, m => m.replace(/[^\r\n]/g, ' '));
+        if (/<%|%>|&lt;%/.test(masked)) return result;
+        const outer = envelope(source), body = source.slice(outer.start, outer.end);
+        const whole = outputOnly && formatParts(body);
+        if (whole) result.excluded = whole.pure ? [[outer.start, outer.end]] : syntaxCuts(source, outer.start, outer.end);
+        else {
+            let doc;
+            try { doc = YAML.parseDocument(masked.slice(outer.start, outer.end), { uniqueKeys: true }); }
+            catch (_) { return result; }
+            if (doc.errors.length || !YAML.isMap(doc.contents)) return result;
+            let shared = false;
+            YAML.visit(doc, (_, node) => { if (YAML.isAlias(node) || node?.anchor || node?.tag && node.tag !== 'tag:yaml.org,2002:str') shared = true; });
+            if (shared) return result;
+            const cuts = [];
+            const span = node => [outer.start + node.range[0], outer.start + node.range[2]];
+            const pairSpan = pair => {
+                const begin = outer.start + pair.key.range[0];
+                const line = source.lastIndexOf('\n', begin - 1) + 1;
+                return [/^[ \t]*$/.test(source.slice(line, begin)) ? line : begin, outer.start + pair.value.range[1]];
             };
-            let rewritten;
-            try {
-                let cursor = candidate.start;
-                rewritten = '';
-                for (const node of payloadNodes.filter(n => !payloadNodes.some(p => p !== n && p.start <= n.start && p.end >= n.end)).sort((a,b)=>a.start-b.start)) {
-                    rewritten += literals(source, tokens, cursor, node.start, rewrite);
-                    rewritten += literals(source, tokens, node.start, node.end, literal => literal.replace(/^([ \t]*)(?:mandatory_patch(?:_template)?|json_?patch)([ \t]*:)/im, '$1数据库变更要求$2'));
-                    cursor = node.end;
+            function walk(map, inDocument = outputOnly) {
+                const complete = map.items.some(pair => formatKey.test(String(pair.key?.value || '')) && formatParts(pair.value?.value));
+                for (const pair of map.items) {
+                    if (!pair.key || !pair.value || !pair.key.range || !pair.value.range) continue;
+                    const key = String(pair.key.value || '');
+                    if (quoteKey.test(key)) continue;
+                    if (formatKey.test(key)) {
+                        const range = pairSpan(pair);
+                        if (tokens.some(([a, b]) => a < range[1] && b > range[0])) continue;
+                        const parts = formatParts(pair.value.value);
+                        if (parts) cuts.push(...(parts.pure ? [range] : syntaxCuts(source, ...range)));
+                    }
+                    else if (inDocument && complete && /^(?:rules?|输出规则|规则)$/i.test(key) && YAML.isSeq(pair.value)) {
+                        for (const item of pair.value.items) {
+                            if (!item?.range || !isProtocolRule(item.toJSON())) continue;
+                            // YAML comments can be business instructions too. A
+                            // known protocol value does not prove its comments disposable.
+                            let commented = false;
+                            YAML.visit(item, (_, node) => { if (node?.comment || node?.commentBefore) commented = true; });
+                            if (commented) continue;
+                            const range = span(item), line = source.lastIndexOf('\n', range[0] - 1) + 1;
+                            if (/^[ \t]*-[ \t]*$/.test(source.slice(line, range[0]))) range[0] = line;
+                            cuts.push(range);
+                        }
+                    } else if (YAML.isMap(pair.value) && documentKey.test(key)) walk(pair.value, true);
                 }
-                rewritten += literals(source, tokens, cursor, candidate.end, rewrite);
             }
-            catch (error) { issue(error.message); continue; }
-            if (payload && mappings.size) rewritten += '\n' + ' '.repeat(candidate.indent || 0) + '更新目标对应: ' + [...mappings].map(([path, label]) => path + ' → ' + label).join('；') + '。\n';
-            accepted.push({ ...candidate, rewritten });
+            walk(doc.contents);
+            result.excluded = cuts.sort((a, b) => a[0] - b[0]);
         }
-        if (!accepted.length) return result;
-        // Ancestor headers and static sibling fields carry explicit conditions.
-        const context = [];
-        for (const range of accepted) {
-            for (let parent = range.parent; parent; parent = parent.parent) {
-                context.push({ start: parent.start, end: parent.lineEnd });
-                for (const sibling of nodes.filter(n => n.parent === parent && !accepted.some(a => a.start <= n.start && a.end >= n.end))) {
-                    if (!nodes.some(n => n.parent === sibling) && !quotedKey.test(sibling.key) && !updateKey.test(sibling.key))
-                        context.push({ start: sibling.start, end: sibling.end });
-                }
-            }
-        }
-        function render(fill) {
-            let text = '', cursor = 0;
-            const selected = (start, end) => (fill ? accepted.concat(context) : accepted).some(r => r.start <= start && r.end >= end);
-            const cuts = [...new Set([0, source.length, ...accepted.flatMap(r => [r.start, r.end]), ...context.flatMap(r => [r.start, r.end]), ...tokens.flatMap(t => [t.start, t.end])])].sort((a, b) => a - b);
-            for (let i = 0; i < cuts.length - 1; i++) {
-                const start = cuts[i], end = cuts[i + 1];
-                if (start < cursor || start === end) continue;
-                const whole = accepted.find(r => r.start === start);
-                if (fill && whole) { text += whole.rewritten; cursor = whole.end; continue; }
-                const token = tokens.find(t => t.start === start);
-                if (token) {
-                    const keep = selected(token.start, token.end);
-                    if (token.mode === '=' || token.mode === '-') {
-                        text += (fill ? keep : !keep) ? token.raw : '<% void (' + token.code + '); ' + token.close + '%>';
-                    } else text += token.raw;
-                    cursor = token.end; continue;
-                }
-                if (fill ? selected(start, end) : !selected(start, end)) text += source.slice(start, end);
-                cursor = end;
-            }
-            return text;
-        }
-        const isolate = text => tokens.length ? '<% { %>\n' + text + '\n<% } %>' : text;
-        result.body = accepted.some(r => r.start === 0 && r.end === source.length) ? '' : isolate(render(false));
-        result.fill = isolate(contract + '\n' + render(true));
-        result.migrated = accepted.length;
-        const fillVisible = segment(result.fill).visible;
-        const withoutPayloads = fillVisible.split('');
-        for (const field of fields(fillVisible).filter(n => n.key === '数据库变更要求'))
-            for (let i = field.start; i < field.end; i++) withoutPayloads[i] = ' ';
-        if (protocol.test(withoutPayloads.join(''))) issue('迁移结果仍含未承接协议引用，不能视为已完整清理');
+        for (const [start, end] of result.excluded.slice().reverse()) result.text = result.text.slice(0, start) + result.text.slice(end);
         return result;
     }
-    function normalizeRule(source, { resolvePath, jsonLocal = false }) {
-        const result = { text: source, issues: [] };
-        if (!protocol.test(source)) return result;
-        let parts;
-        try { parts = segment(source); } catch (error) { result.issues.push(error.message); return result; }
-        const mappings = new Map();
-        const text = parts.visible.replace(/<\/?[A-Za-z_][^>]*>/g, (markup, offset) => parts.visible[offset - 1] === '/' ? markup : ' '.repeat(markup.length));
-        if (!jsonLocal) for (const match of text.matchAll(pointer)) {
-            const path = match[0], binding = !/~(?![01])/.test(path) && resolvePath(path.slice(1).split('/').map(p=>p.replace(/~1/g,'/').replace(/~0/g,'~')));
-            if (!binding) { result.issues.push('无法绑定更新路径：' + path); return result; }
-            mappings.set(path, binding.label);
-        }
-        const rewritten = literals(source, parts.tokens, 0, source.length, literal => {
-            let value = literal;
-            for (const [path, label] of [...mappings].sort((a,b)=>b[0].length-a[0].length)) {
-                const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                value = value.replace(new RegExp(escaped + '(?![\\p{L}\\p{N}_$/])', 'gu'), () => label);
-            }
-            return protocolReferences(value);
-        });
-        if (rewritten !== source) result.text = '业务更新要求（实际输出遵循数据库填表协议）：' + rewritten;
-        return result;
+    function guideTokens(text) {
+        return [...text.matchAll(/<%([_=#-]?)([\s\S]*?)([-_]?)%>/g)]
+            .filter(m => m[0] === guideCall && (m.index === 0 || text[m.index - 1] === '\n') &&
+                (m.index + m[0].length === text.length || /[\r\n]/.test(text[m.index + m[0].length])));
     }
-    return { migrate, normalizeRule, fillTitle };
+    function preparePrompt(code, entries = []) {
+        let text = String(code || '');
+        // The private comment is the fill-view marker, not an arbitrary keyword.
+        if (!guideTokens(text).length) return { text, adapted: false };
+        for (const entry of entries) {
+            if (!entry || entry.enabled === false || !entry.extensions?.mvu2shujukuFillView) continue;
+            const source = String(entry.content || '').trim();
+            if (!source || !text.includes(source)) continue;
+            const view = plan(source, { outputOnly: entry.extensions.mvu2shujukuFillView.outputOnly });
+            if (!view.excluded.length) continue;
+            // Match whole entry text. Never remove individual words, patches or
+            // a partial match inside a quotation / larger business sentence.
+            let from = 0;
+            while (from <= text.length) {
+                const index = text.indexOf(source, from);
+                if (index < 0) break;
+                const end = index + source.length;
+                if ((index === 0 || text[index - 1] === '\n') && (end === text.length || text[end] === '\n')) {
+                    text = text.slice(0, index) + view.text + text.slice(end); from = index + view.text.length;
+                } else from = end;
+            }
+        }
+        for (const token of guideTokens(text).slice().reverse()) {
+            const duplicate = token.index !== guideTokens(text)[0].index && text.slice(token.index).startsWith(guideContent);
+            text = text.slice(0, token.index) + text.slice(token.index + (duplicate ? guideContent.length : guideCall.length));
+        }
+        return { text, adapted: true };
+    }
+    return { guideCall, guideContent, guideTitle, guidance, fillTitle, plan, preparePrompt };
 }
 module.exports = createUpdateRuleMigration;

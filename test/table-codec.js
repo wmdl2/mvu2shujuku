@@ -68,7 +68,12 @@ test('共用编解码：实际生成的旧桥与扩展投影一致，回放空�
     const input = { name: '共用投影测试', first_mes: '你好', character_book: { entries: [
         { comment: '[InitVar]', content: JSON.stringify({ 状态: { 生命: 100, 开关: true }, 列表: [null, false, 0, '', { a: 1 }, [1, 2, 3]], 秘闻: { $meta: { extensible: true }, 第一条: '正文', 第二条: '另一条' } }) },
     ] } };
-    const converted = core.convert(input);
+    const converted = require('./legacy-layout-fixture')(input);
+    // 冻结旧桥对照仅使用旧协议支持的表；publicFallback由专门测试覆盖。
+    const extras = new Set(converted.schema.filter(g => g.publicFallback).map(g => g.tableName));
+    converted.schema = converted.schema.filter(g => !g.publicFallback);
+    for (const key of Object.keys(converted.template)) if (extras.has(converted.template[key]?.name)) delete converted.template[key];
+    (converted.card.data || converted.card).extensions.mvu2shujuku.layout = core.buildLayoutJson(core.buildLayout(converted.schema));
     const { win, tables } = bridgeSandbox(converted, { extra: { setTimeout() { return 0; }, clearTimeout() {} } });
     const layout = JSON.parse((converted.card.data || converted.card).extensions.mvu2shujuku.layout);
     assert.deepStrictEqual(plain(win.getAllVariables()), core.statDataFromTables(layout, tables));

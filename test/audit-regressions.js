@@ -134,7 +134,10 @@ test('审查：顶层数组各 JSON 类型往返，原样回写没有 CRUD', asy
 });
 
 for (const mode of ['false', 'throw', 'insert-minus-one']) test('审查：数组 CRUD 失败停止后续写入 ' + mode, async () => {
-    const result = core.convert(card({ 列表: [1, 2, 3] }));
+    // New arrays use one complete JSON cell. The negative insertRow contract
+    // remains a legacy row-array writer test, not a new-layout insertion path.
+    const convert = mode === 'insert-minus-one' ? require('./legacy-layout-fixture') : core.convert;
+    const result = convert(card({ 列表: [1, 2, 3] }));
     const layout = JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout), tables = clone(result.template);
     const before = core.statDataFromTables(layout, tables).stat_data;
     const api = applyingApi(tables), calls = [];
@@ -163,14 +166,13 @@ test('审查：普通正则不因名称包含完整变量而删除', () => {
     assert.ok((result.card.data || result.card).extensions.regex_scripts.some(r => r.scriptName === '完整变量显示' && r.replaceString === 'world'));
 });
 
-test('审查：EJS 字符串注释正则不改写，模板插值中的真实调用改写', () => {
+test('审查：EJS 字符串、注释、正则和模板插值均保持原变量调用', () => {
     const literal = `const example="getvar('stat_data.状态.生命')"; /* getvar('stat_data.x') */ const regex=/getvar\\('stat_data.x'\\)/; const other=obj . getvar('stat_data.x');`;
     const input = '<% ' + literal + "const value=`文字 getvar('stat_data.x') ${getvar('stat_data.状态.生命')}`; %>";
     const result = core.rewriteEjsConditions(input, {}, core.createReport()).text;
     assert.ok(result.includes(literal));
     assert.ok(result.includes("文字 getvar('stat_data.x')"));
-    assert.ok(!result.includes("${getvar('stat_data.状态.生命')}"));
-    assert.ok(result.includes('mvu2shujukuGetMessageVar'));
+    assert.strictEqual(result, input);
 });
 
 test('审查：会话代次隔离同名角色及 A→B→A', () => {
@@ -283,7 +285,9 @@ test('审查：完整卡接口接受空世界书问候语初始化并保留源�
     vm.runInContext(extract('    async function fetchFullCharacter(', '    function readFileAsBytes('), context);
     const loaded = await context.fetchFullCharacter({ name: full.name, avatar: 'source.png' });
     assert.strictEqual(loaded.avatar, 'source.png');
-    assert.strictEqual(core.convert(loaded).meta.tableCount, 1);
+    const result = core.convert(loaded);
+    assert.strictEqual(result.meta.tableCount, result.schema.length);
+    assert.deepStrictEqual(result.schema.filter(g => !g.publicFallback).map(g => g.name), ['状态']);
 });
 
 test('审查：点击数据桥下载按钮得到可执行 JS 而非报告', async () => {

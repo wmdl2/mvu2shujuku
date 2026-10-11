@@ -24,7 +24,7 @@ function sheetNames(template) {
     return Object.values(template).filter(sheet => sheet && sheet.uid).map(sheet => sheet.name);
 }
 
-test('表格归组：同层数组子表按逻辑父组连续排列，且不改 schema/layout 投影', () => {
+test('旧布局表格归组：同层数组子表按逻辑父组连续排列，且不改 schema/layout 投影', () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -36,10 +36,10 @@ test('表格归组：同层数组子表按逻辑父组连续排列，且不改 s
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const converted = core.convert(card, { mode: 'both' });
+    const converted = require('./legacy-layout-fixture')(card, { mode: 'both' });
     const names = sheetNames(converted.template);
-    assert.deepStrictEqual(names, ['A表', 'A_bag表', 'B表', 'B_bag表']);
-    assert.deepStrictEqual(converted.schema.map(g => g.tableName), ['A表', 'B表', 'A_bag表', 'B_bag表'], 'schema 原有顺序不能被模板排版改写');
+    assert.deepStrictEqual(names, ['A表', 'A_bag表', 'B表', 'B_bag表', '动态变量表']);
+    assert.deepStrictEqual(converted.schema.filter(g => !g.publicFallback).map(g => g.tableName), ['A表', 'B表', 'A_bag表', 'B_bag表'], 'schema 原有顺序不能被模板排版改写');
     const layout = JSON.parse((converted.card.data || converted.card).extensions.mvu2shujuku.layout);
     const tables = Object.fromEntries(Object.entries(converted.template).filter(([uid]) => uid.startsWith('sheet_')));
     assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, {

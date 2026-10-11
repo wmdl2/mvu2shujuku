@@ -2,13 +2,13 @@
 const { test } = require('./runner');
 const { core, assert, applyingApi } = require('./helpers');
 
-function fixture() {
+function fixture(convert = core.convert) {
     const initial = { 关系: {
         甲: { 好感: 1, 背包: { 同名物品: { 数量: 1, 效果: { 同名效果: { 强度: 1 } } } }, 日志: ['甲1', '甲2', '甲3'] },
         乙: { 好感: 2, 背包: { 同名物品: { 数量: 2, 效果: { 同名效果: { 强度: 2 } } } }, 日志: ['乙1', '乙2', '乙3'] },
     } };
     const rule = '变量更新规则:\n  关系:\n    type: |-\n      { [名称: string]: { 好感: number; 背包: { [物品: string]: { 数量: number; 效果: { [效果名: string]: { 强度: number; } }; } }; 日志: string[]; } }';
-    const result = core.convert({ name: '关系生命周期', first_mes: '开场', character_book: { entries: [
+    const result = convert({ name: '关系生命周期', first_mes: '开场', character_book: { entries: [
         { comment: '[InitVar]', content: JSON.stringify(initial) }, { comment: '变量更新规则', content: rule },
     ] } });
     return { initial, template: result.template, layout: JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout) };
@@ -45,10 +45,17 @@ test('关系生命周期：删除或重命名父行同时清理后代物理行�
         assertNoOrphans(layout, template);
     }
 });
-test('关系生命周期：省略整个父组属于部分写入，不能触发后代清理', async () => {
-    const { initial, template, layout } = fixture(), snapshot = JSON.stringify(template);
+test('旧布局关系生命周期：省略整个父组属于部分写入，不能触发后代清理', async () => {
+    const { initial, template, layout } = fixture(require('./legacy-layout-fixture')), snapshot = JSON.stringify(template);
     await core.writeStatDiffToDb(applyingApi(template), layout, initial, {});
     assert.strictEqual(core.lastStatWriteFailed, false);
     assert.strictEqual(JSON.stringify(template), snapshot);
     assertNoOrphans(layout, template);
+});
+
+test('关系生命周期：完整对象替换省略所属根时清除其全部内部数据', async () => {
+    const { initial, template, layout } = fixture();
+    await core.writeStatDiffToDb(applyingApi(template), layout, initial, {});
+    assert.strictEqual(core.lastStatWriteFailed, false);
+    assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, {});
 });

@@ -231,20 +231,36 @@ function createSchemaExecution({ libraries, runSync, runAsync } = {}) {
     }
     // This factory is recreated inside the isolated realm, including all callbacks.
     async function execute(libs, program) {
-        const captured=[],pending=[], fallbackFields=new WeakSet(), defaults=new WeakMap(),instrumented=new WeakSet(), namespaceCache=new WeakMap();
+        const captured=[],pending=[], fallbackFields=new WeakSet(), defaults=new WeakMap(),defaultProviders=new WeakMap(),instrumented=new WeakSet(), namespaceCache=new WeakMap();
         const plain=v=>{if(v===undefined)return undefined;const encoded=JSON.stringify(v);if(encoded===undefined)throw new Error('默认值不是JSON值');return JSON.parse(encoded);};
+        function defaultProvider(def){
+            const descriptor=Object.getOwnPropertyDescriptor(def,def.type==='catch'?'catchValue':'defaultValue');
+            return descriptor?.get || (typeof descriptor?.value==='function'?descriptor.value:null);
+        }
+        function rememberedDefault(def){
+            const provider=defaultProvider(def);
+            return defaults.get(def) || (provider && defaultProviders.get(provider));
+        }
+        function remember(result,key,value){
+            if(!['default','prefault','catch'].includes(key)||!result?._zod)return;
+            const def=result._zod.def,metadata=typeof value==='function'?{dynamic:true}:{value:plain(value),kind:key};
+            defaults.set(def,metadata);
+            // Zod clones definitions when adding checks, retaining these exact
+            // providers. Inspect descriptors without invoking their getters.
+            const provider=defaultProvider(def);if(provider)defaultProviders.set(provider,metadata);
+        }
         function instrument(schema){
             if(!schema?._zod||instrumented.has(schema))return schema;
             instrumented.add(schema);
             const methods=new Set();for(let p=schema;p&&p!==Object.prototype;p=Object.getPrototypeOf(p))Object.getOwnPropertyNames(p).forEach(key=>methods.add(key));
             for(const key of methods)if(typeof schema[key]==='function'&&!['constructor','parse','safeParse','parseAsync','safeParseAsync'].includes(key)){
-                const original=schema[key];schema[key]=function(...args){const result=Reflect.apply(original,schema,args);if(['default','prefault'].includes(key)&&result?._zod)defaults.set(result._zod.def,typeof args[0]==='function'?{dynamic:true}:{value:plain(args[0]),kind:key});return instrument(result);};
+                const original=schema[key];schema[key]=function(...args){const result=Reflect.apply(original,schema,args);remember(result,key,args[0]);return instrument(result);};
             }
             return schema;
         }
         function namespace(object){
             if(namespaceCache.has(object))return namespaceCache.get(object);
-            const proxy=new Proxy(object,{get(target,key){const value=Reflect.get(target,key);if(key==='z')return proxy;if(typeof value==='function')return new Proxy(value,{apply(fn,thisArg,args){return instrument(Reflect.apply(fn,target,args));},construct(fn,args){return instrument(Reflect.construct(fn,args));}});if(value&&typeof value==='object')return namespace(value);return value;}});
+            const proxy=new Proxy(object,{get(target,key){const value=Reflect.get(target,key);if(key==='z')return proxy;if(typeof value==='function')return new Proxy(value,{apply(fn,thisArg,args){const result=Reflect.apply(fn,target,args);remember(result,key,args[1]);return instrument(result);},construct(fn,args){return instrument(Reflect.construct(fn,args));}});if(value&&typeof value==='object')return namespace(value);return value;}});
             namespaceCache.set(object,proxy);return proxy;
         }
         const __field=value=>{try{return value();}catch(error){if(error.name!=='ReferenceError'&&!/Schema.*(?:依赖|构造依赖)/.test(error.message))throw error;const fallback=libs.zod.unknown().optional();fallbackFields.add(fallback);return fallback;}};
@@ -261,6 +277,34 @@ function createSchemaExecution({ libraries, runSync, runAsync } = {}) {
         for(let n=0;n<8;n++){const count=pending.length;await Promise.all(pending);await Promise.resolve();if(count===pending.length)break;}
         if(!captured.length)throw new Error('隔离执行后未登记 Schema');
         const unsupported=[],seen=new Set();let visited=0;
+        // Catch/default outputs bypass the inner validator. Keep its input rules, but
+        // allow their statically captured outputs in storage; never call a callback.
+        function allowOutput(node,value){
+            if(value===undefined){node.optional=true;return node;}
+            if(value===null){node.nullable=true;return node;}
+            const compatible=node.kind==='text'&&typeof value==='string'
+                ||node.kind==='number'&&typeof value==='number'
+                ||node.kind==='boolean'&&typeof value==='boolean';
+            if(compatible){
+                node.outputFallbacks=[...new Set([...(node.outputFallbacks||[]),value])];
+                if(node.kind==='number'&&!Number.isInteger(value))node.integer=false;
+                return node;
+            }
+            if(node.kind==='object'&&typeof value==='object'&&!Array.isArray(value)){
+                for(const [key,child]of Object.entries(value)){
+                    if(node.dynamic&&node.value)node.value=allowOutput(node.value,child);
+                    else if(node.fields?.[key])node.fields[key]=allowOutput(node.fields[key],child);
+                    else node.passthrough=true;
+                }
+                return node;
+            }
+            if(node.kind==='array'&&Array.isArray(value)){
+                for(const child of value)node.element=allowOutput(node.element||{kind:'unknown'},child);
+                return node;
+            }
+            return {kind:'unknown',optional:node.optional,nullable:node.nullable,desc:node.desc,
+                ...(node.hasDefault?{hasDefault:true,defaultValue:node.defaultValue,defaultKind:node.defaultKind}:{}),dynamicDefault:node.dynamicDefault};
+        }
         function walk(schema,path=[],depth=0){
             if(fallbackFields.has(schema)){unsupported.push({path:path.join('.'),kind:'字段构造依赖环境（完整JSON，不补默认）'});return{kind:'unknown',optional:true,unresolved:true};}
             if(!schema?._zod||depth>48||seen.has(schema)||++visited>20000){unsupported.push({path:path.join('.'),kind:'递归或无法展开的结构（完整JSON）'});return{kind:'unknown',unresolved:true};}
@@ -270,11 +314,15 @@ function createSchemaExecution({ libraries, runSync, runAsync } = {}) {
                 if(type==='optional')node.optional=true;if(type==='nullable')node.nullable=true;
                 if(type==='nonoptional')delete node.optional;
                 if(type==='default'||type==='prefault'){
-                    const value=defaults.get(def);
+                    const value=rememberedDefault(def);
                     if(!value||value.dynamic){node.dynamicDefault=true;unsupported.push({path:path.join('.'),kind:'动态默认值（不用于静态开局）'});}
-                    else{node.hasDefault=true;node.defaultValue=value.value;node.defaultKind=type;}
+                    else{if(type==='default')node=allowOutput(node,value.value);node.hasDefault=true;node.defaultValue=value.value;node.defaultKind=type;}
                 }
-                if(type==='catch'){node.dynamicDefault=true;unsupported.push({path:path.join('.'),kind:'catch回退（运行时执行）'});}
+                if(type==='catch'){
+                    const value=rememberedDefault(def);
+                    node=value&&!value.dynamic?allowOutput(node,value.value):{kind:'unknown',optional:node.optional,nullable:node.nullable,desc:node.desc};
+                    node.dynamicDefault=true;unsupported.push({path:path.join('.'),kind:'catch回退（运行时执行）'});
+                }
             }else if(type==='object'){
                 node={kind:'object',fields:{},dynamic:false};
                 for(const [key,child]of Object.entries(def.shape))Object.defineProperty(node.fields,key,{value:walk(child,path.concat(key),depth+1),enumerable:true,writable:true,configurable:true});

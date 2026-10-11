@@ -33,8 +33,9 @@ function fixture(options = {}) {
 test('完整JSON容器：合并子表且原始类型、对象 pair、数组说明无损，无额外状态列', () => {
     for (const mode of ['native', 'sqlite', 'both']) {
         const { result, layout, template } = fixture({ mode });
-        assert.strictEqual(layout.length, Object.keys(initial).length);
-        assert.ok(layout.every(e => e.kind === 'singleton' && e.valueCol === '内容' && e.cols.length === 1 && !e.vwd));
+        const business = layout.filter(e => !e.publicFallback);
+        assert.strictEqual(business.length, Object.keys(initial).length);
+        assert.ok(business.every(e => e.kind === 'singleton' && e.valueCol === '内容' && e.cols.length === 1 && !e.vwd));
         assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, initial);
         assert.deepStrictEqual(core.statDataFromTables(layout, {}).stat_data, initial);
         assert.ok(result.reportText.includes('完整 JSON 容器'));
@@ -79,12 +80,12 @@ test('完整JSON容器：保留原业务规则与 SQL 路径指导，旧关联�
     assert.doesNotMatch(sheet.sourceData.note, /数量说明|对象的说明/);
     assert.ok(JSON.parse(sheet.content[1][1]).档案 === undefined, '单元格就是容器本身，不重复包一层组名');
 });
-test('完整JSON容器：允许选定组，默认转换及明确关闭保持既有布局', () => {
+test('完整JSON容器：允许选定组，关闭全量选项仍保留复杂容器的安全边界', () => {
     const card = source(), legacy = core.convert(card), off = core.convert(card, { jsonContainers: false });
     assert.deepStrictEqual(off.template, legacy.template);
     const { layout, template } = fixture({ jsonContainers: ['档案', '列表'] });
     assert.strictEqual(layout.find(e => e.group === '状态').valueCol, '');
-    assert.strictEqual(layout.find(e => e.group === '背包').kind, 'array');
+    assert.strictEqual(layout.find(e => e.group === '背包').valueCol, '内容');
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, initial);
 });
 test('完整JSON容器：刷新切换模式重建模板，普通刷新继续复用已有转换', () => {

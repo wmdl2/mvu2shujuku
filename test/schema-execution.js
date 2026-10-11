@@ -5,6 +5,38 @@ const engine=require('../src/schema-execution-node');
 const helper="import {registerMvuSchema} from 'https://example.test/mvu_zod.js';\n";
 const card=(source,initial)=>({name:'公开真实Schema契约',character_book:{entries:[{comment:'[InitVar]',content:initial===undefined?'':JSON.stringify(initial),enabled:false}]},extensions:{tavern_helper:{scripts:[{name:'结构',enabled:true,content:helper+source}]}}});
 const read=r=>core.statDataFromTables(JSON.parse(r.card.extensions.mvu2shujuku.layout),r.template).stat_data;
+test('真实Schema：catch输出来自实际参数，管道末端决定存储约束且不调用回退函数',()=>{
+    const snapshot=engine.inspectSync('const S=z.object({枚举:z.enum(["甲","乙"]).catch("").describe("原说明"),函数:z.number().catch(()=>{throw new Error("不能执行回退");}),异型:z.number().catch("未知"),末端:z.enum(["甲"]).catch("").pipe(z.enum(["甲"])),外层:z.enum(["甲"]).pipe(z.enum(["甲"])).catch(""),工厂:z.catch(z.number().min(0),-1),小数:z.int().catch(0.5)});registerMvuSchema(S);').roots[0].fields;
+    assert.deepStrictEqual(snapshot.枚举.enum,['甲','乙']);
+    assert.deepStrictEqual(snapshot.枚举.outputFallbacks,['']);
+    assert.strictEqual(snapshot.枚举.desc,'原说明');
+    assert.strictEqual(snapshot.函数.kind,'unknown');
+    assert.strictEqual(snapshot.异型.kind,'unknown');
+    assert.strictEqual(snapshot.末端.outputFallbacks,undefined);
+    assert.deepStrictEqual(snapshot.外层.outputFallbacks,['']);
+    assert.deepStrictEqual(snapshot.工厂.outputFallbacks,[-1]);
+    assert.strictEqual(snapshot.小数.integer,false);
+});
+test('真实Schema：容器回退按所属字段传播，default短路与prefault解析不混同',()=>{
+    const fields=engine.inspectSync('const S=z.object({组:z.object({值:z.number().min(0),状态:z.enum(["甲"])}).catch({值:-1,状态:""}),列表:z.array(z.enum(["甲"])).catch([""]),默认:z.enum(["甲"]).default(""),预填:z.enum(["甲"]).prefault("")});registerMvuSchema(S);').roots[0].fields;
+    assert.deepStrictEqual(fields.组.fields.值.outputFallbacks,[-1]);
+    assert.deepStrictEqual(fields.组.fields.状态.outputFallbacks,['']);
+    assert.deepStrictEqual(fields.列表.element.outputFallbacks,['']);
+    assert.deepStrictEqual(fields.默认.outputFallbacks,['']);
+    assert.strictEqual(fields.预填.outputFallbacks,undefined);
+});
+test('真实Schema：Zod克隆追加校验仍保留静态回退参数，动态提供器不执行',()=>{
+    const fields=engine.inspectSync('const S=z.object({回退:z.enum(["甲"]).catch("").refine(()=>true),默认:z.string().default("甲").refine(()=>true),预填:z.string().prefault("乙").superRefine(()=>{}),动态:z.number().catch(()=>{throw new Error("不应执行动态回退");}).refine(()=>true),动态默认:z.number().default(()=>{throw new Error("不应执行动态默认");}).refine(()=>true)});registerMvuSchema(S);').roots[0].fields;
+    assert.strictEqual(fields.回退.kind,'text');
+    assert.deepStrictEqual(fields.回退.outputFallbacks,['']);
+    assert.strictEqual(fields.默认.hasDefault,true);
+    assert.strictEqual(fields.默认.defaultValue,'甲');
+    assert.strictEqual(fields.预填.defaultValue,'乙');
+    assert.strictEqual(fields.预填.outputFallbacks,undefined);
+    assert.strictEqual(fields.动态.kind,'unknown');
+    assert.strictEqual(fields.动态默认.hasDefault,undefined);
+    assert.strictEqual(fields.动态默认.dynamicDefault,true);
+});
 test('真实Schema：等价属性语法、键名和辅助函数生成相同默认开局',()=>{
     const values=[
         'const S=z.object({状态:z.number().default(1)});',

@@ -18,6 +18,7 @@ const tools = readTemplateSource => factory({ core, resultView: createResultView
 test('配置预设：用户指定频率优先于新生成只读表的默认零频率', async () => {
     const result = core.convert({ name: '只读配置', character_book: { entries: [
         { comment: '[InitVar]', content: '{"_版本":1}', enabled: false },
+        { comment: '[mvu_update]变量输出格式', content: '变量输出格式:\n  valid_paths: |-\n    /_版本 readonly(脚本维护版本)\n  format: |-\n    <UpdateVariable><JSONPatch>[]</JSONPatch></UpdateVariable>' },
     ] } });
     const row = sheets(result).find(row => row.sheet.name === '_版本表');
     assert.strictEqual(row.sheet.updateConfig.updateFrequency, 0);

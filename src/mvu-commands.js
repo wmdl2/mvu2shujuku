@@ -165,10 +165,8 @@ function createMvuCommands(deps) {
         for (const cmd of cmds) {
             if (!cmd.path) continue;
             const parts = commandPathParts(cmd.path);
-            if (parts.some((p) => p.charAt(0) === '_')) continue;
             if (cmd.type === 'move') {
                 const mf = commandPathParts(cmd.from);
-                if (mf.some((p) => p.charAt(0) === '_')) continue;
                 let mv;
                 let mc = stat, mok = true;
                 for (let i = 0; i < mf.length - 1; i++) { mc = mc ? mc[mf[i]] : null; if (!mc) { mok = false; break; } }

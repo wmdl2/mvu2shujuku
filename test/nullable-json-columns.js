@@ -79,11 +79,13 @@ test('可空 JSON 容器：record 新旧行对象值彼此独立', async () => {
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, next);
 });
 
-test('可空 JSON 容器：nestedRows 的 optional object 独立写回', async () => {
+test('可空 JSON 容器：完整所属对象中的 optional object 独立写回', async () => {
     const schema = `const S = z.object({ Rel: z.record(z.string(), z.object({ Child: z.record(z.string(), z.object({ bag: z.object({ n: z.number() }).optional() })) })) }); registerMvuSchema(S);`;
     const initial = { Rel: { a: { Child: { first: { bag: { n: 1 } }, second: {} } } } };
     const { layout, template } = convert(initial, schema), api = applyingApi(template);
-    assert.ok(layout.some(x => x.kind === 'nestedRows'));
+    assert.strictEqual(layout.length, 1);
+    assert.strictEqual(layout[0].group, 'Rel');
+    assert.strictEqual(layout[0].valueCol, '内容');
     const next = structuredClone(initial);
     delete next.Rel.a.Child.first.bag;
     next.Rel.a.Child.second.bag = { n: 2 };

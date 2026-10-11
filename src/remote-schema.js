@@ -152,13 +152,32 @@ function createRemoteSchema({ createJsSource }) {
     }
     function runtimeAdapter(snapshot, content, localize = false) {
         const schemaKey = key(snapshot);
-        const prelude = `await waitGlobalInitialized('Mvu');
-const __remoteRegister = window.registerVariableSchema;
+        const prelude = `const __remoteRegister = window.registerVariableSchema;
+const __remoteOwner = () => {
+    const host = window.parent || window;
+    const context = host.SillyTavern && host.SillyTavern.getContext && host.SillyTavern.getContext();
+    if (!context) return null;
+    const character = context.characters && context.characters[context.characterId];
+    return JSON.stringify([character && character.avatar || context.characterId,
+        context.groupId, context.chatId || context.chat_id || context.chatFile || context.chatFileName]);
+};
+const __remoteOwnerKey = __remoteOwner();
+let __remoteRegistration = Promise.resolve();
 window.registerVariableSchema = function(schema, options) {
     const result = typeof __remoteRegister === 'function' ? __remoteRegister.apply(this, arguments) : undefined;
     if (options && options.type === 'message' && schema && schema.shape && schema.shape.stat_data) {
-        const api = window.parent && window.parent.Mvu || window.Mvu;
-        if (!api || !api.__mvu2shujukuFake || !api.registerSchema(schema.shape.stat_data, ${JSON.stringify(schemaKey)})) throw new Error('远程 Schema 登记未接入当前数据桥');
+        __remoteRegistration = __remoteRegistration.then(async () => {
+            for (let retry = 0; retry < 200; retry++) {
+                if (__remoteOwnerKey !== null && __remoteOwner() !== __remoteOwnerKey) throw new Error('远程 Schema 所属聊天已切换，已取消登记');
+                const api = window.parent && window.parent.Mvu || window.Mvu;
+                if (api && api.__mvu2shujukuFake && typeof api.registerSchema === 'function' && api.registerSchema(schema.shape.stat_data, ${JSON.stringify(schemaKey)})) return;
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+            throw new Error('远程 Schema 登记未接入当前数据桥');
+        });
+        // Some author modules register from a later document-ready callback.
+        // Observe that failure even when the import itself has already completed.
+        __remoteRegistration.catch(error => console.error(error));
     }
     return result;
 };\n`;
@@ -172,12 +191,12 @@ window.registerVariableSchema = function(schema, options) {
                     edits.push({ ...token, value: JSON.stringify(new URL(token.value.slice(1, -1), snapshot.runtimeUrl).href) });
             });
             for (const edit of edits.reverse()) body = body.slice(0, edit.start) + edit.value + body.slice(edit.end);
-            return { content: prelude + body, key: schemaKey };
+            return { content: prelude + body + '\nawait __remoteRegistration;', key: schemaKey };
         }
         const found = imports(content).filter(item => item.url === snapshot.url);
         if (found.length !== 1 || !/^\s*(?:await\s+)?import\s*(?:\(\s*)?['"][^'"]+['"]\s*\)?\s*;?\s*$/.test(content))
             throw new Error('远程 Schema 启动脚本包含其他逻辑，尚不能自动接入');
-        return { content: prelude + 'await import(' + JSON.stringify(snapshot.runtimeUrl) + ');', key: schemaKey };
+        return { content: prelude + 'await import(' + JSON.stringify(snapshot.runtimeUrl) + ');\nawait __remoteRegistration;', key: schemaKey };
     }
     return { candidates, classify, resolve, analysisSource, supported, key, runtimeAdapter };
 }

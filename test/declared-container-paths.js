@@ -23,8 +23,15 @@ test('声明路径：顶层固定同形对象采用单例，固定身份不混�
     const g = r.schema.find(g => g.name === '频道');
     assert.strictEqual(g.kind, 'singleton');
     assert.strictEqual(g.rows.length, 1);
-    assert.deepStrictEqual(g.columns.filter(c => c.zh !== '_扩展数据').map(c => c.zh), ['甲_标题', '甲_计数', '乙_标题', '乙_计数']);
-    assert.strictEqual(r.schema.filter(g => g.name === '留言').length, 2);
+    assert.strictEqual(g.valueCol, undefined);
+    assert.deepStrictEqual(g.columns.map(c => c.zh), ['甲', '乙', '扩展数据']);
+    assert(g.columns.find(c => c.zh === '甲')?.isObject);
+    assert(g.columns.find(c => c.zh === '乙')?.isObject);
+    assert.strictEqual(r.schema.length, 1);
+    const note = Object.values(r.template).find(t => t.sourceData).sourceData.note;
+    assert.match(note, /留言\.<动态键>：留言正文/);
+    const sheet = Object.values(r.template).find(t => t.sourceData);
+    for (const key of ['甲', '乙']) assert.deepStrictEqual(JSON.parse(sheet.content[1][sheet.content[0].indexOf(key)]), stat.频道[key]);
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, stat);
     const next = structuredClone(stat);
     next.频道.甲.计数 = 7;
@@ -34,18 +41,22 @@ test('声明路径：顶层固定同形对象采用单例，固定身份不混�
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, next);
 });
 
-test('声明路径：深层空记录从完整声明取键名、标量类型、对象字段与范围', async () => {
+test('声明路径：深层空记录在所属 JSON 列保留作者说明、原约束与更新后的数据形状', async () => {
     const stat = { 数据: { 容器: { 积分: {}, 文本: {}, 库存: {} } } };
     const source = 'z.object({数据:z.object({容器:z.object({积分:z.record(z.string().describe("项目ID"),z.number().min(0).max(5)),文本:z.record(z.string().describe("文档ID"),z.string().describe("正文")),库存:z.record(z.string().describe("货号"),z.object({数量:z.number(),描述:z.string()}))})})})';
     const r = converted(input(stat, source));
-    const scores = r.schema.find(g => g.name === '积分'), texts = r.schema.find(g => g.name === '文本'), stock = r.schema.find(g => g.name === '库存');
-    assert.strictEqual(scores.keyCol, '项目ID');
-    assert.strictEqual(scores.scalarValueCol, '数值');
-    assert.deepStrictEqual(scores.columns.find(c => c.zh === '数值').range, [0, 5]);
-    assert.strictEqual(texts.scalarValueCol, '描述');
-    assert.strictEqual(texts.columns.find(c => c.zh === '描述').desc, '正文');
-    assert.strictEqual(stock.keyCol, '货号');
-    assert.strictEqual(stock.columns.find(c => c.zh === '数量').type, 'REAL');
+    assert.strictEqual(r.schema.length, 1);
+    assert.strictEqual(r.schema[0].valueCol, undefined);
+    assert.deepStrictEqual(r.schema[0].columns.map(c => c.zh), ['容器', '扩展数据']);
+    assert(r.schema[0].columns.find(c => c.zh === '容器')?.isObject);
+    const sheet = Object.values(r.template).find(t => t.sourceData), note = sheet.sourceData.note;
+    assert.doesNotMatch(note, /数据\.容器\.积分\.\*：.*范围 0～5/);
+    assert.match(note, /文本\.<动态键>：正文/);
+    const declaration = core.parseMvuShapes(input(stat, source)).zodDefaultsRoot.fields.数据.fields.容器.fields;
+    assert.deepStrictEqual([declaration.积分.value.min, declaration.积分.value.max], [0, 5]);
+    assert.strictEqual(declaration.库存.value.fields.数量.kind, 'number');
+    assert.strictEqual(declaration.库存.value.fields.描述.kind, 'text');
+    assert.match(r.reportText, /SQLite CHECK 不遍历任意元素/);
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, stat);
     const next = { 数据: { 容器: { 积分: { A: 4 }, 文本: { B: '内容' }, 库存: { C: { 数量: 2, 描述: '物品' } } } } };
     assert.strictEqual((await core.writeStatDiffToDbResult(applyingApi(r.template), r.layout, stat, next)).ok, true);
@@ -66,17 +77,17 @@ test('声明路径：混合文字键、展平容器与固定对象下字典的�
     const rules = '变量更新规则:\n  管理:\n    NPC记录:\n      type: "{ [ID: string]: string }"\n      check:\n        - 仅在登记时增加记录\n    当前详情:\n      type: "{ 文本: string }"\n      check:\n        - 完成后清空详情\n  管理.固定.${甲|乙}.留言:\n    check:\n      - 留言按时间更新\n';
     const r = converted(input(stat, source, rules));
     const note = name => Object.values(r.template).find(t => t.name === name).sourceData.note;
-    assert.ok(note('管理_NPC记录表').includes('仅在登记时增加记录'));
+    assert.ok(note('管理表').includes('仅在登记时增加记录'));
     assert.ok(note('管理表').includes('完成后清空详情'));
-    assert.ok(note('管理_固定_甲_留言表').includes('留言按时间更新'));
-    assert.ok(!r.card.character_book.entries.some(e => /\[M2SJK\]/.test(e.comment)));
+    assert.ok(note('管理表').includes('留言按时间更新'));
+    assert.ok(r.card.character_book.entries.some(e => e.content === rules));
 });
 
 test('声明路径：无法定位的业务规则保留原条目，不能凭 YAML 可解析而删除', () => {
     const rules = '变量更新规则:\n  _独立约定:\n    check:\n      - 更新前先核对场景\n  状态:\n    数量:\n      check:\n        - 随交易更新\n';
     const r = converted(input({ 状态: { 数量: 1, 备注: '更新前先核对场景' } }, 'z.object({状态:z.object({数量:z.number(),备注:z.string()})})', rules));
     assert.ok(r.card.character_book.entries.some(e => e.content.includes('更新前先核对场景')));
-    assert.ok(r.reportText.includes('保留原条目'));
+    assert.ok(r.reportText.includes('保留业务原文'));
 });
 
 test('声明路径：显式 MVU 开放元数据优先于固定 Zod 对象推导', () => {
@@ -88,7 +99,7 @@ test('声明路径：显式 MVU 开放元数据优先于固定 Zod 对象推导'
 test('声明路径：嵌套 MVU 固定元数据优先于 Zod record 推导', () => {
     const stat = { 面板: { 容器: { $meta: { extensible: false, required: ['甲'] }, 甲: { 值: 1 } } } };
     const r = converted(input(stat, 'z.object({面板:z.object({容器:z.record(z.string(),z.object({值:z.number()}))})})'));
-    assert.strictEqual(r.schema.length, 1);
+    assert.strictEqual(r.schema.filter(g => !g.publicFallback).length, 1);
     assert.strictEqual(r.schema[0].kind, 'singleton');
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, { 面板: { 容器: { 甲: { 值: 1 } } } });
 });

@@ -20,6 +20,8 @@ function harness(initial = { A: { life: 100, gold: 10 } }) {
     const api = applyingApi(tables, { onImport() { state.imports++; } });
     const context = { window: { MVU2SHUJUKU_CORE: core }, activeLayout: layout, dbgWarn() {},
         getContextSafe: () => state, getAcuApi: () => api, sharedStateWindow: {},
+        nativeStatStorage: require('../src/stat-storage')({ readLayout: () => layout,
+            readPolicy: () => result.card.extensions.mvu2shujuku.statStorage, readChat: () => state.chat }),
         runtimeApiForSession: value => value, isRuntimeSessionCurrent: () => state.session,
         assertRuntimeSession: () => { if (!state.session) throw new Error('session changed'); },
         canonicalJsonForSync: JSON.stringify,

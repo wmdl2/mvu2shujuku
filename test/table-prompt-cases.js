@@ -22,13 +22,13 @@ function cases() {
         ['vwd', require('./vwd-card')],
     ];
     const output = [];
-    for (const [name, makeCard] of sources) for (const mode of ['native', 'sqlite', 'both']) {
+    for (const [name, makeCard] of sources) for (const mode of ['sqlite']) {
         for (const jsonContainers of [false, true]) for (const vwdDescriptions of name === 'vwd' ? [false, true] : [false]) {
             output.push({ name: [name, mode, jsonContainers ? 'json' : 'split', vwdDescriptions ? 'vwd' : 'static'].join('/'),
                 card: makeCard(), options: { mode, jsonContainers, vwdDescriptions, targetSpVersion: '9.2.5' } });
         }
     }
-    for (const mode of ['native', 'sqlite', 'both']) output.push({ name: 'reminders/' + mode,
+    for (const mode of ['sqlite']) output.push({ name: 'reminders/' + mode,
         card: require('./frontend-card')(), options: { mode },
         reminders: ['仅当 状态.生命 变化时更新', '金币缺失时补齐；其余情况保留', '战斗、受伤、消耗、恢复时维护生命'] });
     return output;

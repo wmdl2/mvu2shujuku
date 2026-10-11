@@ -23,13 +23,18 @@ async function main(){
    typedCard.character_book.entries[0].content=JSON.stringify({组:{小数:0,整数:2,布尔:false,评分:0}});
    const typed=await core.convertWithRemoteSchemas(typedCard);
    const columns=typed.schema.find(g=>g.name==='组').columns.filter(c=>['小数','整数','布尔','评分'].includes(c.zh)).map(c=>[c.zh,c.type]);
+   const fallbackCard=card('const S=z.object({组:z.object({时间:z.enum(["白天","夜晚"]).catch("").refine(()=>true).prefault(""),数:z.number().min(0).max(5).catch(-1).refine(()=>true).prefault(-1),动态:z.number().catch(()=>{throw new Error("不能执行回退");}).refine(()=>true)})});registerMvuSchema(S);');
+   fallbackCard.character_book.entries[0].content=JSON.stringify({组:{时间:'白天',数:2,动态:1}});
+   const fallback=await core.convertWithRemoteSchemas(fallbackCard),fallbackColumns=fallback.schema.find(g=>g.name==='组').columns;
+   const fallbackOutputs=['时间','数','动态'].map(name=>{const c=fallbackColumns.find(c=>c.zh===name);return[name,c.type,c.outputFallbacks];});
    try{await core.convertWithRemoteSchemas(card('const x=await fetch("https://schema-execution.invalid/blocked");const S=z.object({[x]:z.number()});registerMvuSchema(S);'));}catch(e){fetchError=e.message;}
    try{await core.convertWithRemoteSchemas(card('const S=(()=>{while(true){}})();registerMvuSchema(S);'));}catch(e){timeoutError=e.message;}
-   return {outputs,columns,fetchError,timeoutError,frames:document.querySelectorAll('[data-mvu-schema-evaluator]').length};
+   return {outputs,columns,fallbackOutputs,fetchError,timeoutError,frames:document.querySelectorAll('[data-mvu-schema-evaluator]').length};
   });
   assert.deepStrictEqual(result.outputs,[{状态:1},{状态:1},{状态:1}]);assert.match(result.fetchError,/fetch|Failed|Content Security/i);assert.match(result.timeoutError,/超时/);assert.strictEqual(result.frames,0);assert.strictEqual(requests,0);assert.deepStrictEqual(errors,[]);
   assert.deepStrictEqual(Object.fromEntries(result.columns),{小数:'REAL',整数:'INTEGER',布尔:'INTEGER',评分:'TEXT'});
-  console.log(JSON.stringify({cases:6,requests,frames:result.frames,errors,columns:result.columns}));
+  assert.deepStrictEqual(result.fallbackOutputs,[['时间','TEXT',['']],['数','REAL',[-1]],['动态','TEXT',undefined]]);
+  console.log(JSON.stringify({cases:8,requests,frames:result.frames,errors,columns:result.columns,fallbackOutputs:result.fallbackOutputs}));
  }finally{await browser.close();}
 }
 main().catch(error=>{console.error(error.stack);process.exitCode=1;});

@@ -13,7 +13,9 @@ function verify(result, expected) {
     const sheets = Object.entries(result.template).filter(([k]) => k.startsWith('sheet_')).map(([, s]) => s);
     assert.strictEqual(new Set(sheets.map(s => identity.physicalName(s.name))).size, sheets.length);
     const layout = JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout);
-    assert.deepStrictEqual(core.statDataFromTables(layout, result.template).stat_data, expected);
+    const metadata = (result.card.data || result.card).extensions.mvu2shujuku;
+    const store = require('../src/stat-storage')({ readPolicy: () => metadata.statStorage, readChat: () => [] });
+    assert.deepStrictEqual(store.merge(core.statDataFromTables(layout, result.template)).stat_data, expected);
     return sheets;
 }
 
@@ -23,8 +25,8 @@ test('表名身份：符号、大小写与同音表保留不同路径和初值',
         const result = core.convert(card(data), { mode });
         const names = verify(result, data).map(s => s.name);
         assert.ok(names.includes('机会表'));
-        assert.ok(names.includes('$机会2表'));
-        assert.ok(names.includes('_机会3表'));
+        assert.ok(!names.includes('$机会2表'));
+        assert.ok(names.includes('_机会2表'));
         assert.ok(result.report.notes.some(n => /物理名称冲突/.test(n) && n.includes('$机会')));
     }
 });
@@ -46,7 +48,12 @@ test('表名身份：嵌套派生表与顶层表统一分配', () => {
         name: 'Schema', enabled: true, content: 'registerMvuSchema(z.object({名册:z.record(z.string(),z.object({技能:z.array(z.string())})),名册_技能:z.array(z.string())}));',
     }] } } }));
     const names = verify(result, initial).map(s => s.name);
-    assert.ok(names.some(n => n === '名册_技能2表'));
+    assert.deepStrictEqual(names, ['名册表', '名册_技能表']);
+    assert.strictEqual(result.schema[0].valueCol, '内容');
+    const old = require('./legacy-layout-fixture')(card(initial, { extensions: { tavern_helper: { scripts: [{
+        name: 'Schema', content: 'registerMvuSchema(z.object({名册:z.record(z.string(),z.object({技能:z.array(z.string())})),名册_技能:z.array(z.string())}));',
+    }] } } }));
+    assert.ok(verify(old, initial).some(s => s.name === '名册_技能2表'), '展开阶段仍消解派生表与根表的碰撞');
 });
 
 test('表名身份：截断后的编号可见，超长冲突不会循环或丢路径', () => {
