@@ -1,4 +1,7 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+// Retained physical layouts are tested with frozen public metadata; current conversions use layout-planning.js.
+const legacyLayoutFixture = require('./legacy-layout-fixture');
 const { test } = require('./runner');
 const { core, assert, applyingApi } = require('./helpers');
 
@@ -12,12 +15,12 @@ function input(stat, source, rules = '') {
     };
 }
 function converted(card) {
-    const r = core.convert(card, { targetSpVersion: '9.2.5' });
+    const r = publishedLayoutFixture(card, { targetSpVersion: '9.2.5' });
     return { ...r, layout: JSON.parse(r.card.extensions.mvu2shujuku.layout) };
 }
 const account = 'z.object({标题:z.string(),计数:z.number(),留言:z.record(z.string().describe("作者ID"),z.string().describe("留言正文"))})';
 
-test('声明路径：顶层固定同形对象采用单例，固定身份不混入字典行列', async () => {
+test("旧布局：声明路径：顶层固定同形对象采用单例，固定身份不混入字典行列", async () => {
     const stat = { 频道: { 甲: { 标题: '甲文', 计数: 2, 留言: {} }, 乙: { 标题: '乙文', 计数: 3, 留言: {} } } };
     const r = converted(input(stat, `z.object({频道:z.object({甲:${account},乙:${account}})})`));
     const g = r.schema.find(g => g.name === '频道');
@@ -41,7 +44,7 @@ test('声明路径：顶层固定同形对象采用单例，固定身份不混�
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, next);
 });
 
-test('声明路径：深层空记录在所属 JSON 列保留作者说明、原约束与更新后的数据形状', async () => {
+test("旧布局：声明路径：深层空记录在所属 JSON 列保留作者说明、原约束与更新后的数据形状", async () => {
     const stat = { 数据: { 容器: { 积分: {}, 文本: {}, 库存: {} } } };
     const source = 'z.object({数据:z.object({容器:z.object({积分:z.record(z.string().describe("项目ID"),z.number().min(0).max(5)),文本:z.record(z.string().describe("文档ID"),z.string().describe("正文")),库存:z.record(z.string().describe("货号"),z.object({数量:z.number(),描述:z.string()}))})})})';
     const r = converted(input(stat, source));
@@ -71,7 +74,7 @@ test('声明路径：深层空记录在所属 JSON 列保留作者说明、原�
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, updated);
 });
 
-test('声明路径：混合文字键、展平容器与固定对象下字典的集合规则均保留', () => {
+test("旧布局：声明路径：混合文字键、展平容器与固定对象下字典的集合规则均保留", () => {
     const stat = { 管理: { NPC记录: {}, 当前详情: { 文本: '' }, 固定: { 甲: { 标题: '', 计数: 0, 留言: {} } } } };
     const source = `z.object({管理:z.object({NPC记录:z.record(z.string(),z.string()),当前详情:z.object({文本:z.string()}),固定:z.object({甲:${account}})})})`;
     const rules = '变量更新规则:\n  管理:\n    NPC记录:\n      type: "{ [ID: string]: string }"\n      check:\n        - 仅在登记时增加记录\n    当前详情:\n      type: "{ 文本: string }"\n      check:\n        - 完成后清空详情\n  管理.固定.${甲|乙}.留言:\n    check:\n      - 留言按时间更新\n';
@@ -83,20 +86,20 @@ test('声明路径：混合文字键、展平容器与固定对象下字典的�
     assert.ok(r.card.character_book.entries.some(e => e.content === rules));
 });
 
-test('声明路径：无法定位的业务规则保留原条目，不能凭 YAML 可解析而删除', () => {
+test("旧布局：声明路径：无法定位的业务规则保留原条目，不能凭 YAML 可解析而删除", () => {
     const rules = '变量更新规则:\n  _独立约定:\n    check:\n      - 更新前先核对场景\n  状态:\n    数量:\n      check:\n        - 随交易更新\n';
     const r = converted(input({ 状态: { 数量: 1, 备注: '更新前先核对场景' } }, 'z.object({状态:z.object({数量:z.number(),备注:z.string()})})', rules));
     assert.ok(r.card.character_book.entries.some(e => e.content.includes('更新前先核对场景')));
     assert.ok(r.reportText.includes('保留业务原文'));
 });
 
-test('声明路径：显式 MVU 开放元数据优先于固定 Zod 对象推导', () => {
+test("旧布局：声明路径：显式 MVU 开放元数据优先于固定 Zod 对象推导", () => {
     const stat = { 字典: { $meta: { extensible: true }, 甲: { 值: 1 } } };
     const r = converted(input(stat, 'z.object({字典:z.object({甲:z.object({值:z.number()})})})'));
     assert.strictEqual(r.schema.find(g => g.name === '字典').kind, 'rows');
 });
 
-test('声明路径：嵌套 MVU 固定元数据优先于 Zod record 推导', () => {
+test("旧布局：声明路径：嵌套 MVU 固定元数据优先于 Zod record 推导", () => {
     const stat = { 面板: { 容器: { $meta: { extensible: false, required: ['甲'] }, 甲: { 值: 1 } } } };
     const r = converted(input(stat, 'z.object({面板:z.object({容器:z.record(z.string(),z.object({值:z.number()}))})})'));
     assert.strictEqual(r.schema.filter(g => !g.publicFallback).length, 1);

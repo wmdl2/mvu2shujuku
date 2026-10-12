@@ -1,4 +1,6 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+const legacyLayoutFixture=require('./legacy-layout-fixture');
 const { test } = require('./runner');
 const { core, assert } = require('./helpers');
 const { spawnSync } = require('child_process');
@@ -25,7 +27,7 @@ print(json.dumps([list(row) for row in db.execute('SELECT * FROM '+t)],ensure_as
     return JSON.parse(result.stdout);
 }
 
-test('SQL示例保真：双模式与 SQLite 的 UPDATE 实际执行遵守枚举、范围、布尔和可空编码', () => {
+test("旧布局：SQL示例保真：双模式与 SQLite 的 UPDATE 实际执行遵守枚举、范围、布尔和可空编码", () => {
     for (const mode of ['both', 'sqlite']) for (const [initial, schema, expected] of [
         ['开始', 'z.enum(["开始","结束"])', '结束'],
         ['普通', 'z.enum(["普通","O\'Brien"])', "O'Brien"],
@@ -36,7 +38,7 @@ test('SQL示例保真：双模式与 SQLite 的 UPDATE 实际执行遵守枚举�
         [null, 'z.enum(["开始","结束"]).nullable()', '"开始"'],
         [null, 'z.string().nullable()', 'null'],
     ]) {
-        const result = core.convert(card({ 状态: { 值: initial } }, `z.object({状态:z.object({值:${schema}})})`), { mode });
+        const result = publishedLayoutFixture(card({ 状态: { 值: initial } }, `z.object({状态:z.object({值:${schema}})})`), { mode });
         const sheet = Object.values(result.template).find(s => s.name === '状态表');
         const rows = execute(sheet, 'updateNode');
         assert.strictEqual(rows[0][sheet.content[0].indexOf('值')], expected, schema);
@@ -63,7 +65,7 @@ test('旧布局SQL示例保真：数组插入和更新的 JSON 编码维持元�
     }
 });
 
-test('SQL示例保真：多层关联数组示例填写全部关联字段并完整定位', () => {
+test("旧布局：SQL示例保真：多层关联数组示例填写全部关联字段并完整定位", () => {
     // 直接验证生成器支持的布局契约，不依赖某张卡恰好如何推导数组。
     const col = (zh, ident, type = 'TEXT', value = '') => ({ zh, ident, type, value, path: [] });
     const group = { name: '标签', tableName: '人物_物品_标签表', ident: 'tags', kind: 'nestedArray',
@@ -81,7 +83,7 @@ test('SQL示例保真：多层关联数组示例填写全部关联字段并完�
     }
 });
 
-test('SQL示例保真：空行表 INSERT 的短示例符合枚举和数值范围', () => {
+test("旧布局：SQL示例保真：空行表 INSERT 的短示例符合枚举和数值范围", () => {
     const group = { name: '记录', tableName: '记录表', ident: 'records', kind: 'rows', keyCol: '名称', rows: [],
         columns: [
             { zh: '名称', ident: 'name', type: 'TEXT', value: '', path: [] },
@@ -94,10 +96,10 @@ test('SQL示例保真：空行表 INSERT 的短示例符合枚举和数值范围
     assert.deepStrictEqual(execute(sheet, 'insertNode')[0].slice(2), ['开始', 2, 0]);
 });
 
-test('SQL示例保真：长初值只存在数据行，新增示例按类型生成且可执行', () => {
+test("旧布局：SQL示例保真：长初值只存在数据行，新增示例按类型生成且可执行", () => {
     const marker = 'PUBLIC_PAYLOAD_MARKER_' + 'x'.repeat(200);
     for (const mode of ['both', 'sqlite']) {
-        const result = core.convert(card({ 记录: { 甲: marker } },
+        const result = publishedLayoutFixture(card({ 记录: { 甲: marker } },
             'z.object({记录:z.record(z.string(),z.string().nullable())})'), { mode });
         const sheet = Object.values(result.template).find(s => s.name === '记录表');
         assert.ok(sheet.content.some(row => row.some(value => String(value).includes(marker))), '真实初值保存在数据行');
@@ -108,11 +110,11 @@ test('SQL示例保真：长初值只存在数据行，新增示例按类型生�
 });
 
 // 按宿主字符串替换插入实际产品 SQL，再由 SQLite 验证值和约束，不能只查源模板。
-test('SQL宿主边界：可空枚举 DDL、默认值与操作示例经过字符串替换后仍可执行', () => {
+test("旧布局：SQL宿主边界：可空枚举 DDL、默认值与操作示例经过字符串替换后仍可执行", () => {
     const { DatabaseSync } = require('node:sqlite');
     const values = ["$'", '$&', '$`', '$$', '末尾$', "O'Brien"];
     const schema = 'z.object({状态:z.object({评分:z.number().min(0).max(5).nullable(),称号:z.enum(' + JSON.stringify(values) + ').nullable(),标记:z.string()})})';
-    const result = core.convert(card({ 状态: { 评分: null, 称号: null, 标记: '末尾$' } }, schema), { mode: 'sqlite' });
+    const result = publishedLayoutFixture(card({ 状态: { 评分: null, 称号: null, 标记: '末尾$' } }, schema), { mode: 'sqlite' });
     const sheet = Object.values(result.template).find(sheet => sheet.name === '状态表');
     const group = result.schema.find(group => group.tableName === sheet.name);
     const inject = sql => {
@@ -139,11 +141,11 @@ test('SQL宿主边界：可空枚举 DDL、默认值与操作示例经过字符�
     } finally { db.close(); }
 });
 
-test('SQL宿主边界：记录键与 JSON 叶路径含美元替换标记时示例保持原值', () => {
+test("旧布局：SQL宿主边界：记录键与 JSON 叶路径含美元替换标记时示例保持原值", () => {
     const { DatabaseSync } = require('node:sqlite');
     for (const marker of ["$'", '$&', '$`', '$$', '末尾$']) {
         const key = '记录' + marker;
-        const result = core.convert(card({ 记录: { [key]: { 字段: marker, 数量: 1 } } },
+        const result = publishedLayoutFixture(card({ 记录: { [key]: { 字段: marker, 数量: 1 } } },
             'z.object({记录:z.record(z.string(),z.object({字段:z.string(),数量:z.number()}))})'), { mode: 'sqlite' });
         const sheet = Object.values(result.template).find(sheet => sheet.name === '记录表');
         const group = result.schema.find(group => group.tableName === sheet.name);

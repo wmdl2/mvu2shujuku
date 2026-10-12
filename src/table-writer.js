@@ -503,56 +503,33 @@ function createTableWriter(dependencies) {
                         const fld = rel[fIdx];
                         const declared = entry.layout.cols.some(c => c[0] === fld);
                         if (!declared) {
-                            // 与 mergeOverflow 同一套排除：子表与已展平为列的嵌套容器
-                            // （如 主角.炼丹 → 炼丹阶级/炼丹熟练度 列）不是溢出字段，
-                            // 递归到叶子后按列路径落列，绝不能写进 _扩展数据。
-                            const groupName0 = String(entry.layout.group || entry.prefix[0] || '');
-                            let isChildGroup = false;
-                            let isFlattened = false;
-                            for (const L2 of entries) {
-                                if (L2 === entry.layout) continue;
-                                const wp = (L2.writePaths || [])[0] || L2.path;
-                                if (Array.isArray(wp) && wp.length >= 2 && wp[0] === groupName0 && wp[1] === fld) { isChildGroup = true; break; }
-                            }
-                            if (!isChildGroup) {
-                                for (const c of (entry.layout.cols || [])) {
-                                    const cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                                    if (Array.isArray(cp) && (
-                                        ((entry.kind === 'rows' || entry.kind === 'nestedRows') && cp.length > 1 && cp[0] === fld) ||
-                                        (entry.kind !== 'rows' && cp.length > 1 && cp[0] === groupName0 && cp[1] === fld)
-                                    )) { isFlattened = true; break; }
+                            // Classify this exact source path using the final
+                            // layout, including delegated child-table prefixes.
+                            // Sharing a first segment is not ownership of every
+                            // sibling beneath that segment.
+                            const logicalPath = rel.slice(fIdx);
+                            const managed = (entry.layout.cols || []).map(c => {
+                                let cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
+                                if (entry.kind === 'singleton' && cp[0] === entry.layout.group) cp = cp.slice(1);
+                                return cp;
+                            }).filter(cp => Array.isArray(cp) && cp.length);
+                            const owner = [...entry.prefix, ...(['rows', 'nestedRows'].includes(entry.kind) ? ['*'] : [])];
+                            for (const child of entries) {
+                                if (child === entry.layout) continue;
+                                const paths = child.writePaths?.length ? child.writePaths : [child.path?.length ? child.path : [child.group]];
+                                for (const path of paths) {
+                                    if (path.length > owner.length && owner.every((part, i) => part === '*' || path[i] === '*' || part === path[i]))
+                                        managed.push(path.slice(owner.length));
                                 }
                             }
-                            if (!isChildGroup && !isFlattened) {
-                                // 前端渲染回写抑制（通用）：`_` 前缀内部状态字段（如 _hypnoos）
-                                // 当前不存在且新值为“全默认/空”时，标记为“回声候选”，稍后按
-                                // 组级判定：同批写入若有其他真实变化（如成就领取同时改 当前MC点）
-                                // 则放行；只有它自己是唯一变化时才是前端 schema 默认回声，跳过。
-                                const mk0 = (entry.kind === 'rows' || entry.kind === 'nestedRows') ? rel[1] : rel[0];
-                                if (String(mk0).charAt(0) === '_' && pv === undefined && isStructurallyDefault(nv)) {
-                                    ops.push({ np, entry, value: nv, prev: pv, overflow: true, echoCandidate: true, mergeKey: mk0, mergePath: [mk0], rowKey: (entry.kind === 'rows' || entry.kind === 'nestedRows') ? rel[0] : undefined, parentKey: entry.kind === 'nestedRows' ? entry.prefix[entry.prefix.length - 2] : undefined });
-                                    continue;
-                                }
-                                ops.push({ np, entry, value: nv, overflow: true, mergeKey: (entry.kind === 'rows' || entry.kind === 'nestedRows') ? rel[1] : rel[0], mergePath: [(entry.kind === 'rows' || entry.kind === 'nestedRows') ? rel[1] : rel[0]], rowKey: (entry.kind === 'rows' || entry.kind === 'nestedRows') ? rel[0] : undefined, parentKey: entry.kind === 'nestedRows' ? entry.prefix[entry.prefix.length - 2] : undefined });
+                            const mapped = managed.some(cp => logicalPath.length <= cp.length && logicalPath.every((part, i) => part === cp[i] || cp[i] === '*'));
+                            if (!mapped) {
+                                const echoCandidate = String(logicalPath[0]).charAt(0) === '_' && pv === undefined && isStructurallyDefault(nv);
+                                ops.push({ np, entry, value: nv, prev: pv, overflow: true, echoCandidate,
+                                    mergeKey: logicalPath[0], mergePath: logicalPath,
+                                    rowKey: ['rows', 'nestedRows'].includes(entry.kind) ? rel[0] : undefined,
+                                    parentKey: entry.kind === 'nestedRows' ? entry.prefix[entry.prefix.length - 2] : undefined });
                                 continue;
-                            }
-                            if (!isChildGroup && isFlattened) {
-                                // 同一容器可能只有部分叶子建列。以往只要看到一个
-                                // 已展开兄弟就把整个容器视为“已处理”，未建列兄弟会在叶子处丢失。
-                                // 若当前路径既不是列也不是任一列的祖先，将这一支按嵌套
-                                // 路径放入 _扩展数据，而不是静默丢弃。
-                                const logicalPath = rel.slice(fIdx);
-                                const normalizedColPaths = (entry.layout.cols || []).map(c => {
-                                    let cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                                    if (entry.kind === 'singleton' && cp[0] === groupName0) cp = cp.slice(1);
-                                    return cp;
-                                }).filter(cp => Array.isArray(cp) && cp.length);
-                                const exact = normalizedColPaths.some(cp => cp.length === logicalPath.length && cp.every((p, i) => p === logicalPath[i]));
-                                const ancestor = normalizedColPaths.some(cp => cp.length > logicalPath.length && logicalPath.every((p, i) => p === cp[i]));
-                                if (!exact && !ancestor) {
-                                    ops.push({ np, entry, value: nv, overflow: true, mergeKey: logicalPath[0], mergePath: logicalPath, rowKey: (entry.kind === 'rows' || entry.kind === 'nestedRows') ? rel[0] : undefined, parentKey: entry.kind === 'nestedRows' ? entry.prefix[entry.prefix.length - 2] : undefined });
-                                    continue;
-                                }
                             }
                         }
                         // 声明为对象列（JSON 存储，如 系统._管理考核）：路径正好落在对象列上时，

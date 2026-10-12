@@ -1,4 +1,7 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+// Retained physical layouts are tested with frozen public metadata; current conversions use layout-planning.js.
+const legacyLayoutFixture = require('./legacy-layout-fixture');
 const { test } = require('./runner');
 const { core, assert } = require('./helpers');
 
@@ -8,12 +11,12 @@ function cardWithNumbers() {
     ] } };
 }
 function sheets(mode) {
-    const result = core.convert(cardWithNumbers(), { mode });
+    const result = publishedLayoutFixture(cardWithNumbers(), { mode });
     const byName = Object.fromEntries(Object.values(result.template).filter(t => t.content).map(t => [t.name, t]));
     return { result, byName, byGroup: Object.fromEntries(result.schema.map(g => [g.name, byName[g.tableName]])) };
 }
 
-test('顶层数值：无规则与对象内数值默认可写，声明美元字段保留隐藏值的写入位置', () => {
+test("旧布局：顶层数值：无规则与对象内数值默认可写，声明美元字段保留隐藏值的写入位置", () => {
     const native = sheets('native').byGroup;
     const sqlite = sheets('sqlite').byGroup;
     for (const name of ['counter', 'obj']) {
@@ -29,8 +32,8 @@ test('顶层数值：无规则与对象内数值默认可写，声明美元字�
     assert.strictEqual(native.counter.sourceData.updateNode, sqlite.counter.sourceData.updateNode);
 });
 
-test('顶层数值：专用规则保留且仍开放 UPDATE', () => {
-    const result = core.convert(cardWithNumbers(), { mode: 'sqlite' });
+test("旧布局：顶层数值：专用规则保留且仍开放 UPDATE", () => {
+    const result = publishedLayoutFixture(cardWithNumbers(), { mode: 'sqlite' });
     const counter = result.schema.find(group => group.name === 'counter');
     assert.ok(counter);
     counter.groupChecks = ['剧情变化时更新，不得为负数'];

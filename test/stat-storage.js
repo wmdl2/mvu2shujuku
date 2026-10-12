@@ -176,14 +176,15 @@ test('旧版本存储协议：v2 独立美元数据不因插件升级被移动�
     const value = { 状态: { 值: 1 }, $旧缓存: { 游标: 2 } };
     assert.deepStrictEqual(store.split(value), { database: { 状态: { 值: 1 } }, native: { $旧缓存: { 游标: 2 } } });
 });
-test('动态业务：开放对象提供可写JSON列，动态行表保持普通CRUD', async () => {
+test('动态业务：开放对象与动态记录保存在可写完整JSON，新增字段和记录可读回', async () => {
     const r = convert({ 状态: { $meta: { extensible: true, required: ['金币'] }, 金币: 1 }, 技能: { 剑术: { 熟练度: 10 } } }, {
         entries: [{ comment: '[mvu_update]变量更新规则', content: '技能.${名称}.熟练度:\n  type: number\n  check: 按使用情况更新' }, { comment: '[mvu_update]变量输出格式', content: '变量输出格式:\n  valid_paths: |-\n    /状态/_界面 readonly(前端维护)\n  format: |-\n    <UpdateVariable><JSONPatch>[]</JSONPatch></UpdateVariable>' }],
     });
     const entry = r.entries.find(e => e.group === '状态');
     assert(!r.entries.some(e => e.publicFallback));
     const sheet = Object.values(r.template).find(sheet => sheet?.name === entry.table);
-    assert(sheet.content[0].includes(entry.overflowCol));
+    assert(sheet.content[0].includes(entry.valueCol));
+    assert(!entry.overflowCol);
     assert(!(sheet.sourceData.hiddenPhysicalColumns || []).length);
     const store = storage(r, []), base = core.statDataFromTables(r.entries, r.template).stat_data;
     const next = { ...base, 状态: { 金币: 2, 新业务: 3 }, 技能: { 剑术: { 熟练度: 10 }, 炼金: { 熟练度: 1 } } };
@@ -198,8 +199,8 @@ test('存储归属：readonly自然语言不改变存储位置', () => {
     const content = '变量输出格式:\n  valid_paths: |\n    /角色/姓名 readonly(人物姓名)\n    /角色/按钮 readonly(前端维护)\n  format: |\n    <UpdateVariable>\n    <Analysis>...</Analysis>\n    <JSONPatch>[]</JSONPatch>\n    </UpdateVariable>';
     const r = convert({ 角色: { 姓名: '甲', 按钮: false, 好感: 1 } }, { entries: [{ comment: '[mvu_update]变量输出格式', content }] });
     const sheet = Object.values(r.template).find(s => s?.name === '角色表');
-    assert(sheet.content[0].includes('姓名'));
-    assert(sheet.content[0].includes('按钮'));
+    assert.equal(r.entries.find(e=>e.group==='角色').valueCol,'内容');
+    assert.deepStrictEqual(JSON.parse(sheet.content[1][1]),{姓名:'甲',按钮:false,好感:1});
     assert.deepStrictEqual(r.policy.initial, {});
     assert.match(sheet.sourceData.note, /姓名.*只读|只读.*姓名/);
 });
@@ -445,13 +446,13 @@ test('Schema展示契约：独立VM保留undefined默认值，过滤隐藏结构
     assert.equal(node.fields.$口令.enum[0], '秘密');
     assert.equal(node.prefaultValue.$口令, '秘密');
 });
-test('Schema展示契约：仅隐藏子容器不迫使普通字段变成整组JSON，数据保留原归属', () => {
+test('Schema展示契约：完整容器统一保存公开和隐藏字段，不为隐藏子节点另建表', () => {
     const initial = { 状态: { 数量: 2, $缓存: ['甲', '乙'] } };
     const r = convert(initial, { extensions: { tavern_helper: { scripts: [{ type: 'script', enabled: true,
         content: 'const S=z.object({状态:z.object({数量:z.number(),$缓存:z.array(z.string())})});registerMvuSchema(S);' }] } } });
     const entry = r.entries.find(e => e.group === '状态');
-    assert.equal(entry.valueCol, '');
-    assert(entry.cols.some(c => c[0] === '数量' && c[1] === 'number'));
+    assert.equal(entry.valueCol, '内容');
+    assert.equal(entry.cols.length,1);
     assert(!r.entries.some(e => e.table.includes('$缓存')));
     assert.deepStrictEqual(core.statDataFromTables(r.entries, r.template).stat_data, initial);
 });

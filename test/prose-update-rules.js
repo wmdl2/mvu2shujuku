@@ -17,7 +17,7 @@ test('散文规则：XML 包裹与自然语言续行完整迁移，宏迁移后�
     assert.ok(retained(r), "作者规则源条目保留");
     const note = sheet(r, '世界表').sourceData.note;
     assert.match(note, /冻结时禁止推进时间/);
-    assert.match(note, /行动\/任务推进后 更新 「时间」/);
+    assert.match(note, /行动\/任务推进后 更新 「内容」内部路径 \/时间/);
     assert.match(note, /mvu2shujukuResolveMacro\("user"\)/);
     assert.doesNotMatch(note, /原变量路径|\/世界\/时间|\/世界\/冻结/);
     assert.doesNotMatch(note, /replace \/世界/);
@@ -37,8 +37,9 @@ test('散文规则：整组 JSON 的业务条件位于实际可写路径范围�
     const r = convert('自由:\n  - add /自由/甲/值 为正文明确的数字', { 自由: {} });
     const note = sheet(r, '自由表').sourceData.note;
     assert.ok(retained(r), "作者规则源条目保留");
-    assert(note.indexOf('【可写路径与约束】') < note.indexOf('新增 「内容」内部路径 /甲/值'));
-    assert.match(note, /遵守原变量规则/);
+    assert.match(note,/新增 「内容」内部路径 \/甲\/值 为正文明确的数字/);
+    assert.match(note,/仅操作规则允许的路径/);
+    assert.doesNotMatch(note,/内部数据，AI 不应直接修改/);
     assert.doesNotMatch(note, /未列出的字段一律只读/);
     assert.doesNotMatch(note, /【可写路径与约束】\n【更新守卫】/);
 });
@@ -98,7 +99,7 @@ test('输出格式：字段业务定义、只读权限与通配根不得随旧�
         assert.doesNotMatch(sheet(r, name).sourceData.note, /UpdateVariable|JSONPatch/);
     }
     assert.match(sheet(r, '名字表').sourceData.note, /显示人物姓名/);
-    assert.match(sheet(r, '世界表').sourceData.note, /模型只读字段：冻结/);
+    assert.match(sheet(r, '世界表').sourceData.note, /\/世界\/冻结 readonly\(玩家开关\)/);
     assert.doesNotMatch(sheet(r, '世界表').sourceData.updateNode, /dongjie|冻结/);
 });
 test('输出格式：未知业务路径源说明保留，纯输出协议仅从请求视图排除', () => {
@@ -128,7 +129,7 @@ test('输出格式：无法解析的路径说明仍保留，不能静默随协�
     assert.ok(retained(r)); assert.match(retained(r).content, /这段是业务说明/);
     assert.doesNotMatch(core.fillEntryRequestView(retained(r)), /UpdateVariable|JSONPatch/);
 });
-test('原变量说明：下划线根保持公开，显式整数说明不得接受小数', () => {
+test('原变量说明：下划线根保持公开，整数原值以JSON数字保存而不推断只读', () => {
     const card = { name: '公开元数据说明测试', character_book: { entries: [{ id: 1, comment: '[InitVar]', content: '{"_schema_version":2}' }] },
         extensions: { tavern_helper: { scripts: [{ name: '结构迁移', enabled: true,
             content: "import { registerMvuSchema } from 'https://example.test/mvu_zod.js';const S=z.object({_schema_version:z.number().int()});registerMvuSchema(S);" }] } } };
@@ -136,7 +137,8 @@ test('原变量说明：下划线根保持公开，显式整数说明不得接�
     assert.doesNotMatch(s.sourceData.note, /本表为模型只读状态/);
     assert.notStrictEqual(s.updateConfig.updateFrequency, 0);
     assert.doesNotMatch(s.sourceData.note, /原变量路径|结构迁移/);
-    assert.match(s.sourceData.note, /一个整数，不接受小数/);
+    assert.strictEqual(s.content[1][1],'2');
+    assert.match(s.sourceData.note,/保持原类型/);
     assert.match(s.sourceData.updateNode, /禁止/);
 });
 test('普通表说明：不再默认添加原路径、类型与世界书引用清单', () => {
@@ -170,7 +172,7 @@ test('只读作用域：通配根仅匹配同层名称，字段只读不关闭�
         { actor_a: '', actor_b: '', actor: '', actorish: '', 世界: { 时间: '', 冻结: false } });
     for (const name of ['actor_a表', 'actor_b表']) assert.strictEqual(sheet(r, name).updateConfig.updateFrequency, 0);
     for (const name of ['actor表', 'actorish表', '世界表']) assert.notStrictEqual(sheet(r, name).updateConfig.updateFrequency, 0);
-    assert.match(sheet(r, '世界表').sourceData.note, /模型只读字段：冻结/);
+    assert.match(sheet(r, '世界表').sourceData.note, /\/世界\/冻结 readonly\(玩家开关\)/);
 });
 
 test('只读频率：单例全部业务列明确只读时关闭自动更新，行表不扩大权限', () => {
@@ -180,12 +182,12 @@ test('只读频率：单例全部业务列明确只读时关闭自动更新，�
     assert.notStrictEqual(sheet(r, '成员表').updateConfig.updateFrequency, 0);
 });
 
-test('字段规则：普通列使用实际列名，不重复原路径和类型', () => {
+test('字段规则：完整父变量JSON保留作者路径和业务要求', () => {
     const r = convert(pathFormat(['/世界/时间 replace:string 正文明确推进时更新', '/世界/冻结 readonly(玩家开关)']));
     const note = sheet(r, '世界表').sourceData.note;
-    assert.match(note, /「时间」：正文明确推进时更新/);
-    assert.match(note, /「冻结」：玩家开关/);
-    assert.doesNotMatch(note, /\/世界|replace:string|原变量路径|原卡字段定义/);
+    assert.match(note, /\/世界\/时间 replace:string 正文明确推进时更新/);
+    assert.match(note, /\/世界\/冻结 readonly\(玩家开关\)/);
+    assert.doesNotMatch(note, /原变量路径|原卡字段定义/);
     assert.notStrictEqual(sheet(r, '世界表').updateConfig.updateFrequency, 0);
 });
 
@@ -195,25 +197,26 @@ test('JSON 字段规则：相对内容列定位，叶子只读不能锁整个 JS
     const note = sheet(r, '自由表').sourceData.note;
     assert.match(note, /「内容」内 \/支线\/已发现：\n\/自由\/支线\/已发现 replace:boolean 正文确认发现后更新/);
     assert.match(note, /「内容」内 \/主线\/阶段：\n\/自由\/主线\/阶段 readonly\(脚本维护\)/);
-    assert.doesNotMatch(note, /内部路径|原变量路径/);
+    assert.doesNotMatch(note, /原变量路径/);
     assert.notStrictEqual(sheet(r, '自由表').updateConfig.updateFrequency, 0);
     assert.ok(retained(r), "作者规则源条目保留");
 });
 
-test('字段规则：已拆列中的未知叶子保留报告，不能自动开放整个表', () => {
+test('字段规则：完整JSON中的作者声明路径保持原文，不生成独立列', () => {
     const r = convert(pathFormat(['/世界/不存在 replace:string 新值']));
     assert.ok(retained(r));
     assert.match(retained(r).content, /世界\/不存在/);
-    assert.doesNotMatch(sheet(r, '世界表').sourceData.note, /不存在/);
+    assert.match(sheet(r, '世界表').sourceData.note, /\/世界\/不存在 replace:string 新值/);
+    assert.deepStrictEqual(sheet(r,'世界表').content[0],['row_id','内容']);
 });
 
-test('行表规则：占位记录名映射实际列，具体记录的只读不扩大到全部记录', () => {
+test('JSON记录规则：占位路径与具体记录的只读保持原文，不扩大到整个容器', () => {
     const r = convert(pathFormat(['/成员/{全名}/值 replace:number(0~100) 明确变化后更新',
         '/成员/甲/备注 readonly(脚本维护)']), { 成员: { 甲: { 值: 1, 备注: '' } } });
     const s = sheet(r, '成员表');
-    assert.match(s.sourceData.note, /「值」：业务数值范围：0~100； 明确变化后更新/);
-    assert.match(s.sourceData.note, /记录「甲」的「备注」：模型只读；脚本维护/);
-    assert.doesNotMatch(s.sourceData.note, /\/成员|number\(0~100\)|模型只读字段：备注/);
+    assert.match(s.sourceData.note, /\/成员\/\{全名\}\/值 replace:number\(0~100\) 明确变化后更新/);
+    assert.match(s.sourceData.note, /\/成员\/甲\/备注 readonly\(脚本维护\)/);
+    assert.doesNotMatch(s.sourceData.note, /模型只读字段：备注/);
     assert.notStrictEqual(s.updateConfig.updateFrequency, 0);
     assert.ok(retained(r), "作者规则源条目保留");
 });
@@ -230,27 +233,28 @@ test('类型冲突：原声明与实际列不一致时保留报告，不提供�
     const r = convert(pathFormat(['/世界/时间 replace:number 当剧情改变时更新']));
     assert.ok(retained(r));
     assert.match(r.reportText, /原类型说明与已解析字段类型不一致/);
-    assert.doesNotMatch(sheet(r, '世界表').sourceData.note, /replace:number|当剧情改变时更新/);
+    assert.match(sheet(r, '世界表').sourceData.note, /\/世界\/时间 replace:number 当剧情改变时更新/);
     assert.match(r.reportText, /原变量路径映射（仅供核对/);
 });
 
-test('类型冲突：整数声明不能在未落实整数约束的 REAL 列中被静默删掉', () => {
+test('类型冲突：整数声明与初值小数冲突仍报告，完整JSON不静默取整', () => {
     const r = convert(pathFormat(['/世界/评分 replace:integer 必须整数']), { 世界: { 评分: 1.5 } });
     assert.ok(retained(r));
     assert.match(r.reportText, /原类型说明与已解析字段类型不一致/);
-    assert.match(sheet(r, '世界表').sourceData.ddl, /REAL/);
+    assert.strictEqual(JSON.parse(sheet(r,'世界表').content[1][1]).评分,1.5);
+    assert.match(sheet(r,'世界表').sourceData.note,/必须整数/);
 });
 
-test('散文规则：展平对象改写为实际列，清空值和条件不能丢失', () => {
+test('散文规则：完整JSON内部替换保留清空值和条件', () => {
     const r = core.convert({ name: '公开展平规则', character_book: { entries: [
         { id: 1, comment: '[InitVar]', content: '{"任务":{"支线":{"名称":"","进度":""}}}', enabled: false },
         { id: 2, comment: '[mvu_update]', content: '支线:\n  - 非空时 replace /任务/支线 为 {"名称":"","进度":""}', enabled: true },
     ] }, extensions: { tavern_helper: { scripts: [{ name: '结构', enabled: true, content:
         "import {registerMvuSchema} from 'https://example.test/mvu_zod.js';registerMvuSchema(z.object({任务:z.object({支线:z.object({名称:z.string(),进度:z.string()})})}));" }] } } });
     const note = sheet(r, '任务表').sourceData.note;
-    assert.match(note, /非空时 更新 「支线_名称」、「支线_进度」/);
-    assert.match(note, /「支线_名称」=""、?「支线_进度」=""/);
-    assert.doesNotMatch(note, /\/任务\/支线|为 \{"名称"/);
+    assert.match(note, /非空时 更新 「内容」内部路径 \/支线/);
+    assert.match(note, /为 \{"名称":"","进度":""\}/);
+    assert.doesNotMatch(note, /支线_名称|支线_进度|\/任务\/支线/);
     assert.ok(retained(r), "作者规则源条目保留");
 });
 

@@ -1,14 +1,16 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+const legacyLayoutFixture=require('./legacy-layout-fixture');
 const {test} = require('./runner');
 const {core, assert} = require('./helpers');
 const promptGuidanceCard = require('./prompt-guidance-card');
 
-test('SQL转换：默认和停用模式参数统一生成 SQLite 模板，报告说明迁移', () => {
+test("旧布局：SQL转换：默认和停用模式参数统一生成 SQLite 模板，报告说明迁移", () => {
     const card = {name: '协议测试', first_mes: '你好', character_book: {entries: [{
         comment: '[InitVar]', content: JSON.stringify({A: {x: 1, _内部: 2, y: 3}}),
     }]}};
-    const converted = Object.fromEntries(['native','both','sqlite'].map(mode => [mode, core.convert(card, {mode})]));
-    const defaultResult = core.convert(card);
+    const converted = Object.fromEntries(['native','both','sqlite'].map(mode => [mode, publishedLayoutFixture(card, {mode})]));
+    const defaultResult = publishedLayoutFixture(card);
     assert.strictEqual(defaultResult.meta.mode, 'sqlite');
     assert.strictEqual(defaultResult.card.extensions.mvu2shujuku.mode, 'sqlite');
     assert.deepStrictEqual(defaultResult.template, converted.sqlite.template);

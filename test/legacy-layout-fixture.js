@@ -1,52 +1,38 @@
 'use strict';
-// Exercise retained legacy layout/codec contracts through the same public
-// schema builder used by the product. This is not a new-conversion acceptance
-// fixture: the current conversion planner intentionally uses new ownership
-// boundaries. No old source tree or private card is required.
+// Frozen synthetic schema-builder outputs from 96067ef, with the version-1
+// storage contract explicitly selected. No ignored old source or private card
+// is required. Current conversion acceptance belongs to layout-planning.js.
+const crypto = require('crypto');
+const fs = require('fs');
+const zlib = require('zlib');
 const core = require('../src/mvu2shujuku');
-const createStorage = require('../src/stat-storage');
-const codec = require('../src/table-codec')();
-module.exports = function legacyLayoutFixture(source, options = {}) {
-    const card = structuredClone(source), original = card.data || card;
-    const entry = original.character_book.entries.find(e => /initvar/i.test(e.comment || ''));
-    const greetingInit = [original.first_mes, ...(original.alternate_greetings || []),
-        ...original.character_book.entries.filter(e => e !== entry).map(e => e.content)]
-        .map(text => String(text || '').match(/<initvar>\s*([\s\S]*?)\s*<\/initvar>/i)).find(Boolean);
-    if (!entry && !greetingInit) throw new Error('Legacy fixture requires a literal InitVar or first greeting block');
-    const initial = core.parseInitVar(entry ? entry.content : greetingInit[1]);
-    const report = core.createReport();
-    const shape = core.parseMvuShapes(card, report);
-    const variation = require('../src/schema-layout')({
-        parseInitVar: core.parseInitVar, analyzeMvuInitMetadata: core.analyzeMvuInitMetadata,
-        createStatusUsage: require('../src/status-usage'),
-    }).scanGreetingShapeVariation(original);
-    for (const path of variation.dynamicPaths) shape.dynamicPaths.add(path);
-    for (const name of variation.dynamicGroups) shape.dynamicGroups.add(name);
-    shape.dynamicPathSamples = variation.samples;
-    const store = createStorage({ readPolicy: () => ({ version: 1 }) });
-    const schema = core.buildSchema(store.split(initial).database, core.scanStatusUsage(card), report, shape, {
-        vwdDescriptions: options.vwdDescriptions,
-    });
-    // Version 1 is the retained draft layout contract, including its fallback
-    // table. It is explicitly selected here, never the current converter default.
-    const policy = store.plan(schema, shape, initial, core.buildLayout(schema).entries, core.toPinyinSlug);
-    const template = core.generateTemplate(schema, { ...options, report });
-    core.migrateTemplatePromptRuntime(template, original.extensions?.regex_scripts || [], report, schema);
-    for (const group of schema) if (group.vwd?.promptVersion === 1) {
-        const sheet = Object.values(template).find(s => s?.name === group.tableName);
-        codec.bindVwdPromptNote(group.vwd, group.tableName, sheet.sourceData.note);
-    }
-    const result = core.convert(card, options), data = result.card.data || result.card;
+const {decode}=require('./frozen-value-codec');
+const frozen = decode(JSON.parse(zlib.gunzipSync(fs.readFileSync(require.resolve('./legacy/layouts.json.gz')))));
+const localPath=require('path').join(__dirname,'fixtures/legacy-layouts.local.json');
+const local=fs.existsSync(localPath)?decode(JSON.parse(fs.readFileSync(localPath,'utf8'))):{};
+function fixture(source, options = {}, published = false) {
+    const key = (published ? 'published:' : '') + (core.isVwdExperimental() ? 'vwd:' : '')
+        + crypto.createHash('sha256').update(JSON.stringify([source, options])).digest('hex');
+    const saved = frozen.fixtures[key] || local[key];
+    if (!saved) throw new Error('Missing frozen legacy layout fixture: ' + key);
+    const { schema, template, layout, policy, report } = structuredClone(saved);
+    const result = core.convert(structuredClone(source), options), data = result.card.data || result.card;
     result.schema = schema;
+    result.template = template;
+    result.layout = layout;
     result.meta.tableNames = schema.map(g => g.tableName);
     result.meta.tableCount = schema.length;
-    result.template = template;
-    result.report = report;
-    result.reportText = report.toMarkdown();
-    result.layout = core.buildLayout(schema);
-    data.extensions.mvu2shujuku.layout = core.buildLayoutJson(core.buildLayout(schema));
+    result.report = Object.assign(core.createReport(), report);
+    result.reportText = result.report.toMarkdown();
+    data.extensions.mvu2shujuku.layout = core.buildLayoutJson(layout);
     data.extensions.mvu2shujuku.statStorage = policy;
-    const templateEntry = data.character_book.entries.find(e => e.keys?.includes('__ACU_TEMPLATE_DATA__'));
-    if (templateEntry) templateEntry.content = Buffer.from(JSON.stringify(template), 'utf8').toString('base64');
+    result.bridgeScript = core.generateBridgeScript(schema, template, {
+        ...options, bridgeCardName: data.name || '', bridgeCardAvatar: data.avatar || '',
+        bridgeConvertedAt: data.extensions.mvu2shujuku.convertedAt, statStorage: policy,
+    });
+    const entry = data.character_book.entries.find(e => e.keys?.includes('__ACU_TEMPLATE_DATA__'));
+    if (entry) entry.content = Buffer.from(JSON.stringify(template), 'utf8').toString('base64');
     return result;
-};
+}
+module.exports=(source,options)=>fixture(source,options);
+module.exports.published=(source,options)=>fixture(source,options,true);

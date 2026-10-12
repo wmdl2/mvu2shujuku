@@ -112,20 +112,21 @@ test('旧布局 VWD动态提示：损坏覆盖按静态默认退化，渲染不�
     assert.strictEqual(JSON.stringify(sheet), before);
 });
 
-test('旧布局 VWD动态提示：复用自有模板仍重建插槽，自定义模板不伪报支持', async () => withRenderer(async () => {
-    const { result, tables } = fixture();
-    const refreshed = core.refreshConversion(result, { vwdDescriptions: true, template: tables });
-    const layout = JSON.parse((refreshed.card.data || refreshed.card).extensions.mvu2shujuku.layout);
-    assert.strictEqual(core.canWriteVwdDescriptions(layout.find(e => e.group === 'A'), refreshed.template), true);
-    const altered = clone(tables); Object.values(altered).find(t => t.name === 'A表').sourceData.note = '自定义模板';
-    const custom = core.refreshConversion(result, { vwdDescriptions: true, template: altered });
-    assert.match(custom.reportText, /自定义模板不含匹配的动态说明入口/);
-    const withRule = clone(tables); Object.values(withRule).find(t => t.name === 'A表').sourceData.note += '\n新增业务规则';
-    const updated = core.refreshConversion(result, { vwdDescriptions: true, template: withRule });
-    const updatedLayout = JSON.parse((updated.card.data || updated.card).extensions.mvu2shujuku.layout);
-    assert.strictEqual(core.canWriteVwdDescriptions(updatedLayout.find(e => e.group === 'A'), updated.template), true);
-    assert.ok(!result.schema.find(g => g.name === 'A').vwd.noteTemplate.includes('新增业务规则'), '刷新不回改旧转换结果');
-}));
+test('当前完整JSON说明：刷新自有或自定义模板不创建旧VWD插槽，不改变原转换结果', () => {
+    const source={name:'当前说明刷新公开样本',character_book:{entries:[{comment:'[InitVar]',content:JSON.stringify(initial)}]}};
+    const result=core.convert(source,{vwdDescriptions:true});
+    const before=JSON.stringify(result.template);
+    for(const custom of [false,true]){
+        const tables=clone(result.template);
+        if(custom)Object.values(tables).find(t=>t.name==='A表').sourceData.note='自定义模板';
+        const refreshed=core.refreshConversion(result,{vwdDescriptions:true,template:tables});
+        const layout=JSON.parse(refreshed.card.extensions.mvu2shujuku.layout),entry=layout.find(e=>e.group==='A');
+        assert.equal(entry.valueCol,'内容');assert.equal(entry.vwd,undefined);
+        assert.deepStrictEqual(core.statDataFromTables(layout,refreshed.template).stat_data,initial);
+        assert.equal(JSON.stringify(result.template),before);
+        if(custom)assert.equal(Object.values(refreshed.template).find(t=>t.name==='A表').sourceData.note,'自定义模板');
+    }
+});
 
 test('旧布局 VWD动态提示：布局宏只解析默认说明，原规则宏保留在提示管线执行', async () => withRenderer(async () => {
     const { entry, sheet } = fixture({ A: { str: ['值', '说明给 {{user}}'] } });

@@ -1009,6 +1009,7 @@ async function main() {
             else if (only === 'state-transfer') await require('./state-transfer-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record, work });
             else if (only === 'state-transfer-failure') await require('./state-transfer-failure-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, record, work });
             else if (only === 'stat-storage') await require('./stat-storage-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
+            else if (only === 'layout-planning') await require('./layout-planning-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record });
             else if (only === 'fill-adaptation') await require('./fill-adaptation-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record, work });
             else if (only === 'worldbook-save') await require(root + '/test/worldbook-save-host')({ page, record, work });
             else if (only === 'opening-schema') await require('./opening-schema-host')({ page, runtimeTest, setStorageMode, assertStorageMode, openState, record });

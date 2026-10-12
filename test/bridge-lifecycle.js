@@ -1,4 +1,7 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+// Retained physical layouts are tested with frozen public metadata; current conversions use layout-planning.js.
+const legacyLayoutFixture = require('./legacy-layout-fixture');
 const vm = require('vm');
 const { test } = require('./runner');
 const { core, assert, fs, path, bridgeSandbox, legacyBridgeScript } = require('./helpers');
@@ -17,7 +20,7 @@ function setup() {
         on(name, fn) { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(fn); },
         off(name, fn) { listeners.get(name)?.delete(fn); },
     };
-    const converted = core.convert({ name: '接管测试', first_mes: '你好', character_book: { entries: [
+    const converted = publishedLayoutFixture({ name: '接管测试', first_mes: '你好', character_book: { entries: [
         { comment: '[InitVar]', content: JSON.stringify({ 状态: { 生命: 100, 魔力: 50 } }) },
     ] } }, { installMvuShim: true });
     const r = bridgeSandbox(converted, { extra: {
@@ -47,7 +50,7 @@ function startExtension(win) {
     return { started, received, extensionMvu, registry: win.__mvu2shujukuRuntime };
 }
 
-test('桥接管：工厂停止后取消睡眠、定时器和监听，API 失败也能排空', async () => {
+test("旧布局：桥接管：工厂停止后取消睡眠、定时器和监听，API 失败也能排空", async () => {
     const timers = new Map(); let id = 0, fire;
     const factory = vm.runInNewContext('(' + createLifecycle.toString() + ')');
     const life = factory({ setTimeout(fn) { timers.set(++id, fn); return id; }, clearTimeout(key) { timers.delete(key); } });
@@ -68,7 +71,7 @@ test('桥接管：工厂停止后取消睡眠、定时器和监听，API 失败�
     await ready;
 });
 
-test('桥接管：扩展晚加载取消待提交快照，旧定时器不会抢回 Mvu', async () => {
+test("旧布局：桥接管：扩展晚加载取消待提交快照，旧定时器不会抢回 Mvu", async () => {
     const r = setup(); await tick();
     const callbackKey = '__mvu2shujukuTableUpdateCallback_0.3.17';
     const oldCallback = r.win[callbackKey];
@@ -95,7 +98,7 @@ test('桥接管：扩展晚加载取消待提交快照，旧定时器不会抢�
     assert.strictEqual(sheet.content[1][sheet.content[0].indexOf('生命')], 100);
 });
 
-test('桥接管：API 缺失时重试不累积控制器，晚加载扩展取消重试', async () => {
+test("旧布局：桥接管：API 缺失时重试不累积控制器，晚加载扩展取消重试", async () => {
     const r = setup(), timers = new Map(); let id = 0;
     const win = { console, setTimeout(fn, delay) { timers.set(++id, { fn, delay }); return id; },
         clearTimeout(key) { timers.delete(key); } };
@@ -115,7 +118,7 @@ test('桥接管：API 缺失时重试不累积控制器，晚加载扩展取消�
     assert.strictEqual(win.__mvu2shujukuLegacyBridges.length, 0);
 });
 
-test('桥接管：扩展登记抛错也不启动第二套兼容运行时', () => {
+test("旧布局：桥接管：扩展登记抛错也不启动第二套兼容运行时", () => {
     const r = setup();
     const win = { console, __mvu2shujukuRuntime: { owner: 'extension', registerCard() { throw new Error('登记失败'); } } };
     win.window = win; win.top = win;
@@ -125,7 +128,7 @@ test('桥接管：扩展登记抛错也不启动第二套兼容运行时', () =>
     assert.strictEqual(win.Mvu, undefined);
 });
 
-test('桥接管：等在途提交结束再启动扩展，旧批次后续单元格被拒绝', async () => {
+test("旧布局：桥接管：等在途提交结束再启动扩展，旧批次后续单元格被拒绝", async () => {
     const r = setup(); await tick();
     let release, signal, writes = 0;
     const started = new Promise(resolve => { signal = resolve; });

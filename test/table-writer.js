@@ -1,4 +1,7 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+// Retained physical layouts are tested with frozen public metadata; current conversions use layout-planning.js.
+const legacyLayoutFixture = require('./legacy-layout-fixture');
 const vm = require('vm');
 const createTableWriter = require('../src/table-writer');
 const codec = require('../src/table-codec')();
@@ -12,7 +15,7 @@ function tables() {
 }
 
 async function standaloneWrite(fail) {
-    const converted = core.convert({ name: '独立写入测试', first_mes: '你好', character_book: { entries: [
+    const converted = publishedLayoutFixture({ name: '独立写入测试', first_mes: '你好', character_book: { entries: [
         { comment: '[InitVar]', content: JSON.stringify({ 状态: { 生命: 100, 魔力: 50 } }) },
     ] } }, { installMvuShim: true });
     const timers = [];
@@ -55,9 +58,9 @@ test('旧桥共用写入：失败返回 false 且不重复执行兜底', async (
     assert.strictEqual(result.stat.状态.生命, 100);
 });
 
-test('JSON 组统一写入：核心与独立桥接受空对象到标量，重复值不提交', async () => {
+test("旧布局：JSON 组统一写入：核心与独立桥接受空对象到标量，重复值不提交", async () => {
     for (const value of ['无', '', 0, false, ['记录'], { 记录: '内容' }]) {
-        const converted = core.convert({ name: 'JSON统一测试', first_mes: '你好', character_book: { entries: [
+        const converted = publishedLayoutFixture({ name: 'JSON统一测试', first_mes: '你好', character_book: { entries: [
             { comment: '[InitVar]', content: JSON.stringify({ 日志: {} }) },
         ] } }, { installMvuShim: true });
         const entries = JSON.parse((converted.card.data || converted.card).extensions.mvu2shujuku.layout);
@@ -91,7 +94,7 @@ test('JSON 组统一写入：核心与独立桥接受空对象到标量，重复
     }
 });
 
-test('写入适配模块：工厂可隔离内联，只通过传入 API 修改表格', async () => {
+test("旧布局：写入适配模块：工厂可隔离内联，只通过传入 API 修改表格", async () => {
     const factory = vm.runInNewContext('(' + createTableWriter.toString() + ')');
     const writer = factory({ parseJson: codec.parseObject });
     const data = tables();
@@ -102,7 +105,7 @@ test('写入适配模块：工厂可隔离内联，只通过传入 API 修改表
     assert.strictEqual(writer.lastStatWriteFailed, false);
 });
 
-test('写入适配模块：缓存模板由回调注入，不访问隐式宿主', async () => {
+test("旧布局：写入适配模块：缓存模板由回调注入，不访问隐式宿主", async () => {
     const data = tables(), cached = tables();
     data.sheet_status.content = [data.sheet_status.content[0]];
     cached.sheet_status.content[1][2] = '缓存姓名';
@@ -117,7 +120,7 @@ test('写入适配模块：缓存模板由回调注入，不访问隐式宿主',
     assert.strictEqual(writer.lastStatWriteFailed, false);
 });
 
-test('写入适配模块：失败状态在实例间隔离，计划数量不等于成功数量', async () => {
+test("旧布局：写入适配模块：失败状态在实例间隔离，计划数量不等于成功数量", async () => {
     const first = createTableWriter({ parseJson: codec.parseObject }), second = createTableWriter({ parseJson: codec.parseObject });
     const data = tables(), api = applyingApi(data);
     api.updateCell = async () => false;
@@ -130,7 +133,7 @@ test('写入适配模块：失败状态在实例间隔离，计划数量不等�
     assert.strictEqual(first.lastStatWriteFailed, true);
 });
 
-test('写入结果：无操作、成功与宿主 false/throw 保留计划数量和首个原因', async () => {
+test("旧布局：写入结果：无操作、成功与宿主 false/throw 保留计划数量和首个原因", async () => {
     const writer = createTableWriter({ parseJson: codec.parseObject });
     const data = tables(), api = applyingApi(data);
     const before = { 状态: { 生命: 100 } };
@@ -151,7 +154,7 @@ test('写入结果：无操作、成功与宿主 false/throw 保留计划数量�
     }
 });
 
-test('写入结果：规划拒绝可以失败且计划数为零', async () => {
+test("旧布局：写入结果：规划拒绝可以失败且计划数为零", async () => {
     const writer = createTableWriter({ parseJson: codec.parseObject });
     const numberLayout = [{ kind: 'json', group: 'counter', table: 'counter表', scalarType: 'number' }];
     const result = await writer.writeStatDiffToDbResult(applyingApi({}), numberLayout,
@@ -161,7 +164,7 @@ test('写入结果：规划拒绝可以失败且计划数为零', async () => {
     assert.match(result.failureReason, /只接受有限数字/);
 });
 
-test('写入结果：已成功的写入后失败仍报告完整计划，updateRow 降级成功不报失败', async () => {
+test("旧布局：写入结果：已成功的写入后失败仍报告完整计划，updateRow 降级成功不报失败", async () => {
     const writer = createTableWriter({ parseJson: codec.parseObject });
     const before = { 状态: { 生命: 100, 姓名: '甲' } };
     const after = { 状态: { 生命: 80, 姓名: '乙' } };
@@ -189,7 +192,7 @@ test('写入结果：已成功的写入后失败仍报告完整计划，updateRo
     assert.strictEqual(fallbackData.sheet_status.content[1][2], '乙');
 });
 
-test('写入结果：同实例交错调用的失败状态独立，旧数值接口仍更新 getter', async () => {
+test("旧布局：写入结果：同实例交错调用的失败状态独立，旧数值接口仍更新 getter", async () => {
     const writer = createTableWriter({ parseJson: codec.parseObject });
     const before = { 状态: { 生命: 100 } };
     let release, entered;
@@ -219,7 +222,7 @@ test('写入结果：同实例交错调用的失败状态独立，旧数值接�
     assert.strictEqual(writer.lastStatWriteFailed, true);
 });
 
-test('写入结果：回放跳过继续后续操作，未捕获规划异常仍抛出', async () => {
+test("旧布局：写入结果：回放跳过继续后续操作，未捕获规划异常仍抛出", async () => {
     const writer = createTableWriter({ parseJson: codec.parseObject });
     const data = tables();
     data.sheet_status.content = [data.sheet_status.content[0]];
@@ -245,7 +248,7 @@ test('写入结果：回放跳过继续后续操作，未捕获规划异常仍�
         { 状态: { 生命: 100 } }, { 状态: { 生命: 80 } }), /规划错误/);
 });
 
-test('写入适配模块：浏览器构建使用内联工厂且保留核心写入接口', async () => {
+test("旧布局：写入适配模块：浏览器构建使用内联工厂且保留核心写入接口", async () => {
     const coreSource = fs.readFileSync(path.join(__dirname, '../src/mvu2shujuku.js'), 'utf8');
     const index = core.assembleExtension({ coreSource })['index.js'];
     const sandbox = vm.createContext({ console });

@@ -1,4 +1,7 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+// Retained physical layouts are tested with frozen public metadata; current conversions use layout-planning.js.
+const legacyLayoutFixture = require('./legacy-layout-fixture');
 const vm = require('vm');
 const { test } = require('./runner');
 const { core, assert, fs, applyingApi } = require('./helpers');
@@ -35,7 +38,7 @@ function plainGreetingSource(metadata) {
     });
 }
 
-test('开场 Schema：世界书初值没有内联块也校验，首次建表可延后', async () => {
+test("旧布局：开场 Schema：世界书初值没有内联块也校验，首次建表可延后", async () => {
     const { zod: z } = require('../src/vendor/schema-engine-libs');
     const metadata = { schemaKeys: ['public'] };
     const api = require('../src/card-api')({ readMetadata: () => metadata, isCurrent: () => true });
@@ -57,7 +60,7 @@ test('开场 Schema：世界书初值没有内联块也校验，首次建表可�
     assert.strictEqual(parses, 1);
 });
 
-test('开场 Schema：无任务缓存不阻止晚到的Schema元数据，普通卡仍无任务', () => {
+test("旧布局：开场 Schema：无任务缓存不阻止晚到的Schema元数据，普通卡仍无任务", () => {
     const metadata = { schemaKeys: [] }, capture = plainGreetingSource(metadata);
     assert.strictEqual(capture(), null);
     metadata.schemaKeys = ['public'];
@@ -68,7 +71,7 @@ test('开场 Schema：无任务缓存不阻止晚到的Schema元数据，普通�
     assert.strictEqual(capture(), null);
 });
 
-test('开场 Schema：已有世界书初值存档只建基线，不重放Schema', async () => {
+test("旧布局：开场 Schema：已有世界书初值存档只建基线，不重放Schema", async () => {
     const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
     const start = source.indexOf('    async function applyActiveGreetingInitvar(');
     const end = source.indexOf('    // 扩展成为唯一 runtime owner', start);
@@ -92,7 +95,7 @@ test('开场 Schema：已有世界书初值存档只建基线，不重放Schema'
     assert.deepStrictEqual(stored.stat_data, { 账户: { 等级: 23 } });
 });
 
-test('开场 Schema：纯 InitVar 先运行作者预处理，旧名删除、新名和记录保留', async () => {
+test("旧布局：开场 Schema：纯 InitVar 先运行作者预处理，旧名删除、新名和记录保留", async () => {
     const { zod: z } = require('../src/vendor/schema-engine-libs');
     const api = require('../src/card-api')({ readMetadata: () => ({ schemaKeys: ['public'] }), isCurrent: () => true });
     let parses = 0;
@@ -109,7 +112,7 @@ test('开场 Schema：纯 InitVar 先运行作者预处理，旧名删除、新�
     assert.strictEqual(parses, 1);
 });
 
-test('开场 Schema：校验失败拒绝快照，无 InitVar 不额外运行变换', async () => {
+test("旧布局：开场 Schema：校验失败拒绝快照，无 InitVar 不额外运行变换", async () => {
     let calls = 0;
     const compute = greetingSnapshot(core, async () => { calls++; throw new Error('无效原卡 Schema'); });
     const source = { first: {}, text: '公开开场', updateSource: '', sourceFp: 'one', swipe: 0 };
@@ -120,7 +123,7 @@ test('开场 Schema：校验失败拒绝快照，无 InitVar 不额外运行变�
     assert.strictEqual(calls, 1);
 });
 
-test('开场 Schema：首次建表不等待依赖数据就绪的登记，仍保留后续校验任务', async () => {
+test("旧布局：开场 Schema：首次建表不等待依赖数据就绪的登记，仍保留后续校验任务", async () => {
     let calls = 0;
     const compute = greetingSnapshot(core, async stat => { calls++; return { 状态: stat.状态 + 1 }; });
     const source = { first: {}, text: '公开开场', m: ['', '{"状态":3}'], updateSource: '', sourceFp: 'one', swipe: 0 };
@@ -134,7 +137,7 @@ test('开场 Schema：首次建表不等待依赖数据就绪的登记，仍保�
     assert.deepStrictEqual(clone(settled.finalWrap.stat_data), { 状态: 4 });
 });
 
-test('开场 Schema：含更新指令的开场复用原更新周期，不二次执行变换', async () => {
+test("旧布局：开场 Schema：含更新指令的开场复用原更新周期，不二次执行变换", async () => {
     let calls = 0;
     const compute = greetingSnapshot(core, () => { throw new Error('不得重复校验'); }, async (_, wrap) => {
         calls++; wrap.stat_data.状态++; return wrap;
@@ -144,10 +147,10 @@ test('开场 Schema：含更新指令的开场复用原更新周期，不二次�
     assert.strictEqual(calls, 1);
 });
 
-test('开场快照：浏览器内联工厂不依赖 Node 模块外部作用域', async () => {
+test("旧布局：开场快照：浏览器内联工厂不依赖 Node 模块外部作用域", async () => {
     const factory = require('../src/extension-runtime').createCandidateBuilder;
     const inlineFactory = vm.runInNewContext('(' + factory.toString() + ')');
-    const result = core.convert(require('./synthetic-card')());
+    const result = publishedLayoutFixture(require('./synthetic-card')());
     const layout = JSON.parse(result.card.data.extensions.mvu2shujuku.layout);
     const before = core.statDataFromTables(layout, result.template).stat_data;
     const after = clone(before);
@@ -157,8 +160,8 @@ test('开场快照：浏览器内联工厂不依赖 Node 模块外部作用域',
     assert.deepStrictEqual(core.statDataFromTables(layout, result.template).stat_data, before, '内联工厂不修改输入快照');
 });
 
-test('开场快照：先追平已有数组，再清空数组，生成的完整模板保留目标状态', async () => {
-    const result = core.convert(require('./synthetic-card')());
+test("旧布局：开场快照：先追平已有数组，再清空数组，生成的完整模板保留目标状态", async () => {
+    const result = publishedLayoutFixture(require('./synthetic-card')());
     const layout = JSON.parse(result.card.data.extensions.mvu2shujuku.layout);
     const original = JSON.stringify(result.template);
     const before = { 状态: { 生命: 100, 金币: 77 }, 背包: ['已有进度', false] };
@@ -168,8 +171,8 @@ test('开场快照：先追平已有数组，再清空数组，生成的完整�
     assert.strictEqual(JSON.stringify(result.template), original, '构造候选模板不修改原始模板');
 });
 
-test('开场快照：追平或应用失败时拒绝候选，不能把半成品交给持久化', async () => {
-    const result = core.convert(require('./synthetic-card')());
+test("旧布局：开场快照：追平或应用失败时拒绝候选，不能把半成品交给持久化", async () => {
+    const result = publishedLayoutFixture(require('./synthetic-card')());
     const layout = JSON.parse(result.card.data.extensions.mvu2shujuku.layout);
     for (const failAt of [1, 2]) {
         let calls = 0;
@@ -185,8 +188,8 @@ test('开场快照：追平或应用失败时拒绝候选，不能把半成品�
     }
 });
 
-test('写入结果：候选构造和当前回复规划不读取旧失败标记', async () => {
-    const converted = core.convert(require('./synthetic-card')());
+test("旧布局：写入结果：候选构造和当前回复规划不读取旧失败标记", async () => {
+    const converted = publishedLayoutFixture(require('./synthetic-card')());
     const layout = JSON.parse(converted.card.data.extensions.mvu2shujuku.layout);
     const before = core.statDataFromTables(layout, converted.template).stat_data;
     const after = clone(before); after.状态.金币 = 27;
@@ -214,8 +217,8 @@ function messageSnapshotCommitter(layout) {
     });
 }
 
-test('消息持久化：一次整表导入承载本楼更新，不调用回写历史楼的手动 CRUD', async () => {
-    const result = core.convert(require('./synthetic-card')());
+test("旧布局：消息持久化：一次整表导入承载本楼更新，不调用回写历史楼的手动 CRUD", async () => {
+    const result = publishedLayoutFixture(require('./synthetic-card')());
     const layout = JSON.parse(result.card.data.extensions.mvu2shujuku.layout);
     const before = core.statDataFromTables(layout, result.template).stat_data;
     const after = clone(before); after.状态.金币 = 23;
@@ -232,8 +235,8 @@ test('消息持久化：一次整表导入承载本楼更新，不调用回写�
     assert.strictEqual(calls, 1, '没有变化不导入');
 });
 
-test('消息持久化：缺少导入、提交失败或规划期间快照变化时拒绝提交', async () => {
-    const result = core.convert(require('./synthetic-card')());
+test("旧布局：消息持久化：缺少导入、提交失败或规划期间快照变化时拒绝提交", async () => {
+    const result = publishedLayoutFixture(require('./synthetic-card')());
     const layout = JSON.parse(result.card.data.extensions.mvu2shujuku.layout);
     const before = core.statDataFromTables(layout, result.template).stat_data;
     const after = clone(before); after.状态.金币 = 23;
@@ -249,7 +252,7 @@ test('消息持久化：缺少导入、提交失败或规划期间快照变化�
 });
 
 async function nativeRuntime(source = require('./synthetic-card')(), configure) {
-    const result = core.convert(source, { installMvuShim: true });
+    const result = publishedLayoutFixture(source, { installMvuShim: true });
     result.card.data.avatar = 'public-native.png';
     const tables = clone(result.template), api = applyingApi(tables);
     const tableCallbacks = [];
@@ -306,7 +309,7 @@ async function nativeRuntime(source = require('./synthetic-card')(), configure) 
     return { win, context, tables, api, advance, tableCallbacks, handlers };
 }
 
-test('开场恢复：内部Schema提交后丢失载体仍恢复已提交值，不回退模板占位值', async () => {
+test("旧布局：开场恢复：内部Schema提交后丢失载体仍恢复已提交值，不回退模板占位值", async () => {
     const source = { name: '公开开场提交缓存', first_mes: '开场', character_book: { entries: [{ comment: '[InitVar]', enabled: false, content: JSON.stringify({组:{时间:'待初始化',备注:'保留'}}) }] },
         extensions: { tavern_helper: { scripts: [{enabled:true,content:'import {registerMvuSchema} from "https://example.test/mvu_zod.js";const S=z.object({组:z.object({时间:z.enum(["白天","夜晚"]).catch(""),备注:z.string()})});registerMvuSchema(S);'}] } } };
     const h = await nativeRuntime({spec:'chara_card_v3',spec_version:'3.0',data:source}, ({win,context,api,tables,now}) => {
@@ -345,7 +348,7 @@ function placeholderCard() {
     return source;
 }
 
-test('占位符维护：原版 ST 和 TT 虚拟化保留助手刷新，TT 静态使用宿主且不重画相同内容', async () => {
+test("旧布局：占位符维护：原版 ST 和 TT 虚拟化保留助手刷新，TT 静态使用宿主且不重画相同内容", async () => {
     for (const mode of ['st', 'managed', 'static', 'static-identical']) {
         const calls = [], rendered = [];
         const h = await nativeRuntime(placeholderCard(), ({ win, context }) => {
@@ -366,7 +369,7 @@ test('占位符维护：原版 ST 和 TT 虚拟化保留助手刷新，TT 静态
     }
 });
 
-test('占位符维护：等待保存时切聊天不刷新新聊天，保存拒绝可由下一事件重试', async () => {
+test("旧布局：占位符维护：等待保存时切聊天不刷新新聊天，保存拒绝可由下一事件重试", async () => {
     let release, renders = 0, attempts = 0;
     const h = await nativeRuntime(placeholderCard(), ({ win, context }) => {
         context.event_types = { CHAT_CHANGED: 'chat_changed', CHARACTER_MESSAGE_RENDERED: 'rendered' };
@@ -394,7 +397,7 @@ test('占位符维护：等待保存时切聊天不刷新新聊天，保存拒�
     assert.strictEqual(renders, 1);
 });
 
-test('前端就绪：完整零值和 false 状态也广播初始化，未物化空壳不广播', async () => {
+test("旧布局：前端就绪：完整零值和 false 状态也广播初始化，未物化空壳不广播", async () => {
     const source = require('./synthetic-card')();
     source.data.first_mes = '零值开场';
     source.data.character_book.entries = [{ comment: '[InitVar]', content: JSON.stringify({ 状态: { 积分: 0, 开关: false } }), enabled: true }];
@@ -417,7 +420,7 @@ test('前端就绪：完整零值和 false 状态也广播初始化，未物化�
     }
 });
 
-test('变量回放：未加载的 JSON 标量骨架不能被脚本读取并转换写回', async () => {
+test("旧布局：变量回放：未加载的 JSON 标量骨架不能被脚本读取并转换写回", async () => {
     const source = require('./synthetic-card')();
     source.data.character_book.entries = [{ comment: '[InitVar]', content: '{"主角名":"林验收","状态":{"积分":0}}', enabled: false }];
     const h = await nativeRuntime(source);
@@ -448,7 +451,7 @@ test('变量回放：未加载的 JSON 标量骨架不能被脚本读取并转�
     assert.strictEqual(h.win.getVariables({ type: 'message' }).stat_data.主角名, '林验收');
 });
 
-test('变量回放：共享全局初始化等待完整数据，恢复后才启动作者脚本', async () => {
+test("旧布局：变量回放：共享全局初始化等待完整数据，恢复后才启动作者脚本", async () => {
     let initialized = 0;
     const h = await nativeRuntime(undefined, ({ win }) => {
         win.waitGlobalInitialized = () => Promise.resolve('宿主');
@@ -475,7 +478,7 @@ test('变量回放：共享全局初始化等待完整数据，恢复后才启�
     assert.strictEqual(initialized, 1);
 });
 
-test('运行内存：完整扩展在 iframe 移除后还原接口并释放登记', async () => {
+test("旧布局：运行内存：完整扩展在 iframe 移除后还原接口并释放登记", async () => {
     const h = await nativeRuntime();
     let now = Date.now();
     h.win.Date = class extends Date { static now() { return now; } };
@@ -502,7 +505,7 @@ test('运行内存：完整扩展在 iframe 移除后还原接口并释放登记
     }
 });
 
-test('MVU 命令运行时：parseMessage 注入解析库后修复 JSONPatch，无法修复时保留旧值', async () => {
+test("旧布局：MVU 命令运行时：parseMessage 注入解析库后修复 JSONPatch，无法修复时保留旧值", async () => {
     const { win } = await nativeRuntime();
     win.__MVU2SHUJUKU_YAML_LIBS__ = require('../src/vendor/mvu-yaml-libs');
     const base = { stat_data: { score: 1 } };
@@ -515,7 +518,7 @@ test('MVU 命令运行时：parseMessage 注入解析库后修复 JSONPatch，�
     assert.strictEqual(ignored.stat_data.score, 1);
 });
 
-test('提交读缓存：脚本成功写入后立即读回新值，不等旧提交快照过期', async () => {
+test("旧布局：提交读缓存：脚本成功写入后立即读回新值，不等旧提交快照过期", async () => {
     const h = await nativeRuntime();
     await h.advance(2000);
     assert.ok(h.tableCallbacks.length, '必须经过真实宿主回调入口建立旧读窗口');
@@ -532,7 +535,7 @@ test('提交读缓存：脚本成功写入后立即读回新值，不等旧提�
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 37, '成功 Promise 后读视图必须追上本次已提交快照');
 });
 
-test('整组空值：真实运行时的完整替换保留删除意图，普通旧布局仍补齐遗漏组', async () => {
+test("旧布局：整组空值：真实运行时的完整替换保留删除意图，普通旧布局仍补齐遗漏组", async () => {
     const source = require('./synthetic-card')();
     const stat = { 状态: { 生命: 100, 金币: 10 }, 背包: ['钥匙', 0, false, null], 容器: { n: 1 }, 原有组: { 值: 7 } };
     source.data.first_mes = '<initvar>' + JSON.stringify(stat) + '</initvar>';
@@ -560,7 +563,7 @@ test('整组空值：真实运行时的完整替换保留删除意图，普通�
     }
 });
 
-test('原生模式：SQL 读取 getter 隐藏时，已就绪的 CRUD 仍能成功写入', async () => {
+test("旧布局：原生模式：SQL 读取 getter 隐藏时，已就绪的 CRUD 仍能成功写入", async () => {
     const { win, tables, advance } = await nativeRuntime();
     const next = win.Mvu.getMvuData(); next.stat_data.状态.金币 = 37;
     let settled;
@@ -601,7 +604,7 @@ function floorSession(chat) {
 const frameMessage = (keys = ['']) => ({ is_user: false, mes: 'reply',
     TavernDB_ACU_IsolatedData: Object.fromEntries(keys.map(key => [key, { storageFrame: { version: 2, logEntries: [] } }])) });
 
-test('写入楼层：内联工厂保守验证所有作用域，新楼建帧后恢复差量', () => {
+test("旧布局：写入楼层：内联工厂保守验证所有作用域，新楼建帧后恢复差量", () => {
     const chat = [frameMessage(), { is_user: true }, { is_user: false, mes: 'new' }];
     const { manager, session } = floorSession(chat);
     assert.strictEqual(session.writeTarget.canUseCrud(), false);
@@ -614,7 +617,7 @@ test('写入楼层：内联工厂保守验证所有作用域，新楼建帧后�
     assert.strictEqual(manager.bindWriteTarget(session, () => chat), session, '重试保留原始目标');
 });
 
-test('写入楼层：未知/旧帧格式不能授权旧楼 CRUD，开场保持原路径', () => {
+test("旧布局：写入楼层：未知/旧帧格式不能授权旧楼 CRUD，开场保持原路径", () => {
     for (const old of [
         { TavernDB_ACU_Data: { sheet_x: {} } },
         { TavernDB_ACU_IsolatedData: '{"":{}}' },
@@ -627,7 +630,7 @@ test('写入楼层：未知/旧帧格式不能授权旧楼 CRUD，开场保持�
     assert.strictEqual(floorSession([frameMessage()]).session.writeTarget.canUseCrud(), true);
 });
 
-test('写入楼层：删楼、换 swipe、编辑、新回复以及原有来源失效均取消', () => {
+test("旧布局：写入楼层：删楼、换 swipe、编辑、新回复以及原有来源失效均取消", () => {
     for (const change of [chat => chat.pop(), chat => { chat[2].swipe_id = 1; },
         chat => { chat[2].mes = 'edited'; }, chat => chat.push(frameMessage()),
         chat => { chat[2] = { ...chat[2] }; }]) {
@@ -644,7 +647,7 @@ test('写入楼层：删楼、换 swipe、编辑、新回复以及原有来源�
     assert.strictEqual(manager.isCurrent(session), false, '不能丢掉原有来源 validate');
 });
 
-test('写入楼层：每次 CRUD 前复查归属，不可靠时只允许正式导入', async () => {
+test("旧布局：写入楼层：每次 CRUD 前复查归属，不可靠时只允许正式导入", async () => {
     const chat = [frameMessage(), { is_user: true }, frameMessage()];
     const { manager, session } = floorSession(chat); let calls = 0;
     const api = manager.apiForSession({ updateCell() { calls++; }, importTableAsJson: async () => true }, session);
@@ -683,7 +686,7 @@ async function settleGold(h, gold) {
     return result;
 }
 
-test('写入楼层：真实运行时新楼一次快照、随后差量，无变化不建帧', async () => {
+test("旧布局：写入楼层：真实运行时新楼一次快照、随后差量，无变化不建帧", async () => {
     const h = await nativeRuntime(), calls = observeHostWrites(h);
     const opening = JSON.stringify(h.context.chat[0]);
     h.context.chat.push({ is_user: true, mes: 'user' }, { is_user: false, mes: 'new reply' });
@@ -701,7 +704,7 @@ test('写入楼层：真实运行时新楼一次快照、随后差量，无变�
     assert.strictEqual(h.context.chat[3].TavernDB_ACU_IsolatedData, undefined);
 });
 
-test('写入楼层：真实运行时导入失败不降级旧楼 CRUD', async () => {
+test("旧布局：写入楼层：真实运行时导入失败不降级旧楼 CRUD", async () => {
     const h = await nativeRuntime(), calls = observeHostWrites(h, true);
     const before = JSON.stringify(h.tables), opening = JSON.stringify(h.context.chat[0]);
     h.context.chat.push({ is_user: true }, { is_user: false, mes: 'new reply' });
@@ -712,7 +715,7 @@ test('写入楼层：真实运行时导入失败不降级旧楼 CRUD', async () 
     assert.strictEqual(JSON.stringify(h.context.chat[0]), opening);
 });
 
-test('写入楼层：真实运行时候选规划期间新回复到来，旧提交取消', async () => {
+test("旧布局：写入楼层：真实运行时候选规划期间新回复到来，旧提交取消", async () => {
     const h = await nativeRuntime(), calls = observeHostWrites(h);
     h.context.chat.push({ is_user: true }, { is_user: false, mes: 'target reply' });
     const runtimeCore = h.win.MVU2SHUJUKU_CORE, original = runtimeCore.writeStatDiffToDbResult;
@@ -742,7 +745,7 @@ async function settleMutation(h, mutate) {
     return result;
 }
 
-test('当前楼批次：混合扣金币与新增道具只提交一次完整快照', async () => {
+test("旧布局：当前楼批次：混合扣金币与新增道具只提交一次完整快照", async () => {
     const h = await nativeRuntime(); addReplyWithFrame(h);
     const opening = JSON.stringify(h.context.chat[0]), calls = observeHostWrites(h);
     assert.strictEqual(await settleMutation(h, stat => { stat.状态.金币 = 2; stat.背包.push('药'); }), true);
@@ -752,7 +755,7 @@ test('当前楼批次：混合扣金币与新增道具只提交一次完整快�
     assert.strictEqual(JSON.stringify(h.context.chat[0]), opening);
 });
 
-test('旧卡首楼批次：缺少 statStorage 元数据时混合写入仍只提交一次', async () => {
+test("旧布局：旧卡首楼批次：缺少 statStorage 元数据时混合写入仍只提交一次", async () => {
     const h = await nativeRuntime(undefined, ({ context }) => {
         delete context.characters[0].extensions.mvu2shujuku.statStorage;
         context.characters[0].extensions.mvu2shujuku.version = '0.4.0';
@@ -764,7 +767,7 @@ test('旧卡首楼批次：缺少 statStorage 元数据时混合写入仍只提�
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.背包.at(-1), '药');
 });
 
-test('旧卡首楼批次：整批提交被拒绝时不能留下先写成功的字段', async () => {
+test("旧布局：旧卡首楼批次：整批提交被拒绝时不能留下先写成功的字段", async () => {
     const h = await nativeRuntime(undefined, ({ context }) => {
         delete context.characters[0].extensions.mvu2shujuku.statStorage;
     });
@@ -774,7 +777,7 @@ test('旧卡首楼批次：整批提交被拒绝时不能留下先写成功的�
     assert.ok(calls.length > 0 && calls.every(method => method === 'importTableAsJson'));
 });
 
-test('当前楼批次：混合写入被拒绝时不留下先完成的道具变更', async () => {
+test("旧布局：当前楼批次：混合写入被拒绝时不留下先完成的道具变更", async () => {
     const h = await nativeRuntime(); addReplyWithFrame(h);
     const before = JSON.stringify(h.tables), frame = JSON.stringify(h.context.chat[2]);
     const calls = observeHostWrites(h, true), updateCell = h.api.updateCell;
@@ -785,7 +788,7 @@ test('当前楼批次：混合写入被拒绝时不留下先完成的道具变�
     assert.ok(calls.length > 0 && calls.every(method => method === 'importTableAsJson'));
 });
 
-test('当前楼批次：同一行多列保留一次 updateRow，拒绝后不拆成逐格写入', async () => {
+test("旧布局：当前楼批次：同一行多列保留一次 updateRow，拒绝后不拆成逐格写入", async () => {
     const h = await nativeRuntime(); addReplyWithFrame(h);
     const calls = observeHostWrites(h);
     assert.strictEqual(await settleMutation(h, stat => { stat.状态.金币 = 2; stat.状态.生命 = 90; }), true);
@@ -797,7 +800,7 @@ test('当前楼批次：同一行多列保留一次 updateRow，拒绝后不拆�
     assert.strictEqual(JSON.stringify(h.tables), before);
 });
 
-test('当前楼批次：缺少整表接口时多步写入在任何 CRUD 前拒绝', async () => {
+test("旧布局：当前楼批次：缺少整表接口时多步写入在任何 CRUD 前拒绝", async () => {
     const h = await nativeRuntime(); addReplyWithFrame(h);
     const calls = observeHostWrites(h), before = JSON.stringify(h.tables);
     delete h.api.importTableAsJson;
@@ -806,7 +809,7 @@ test('当前楼批次：缺少整表接口时多步写入在任何 CRUD 前拒�
     assert.strictEqual(JSON.stringify(h.tables), before);
 });
 
-test('当前楼批次：草稿规划中途失败不调用宿主、不提交半成品', async () => {
+test("旧布局：当前楼批次：草稿规划中途失败不调用宿主、不提交半成品", async () => {
     const h = await nativeRuntime(); addReplyWithFrame(h);
     const calls = observeHostWrites(h), before = JSON.stringify(h.tables);
     const runtimeCore = h.win.MVU2SHUJUKU_CORE, original = runtimeCore.writeStatDiffToDbResult;
@@ -818,7 +821,7 @@ test('当前楼批次：草稿规划中途失败不调用宿主、不提交半�
     assert.strictEqual(JSON.stringify(h.tables), before);
 });
 
-test('当前楼批次：宿主整批落库后返回失败，不回写旧快照或重复增加道具', async () => {
+test("旧布局：当前楼批次：宿主整批落库后返回失败，不回写旧快照或重复增加道具", async () => {
     const h = await nativeRuntime(); addReplyWithFrame(h);
     const calls = observeHostWrites(h), original = h.api.importTableAsJson;
     h.api.importTableAsJson = async (...args) => { await original(...args); return false; };
@@ -828,9 +831,9 @@ test('当前楼批次：宿主整批落库后返回失败，不回写旧快照�
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.背包.filter(x => x === '药').length, 1);
 });
 
-test('当前楼批次：序列化工厂的完整数组JSON和标量合成同一候选，保留未登记表', async () => {
+test("旧布局：当前楼批次：序列化工厂的完整数组JSON和标量合成同一候选，保留未登记表", async () => {
     const inlineFactory = vm.runInNewContext('(' + core.getCandidateBuilderFactory().toString() + ')');
-    const result = core.convert(require('./synthetic-card')());
+    const result = publishedLayoutFixture(require('./synthetic-card')());
     const layout = JSON.parse(result.card.data.extensions.mvu2shujuku.layout);
     const tables = clone(result.template);
     tables.sheet_other = { name: '其它表', content: [['row_id', '保留'], [1, '原值']] };
@@ -847,13 +850,13 @@ test('当前楼批次：序列化工厂的完整数组JSON和标量合成同一�
     assert.ok(plan.operations.length > 1, '数组内部导入仍须与外层标量合并提交');
 });
 
-test('当前楼批次：规划期间数据库变化或来源失效，不提交过时草稿', async () => {
+test("旧布局：当前楼批次：规划期间数据库变化或来源失效，不提交过时草稿", async () => {
     const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
     const start = source.indexOf('    async function commitCurrentReplyBatch(');
     const end = source.indexOf('    async function tryOpeningBulkInit(', start);
     assert.ok(start >= 0 && end > start);
     for (const invalidation of ['database', 'source']) {
-        const result = core.convert(require('./synthetic-card')());
+        const result = publishedLayoutFixture(require('./synthetic-card')());
         const layout = JSON.parse(result.card.data.extensions.mvu2shujuku.layout), tables = clone(result.template);
         const api = applyingApi(tables), before = core.statDataFromTables(layout, tables).stat_data, after = clone(before);
         after.状态.金币 = 2; after.背包.push('药');
@@ -875,7 +878,7 @@ test('当前楼批次：规划期间数据库变化或来源失效，不提交�
     }
 });
 
-test('可空动态记录：实际扩展 replace 立即读回和宿主回调保持记录语义', async () => {
+test("旧布局：可空动态记录：实际扩展 replace 立即读回和宿主回调保持记录语义", async () => {
     const sample = require('./nullable-records'), h = await nativeRuntime({ data: sample.source() });
     for (const value of [null, {}, undefined, { 数量: 4, 文本: '新值', 明细: { 保留: 2 } }]) {
         const next = h.win.Mvu.getMvuData();
@@ -902,7 +905,7 @@ function replyStatusOptions({ win, context }) {
 }
 function reply(text) { return { is_user: false, mes: text, swipe_id: 0 }; }
 
-test('回复状态清理：单数复数完整块、多个块及多行按原 MVU 去除，块外正文保留', async () => {
+test("旧布局：回复状态清理：单数复数完整块、多个块及多行按原 MVU 去除，块外正文保留", async () => {
     const h = await nativeRuntime(undefined, replyStatusOptions);
     let calls = 0;
     const before = JSON.stringify(h.tables);
@@ -919,7 +922,7 @@ test('回复状态清理：单数复数完整块、多个块及多行按原 MVU 
     assert.strictEqual(calls, 1, '已清理的消息不再保存');
     assert.strictEqual(JSON.stringify(h.tables), before, '回复展示处理不写变量和业务表');
 });
-test('回复状态清理：残缺、嵌套、属性及不配对的状态块不猜测删除', async () => {
+test("旧布局：回复状态清理：残缺、嵌套、属性及不配对的状态块不猜测删除", async () => {
     const h = await nativeRuntime(undefined, replyStatusOptions);
     let calls = 0; h.context.setChatMessages = async () => { calls++; };
     for (const text of ['前<status_current_variable>未闭合', '前</status_current_variable>后',
@@ -932,7 +935,7 @@ test('回复状态清理：残缺、嵌套、属性及不配对的状态块不�
     }
     assert.strictEqual(calls, 0);
 });
-test('回复状态清理：流式期间保留，完成后清理；补占位符与清理只保存一次', async () => {
+test("旧布局：回复状态清理：流式期间保留，完成后清理；补占位符与清理只保存一次", async () => {
     const h = await nativeRuntime(placeholderCard(), replyStatusOptions);
     let calls = 0; h.context.setChatMessages = async messages => { calls++; h.context.chat[messages[0].message_id].mes = messages[0].message; };
     const text = '故事<status_current_variable>变量</status_current_variable>';
@@ -945,7 +948,7 @@ test('回复状态清理：流式期间保留，完成后清理；补占位符�
     assert.strictEqual(h.context.chat[1].mes, '故事\n\n<StatusPlaceHolderImpl/>');
     assert.strictEqual(calls, 1);
 });
-test('回复状态清理：不遍历旧聊天，用户、系统和普通卡保持完整', async () => {
+test("旧布局：回复状态清理：不遍历旧聊天，用户、系统和普通卡保持完整", async () => {
     const h = await nativeRuntime(undefined, replyStatusOptions);
     const text = '故事<status_current_variable>变量</status_current_variable>';
     h.context.chat[0].mes = text;
@@ -961,7 +964,7 @@ test('回复状态清理：不遍历旧聊天，用户、系统和普通卡保�
     h.context.chat.push(reply(text)); await h.context.eventSource.emit('received', h.context.chat.length - 1); await h.advance(1300);
     assert.strictEqual(h.context.chat.at(-1).mes, text); assert.strictEqual(calls, 0);
 });
-test('回复状态清理：延迟期间切聊天、替换楼层或换 swipe 取消旧任务', async () => {
+test("旧布局：回复状态清理：延迟期间切聊天、替换楼层或换 swipe 取消旧任务", async () => {
     for (const change of ['chat', 'message', 'swipe']) {
         const h = await nativeRuntime(undefined, replyStatusOptions);
         let calls = 0; h.context.setChatMessages = async () => { calls++; };
@@ -973,7 +976,7 @@ test('回复状态清理：延迟期间切聊天、替换楼层或换 swipe 取�
         await h.advance(2500); assert.strictEqual(calls, 0);
     }
 });
-test('回复状态清理：保存拒绝后重试；保存中重复事件与切聊天不刷新其他楼', async () => {
+test("旧布局：回复状态清理：保存拒绝后重试；保存中重复事件与切聊天不刷新其他楼", async () => {
     const h = await nativeRuntime(undefined, replyStatusOptions);
     let calls = 0, renders = 0, release;
     const text = '故事<status_current_variable>变量</status_current_variable>';
@@ -1023,7 +1026,7 @@ function addUpdateReply(h, text = '原正文<UpdateVariable>_.add("状态.金币
     addReplyWithFrame(h); h.context.chat[2].mes = text; h.context.chat[2].swipe_id = 0;
     return h.context.chat[2];
 }
-test('MVU正文回调：更新后的变量与正文一同采用，重复事件不重放增量命令', async () => {
+test("旧布局：MVU正文回调：更新后的变量与正文一同采用，重复事件不重放增量命令", async () => {
     const h = await beforeMessageRuntime(context => {
         context.variables.stat_data.状态.金币 += 2;
         context.message_content = '金币：' + context.variables.stat_data.状态.金币;
@@ -1037,7 +1040,7 @@ test('MVU正文回调：更新后的变量与正文一同采用，重复事件�
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 13);
     assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 1 });
 });
-test('MVU正文回调：变量不变也保存正文，改写后的更新块登记为已处理', async () => {
+test("旧布局：MVU正文回调：变量不变也保存正文，改写后的更新块登记为已处理", async () => {
     const h = await beforeMessageRuntime(context => {
         context.message_content = '改写正文<UpdateVariable>_.add("状态.金币", 5);</UpdateVariable>';
     });
@@ -1048,7 +1051,7 @@ test('MVU正文回调：变量不变也保存正文，改写后的更新块登�
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 10);
     assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 1 });
 });
-test('MVU正文回调：保存失败只重试正文，不重复变量命令和作者回调', async () => {
+test("旧布局：MVU正文回调：保存失败只重试正文，不重复变量命令和作者回调", async () => {
     const h = await beforeMessageRuntime(context => { context.message_content = '改写后正文'; });
     let attempts = 0;
     h.context.setChatMessages = async messages => {
@@ -1063,7 +1066,7 @@ test('MVU正文回调：保存失败只重试正文，不重复变量命令和�
     assert.strictEqual(h.counts().hooks, 1);
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
 });
-test('MVU正文回调：回调等待期间切聊天、替换消息、编辑或换 swipe 均放弃旧写入', async () => {
+test("旧布局：MVU正文回调：回调等待期间切聊天、替换消息、编辑或换 swipe 均放弃旧写入", async () => {
     for (const change of ['chat', 'message', 'edit', 'swipe']) {
         let release, entered = false;
         const h = await beforeMessageRuntime(async context => {
@@ -1080,7 +1083,7 @@ test('MVU正文回调：回调等待期间切聊天、替换消息、编辑或�
         assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 10, change);
     }
 });
-test('MVU正文回调：生成结束才执行回调，状态清理与补占位符合并保存', async () => {
+test("旧布局：MVU正文回调：生成结束才执行回调，状态清理与补占位符合并保存", async () => {
     const h = await beforeMessageRuntime(context => { context.message_content += '\n回调正文'; }, placeholderCard());
     h.context.chat[0].mes += '\n<StatusPlaceHolderImpl/>';
     const message = addUpdateReply(h, '原正文<status_current_variable>旧状态</status_current_variable><UpdateVariable>_.add("状态.金币", 1);</UpdateVariable>');
@@ -1095,7 +1098,7 @@ test('MVU正文回调：生成结束才执行回调，状态清理与补占位�
     assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 1 });
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
 });
-test('MVU正文回调：首楼更新采用正文，修改来源后轮询不重放初始化', async () => {
+test("旧布局：MVU正文回调：首楼更新采用正文，修改来源后轮询不重放初始化", async () => {
     const h = await beforeMessageRuntime(context => {
         context.message_content = '<initvar>{"状态":{"生命":100,"金币":10},"背包":["钥匙",0,false,null]}</initvar>改写开场<UpdateVariable>_.add("状态.金币", 5);</UpdateVariable>';
     }, undefined, ({ context }) => { context.chat[0].mes = require('./synthetic-card')().data.first_mes; });
@@ -1108,7 +1111,7 @@ test('MVU正文回调：首楼更新采用正文，修改来源后轮询不重�
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
 });
 
-test('MVU正文回调：正文重试前编辑、删除或换分支取消；变量保持单次提交', async () => {
+test("旧布局：MVU正文回调：正文重试前编辑、删除或换分支取消；变量保持单次提交", async () => {
     for (const change of ['edit', 'delete', 'swipe']) {
         const h = await beforeMessageRuntime(context => { context.message_content = '回调正文'; });
         let attempts = 0; h.context.setChatMessages = async () => { attempts++; throw new Error('模拟保存失败'); };
@@ -1124,7 +1127,7 @@ test('MVU正文回调：正文重试前编辑、删除或换分支取消；变�
         if (change !== 'delete') assert.strictEqual(message.mes, '用户新正文');
     }
 });
-test('MVU正文回调：未修改正文或返回非字符串，不生成额外正文保存', async () => {
+test("旧布局：MVU正文回调：未修改正文或返回非字符串，不生成额外正文保存", async () => {
     for (const invalid of [false, true]) {
         const h = await beforeMessageRuntime(context => { if (invalid) context.message_content = undefined; });
         const message = addUpdateReply(h), original = message.mes;
@@ -1135,7 +1138,7 @@ test('MVU正文回调：未修改正文或返回非字符串，不生成额外�
     }
 });
 
-test('MVU正文回调：新聊天首楼合并初始化成功后保存正文，首轮增量只执行一次', async () => {
+test("旧布局：MVU正文回调：新聊天首楼合并初始化成功后保存正文，首轮增量只执行一次", async () => {
     const source = require('./synthetic-card')();
     source.data.first_mes += '<UpdateVariable>_.add("状态.金币", 1);</UpdateVariable>';
     const h = await beforeMessageRuntime(context => { context.message_content = '新聊天回调正文'; }, source, ({ context, api, tables }) => {
@@ -1153,7 +1156,7 @@ test('MVU正文回调：新聊天首楼合并初始化成功后保存正文，�
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 11);
     assert.deepStrictEqual(h.counts(), { hooks: 1, saves: 1 });
 });
-test('MVU正文回调：首楼回调等待期间编辑或换分支，变量与正文都不覆盖新来源', async () => {
+test("旧布局：MVU正文回调：首楼回调等待期间编辑或换分支，变量与正文都不覆盖新来源", async () => {
     for (const change of ['edit', 'swipe']) {
         let release;
         const h = await beforeMessageRuntime(async context => {
@@ -1169,7 +1172,7 @@ test('MVU正文回调：首楼回调等待期间编辑或换分支，变量与�
     }
 });
 
-test('MVU正文回调：接口改内存后报错仍重试保存，改写的命令不能再执行', async () => {
+test("旧布局：MVU正文回调：接口改内存后报错仍重试保存，改写的命令不能再执行", async () => {
     const h = await beforeMessageRuntime(context => {
         context.message_content = '回调正文<UpdateVariable>_.add("状态.金币", 5);</UpdateVariable>';
     });
@@ -1186,7 +1189,7 @@ test('MVU正文回调：接口改内存后报错仍重试保存，改写的命�
     assert.strictEqual(h.counts().hooks, 1);
 });
 
-test('统一变量入口实装：MVU与TH历史读取限定消息边界，历史写入不动当前表', async () => {
+test("旧布局：统一变量入口实装：MVU与TH历史读取限定消息边界，历史写入不动当前表", async () => {
     const h = await nativeRuntime();
     const original = clone(h.tables);
     const historical = h.win.Mvu.getMvuData();
@@ -1207,7 +1210,7 @@ test('统一变量入口实装：MVU与TH历史读取限定消息边界，历史
     assert.deepStrictEqual(clone(h.context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame.checkpoint.data), original);
 });
 
-test('统一变量入口实装：MVU显式chat/global作用域仍调用宿主公开接口', async () => {
+test("旧布局：统一变量入口实装：MVU显式chat/global作用域仍调用宿主公开接口", async () => {
     const calls = [];
     const h = await nativeRuntime(undefined, ({ win }) => {
         win.getVariables = options => { calls.push(['read', options]); return { native: options.type }; };
@@ -1252,7 +1255,7 @@ async function hostSeededSchemaRuntime() {
     return {...h,calls:()=>calls};
 }
 
-test('宿主先建表：真实新聊天事件补齐 Schema 初始化且只执行一次', async () => {
+test("旧布局：宿主先建表：真实新聊天事件补齐 Schema 初始化且只执行一次", async () => {
     const h=await hostSeededSchemaRuntime(), before=h.win.Mvu.getMvuData().stat_data.状态.金币;
     assert(h.handlers.has('chat_created'), 'actual runtime subscribes to the host lifecycle event');
     assert.equal(h.calls(),0,'existing checkpoint alone must not replay author transforms');
@@ -1263,7 +1266,7 @@ test('宿主先建表：真实新聊天事件补齐 Schema 初始化且只执行
     assert.equal(h.calls(),1,'duplicate notifications must not repeat non-idempotent transforms');
 });
 
-test('宿主先建表：已有聊天只换页不重跑 Schema 初始化', async () => {
+test("旧布局：宿主先建表：已有聊天只换页不重跑 Schema 初始化", async () => {
     const h=await hostSeededSchemaRuntime(), before=h.win.Mvu.getMvuData().stat_data;
     await h.context.eventSource.emit('chat_changed'); await h.advance(15000);
     assert.equal(h.calls(),0);
@@ -1271,14 +1274,14 @@ test('宿主先建表：已有聊天只换页不重跑 Schema 初始化', async 
 });
 
 
-test('开场完整 JSON：Schema 删除未声明子字段后不恢复模板旧值', async () => {
+test("旧布局：开场完整 JSON：Schema 删除未声明子字段后不恢复模板旧值", async () => {
     const source=require('./synthetic-card')(), entry=source.data.character_book.entries.find(e=>/initvar/i.test(e.comment));
     const initial=core.parseInitVar(entry.content); initial.状态.身份=[]; entry.content=JSON.stringify(initial);
     source.data.first_mes='公开开场。'; source.data.alternate_greetings=[];
     source.data.extensions.tavern_helper.scripts.push({type:'script',name:'公开对象规范化',enabled:true,
         content:`import {registerMvuSchema} from 'https://example.org/mvu_zod.js';
         const Schema=z.object({状态:z.object({生命:z.number(),金币:z.number()}).transform(v=>v),背包:z.array(z.any())});registerMvuSchema(Schema);`});
-    assert.equal(core.convert(source).schema.find(group=>group.name==='状态').valueCol,'内容');
+    assert.equal(publishedLayoutFixture(source).schema.find(group=>group.name==='状态').valueCol,'内容');
     const h=await nativeRuntime(source,({win,context,api,tables})=>{
         win.TavernHelper={};context.event_types={CHAT_CHANGED:'chat_changed',CHAT_CREATED:'chat_created'};
         const original=api.importTableAsJson;api.importTableAsJson=async (...args)=>{const result=await original(...args);context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame.checkpoint.data=clone(tables);return result;};

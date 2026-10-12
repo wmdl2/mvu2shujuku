@@ -11,6 +11,7 @@
  * 默认只打印数量/汇总；失败时回放该用例最后 20 条截断日志。
  */
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
 
 const { test, runTests, parseArgs } = require('./runner');
 const {
@@ -298,7 +299,7 @@ test('从 [mvu_update] 与酒馆助手 Zod Schema 合并结构声明', () => {
     assert.strictEqual(si.objects['玉简']['历史记录'], true);
 });
 
-test('从 [mvu_update] 提取 check 规则与提醒（含引号项、模板键展开）', () => {
+test("旧布局：从 [mvu_update] 提取 check 规则与提醒（含引号项、模板键展开）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -359,13 +360,13 @@ test('从 [mvu_update] 提取 check 规则与提醒（含引号项、模板键�
     assert.strictEqual(si.checks['主角']['道心'][0], '四境：凡心(0~25) 初窥(26~50)', '引号包裹的列表项应剥掉引号');
     assert.ok(si.reminders['主角'].some(r => r.includes('生命/精血')), '提醒中的模板键应展开');
     // 落到表格 note：check 规则应出现在填表提示词里
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const world = Object.values(r.template).find(s => s && s.name === '世界表');
     assert.ok(world.sourceData.note.includes('- 遭遇冷却：\n') && world.sourceData.note.includes('  - 如果当前遭遇冷却大于0'), 'note 应在字段分组中包含 check 规则');
     assert.ok(world.sourceData.note.includes('当前地点：必须按层级描述'), 'note 应包含单行引号 check');
 });
 
-test('YAML 带前后缀的 ${A|B}模板键展开 check/range，非数值 range 作为枚举', () => {
+test("旧布局：YAML 带前后缀的 ${A|B}模板键展开 check/range，非数值 range 作为枚举", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -409,7 +410,7 @@ test('YAML 带前后缀的 ${A|B}模板键展开 check/range，非数值 range �
     assert.deepStrictEqual(si.enums['露出分区'], ['初级区', '中级区', '高级区'], '非数值 range 应作为枚举');
     assert.ok(si.checks['任务经验']['扩张分区'].some(x => x.includes('0至20')), 'check 应附着到每个展开字段');
 
-    const r = core.convert(card, { mode: 'both', ddlIncludeCheck: true });
+    const r = publishedLayoutFixture(card, { mode: 'both', ddlIncludeCheck: true });
     const table = Object.values(r.template).find(s => s && s.name === '任务经验表');
     for (const field of ['露出经验', '扩张经验']) {
         const section = table.sourceData.note.split(`- ${field}：`)[1].split('\n- ')[0];
@@ -443,7 +444,7 @@ test('组级 check（道侣/灵宠/人物/玉简等整表规则）不应丢失',
     assert.ok(jade.sourceData.note.includes('历史记录严格限制最多保留100条'), '玉简表 note 应含组级规则');
 });
 
-test('format 支持无引号与块标量写法；zod 数值约束提取范围', () => {
+test("旧布局：format 支持无引号与块标量写法；zod 数值约束提取范围", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -505,7 +506,7 @@ test('format 支持无引号与块标量写法；zod 数值约束提取范围', 
     assert.ok(si.numericFields.has('依存度'), 'zod 数值字段应标记为数字');
     assert.deepStrictEqual(si.enums['称谓'], ['仙子', '道友'], 'zod z.enum 应提取可选值');
     assert.strictEqual(si.zodDescs['白娅']['着装'], '穿着描述', 'zod .describe 应提取字段说明');
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const byName = (n) => Object.values(r.template).find(s => s && s.name === n);
     const world = byName('世界表');
     assert.ok(world.sourceData.note.includes('格式要求：YYYY年MM月DD日 星期X HH:MM'), 'note 应含无引号格式');
@@ -605,7 +606,7 @@ test('动态构造的 registerMvuSchema 无法静态解析时必须报告降级'
     assert.ok(Object.values(r.template).some(s => s && s.name === '系统表'), 'Schema 降级不应阻止 InitVar 主体转换');
 });
 
-test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而非静默丢弃', () => {
+test("旧布局：通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而非静默丢弃", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -647,7 +648,7 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     assert.ok(si.wildcardFields.has('户.<门牌>.夫.当前情绪'), '多个通配路径字段都应被识别');
     assert.ok(![...si.wildcardFields].some(k => k.includes('0.8mm')), '描述文本中的小数点不得误判为 MVU 路径');
     assert.ok(Array.isArray(si.wildcardRules['人物']) && si.wildcardRules['人物'][0].range[0] === 0, '通配规则应按路径首段归组并提取范围');
-    const r = core.convert(card, { mode: 'sqlite' });
+    const r = publishedLayoutFixture(card, { mode: 'sqlite' });
     assert.ok(r.report.toMarkdown().includes('动态键规则'), '转换报告应说明实际含动态键的规则');
     const hub = Object.values(r.template).find(s => s && s.name === '户表');
     assert.ok(hub.sourceData.note.includes('【可写路径与约束】'), 'JSON 表有可写规则时不应一刀切只读');
@@ -674,7 +675,7 @@ test('通配路径字段（如 户.<门牌>.妻.好感值）应显式警告而�
     );
 });
 
-test('模板 content 单元格归一化：布尔 → 1/0，无非法类型（插件 escapeValue 兼容）', () => {
+test("旧布局：模板 content 单元格归一化：布尔 → 1/0，无非法类型（插件 escapeValue 兼容）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -695,7 +696,7 @@ test('模板 content 单元格归一化：布尔 → 1/0，无非法类型（插
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const sheet = Object.values(r.template).find(s => s && s.name === '玩家资源表');
     assert.ok(sheet, '应生成玩家资源表');
     for (let ri = 1; ri < sheet.content.length; ri++) {
@@ -708,7 +709,7 @@ test('模板 content 单元格归一化：布尔 → 1/0，无非法类型（插
     assert.strictEqual(sheet.content[1][sheet.content[0].indexOf('已启用')], 1, 'true 应归一化为 1');
 });
 
-test('zod/TS 替代写法：z.object 结构 + /** check: */ 注释应被解析', () => {
+test("旧布局：zod/TS 替代写法：z.object 结构 + /** check: */ 注释应被解析", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -762,7 +763,7 @@ test('zod/TS 替代写法：z.object 结构 + /** check: */ 注释应被解析',
         'zod /** check: */ 注释应提取为规则'
     );
     // 落到表格 note
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const bya = Object.values(r.template).find(s => s && s.name === '白娅表');
     assert.ok(bya.sourceData.note.includes('- 依存度：\n') && bya.sourceData.note.includes('  - 根据白娅对<%- mvu2shujukuResolveMacro("user") %>行为的感知和反应调整 ±(3~6)'), 'zod check 应进入字段分组填表提示词并在请求时解析 user 宏');
 });
@@ -806,7 +807,7 @@ test('动态 EJS YAML 值不得被识别为静态枚举或写入表格提示词'
     assert.ok(!notes.includes('<%-'), '表格 note 不应保留动态 EJS 输出标记');
 });
 
-test('DDL CHECK 开关：默认带约束，ddlIncludeCheck:false 时全部去掉（范围/枚举/json_valid）', () => {
+test("旧布局：DDL CHECK 开关：默认带约束，ddlIncludeCheck:false 时全部去掉（范围/枚举/json_valid）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -839,7 +840,7 @@ test('DDL CHECK 开关：默认带约束，ddlIncludeCheck:false 时全部去掉
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const withCheck = core.convert(card, { mode: 'both' });
+    const withCheck = publishedLayoutFixture(card, { mode: 'both' });
     const allDdl = Object.values(withCheck.template)
         .filter(s => s && s.sourceData && s.sourceData.ddl)
         .map(s => s.sourceData.ddl)
@@ -847,7 +848,7 @@ test('DDL CHECK 开关：默认带约束，ddlIncludeCheck:false 时全部去掉
     assert.ok(allDdl.includes('CHECK('), '默认应带 CHECK 约束');
     assert.ok(allDdl.includes('CHECK(json_valid(neirong))'), 'JSON 表默认应有 json_valid CHECK');
     assert.ok(allDdl.includes('CHECK(yicundu BETWEEN 0 AND 100)'), '数值范围默认应有 CHECK');
-    const noCheck = core.convert(card, { mode: 'both', ddlIncludeCheck: false });
+    const noCheck = publishedLayoutFixture(card, { mode: 'both', ddlIncludeCheck: false });
     const allDdl2 = Object.values(noCheck.template)
         .filter(s => s && s.sourceData && s.sourceData.ddl)
         .map(s => s.sourceData.ddl)
@@ -893,7 +894,7 @@ test('自动化更新参数：模板每表带 updateConfig，改 JSON 后重转�
     assert.strictEqual(worldEmbed.updateConfig.updateFrequency, 2, '卡内模板 base64 应同步新参数');
 });
 
-test('SQL INSERT 示例按类型生成短值，不复制已有记录和默认载荷', () => {
+test("旧布局：SQL INSERT 示例按类型生成短值，不复制已有记录和默认载荷", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -913,16 +914,16 @@ test('SQL INSERT 示例按类型生成短值，不复制已有记录和默认载
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'sqlite' });
+    const r = publishedLayoutFixture(card, { mode: 'sqlite' });
     const dl = Object.values(r.template).find(s => s && s.name === '道侣表');
     assert.ok(dl.sourceData.insertNode.includes("VALUES ('键名', 0, 0, '性格示例', '{}')"), 'INSERT 使用新键占位、数值和文本短示例');
     assert.ok(dl.sourceData.updateNode.includes('SET qinmi = 51'), 'UPDATE 示例保持数值类型，演示不同于初始值的合法数值');
     assert.doesNotMatch(dl.sourceData.note, /SQL 示例仅在本次输出要求 SQL 脚本时适用/, '移除停用模式的共用说明');
 });
 
-test('单例 UPDATE 示例：与行表一致的“规则 + SQL示例:”格式，TEXT 用“新值”占位', () => {
+test("旧布局：单例 UPDATE 示例：与行表一致的“规则 + SQL示例:”格式，TEXT 用“新值”占位", () => {
     const card = { name: '单例短示例', first_mes: '', character_book: { entries: [{ comment: '[InitVar]', content: '世界: { 当前时间: 未知, 遭遇冷却: 20 }' }] } };
-    const r = core.convert(card, { mode: 'sqlite' });
+    const r = publishedLayoutFixture(card, { mode: 'sqlite' });
     const world = Object.values(r.template).find(s => s && s.name === '世界表');
     const node = world.sourceData.updateNode;
     assert.ok(node.includes('SQL示例: UPDATE shijiebiao SET dangqianshijian ='), '单例 updateNode 应有 SQL示例: 前缀');
@@ -931,7 +932,7 @@ test('单例 UPDATE 示例：与行表一致的“规则 + SQL示例:”格式�
     assert.ok(!node.includes('示例值仅为格式演示'), 'UPDATE 示例不再带“示例值仅为格式演示”后缀（与插件内置模板一致）');
 });
 
-test('相邻顶层组不被跳过 + check 机制词清洗（op/delta/replace/分指令）', () => {
+test("旧布局：相邻顶层组不被跳过 + check 机制词清洗（op/delta/replace/分指令）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -970,7 +971,7 @@ test('相邻顶层组不被跳过 + check 机制词清洗（op/delta/replace/分
     const si = core.parseMvuShapes(card);
     // 相邻组（变量更新规则: 后紧跟 世界:）不能被跳过
     assert.ok(Array.isArray(si.checks['世界']['遭遇冷却']), '相邻的 世界 组应被识别（check 应挂在 世界 下）');
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const byName = (n) => Object.values(r.template).find(s => s && s.name === n);
     const worldNote = byName('世界表').sourceData.note;
     assert.ok(worldNote.includes('- 遭遇冷却：\n') && worldNote.includes('  - 如果当前遭遇冷却大于0，每推进一次剧情/回合就减1'), '括号机制注释应删除、业务规则应保留在字段分组中');
@@ -997,7 +998,7 @@ test('道渊状态栏字段扫描', () => {
 
 /* ---------------- buildSchema / generateTemplate ---------------- */
 section('buildSchema / generateTemplate');
-test('道渊：关系子表与未知变换的完整JSON结构正确', () => {
+test("道渊：完整父变量JSON保留数据与原业务规则", () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const t = r.template;
@@ -1010,10 +1011,11 @@ test('道渊：关系子表与未知变换的完整JSON结构正确', () => {
     assert.ok(hero.sourceData.ddl.includes('CHECK('), '主角表 DDL 应有范围约束（来自卡内规则）');
     assert.ok(hero.sourceData.ddl.includes('DEFAULT'), '主角表 DDL 应有默认值');
     const jade = t[byName('玉简表')];
-    assert.ok(jade.content[0].includes('历史记录'), '任意变换的历史记录输出应整体JSON保存');
+    assert.deepStrictEqual(jade.content[0],['row_id','内容'],'历史记录随玉简完整保存');
     assert.strictEqual(byName('玉简_历史记录表'),undefined,'不能猜测未知变换输出后再重复拆表');
     const jadeLayout = JSON.parse(r.card.data.extensions.mvu2shujuku.layout).find(entry=>entry.table==='玉简表');
-    assert.strictEqual(jadeLayout.cols.find(column=>column[0]==='历史记录')[7],'any','完整JSON保留任意合法输出值');
+    assert.strictEqual(jadeLayout.valueCol,'内容');
+    assert.deepStrictEqual(JSON.parse(jade.content[1][1]),core.statDataFromTables(JSON.parse(r.card.data.extensions.mvu2shujuku.layout),t).stat_data.玉简);
     // 标识符应为拼音 slug（无下划线冲突、可作 SQL 标识符）
     for (const k of Object.keys(t).filter(k => k.startsWith('sheet_'))) {
         assert.ok(/^sheet_[a-z0-9_]+$/.test(k), `sheet key 应为拼音 slug：${k}`);
@@ -1380,7 +1382,7 @@ test('writeStatDiffToDb：写路径纯原生 CRUD，executeSqlBatch 永不调用
     assert.strictEqual(tables.sheet_2.content.length, 3, '应插入新行');
 });
 
-test('条目字段全是叶子的字典应判为行表（修复误判为单例）', () => {
+test("旧布局：条目字段全是叶子的字典应判为行表（修复误判为单例）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -1401,7 +1403,7 @@ test('条目字段全是叶子的字典应判为行表（修复误判为单例�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const t = Object.values(r.template).find(s => s && s.name === '道侣表');
     assert.ok(t, '应有道侣表');
     assert.strictEqual(t.content.length - 1, 2, '应为 2 行（每条目一行）');
@@ -1569,7 +1571,7 @@ test('转换后 tavern_helper 脚本必须带 type:script（酒馆助手 discrim
     }
 });
 
-test('多分支开场 <initvar> 只以首个分支为基准，不再合并所有分支状态', () => {
+test("旧布局：多分支开场 <initvar> 只以首个分支为基准，不再合并所有分支状态", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -1585,7 +1587,7 @@ test('多分支开场 <initvar> 只以首个分支为基准，不再合并所有
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const t = Object.values(r.template).find(s => s && s.name === '主角表');
     assert.ok(t, '应有主角表');
     assert.strictEqual(t.content.length - 1, 1, '模板初始行只有一行（不应把各分支合并）');
@@ -1594,7 +1596,7 @@ test('多分支开场 <initvar> 只以首个分支为基准，不再合并所有
     assert.strictEqual(t.content[1][ki], '筑基五层', '初始值应来自首个分支');
 });
 
-test('开局按当前分支注入 <initvar>：切到另一分支后表格更新为该分支初始值', async () => {
+test("旧布局：开局按当前分支注入 <initvar>：切到另一分支后表格更新为该分支初始值", async () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -1609,7 +1611,7 @@ test('开局按当前分支注入 <initvar>：切到另一分支后表格更新�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const tables = JSON.parse(JSON.stringify(r.template));
     const byName = (n) => Object.keys(tables).find(k => tables[k].name === n);
     const zjKey = byName('主角表');
@@ -1720,7 +1722,7 @@ test("旧桥回归：单例容器列不覆盖展平字段；空动态字典用�
     assert.strictEqual(stat2.主角.状态.BUFF列表.流血, true, 'BUFF列表布尔条目应读回 true');
 });
 
-test('行表条目内的空嵌套对象不再拆出每条目重复子表', () => {
+test("旧布局：行表条目内的空嵌套对象不再拆出每条目重复子表", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -1741,7 +1743,7 @@ test('行表条目内的空嵌套对象不再拆出每条目重复子表', () =>
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const names = Object.values(r.template).filter(s => s && s.name).map(s => s.name);
     assert.ok(names.includes('角色表'), '应有角色表');
     assert.ok(!names.includes('A表') && !names.includes('B表'), '不应有每条目重复子表');
@@ -1750,7 +1752,7 @@ test('行表条目内的空嵌套对象不再拆出每条目重复子表', () =>
     assert.ok(t.content[0].includes('效果'), '空嵌套对象应转为 JSON 列');
 });
 
-test('行表 [值,说明] 文本列保留 pair 与 desc（状态栏读取一致）', () => {
+test("旧布局：行表 [值,说明] 文本列保留 pair 与 desc（状态栏读取一致）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -1770,7 +1772,7 @@ test('行表 [值,说明] 文本列保留 pair 与 desc（状态栏读取一致�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const layout = core.buildLayout(r.schema);
     const e = layout.entries.find(x => x.table === '道侣表');
     const zhongzu = e.cols.find(c => c.zh === '种族');
@@ -1783,7 +1785,7 @@ test('行表 [值,说明] 文本列保留 pair 与 desc（状态栏读取一致�
     assert.ok(t.sourceData.note.includes('林若悠的种族'), 'note 列定义应含 desc');
 });
 
-test('表种类推导矩阵：单例/行表/数组/混合均符合预期', () => {
+test("旧布局：表种类推导矩阵：单例/行表/数组/混合均符合预期", () => {
     const cases = [
         ['纯叶子', { 主角: { 姓名: '未知', 生命: 100 } }, '主角表', 'singleton', 1],
         ['叶子+平铺子对象', { 主角: { 姓名: 'x', 炼丹: { 阶级: '未入门' } } }, '主角表', 'singleton', 1],
@@ -1805,7 +1807,7 @@ test('表种类推导矩阵：单例/行表/数组/混合均符合预期', () =>
                 extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
             },
         };
-        const r = core.convert(card, { mode: 'both' });
+        const r = publishedLayoutFixture(card, { mode: 'both' });
         const g = (Array.isArray(r.schema) ? r.schema : []).find(x => x && x.name === tableName.replace(/表$/, ''));
         assert.strictEqual(g && g.kind, expectKind, `${label}: 表种类应为 ${expectKind}`);
         const t = Object.values(r.template).find(s => s && s.name === tableName);
@@ -1815,7 +1817,7 @@ test('表种类推导矩阵：单例/行表/数组/混合均符合预期', () =>
     }
 });
 
-test('initvar 注释行不产生变量组，顶层标量原样保留', () => {
+test("旧布局：initvar 注释行不产生变量组，顶层标量原样保留", () => {
     // YAML 子集：开头 # 注释行、顶层标量、嵌套对象混排（人妻公寓式写法）
     const content = [
         '# 初始值:第四态休眠拍板（注释绝不能当变量组）',
@@ -1841,7 +1843,7 @@ test('initvar 注释行不产生变量组，顶层标量原样保留', () => {
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const t = r.template;
     const sheetNames = Object.keys(t).filter(k => k.startsWith('sheet_')).map(k => t[k].name);
     // 1) # 注释行不得成为表
@@ -1867,7 +1869,7 @@ test('initvar 注释行不产生变量组，顶层标量原样保留', () => {
     assert.ok(!sheetNames.some(n => n.startsWith('_')), '_ 前缀空字典不应拆成表');
 });
 
-test('initvar 使用与 MVU 源码同款 YAML 库：merge keys / 块标量 / 混合键', () => {
+test("旧布局：initvar 使用与 MVU 源码同款 YAML 库：merge keys / 块标量 / 混合键", () => {
     const content = [
         '基础: &base',
         '  a: 1',
@@ -1890,7 +1892,7 @@ test('initvar 使用与 MVU 源码同款 YAML 库：merge keys / 块标量 / 混
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const t = r.template;
     const byName = (n) => Object.keys(t).find(k => t[k].name === n);
     const base = t[byName('基础表')];
@@ -1905,7 +1907,7 @@ test('initvar 使用与 MVU 源码同款 YAML 库：merge keys / 块标量 / 混
     assert.strictEqual(sys.content[1][sys.content[0].indexOf('上次生成期')], -1, '行内对象解析正确');
 });
 
-test('单例对象列写入：子字段变更整对象写回（jsonCell）', async () => {
+test("旧布局：单例对象列写入：子字段变更整对象写回（jsonCell）", async () => {
     const content = [
         '系统:',
         '  _数据版本: 7',
@@ -1921,7 +1923,7 @@ test('单例对象列写入：子字段变更整对象写回（jsonCell）', asy
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const t = r.template;
     const layout = JSON.parse(r.card.data.extensions.mvu2shujuku.layout);
     const tables = JSON.parse(JSON.stringify(t));
@@ -2057,7 +2059,7 @@ test('误标 [mvu_update] 的剧情文本条目应保留，纯变量管道仍删
     assert.ok(!entries.some(e => e.comment.includes('变量列表开始')), '短标记应删除');
 });
 
-test('<%_ if %>（EJS 吞空白写法）也能重写为 <if cell>，且仅 EJS 出现的字段补进列', () => {
+test("旧布局：<%_ if %>（EJS 吞空白写法）也能重写为 <if cell>，且仅 EJS 出现的字段补进列", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -2076,7 +2078,7 @@ test('<%_ if %>（EJS 吞空白写法）也能重写为 <if cell>，且仅 EJS �
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const entries = (r.card.data || r.card).character_book.entries;
     const plot = entries.find(e => e.comment.includes('人设'));
     assert.ok(plot.content.includes("getvar('stat_data.角色.苏苏.发情值') < 20"), '吞空白 EJS 应改为数据库安全取值');
@@ -2290,7 +2292,7 @@ test("旧桥回归：数据桥 getAllVariables 重建 stat_data（端到端模�
 section('Mvu 兼容层');
 
 test('旧桥回归：Mvu 兼容层：完整 API 面（setMvuVariable/getMvuVariable/parseMessage/事件名）', () => {
-    const card = requireFixture();
+    const card = {name:'旧桥API面公开样本',character_book:{entries:[{comment:'[InitVar]',content:'主角: {姓名: 甲}'}]}};
     const r = legacyLayoutFixture(card, { mode: 'both' });
     const { win, tables } = bridgeSandbox(r);
     const Mvu = win.Mvu;
@@ -2593,7 +2595,7 @@ test("旧桥回归：空字典组（无字段线索）→ 整组 JSON：对象�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both', installMvuShim: true });
+    const r = publishedLayoutFixture(card, { mode: 'both', installMvuShim: true });
     const layout = core.buildLayout(r.schema);
     const taskEntry = layout.entries.find(e => e.group === '任务');
     const opEntry = layout.entries.find(e => e.group === '本轮操作');
@@ -2895,7 +2897,7 @@ test("旧桥回归：单例/整组JSON表仅表头时自动补初始行（update
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both', installMvuShim: true });
+    const r = publishedLayoutFixture(card, { mode: 'both', installMvuShim: true });
     const tables = JSON.parse(JSON.stringify(r.template));
     const byName = (n) => Object.keys(tables).find(k => tables[k].name === n);
     // 模拟插件运行期"仅表头+seedRows"：把 系统表/任务表 的 content 裁成只有表头
@@ -2965,7 +2967,7 @@ test("旧桥回归：单例/整组JSON表仅表头时自动补初始行（update
     })().catch(e => { throw e; });
 });
 
-test('SQL 示例不应包含内部溢出列 _扩展数据', () => {
+test("旧布局：SQL 示例不应包含内部溢出列 _扩展数据", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -2985,7 +2987,7 @@ test('SQL 示例不应包含内部溢出列 _扩展数据', () => {
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'sqlite' });
+    const r = publishedLayoutFixture(card, { mode: 'sqlite' });
     const sheet = Object.values(r.template).find(s => s && s.name === '持有物品表');
     assert.ok(!sheet.content[0].includes('_扩展数据'), '新模板不再生成隐藏扩展列');
     assert.ok(!sheet.sourceData.insertNode.includes('_扩展数据'), 'INSERT 示例不应包含 _扩展数据');
@@ -3052,7 +3054,7 @@ test('旧布局：嵌套数组拆成有序子表，不在父表保留业务 JSON
     assert.deepStrictEqual(businessJson, []);
 });
 
-test('行表 initNode 不写死首个开场分支的初始记录名（多开场白分支注入后不误导）', () => {
+test("旧布局：行表 initNode 不写死首个开场分支的初始记录名（多开场白分支注入后不误导）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3065,14 +3067,14 @@ test('行表 initNode 不写死首个开场分支的初始记录名（多开场�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const sheet = Object.values(r.template).find(s => s && s.name === '结识道友录表');
     assert.ok(sheet, '应生成结识道友录表');
     assert.ok(sheet.sourceData.initNode.includes('开局模板已初始化 2 条记录'), 'initNode 应说明记录条数');
     assert.ok(!sheet.sourceData.initNode.includes('潮听澜') && !sheet.sourceData.initNode.includes('林晚'), 'initNode 不应写死具体记录名（首个开场分支）');
 });
 
-test('下划线名称不单独改变公开单例的更新权限', () => {
+test("旧布局：下划线名称不单独改变公开单例的更新权限", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3085,7 +3087,7 @@ test('下划线名称不单独改变公开单例的更新权限', () => {
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const sheet = Object.values(r.template).find(s => s && s.name === '系统表');
     assert.ok(sheet, '应生成系统表');
     assert.ok(sheet.sourceData.note.includes('禁止新增或删除记录'), '普通单例仍固定身份行');
@@ -3470,7 +3472,7 @@ test('折叠显示类 MVU 更新块清理正则也保留', () => {
     assert.ok(rx.some(x => x.scriptName === '[美化]变量更新'), '匹配更新块并调用兼容 API 不能证明是引擎，业务脚本应保留');
 });
 
-test('REAL range 初始值为非数字哨兵时 DDL 放行且默认值保留哨兵', () => {
+test("旧布局：REAL range 初始值为非数字哨兵时 DDL 放行且默认值保留哨兵", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3486,7 +3488,7 @@ test('REAL range 初始值为非数字哨兵时 DDL 放行且默认值保留哨�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const t = Object.values(r.template).find(s => s && s.name === '角色表');
     assert.ok(t, '应有角色表');
     assert.ok(t.sourceData.ddl.includes("tianfu_dengji REAL NOT NULL DEFAULT '无' CHECK(tianfu_dengji BETWEEN 1 AND 100 OR tianfu_dengji IN ('无'))"), '非数字哨兵应作为默认值并在 CHECK 中放行');
@@ -3516,7 +3518,7 @@ test('INTEGER range 空表默认值不应违反 CHECK', () => {
     assert.ok(t.sourceData.ddl.includes('dengji INTEGER NOT NULL DEFAULT 1 CHECK(dengji BETWEEN 1 AND 100'), '空表数值 range 默认值应取区间下限，避免 DEFAULT 0 违反 CHECK');
 });
 
-test('initvar 容错 key:{{user}} 无空格，不把宏带进列名', () => {
+test("旧布局：initvar 容错 key:{{user}} 无空格，不把宏带进列名", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3534,7 +3536,7 @@ test('initvar 容错 key:{{user}} 无空格，不把宏带进列名', () => {
     const init = card.data.character_book.entries[0].content;
     const parsed = core.parseInitVar(init);
     assert.strictEqual(parsed.角色.ID.真名, '{{user}}', '无空格宏值应解析为 真名 字段的值');
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const t = Object.values(r.template).find(s => s && s.name === '角色表');
     assert.ok(t, '应有角色表');
     assert.ok(t.content[0].includes('ID_真名'), '列名应为 ID_真名');
@@ -3543,7 +3545,7 @@ test('initvar 容错 key:{{user}} 无空格，不把宏带进列名', () => {
     assert.strictEqual(t.content[1][ci], '{{user}}', '宏值应保留在单元格中');
 });
 
-test('宏列名兜底清洗：即使解析后仍有宏列名也会被 sanitize', () => {
+test("旧布局：宏列名兜底清洗：即使解析后仍有宏列名也会被 sanitize", () => {
     const init = { 角色: { 姓名: '无名', ID: { '真名:{{user}}': null } } };
     const card = {
         spec: 'chara_card_v3',
@@ -3555,7 +3557,7 @@ test('宏列名兜底清洗：即使解析后仍有宏列名也会被 sanitize',
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const t = Object.values(r.template).find(s => s && s.name === '角色表');
     assert.ok(t, '应有角色表');
     assert.ok(t.content[0].includes('ID_真名'), '宏列名应清洗为 ID_真名');
@@ -3611,7 +3613,7 @@ test('旧布局：行表内 JSON 数组列 DDL 使用 json_type = array 而不�
     assert.strictEqual(t.content[1][ci], '[]', '初始数组值应保持 []');
 });
 
-test('通配路径的有限枚举占位符展开为固定列', () => {
+test("旧布局：通配路径的有限枚举占位符展开为固定列", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3640,7 +3642,7 @@ test('通配路径的有限枚举占位符展开为固定列', () => {
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const role = Object.values(r.template).find(s => s && s.name === '角色表');
     assert.ok(role, '应生成角色表');
     const h = role.content[0];
@@ -3680,7 +3682,7 @@ test('旧布局：动态对象内部字段不泄漏为父表幽灵列', () => {
     assert.ok(arch.content[0].includes('类型'), '建筑子表应保留类型列');
 });
 
-test('动态行表 ${角色}.静态字段 保守展开为列，数组/对象保留 JSON 类型', () => {
+test("旧布局：动态行表 ${角色}.静态字段 保守展开为列，数组/对象保留 JSON 类型", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3699,7 +3701,7 @@ test('动态行表 ${角色}.静态字段 保守展开为列，数组/对象保�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const t = Object.values(r.template).find(s => s && s.name === '角色表');
     assert.ok(t, '应有角色表');
     assert.ok(t.content[0].includes('好感度'), '${角色}.好感度 应展开为列');
@@ -3723,7 +3725,7 @@ test("旧桥回归：开场整表快速路径先追平 prev，再应用部分 ne
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const tables = JSON.parse(JSON.stringify(r.template));
     const layout = JSON.parse((r.card.data || r.card).extensions.mvu2shujuku.layout);
     const api = applyingApi(tables);
@@ -3760,9 +3762,9 @@ test('native / sqlite 单模式', () => {
     assert.ok(rn.template[hero].sourceData.note.includes('【字段说明与规则】'), 'note 应含强制约束');
 });
 
-test('SQL 示例 VALUES 数量与列数一致', () => {
+test("旧布局：SQL 示例 VALUES 数量与列数一致", () => {
     const card = requireFixture();
-    const r = core.convert(card, { mode: 'sqlite' });
+    const r = legacyLayoutFixture(card, { mode: 'sqlite' });
     let checked = 0;
     for (const k of Object.keys(r.template).filter(k => k.startsWith('sheet_'))) {
         const ins = r.template[k].sourceData.insertNode || '';
@@ -3776,7 +3778,7 @@ test('SQL 示例 VALUES 数量与列数一致', () => {
     assert.ok(checked >= 3, `应至少检查 3 张表的 INSERT 示例（实际 ${checked}）`);
 });
 
-test('INSERT 示例使用短值而不复制真实初始记录，空表保留键名示例', () => {
+test("旧布局：INSERT 示例使用短值而不复制真实初始记录，空表保留键名示例", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -3796,7 +3798,7 @@ test('INSERT 示例使用短值而不复制真实初始记录，空表保留键�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'sqlite' });
+    const r = publishedLayoutFixture(card, { mode: 'sqlite' });
     const ins = Object.values(r.template).find(s => s && s.name === '道侣表').sourceData.insertNode;
     assert.ok(ins.includes("VALUES ('键名', 0, '{}', '{}')"), ins);
     assert.ok(!ins.includes('林若悠') && !ins.includes('周三'), ins);
@@ -3816,7 +3818,7 @@ test('INSERT 示例使用短值而不复制真实初始记录，空表保留键�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r2 = core.convert(card2, { mode: 'sqlite' });
+    const r2 = publishedLayoutFixture(card2, { mode: 'sqlite' });
     const ins2 = Object.values(r2.template).find(s => s && s.name === '仓库表').sourceData.insertNode;
     assert.ok(ins2.includes("VALUES ('键名')") || !ins2.includes('值1'), ins2);
 });
@@ -4580,7 +4582,7 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
     assert.ok(index.includes('(nativeWrite?.changed || n > 0) && bulkInit !== true'), '数据库整表保存不重复调用；原消息隐藏数据变化仍需保存');
 });
 
-test('规则裸 object/array 类型生成 JSON 列，更新对象不会读回为字符串', () => {
+test("旧布局：规则裸 object/array 类型生成 JSON 列，更新对象不会读回为字符串", () => {
     const card = { spec: 'chara_card_v3', data: {
         name: '裸宽类型卡', description: '', first_mes: '你好',
         character_book: { entries: [
@@ -4589,7 +4591,7 @@ test('规则裸 object/array 类型生成 JSON 列，更新对象不会读回为
         ] },
         extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
     } };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const layout = JSON.parse((r.card.data || r.card).extensions.mvu2shujuku.layout);
     const relation = layout.find(x => x.table === '关系列表表');
     assert.ok(relation, '动态关系列表应生成行表');
@@ -4600,7 +4602,7 @@ test('规则裸 object/array 类型生成 JSON 列，更新对象不会读回为
     assert.strictEqual(cols.标签[2], '[]', '裸 array 必须保留数组逻辑类型与数组默认值');
 });
 
-test('动态新行的嵌套 JSON 列按完整路径写入，并为同表其他 JSON 列补合法默认值', async () => {
+test("旧布局：动态新行的嵌套 JSON 列按完整路径写入，并为同表其他 JSON 列补合法默认值", async () => {
     const card = { spec: 'chara_card_v3', data: {
         name: '嵌套JSON新行卡', description: '', first_mes: '你好',
         character_book: { entries: [
@@ -4609,7 +4611,7 @@ test('动态新行的嵌套 JSON 列按完整路径写入，并为同表其他 J
         ] },
         extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
     } };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const layout = JSON.parse((r.card.data || r.card).extensions.mvu2shujuku.layout);
     const relationLayout = layout.find(x => x.table === '关系列表表');
     const relationHeaders = relationLayout.cols.map(c => c[0]);
@@ -4630,7 +4632,7 @@ test('动态新行的嵌套 JSON 列按完整路径写入，并为同表其他 J
     assert.deepStrictEqual(read.关系列表.测试角色.登神长阶.法则, {});
 });
 
-test('扩展 owner 端到端：仅含 JSONPatch 的首楼合并初始化、保留 _基础 且轮询不重复 insert', async () => {
+test("旧布局：扩展 owner 端到端：仅含 JSONPatch 的首楼合并初始化、保留 _基础 且轮询不重复 insert", async () => {
     const vm = require('vm');
     const sourceCard = {
         spec: 'chara_card_v3',
@@ -4653,7 +4655,7 @@ test('扩展 owner 端到端：仅含 JSONPatch 的首楼合并初始化、保�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const converted = core.convert(sourceCard, { mode: 'both' });
+    const converted = publishedLayoutFixture(sourceCard, { mode: 'both' });
     const card = JSON.parse(JSON.stringify(converted.card.data || converted.card));
     card.avatar = 'jsonpatch.png';
     const layout = JSON.parse(card.extensions.mvu2shujuku.layout);
@@ -4846,7 +4848,7 @@ test("旧桥回归：合成卡：与参考卡无关的组名也能转换（含 [
             alternate_greetings: ['<UpdateVariable>_.set("队伍.队员.小美.职业", "旧", "大法师");</UpdateVariable>'],
         },
     };
-    const r = core.convert(synthetic, { mode: 'both' });
+    const r = publishedLayoutFixture(synthetic, { mode: 'both' });
     const t = r.template;
     const byName = (name) => Object.keys(t).find(k => t[k].name === name);
     assert.ok(byName('冒险者表'), '应有 冒险者表');
@@ -4924,11 +4926,11 @@ test('EJS 安全补全：variables.stat_data 与明确 message 作用域 setvar 
     assert.ok(!report.manualReview.some(x => x.includes("flags: 'xx'")), '已接管的条件写入不再报为遗漏');
 });
 
-test('EJS 兼容端到端：改写后的 if 从数据库重建 stat_data 并得到与原模板一致的输出', () => {
+test('旧桥 EJS 兼容：改写后的 if 从旧布局重建 stat_data 并得到与原模板一致的输出', () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
-            name: '测试角色', description: '', first_mes: '你好',
+            name: '旧桥条件测试角色', description: '', first_mes: '你好',
             character_book: { entries: [
                 { comment: '[InitVar]', content: '冒险者:\n  等级: 12' },
                 { comment: '条件', content: '<% if (getvar("stat_data", {}).冒险者.等级 >= 10) { %>老练冒险者<% } %>' },
@@ -4936,7 +4938,7 @@ test('EJS 兼容端到端：改写后的 if 从数据库重建 stat_data 并得�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = legacyLayoutFixture(card, { mode: 'both' });
     const tpl = r.card.data.character_book.entries.find(e => e.comment === '条件').content;
     const { win } = bridgeSandbox(r, { extra: { EjsTemplate: { defines: {} } } });
     const ctx = win.EjsTemplate.defines;
@@ -4960,7 +4962,7 @@ test('EJS 兼容端到端：改写后的 if 从数据库重建 stat_data 并得�
     assert.strictEqual(render(tpl, ctx), '老练冒险者');
 });
 
-test('可选简单 EJS→数据库语法：仅静态字段字面量条件转换，复杂 EJS 保留', () => {
+test("旧布局：可选简单 EJS→数据库语法：仅静态字段字面量条件转换，复杂 EJS 保留", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -4973,9 +4975,10 @@ test('可选简单 EJS→数据库语法：仅静态字段字面量条件转换�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both', translateSimpleEjs: true });
-    const simple = r.card.data.character_book.entries.find(e => e.comment === '简单').content;
-    const complex = r.card.data.character_book.entries.find(e => e.comment === '复杂').content;
+    const r = publishedLayoutFixture(card, { mode: 'both', translateSimpleEjs: true });
+    const translate=text=>core.rewriteEjsConditions(text,core.buildLayout(r.schema),core.createReport(),{translateSimpleEjs:true}).text;
+    const simple = translate(card.data.character_book.entries.find(e => e.comment === '简单').content);
+    const complex = translate(card.data.character_book.entries.find(e => e.comment === '复杂').content);
     assert.ok(simple.startsWith('<if db="db.冒险者表.'), simple);
     assert.ok(simple.includes("get('等级') >= 10"), simple);
     assert.ok(!simple.includes('<%'), simple);
@@ -5966,7 +5969,7 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     assert.strictEqual(win.replaceVariables, undefined, '切回普通卡后应撤销 replaceVariables');
 });
 
-test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU 卡后还原全部原始函数', async () => {
+test("旧布局：桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU 卡后还原全部原始函数", async () => {
     const vm2 = require('vm');
     const card = {
         spec: 'chara_card_v3',
@@ -5981,7 +5984,7 @@ test('桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU �
         avatar: 'g.png',
         extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const bridge = r.files.find(f => f.kind === 'bridge').data;
     const toLayout = schema => JSON.parse(core.buildLayoutJson(core.buildLayout(schema)));
     const converted = {
@@ -6288,7 +6291,7 @@ test('旧桥回归：全局函数原本不存在时，切到普通卡必须清�
     assert.strictEqual(win.getAllVariables, undefined, '切到普通卡后 getAllVariables 应被清除');
 });
 
-test('initvar 写在其他世界书条目（[scenario_builtin]）且分多个开局：转换以首个分支推导结构，运行时按所选分支注入', async () => {
+test("旧布局：initvar 写在其他世界书条目（[scenario_builtin]）且分多个开局：转换以首个分支推导结构，运行时按所选分支注入", async () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -6315,7 +6318,7 @@ test('initvar 写在其他世界书条目（[scenario_builtin]）且分多个开
         },
     };
     // 转换：不得因 [InitVar] 占位为空而中止，结构/初始值以首个 scenario 分支为基准
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     assert.ok(r.reportText.includes('已改用分支 <initvar> 推导结构'), '报告应注明 initvar 来自分支 <initvar>');
     assert.ok(r.reportText.includes('首个来自 世界书条目「[scenario_builtin]开局-街头魂穿」'), '报告应注明首个分支来源条目');
     const zjName = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '主角表');
@@ -6377,7 +6380,7 @@ test('initvar 写在其他世界书条目（[scenario_builtin]）且分多个开
     assert.strictEqual(sj2.content[1][sj2.content[0].indexOf('当前日期')], '崇祯七年八月二十六日', '注入分支2 后世界运转表日期应更新');
 });
 
-test('[mvu_plot] 剧情条目不得被当规则解析：长文本 <说明: |-> 不产生伪枚举，DDL 列不挂超长 CHECK（残明余烬1.8.1 导入校验失败回归）', () => {
+test("旧布局：[mvu_plot] 剧情条目不得被当规则解析：长文本 <说明: |-> 不产生伪枚举，DDL 列不挂超长 CHECK（残明余烬1.8.1 导入校验失败回归）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -6405,7 +6408,7 @@ test('[mvu_plot] 剧情条目不得被当规则解析：长文本 <说明: |-> �
     const si = core.parseMvuShapes(card);
     assert.strictEqual(si.enums['说明'], undefined, '[mvu_plot] 长文本不得被误判为 说明 枚举');
     assert.strictEqual(si.checks['战斗系统'], undefined, '[mvu_plot] 条目不得被当规则组解析');
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const k = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '资产表');
     assert.ok(k, '应生成资产表');
     const ddl = r.template[k].sourceData.ddl || r.template[k].sourceData.ddlSql || '';
@@ -6477,7 +6480,7 @@ test('旧布局：动态键字典子对象所在组不展平为行表：天下�
     assert.strictEqual(sd['天下地图']['地区态势']['陕西']['实控势力'], '明廷与流寇争夺', '读回 陕西 应还原');
 });
 
-test('拼音相同列消歧兜底：同表 山西/陕西 两列时后列改名（陕西→陕西2），读回 path 保持原中文', () => {
+test("旧布局：拼音相同列消歧兜底：同表 山西/陕西 两列时后列改名（陕西→陕西2），读回 path 保持原中文", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -6495,7 +6498,7 @@ test('拼音相同列消歧兜底：同表 山西/陕西 两列时后列改名�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const k = Object.keys(r.template).find(k => r.template[k] && r.template[k].name === '统计表');
     assert.ok(k, '应生成统计表');
     const s = r.template[k];
@@ -6525,7 +6528,7 @@ test('拼音相同列消歧兜底：同表 山西/陕西 两列时后列改名�
     assert.strictEqual(sd['统计']['省份']['陕西2'], undefined, '不得出现 陕西2 键');
 });
 
-test('JSON 表内容列为非严格 JSON（尾逗号/单引号/注释）时读回不丢数据（大荒 宗门/寻缘蝶/灵兽栏 面板不显示回归）', () => {
+test("旧布局：JSON 表内容列为非严格 JSON（尾逗号/单引号/注释）时读回不丢数据（大荒 宗门/寻缘蝶/灵兽栏 面板不显示回归）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -6540,7 +6543,7 @@ test('JSON 表内容列为非严格 JSON（尾逗号/单引号/注释）时读�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const tables = JSON.parse(JSON.stringify(r.template));
     const byName = (n) => Object.values(tables).find(x => x && x.name === n);
     // AI/前端写入的常见非严格 JSON：尾逗号、单引号、行注释
@@ -6564,7 +6567,7 @@ test('JSON 表内容列为非严格 JSON（尾逗号/单引号/注释）时读�
     // 卡内桥读回（无扩展时前端走桥的 getAllVariables）
     const tables2 = JSON.parse(JSON.stringify(r.template));
     Object.values(tables2).find(x => x && x.name === '宗门表').content[1][1] = "{'掌门':'李四',}";
-    const bridgeR = core.convert({
+    const bridgeR = publishedLayoutFixture({
         ...card,
         data: { ...card.data, character_book: { entries: [{ comment: '[InitVar]', content: '宗门: {}' }] } },
     }, { mode: 'both' });
@@ -6644,7 +6647,7 @@ test('旧布局：组级 type 块标量（{ [键]: {...} } 动态键字典）必
     assert.strictEqual(Number(_sd && _sd['主角贡献点']), 0, 'EJS 的 _sd.主角贡献点 可读');
 });
 
-test('规则 YAML 非法回退正则时，组级 type/check、字段级 type/check/range/format 全部提取完整（正则回退路径同类审计）', () => {
+test("旧布局：规则 YAML 非法回退正则时，组级 type/check、字段级 type/check/range/format 全部提取完整（正则回退路径同类审计）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -6697,13 +6700,13 @@ test('规则 YAML 非法回退正则时，组级 type/check、字段级 type/che
     assert.deepStrictEqual(si.ranges['道心'], [0, 100], '字段级 range 应保留');
     assert.deepStrictEqual((si.checks['主角'] || {}).道心, ['归零走火入魔'], '字段级 check 应保留');
     assert.ok((si.formats['主角'] || {}).气运, '字段级 format 应保留');
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const zj = Object.values(r.template).find(s => s && s.name === '宗门表');
     assert.ok(zj && zj.content[0].includes('主角职务'), '宗门表应为行表（主角职务列）');
     assert.ok(r.reportText.includes('回退正则路径'), '报告应注明 YAML 失败已回退正则（便于发现解析异常）');
 });
 
-test('组级 type 固定嵌套对象用下划线展平，新行读写后 EJS 仍得到原嵌套结构（大荒宗门回归）', async () => {
+test("旧布局：组级 type 固定嵌套对象用下划线展平，新行读写后 EJS 仍得到原嵌套结构（大荒宗门回归）", async () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -6739,7 +6742,7 @@ test('组级 type 固定嵌套对象用下划线展平，新行读写后 EJS 仍
     assert.ok((si.shapes['宗门'] || []).includes('等级'), '顶层标量字段 等级 应提取（旧实现丢失）');
     assert.ok((si.shapes['宗门'] || []).includes('声望') && (si.shapes['宗门'] || []).includes('通缉'), '声望/通缉 应提取');
     assert.ok(si.objects['宗门'] && si.objects['宗门']['资源'] && si.objects['宗门']['建筑'], '资源/建筑 应为对象字段');
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const zj = Object.values(r.template).find(s => s && s.name === '宗门表');
     assert.ok(zj.content[0].includes('资源_灵脉') && zj.content[0].includes('建筑_大殿'), '固定嵌套对象应展平为带下划线的列');
     assert.ok(!zj.content[0].includes('资源') && !zj.content[0].includes('建筑'), '不应再保留整对象 JSON 列');
@@ -8576,12 +8579,12 @@ test('读侧 SQL 回放由数据库负责：加载空窗拒绝旧 checkpoint，�
     assert.strictEqual(win.Mvu.getMvuData().stat_data.主角.姓名, '斯维姆');
 });
 
-test('全新聊天运行时仅表头且无 checkpoint：读侧退回布局默认值而非空对象（避免前端按自己的默认值写回）', async () => {
+test("旧布局：全新聊天运行时仅表头且无 checkpoint：读侧退回布局默认值而非空对象（避免前端按自己的默认值写回）", async () => {
     const vm2 = require('vm');
     const card = require('./synthetic-card')();
     card.data.character_book.entries[0].content = JSON.stringify({世界:{遭遇冷却:20},主角:{姓名:'未知'}});
     card.data.extensions.tavern_helper.scripts = [{name:'公开初始值Schema',enabled:true,content:'const S=z.object({世界:z.object({遭遇冷却:z.number().transform(n=>n).default(20).optional()}),主角:z.object({姓名:z.string().default("未知")})});registerMvuSchema(S);'}];
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const srcDir = path.join(__dirname, '..', 'src');
     const coreSource = fs.readFileSync(path.join(srcDir, 'mvu2shujuku.js'), 'utf8');
     const pinyinData = fs.readFileSync(path.join(srcDir, 'pinyin-data.js'), 'utf8');
@@ -9818,7 +9821,7 @@ test('旧布局：点路径嵌套动态表保持对象形状：固定部位/饰�
     assert.strictEqual(sd.主角.装备.饰品.护心玉佩.作用, '护心', '新增饰品写表后应按原嵌套路径读回');
 });
 
-test('大荒式空动态表：前端别名补列、混合字段名/类型保留、JSON 对象结构可见且强校验', () => {
+test("旧布局：大荒式空动态表：前端别名补列、混合字段名/类型保留、JSON 对象结构可见且强校验", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -9867,7 +9870,7 @@ test('大荒式空动态表：前端别名补列、混合字段名/类型保留�
     assert.ok(usage.宗门.includes('师尊') && usage.宗门.includes('主角派系') && usage.宗门.includes('禁闭剩余'));
     assert.ok(!usage.宗门.includes('老祖') && !usage.宗门.includes('品质'), '嵌套 JSON 键和其他 render 的临时变量不得混成宗门列');
 
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const sect = Object.values(r.template).find(x => x && x.name === '宗门表');
     const npc = Object.values(r.template).find(x => x && x.name === '寻缘蝶表');
     assert.ok(sect && npc);
@@ -9961,9 +9964,9 @@ test('通用形状往返：对象内 number 不污染外层、子表对象/普�
     assert.strictEqual(sd.图鉴, null, '顶层 null 必须经过 JSON 表原样往返，不得被跳过或变成空对象');
 
     const platform = Object.values(tables).find(x => x && x.name === '平台表');
-    const incomeIndex = platform.content[0].indexOf('收益明细_本月总收益');
-    assert.ok(incomeIndex >= 0, '固定收益明细对象应展平为叶子列');
-    assert.match(platform.sourceData.ddl, /shouyimingxi_benyuezongshouyi REAL/i, '嵌套 number 应只影响对应叶子列');
+    const incomeIndex = platform.content[0].indexOf('内容');
+    assert.ok(incomeIndex >= 0, '父容器完整替换不能丢失字段存在状态');
+    assert.strictEqual(JSON.parse(platform.content[1][incomeIndex]).甲站.收益明细.本月总收益,10);
     const relationLayout = layout.find(x => x.table === '主角表');
     assert.strictEqual(relationLayout.valueCol, '内容', '关系网随完整所属对象保存');
     const rootSheet = Object.values(tables).find(t => t.name === relationLayout.table);
@@ -10136,7 +10139,7 @@ test('旧布局：非法 YAML（format 带裸 | 联合）时回退正则，功�
     assert.deepStrictEqual(gf && gf.content[0], ['row_id', '功法键名', '名称', '品阶', '修炼层数', '效果'], '功法表业务键与条目列应来自 type 声明，而非只剩 _扩展数据');
 });
 
-test('组内子字段通配（首段非组名）挂到所在组，format 一并带出（大荒回归）', () => {
+test("旧布局：组内子字段通配（首段非组名）挂到所在组，format 一并带出（大荒回归）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -10173,7 +10176,7 @@ test('组内子字段通配（首段非组名）挂到所在组，format 一并�
     const wrs = si.wildcardRules['主角'] || [];
     assert.ok(wrs.some(w => w.path === '生理.欲望槽' && w.range && w.range[0] === 0 && w.range[1] === 100), '组内通配应挂到所在组 主角');
     assert.ok(wrs.some(w => w.path === '技艺.${炼丹|炼器}' && w.format), '组内通配应带出 format');
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const zj = Object.values(r.template).find(x => x && x.name === '主角表');
     const note = zj.sourceData.note || '';
     assert.ok(note.includes('生理.欲望槽'), '主角表 note 应含组内通配规则');
@@ -10246,7 +10249,7 @@ test('首段为 ${A|B} 模板键的通配规则（${小宅仙|小御仙}.当前�
     assert.ok(note.includes('怕死/利己主义'), 'note 应含第二个模板键通配的 check');
 });
 
-test('路径化附着：规则分组与 initvar 结构不一致（修为 写在根目录、initvar 在 主角.修为）时，check/range 按路径挂到展平列（修为进度百分比）', () => {
+test("旧布局：路径化附着：规则分组与 initvar 结构不一致（修为 写在根目录、initvar 在 主角.修为）时，check/range 按路径挂到展平列（修为进度百分比）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -10279,7 +10282,7 @@ test('路径化附着：规则分组与 initvar 结构不一致（修为 写在�
         si.checkPaths.some(e => JSON.stringify(e.path) === JSON.stringify(['修为', '进度百分比']) && e.list.length === 2),
         'checkPaths 应记录规则书写路径 修为.进度百分比'
     );
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const g = r.schema.find(x => x.name === '主角');
     const c = g.columns.find(x => x.zh === '修为_进度百分比');
     assert.ok(c, '应有展平列 修为_进度百分比');
@@ -10288,7 +10291,7 @@ test('路径化附着：规则分组与 initvar 结构不一致（修为 写在�
     assert.strictEqual(c.type, 'REAL', 'range 不意味着整数约束，普通 number 应为 REAL');
 });
 
-test('路径化附着：6 空格嵌套写法（主角.修为.进度百分比）在 YAML 失败回退正则时也能记录完整路径并附着', () => {
+test("旧布局：路径化附着：6 空格嵌套写法（主角.修为.进度百分比）在 YAML 失败回退正则时也能记录完整路径并附着", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -10322,13 +10325,13 @@ test('路径化附着：6 空格嵌套写法（主角.修为.进度百分比）�
         si.checkPaths.some(e => JSON.stringify(e.path) === JSON.stringify(['主角', '修为', '进度百分比'])),
         '正则回退也应记录 3 层路径 主角.修为.进度百分比'
     );
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const g = r.schema.find(x => x.name === '主角');
     const c = g.columns.find(x => x.zh === '修为_进度百分比');
     assert.deepStrictEqual(c.check, ['突破时更新'], '6 空格子字段的 check 应附着到展平列');
 });
 
-test('路径化附着：通配路径（生理.欲望槽）按 initvar 列路径（主角.生理.欲望槽）挂 check/range（大荒回归）', () => {
+test("旧布局：路径化附着：通配路径（生理.欲望槽）按 initvar 列路径（主角.生理.欲望槽）挂 check/range（大荒回归）", () => {
     const card = {
         spec: 'chara_card_v3',
         data: {
@@ -10359,7 +10362,7 @@ test('路径化附着：通配路径（生理.欲望槽）按 initvar 列路径�
             extensions: { regex_scripts: [], tavern_helper: { scripts: [] } },
         },
     };
-    const r = core.convert(card, { mode: 'both' });
+    const r = publishedLayoutFixture(card, { mode: 'both' });
     const g = r.schema.find(x => x.name === '主角');
     const c = g.columns.find(x => x.zh === '生理_欲望槽');
     assert.ok(c && c.check && c.check.length === 2, '生理_欲望槽 列应附着通配 check');
@@ -10631,6 +10634,7 @@ require('./sql-example-safety');
 require('./business-rule-preservation');
 require('./fixed-child-tables');
 require('./complex-object-layout');
+require('./layout-planning');
 require('./declared-container-paths');
 require('./bound-template-fields');
 require('./output-business-rules');

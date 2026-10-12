@@ -1,16 +1,19 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+// Retained physical layouts are tested with frozen public metadata; current conversions use layout-planning.js.
+const legacyLayoutFixture = require('./legacy-layout-fixture');
 const { test } = require('./runner');
 const { core, assert } = require('./helpers');
 
 function convert(rules, mode = 'both') {
-    return core.convert({ name: '业务限制保真', first_mes: '', character_book: { entries: [
+    return publishedLayoutFixture({ name: '业务限制保真', first_mes: '', character_book: { entries: [
         { comment: '[InitVar]', content: '状态: {授权: 未授权}' },
         { comment: '变量更新规则', content: '变量更新规则:\n  状态:\n    授权:\n      check:\n' + rules.map(r => '        - ' + JSON.stringify(r)).join('\n') },
     ] } }, { mode });
 }
 const noteOf = result => Object.values(result.template).find(s => s.name === '状态表').sourceData.note;
 
-test('业务规则保真：指令、英文名称、路径及括号条件均不因关键词被删除', () => {
+test("旧布局：业务规则保真：指令、英文名称、路径及括号条件均不因关键词被删除", () => {
     const rules = [
         '不要在没有收到管理员指令时修改授权状态',
         '权限为冻结时保持原值（收到解除指令后才可修改）',
@@ -28,7 +31,7 @@ test('业务规则保真：指令、英文名称、路径及括号条件均不�
     }
 });
 
-test('业务规则保真：已识别 op 参数保留增量和新值，不保留旧命令语法', () => {
+test("旧布局：业务规则保真：已识别 op 参数保留增量和新值，不保留旧命令语法", () => {
     const note = noteOf(convert([
         '按经过的回合递减（op: delta, value: -1）',
         '重新授权时设置为初始状态(op: replace, value: "已授权")',
@@ -40,7 +43,7 @@ test('业务规则保真：已识别 op 参数保留增量和新值，不保留�
     assert.doesNotMatch(note, /op:|\bdelta\b|\breplace\b/);
 });
 
-test('业务规则保真：容器机制守卫保留含义，混合业务限制不整行删除', () => {
+test("旧布局：业务规则保真：容器机制守卫保留含义，混合业务限制不整行删除", () => {
     const mixed = '严禁对整个对象使用 replace 或 delta；管理员确认后仍须保留审计记录';
     const note = noteOf(convert([
         '【防崩警告】更新时必须精确到子字段（如 /状态/授权），严禁直接对整个对象使用 replace 或 delta！',
@@ -52,7 +55,7 @@ test('业务规则保真：容器机制守卫保留含义，混合业务限制�
     assert.match(note, /经验满100时，必须同时完成：等级提升；经验为0（增量更新不得导致超限）/);
 });
 
-test('业务规则保真：JSON 数组删除写法改写时保留括号中的业务限制', () => {
+test("旧布局：业务规则保真：JSON 数组删除写法改写时保留括号中的业务限制", () => {
     const result = convert([]);
     const g = result.schema[0], column = g.columns.find(c => c.zh === '授权');
     column.isObject = true; column.jsonKind = 'array'; column.value = '[]';

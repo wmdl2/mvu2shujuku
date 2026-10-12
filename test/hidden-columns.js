@@ -1,4 +1,7 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+// Retained physical layouts are tested with frozen public metadata; current conversions use layout-planning.js.
+const legacyLayoutFixture = require('./legacy-layout-fixture');
 const { test } = require('./runner');
 const { core, assert, applyingApi } = require('./helpers');
 
@@ -9,8 +12,8 @@ function card() {
 }
 function sheet(result, name) { return Object.values(result.template).find(t => t.name === name); }
 
-test('模板存储：声明$保留写入、内部$随记录，扩展列只过滤发送内容', () => {
-    const results = Object.fromEntries(['native', 'both', 'sqlite'].map(mode => [mode, core.convert(card(), { mode })]));
+test("旧布局：模板存储：声明$保留写入、内部$随记录，扩展列只过滤发送内容", () => {
+    const results = Object.fromEntries(['native', 'both', 'sqlite'].map(mode => [mode, publishedLayoutFixture(card(), { mode })]));
     for (const mode of Object.keys(results)) {
         const obj = sheet(results[mode], 'obj表');
         assert.deepStrictEqual(obj.content[0], ['row_id', 'visible', '_state', '扩展数据']);
@@ -43,17 +46,17 @@ test('模板存储：声明$保留写入、内部$随记录，扩展列只过滤
     assert.strictEqual(native.sourceData.ddl, sqlite.sourceData.ddl);
 });
 
-test('模板内部列：8.5 起生成隐藏字段，接受两至四段版本', () => {
+test("旧布局：模板内部列：8.5 起生成隐藏字段，接受两至四段版本", () => {
     for (const targetSpVersion of ['8.5', '8.5.0', 'v8.5.1', '8.6', '9.0', '9.2.4', '9.2.5.1']) {
-        const result = core.convert(card(), { targetSpVersion });
+        const result = publishedLayoutFixture(card(), { targetSpVersion });
         assert.deepStrictEqual(sheet(result, 'obj表').sourceData.hiddenPhysicalColumns, undefined);
         assert.doesNotMatch(result.reportText, /停用.*隐藏/);
     }
 });
 
-test('模板内部列：旧版或未知 SP 版本不生成隐藏字段并给出降级警告', () => {
+test("旧布局：模板内部列：旧版或未知 SP 版本不生成隐藏字段并给出降级警告", () => {
     for (const targetSpVersion of ['8.4', '8.4.9', 'unknown']) {
-        const result = core.convert(card(), { mode: 'both', targetSpVersion });
+        const result = publishedLayoutFixture(card(), { mode: 'both', targetSpVersion });
         const obj = sheet(result, 'obj表');
         assert.strictEqual(obj.sourceData.hiddenPhysicalColumns, undefined);
         assert.doesNotMatch(result.reportText, /不支持可靠隐藏内部物理列/, '原$数据不依赖宿主隐藏列能力');
@@ -62,8 +65,8 @@ test('模板内部列：旧版或未知 SP 版本不生成隐藏字段并给出�
     }
 });
 
-test('模板内部列：混合JSON使用递归发送投影，不误报成整列泄漏', () => {
-    const result = core.convert({ name: 'JSON边界', first_mes: '开场', character_book: { entries: [
+test("旧布局：模板内部列：混合JSON使用递归发送投影，不误报成整列泄漏", () => {
+    const result = publishedLayoutFixture({ name: 'JSON边界', first_mes: '开场', character_book: { entries: [
         { comment: '[InitVar]', content: JSON.stringify({ blob: {} }) },
     ] } }, { mode: 'sqlite' });
     const blobSchema = result.schema.find(group => group.name === 'blob');
@@ -77,14 +80,14 @@ test('模板内部列：混合JSON使用递归发送投影，不误报成整列�
 });
 
 
-test('新模板下划线列：中文拼音、普通列和大小写不敏感消歧', async () => {
+test("旧布局：新模板下划线列：中文拼音、普通列和大小写不敏感消歧", async () => {
     const input = { name: '列名测试', first_mes: '开场', character_book: { entries: [
         { comment: '[InitVar]', content: JSON.stringify({
             obj: { visible: 1, _状态: 3, _ZHUANGTAI: 4 }, plain: { 状态: 2 },
         }) },
     ] } };
     for (const mode of ['native', 'both', 'sqlite']) {
-        const result = core.convert(input, { mode });
+        const result = publishedLayoutFixture(input, { mode });
         const group = result.schema.find(g => g.tableName === 'obj表');
         const obj = sheet(result, 'obj表');
         const byName = Object.fromEntries(group.columns.map(c => [c.zh, c.ident]));
@@ -117,7 +120,7 @@ test('新模板下划线列：中文拼音、普通列和大小写不敏感消�
     }
 });
 
-test('旧冻结模板的 kuozhanshuju 继续按原 DDL 与布局读写', async () => {
+test("旧布局：旧冻结模板的 kuozhanshuju 继续按原 DDL 与布局读写", async () => {
     const old = require('./vwd-static-before.json').conversion;
     const layout = old.layout;
     const tables = JSON.parse(JSON.stringify(old.template));

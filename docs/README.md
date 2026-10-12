@@ -1,6 +1,6 @@
 # 文档与维护入口
 
-v0.8.0 的完整改动见[更新日志](../CHANGELOG.md)，本次[发布验证](validation/2026-10-11-release-v0.8.0.md)记录最终包与受测范围。
+v0.8.1 的完整改动见[更新日志](../CHANGELOG.md)，本次[布局与发布验证](validation/2026-10-12-layout-planning.md)记录最终包与受测范围；[v0.8.0 发布验证](validation/2026-10-11-release-v0.8.0.md)保留前版证据。
 
 状态档案、完整聊天备份、四向迁移及旧布局／声明隐藏字段续修的实现和验收状态见[2026-10-11 状态迁移](validation/2026-10-11-state-transfer.md)。
 
@@ -12,7 +12,7 @@ H01 嵌套对象展开、扩展数据与 JSON 标量说明复核见[提示词与
 
 历史接口之外的待办分类、发送窗口上游草案与历史写入边界见[兼容续核对](validation/2026-10-10-compatibility-follow-up.md)；草案尚未接入，不代表边界已全部消除。
 
-社区关键流程续验、SQL 发送视图与测试集边界见[2026-10-10 记录](validation/2026-10-10-community-acceptance.md)。当前混合存储、显式根对象映射及隐藏数据归属见[2026-10-09 验证](validation/2026-10-09-hybrid-storage.md)。
+社区关键流程续验、SQL 发送视图与测试集边界见[2026-10-10 记录](validation/2026-10-10-community-acceptance.md)。前版混合存储、显式根对象映射及隐藏数据归属见[2026-10-09 验证](validation/2026-10-09-hybrid-storage.md)。
 
 动态变量入口、历史读取、缓存边界和 MIT 适配范围见[最新验证](validation/2026-10-08-variable-adapter.md)。
 
@@ -126,3 +126,6 @@ EJS、JavaScript 词法与 Lodash 复用的最新实现及范围见[2026-10-08 �
 按上表定位相关主题和函数；构建产物 `index.js` 不作为源码入口。验证命令和按改动选择检查范围的规则见[开发指南](development.md)。
 
 行为或兼容范围变化时更新对应架构章节和兼容清单。具体测试结果与受测版本记录在日期验收文件，其他文档引用这些记录。
+
+- [变量布局与容器存在状态](design/layout-planning.md)：本轮 JSON 回退决定及未来拆分的准入。
+- [2026-10-12 布局验收](validation/2026-10-12-layout-planning.md)：公开回归、隔离宿主与开发集的不同证据范围。
