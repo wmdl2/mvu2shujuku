@@ -1,6 +1,7 @@
 'use strict';
 const { test } = require('./runner');
 const { core, assert, applyingApi, bridgeSandbox } = require('./helpers');
+const publishedLayoutFixture=require('./published-layout-fixture');
 const fs = require('fs');
 function input(rule, data = { 任务: {}, 记录: { 关注度: '随意描述' } }) {
     return { name: '规则迁移测试', first_mes: '开场', character_book: { entries: [
@@ -47,11 +48,12 @@ test('下载卡：旧式源卡的 JSON/PNG 均保留 v3 世界书、绑定和脚
     assert.strictEqual(exported.data.data, undefined, '已有 v3 卡不得再次包装');
 });
 
-test('规则迁移：英文外壳和 TS 字面量联合进入提示词与 CHECK', () => {
+test('规则迁移：英文外壳和 TS 字面量联合保留解析结果与作者业务原文', () => {
     const result = core.convert(input(rule));
     const table = Object.values(result.template).find(t => t.name === '任务表');
-    assert.ok(table.sourceData.note.includes('可选值：高 / 中 / 低'));
-    assert.match(table.sourceData.ddl, /CHECK\(guanzhudu IN \('高', '中', '低'\)\)/);
+    const parsed=core.buildSchema({任务:{},记录:{关注度:'随意描述'}},{},core.createReport(),core.parseMvuShapes(input(rule)));
+    assert.deepStrictEqual(parsed.find(g=>g.name==='任务').columns.find(c=>c.zh==='关注度').enum,['高','中','低']);
+    assert.deepStrictEqual(table.content[0],['row_id','内容']);
     assert.ok(table.sourceData.note.includes('领取奖励后删除'));
     assert.ok((result.card.data || result.card).character_book.entries.some(e => e.content === rule));
 });
@@ -75,7 +77,8 @@ test('规则迁移：check 行内操作说明按文本解析，映射后继续�
     const note = Object.values(result.template).find(t => t.name === '状态表').sourceData.note;
     assert.match(note, /本轮推进时减1/);
     assert.match(note, /触发事件时重置为15/);
-    assert.doesNotMatch(note, /op:|value:/, '操作协议由数据库说明负责，业务条件仍保留');
+    for(const check of checks)assert(note.includes(check),'作者混合业务说明不猜测改写');
+    assert(data.character_book.entries.some(e=>e.comment==='[M2SJK]填表适配说明'));
 });
 
 test('规则迁移：行内操作容错不改块文本、不掩盖其他 YAML 错误或混合 EJS', () => {
@@ -92,14 +95,17 @@ test('规则迁移：行内操作容错不改块文本、不掩盖其他 YAML �
 });
 
 test('规则迁移：宽字符串联合不误建枚举，纯字符串选项保留内部竖线', () => {
-    const result = core.convert(input(`变量更新规则:
+    const card=input(`变量更新规则:
   任务:
     type: |-
       { [名称: string]: { 关注度: string | '未知'; 说明: '甲|乙' | '丙'; } }
-`));
+`);
+    const result=core.convert(card);
     const table = Object.values(result.template).find(t => t.name === '任务表');
     assert.ok(!/CHECK\(guanzhudu IN/.test(table.sourceData.ddl));
-    assert.ok(table.sourceData.note.includes('可选值：甲|乙 / 丙'));
+    const parsed=core.buildSchema({任务:{}},{},core.createReport(),core.parseMvuShapes(card));
+    assert.deepStrictEqual(parsed.find(g=>g.name==='任务').columns.find(c=>c.zh==='说明').enum,['甲|乙','丙']);
+    assert((result.card.data||result.card).character_book.entries.some(e=>e.content.includes("'甲|乙' | '丙'")));
 });
 
 test('正则保留：会生成更新块的交互开局面板不视为 MVU 引擎', () => {
@@ -157,8 +163,8 @@ test('前端 EJS：生成的扩展在当前转换卡渲染阶段保护，切聊�
     assert.strictEqual(registered, undefined);
 });
 
-test('顶层数字：数值 DDL、默认值和示例保留数字，小数往返不变', async () => {
-    const result = core.convert(input('变量更新规则:\n  点数:\n    type: number\n    check:\n      - 消耗后更新，不可为负数', { 点数: 0, 比例: 0.5, 空组: {} }), {mode: 'sqlite'});
+test('已发布0.8.0布局：数值 DDL、默认值和示例保留数字，小数往返不变', async () => {
+    const result = publishedLayoutFixture(input('变量更新规则:\n  点数:\n    type: number\n    check:\n      - 消耗后更新，不可为负数', { 点数: 0, 比例: 0.5, 空组: {} }), {mode: 'sqlite'});
     const t = Object.values(result.template).find(t => t.name === '点数表');
     assert.match(t.sourceData.ddl, /neirong REAL NOT NULL DEFAULT 0 CHECK\(typeof\(neirong\) IN \('integer', 'real'\)\)/);
     assert.ok(!t.sourceData.ddl.includes('json_valid'));
@@ -175,8 +181,8 @@ test('顶层数字：数值 DDL、默认值和示例保留数字，小数往返�
     assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, { 点数: 2.75, 比例: 0, 空组: {} });
 });
 
-test('顶层数字：缺表与补行使用数字默认，拒绝对象、字符串和非有限数字', async () => {
-    const result = core.convert(input('', { 点数: 7 }));
+test('已发布0.8.0布局：缺表与补行使用数字默认，拒绝对象、字符串和非有限数字', async () => {
+    const result = publishedLayoutFixture(input('', { 点数: 7 }));
     const layout = JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout);
     assert.strictEqual(core.statDataFromTables(layout, {}).stat_data.点数, 7);
     for (const value of [{}, '8', null, NaN, Infinity]) {
@@ -196,8 +202,8 @@ test('顶层数字：缺表与补行使用数字默认，拒绝对象、字符�
     assert.strictEqual(core.statDataFromTables(layout, tables).stat_data.点数, 8.5);
 });
 
-test('顶层数字：实际生成桥读取数值列，旧 JSON 布局仍可读数字', () => {
-    const result = core.convert(input('', { 点数: 0 }));
+test('已发布0.8.0布局：实际生成桥读取数值列，旧 JSON 布局仍可读数字', () => {
+    const result = publishedLayoutFixture(input('', { 点数: 0 }));
     const { win } = bridgeSandbox(result, { extra: { setTimeout() { return 0; }, clearTimeout() {} } });
     assert.strictEqual(win.getAllVariables().stat_data.点数, 0);
     const old = [{ kind: 'json', group: '点数', table: '点数表' }];

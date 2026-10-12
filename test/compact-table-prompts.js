@@ -1,4 +1,6 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+const legacyLayoutFixture=require('./legacy-layout-fixture');
 const { test } = require('./runner');
 const { core, assert } = require('./helpers');
 
@@ -18,13 +20,13 @@ test('字段说明保真：同范围各列保留各自描述、单位与格式�
             const result = core.convert(card, { mode });
             const sheet = Object.values(result.template).find(s => s.name === '状态表');
             const note = sheet.sourceData.note;
-            const left = note.split('- 左臂能量：')[1].split('- 右臂能量：')[0];
-            const right = note.split('- 右臂能量：')[1];
-            assert.ok(left.includes(descriptions[0]) && right.includes(descriptions[1]));
-            assert.match(left, /数值范围 0~10/);
-            assert.match(right, /数值范围 0~10/);
+            const description=result.schema[0].columns[0].desc;
+            if(descriptions[0])assert(description.includes('状态.左臂能量：'+descriptions[0]));
+            assert(description.includes('状态.右臂能量：'+descriptions[1]));
+            const checks=result.schema[0].columns[0].jsonPathChecks;
+            for(const name of ['左臂能量','右臂能量'])assert.deepStrictEqual(checks.find(c=>c.path.join('.')===name).range,[0,10]);
             assert.doesNotMatch(note, /\$\{左\|右\}/);
-            assert.ok(sheet.content[0].includes('左臂能量') && sheet.sourceData.ddl.includes('-- 右臂能量'));
+            assert.strictEqual(JSON.parse(sheet.content[1][1]).左臂能量,5);
         }
     }
 });
@@ -34,8 +36,8 @@ test('字段说明保真：VWD 描述的独有条件和多行说明保留在所�
         content: JSON.stringify({ 状态: { 左侧: [5, '单位：点\n防御后扣减'], 右侧: [5, '单位：点\n攻击后扣减'] } }) }] } };
     const result = core.convert(card);
     const sheet = Object.values(result.template).find(s => s.name === '状态表');
-    assert.match(sheet.sourceData.note, /左侧：单位：点\n  防御后扣减/);
-    assert.match(sheet.sourceData.note, /右侧：单位：点\n  攻击后扣减/);
+    assert.match(sheet.sourceData.note, /左侧：[\s\S]*单位：点\n  防御后扣减/);
+    assert.match(sheet.sourceData.note, /右侧：[\s\S]*单位：点\n  攻击后扣减/);
     assert.match(sheet.sourceData.note, /【字段说明与规则】/);
     const plain = Object.values(core.convert(simpleCard()).template).find(s => s.name === 'obj表');
     assert.doesNotMatch(plain.sourceData.note, /【字段说明与规则】\s*更新以正文/);
@@ -45,9 +47,9 @@ test('字段说明保真：只读业务描述可读，关联标识的独有说�
     const result = core.convert({ name: '说明职责', first_mes: '', character_book: { entries: [{ comment: '[InitVar]',
         content: JSON.stringify({ 状态: { _冷却: [2, '单位为回合；由脚本倒数'], 备注: '无' } }) }] } });
     const sheet = Object.values(result.template).find(s => s.name === '状态表');
-    assert.match(sheet.sourceData.note, /_冷却：单位为回合；由脚本倒数/);
+    assert.match(sheet.sourceData.note, /_冷却：[\s\S]*单位为回合；由脚本倒数/);
     assert.doesNotMatch(sheet.sourceData.note, /下划线开头字段.*严禁更新/);
-    const g = result.schema[0];
+    const g = core.buildSchema({状态:{_冷却:[2,'单位为回合；由脚本倒数'],备注:'无'}},{},core.createReport())[0];
     g.kind = 'nestedRows'; g.keyCol = '备注'; g.parentKeyCol = '_冷却';
     g.ancestorKeyCols = [{ col: '_冷却', parentTable: '来源表', parentKeyCol: '标识' }];
     g.columns.find(c => c.zh === '备注').desc = '使用作者给定的稳定编号，不能改为昵称';
@@ -55,8 +57,8 @@ test('字段说明保真：只读业务描述可读，关联标识的独有说�
     assert.match(related.sourceData.note, /备注：使用作者给定的稳定编号，不能改为昵称/);
 });
 
-test('表格提示：移除纯列映射但保留自定义规则，三种模式数据与 DDL 不变', () => {
-    const results = Object.fromEntries(['native', 'both', 'sqlite'].map(mode => [mode, core.convert(simpleCard(), { mode })]));
+test("旧布局：表格提示：移除纯列映射但保留自定义规则，三种模式数据与 DDL 不变", () => {
+    const results = Object.fromEntries(['native', 'both', 'sqlite'].map(mode => [mode, publishedLayoutFixture(simpleCard(), { mode })]));
     for (const mode of Object.keys(results)) {
         const result = results[mode];
         const group = result.schema.find(g => g.name === 'obj');

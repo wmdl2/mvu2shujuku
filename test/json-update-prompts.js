@@ -1,4 +1,7 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+// Retained physical layouts are tested with frozen public metadata; current conversions use layout-planning.js.
+const legacyLayoutFixture = require('./legacy-layout-fixture');
 const { test } = require('./runner');
 const { core, assert } = require('./helpers');
 const { spawnSync } = require('child_process');
@@ -14,8 +17,8 @@ function card(bag = { "O'Brien": { text: '旧', keep: 7 } }) {
 }
 const stateSheet = result => Object.values(result.template).find(s => s.name === '状态表');
 
-test('JSON局部更新：停用模式参数统一使用 SQL 路径说明，布局数据不变', () => {
-    const results = Object.fromEntries(['native', 'both', 'sqlite'].map(mode => [mode, core.convert(card(), { mode })]));
+test("旧布局：JSON局部更新：停用模式参数统一使用 SQL 路径说明，布局数据不变", () => {
+    const results = Object.fromEntries(['native', 'both', 'sqlite'].map(mode => [mode, publishedLayoutFixture(card(), { mode })]));
     for (const mode of ['both', 'sqlite']) {
         const sheet = stateSheet(results[mode]);
         assert.match(sheet.sourceData.note, /对象\/数组优先用 json_set/);
@@ -36,8 +39,8 @@ test('JSON局部更新：停用模式参数统一使用 SQL 路径说明，布�
     assert.match(stateSheet(results.sqlite).sourceData.updateNode, /json_replace/);
 });
 
-test('JSON局部更新：生成的 SQL 示例正确转义路径，只替换目标字段并通过原 DDL', () => {
-    const result = core.convert(card(), { mode: 'sqlite' }), sheet = stateSheet(result);
+test("旧布局：JSON局部更新：生成的 SQL 示例正确转义路径，只替换目标字段并通过原 DDL", () => {
+    const result = publishedLayoutFixture(card(), { mode: 'sqlite' }), sheet = stateSheet(result);
     const sql = sheet.sourceData.updateNode.split('\nSQL示例: ')[1];
     assert.match(sql, /O''Brien/);
     const output = spawnSync(require('./helpers').pythonExecutable, ['-c', `
@@ -59,16 +62,16 @@ print(json.dumps(list(db.execute('SELECT * FROM '+t).fetchone()), ensure_ascii=F
         { "O'Brien": { text: '新值', keep: 7 } });
 });
 
-test('JSON局部更新：空容器和无安全公开路径不虚构 SQL 键，也不以空对象覆盖原值', () => {
+test("旧布局：JSON局部更新：空容器和无安全公开路径不虚构 SQL 键，也不以空对象覆盖原值", () => {
     for (const bag of [null, {}, { $secret: { text: '私有', keep: 1 } }, { '含"引号': { text: '值', keep: 1 } }]) {
-        const sheet = stateSheet(core.convert(card(bag), { mode: 'sqlite' }));
+        const sheet = stateSheet(publishedLayoutFixture(card(bag), { mode: 'sqlite' }));
         assert.doesNotMatch(sheet.sourceData.updateNode, /SQL示例:|可写键名|SET .* = '\{\}'/);
         assert.match(sheet.sourceData.note, /仅操作规则允许的路径/);
     }
 });
 
-test('JSON局部更新：整组 JSON 保留路径守卫，无可写路径不增加 SQL JSON 说明，普通表扩展数据可写', () => {
-    const result = core.convert({ name: '整组JSON', first_mes: '', character_book: { entries: [{
+test("旧布局：JSON局部更新：整组 JSON 保留路径守卫，无可写路径不增加 SQL JSON 说明，普通表扩展数据可写", () => {
+    const result = publishedLayoutFixture({ name: '整组JSON', first_mes: '', character_book: { entries: [{
         comment: '[InitVar]', content: JSON.stringify({ 自由: {}, 普通: { n: 1 } }),
     }] } });
     const json = result.schema.find(g => g.kind === 'json');

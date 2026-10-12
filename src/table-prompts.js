@@ -21,7 +21,7 @@ function createTablePrompts(deps) {
         if (!cols.length) return '';
         const label = group.kind === 'json' ? '内容列' : cols.map(c => `「${c.zh}」`).join('、');
         return `${label}以 JSON 存储。`
-            + `对象/数组优先用 json_set(列, '$."键"', 新值)、json_replace 或 json_remove 局部更新，仅操作规则允许的路径；标量按原类型整体更新。对象/数组/布尔/null 新值用 json('...')，字符串用 SQL 字符串。数组从 0 索引，末尾追加用 [#]，中间插入/移动需重建受影响数组。空单元格或 JSON null 容器先按规则初始化，保留未改字段；json_patch 的 null 会删键，不作路径更新替代。`;
+            + `对象/数组优先用 json_set(列, '$."键"', 新值)、json_replace 或 json_remove 局部更新，仅操作规则允许的路径；标量按原类型整体更新。对象/数组/布尔/null 新值用 json('...')；内部路径写入字符串用 SQL 字符串，整列替换为 JSON 字符串用 json_quote('新值')。数组从 0 索引，末尾追加用 [#]，中间插入/移动需重建受影响数组。空单元格或 JSON null 容器先按规则初始化，保留未改字段；json_patch 的 null 会删键，不作路径更新替代。`;
     }
 
     function buildNote(group, opts = {}) {

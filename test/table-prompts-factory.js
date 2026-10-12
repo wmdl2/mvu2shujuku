@@ -32,22 +32,21 @@ test('表格提示工厂：浏览器内联后无 Node 外部作用域，数值�
 
 test('表格提示工厂：未知变换输出的 JSON 数值不误称对象，浏览器内联遵守相同契约', () => {
     const card = { name: '变换值说明', first_mes: '', character_book: { entries: [{ comment: '[InitVar]',
-        content: JSON.stringify({ 状态: { 分数: 1.5, 附件: null } }) }] },
+        content: JSON.stringify({ 分数: 1.5, 附件: null }) }] },
         extensions: { tavern_helper: { scripts: [{ name: '结构', content:
-            "import {registerMvuSchema} from 'https://example.test/mvu_zod.js';\nconst S=z.object({状态:z.object({分数:z.number().transform(v=>Math.max(0,v)),附件:z.object({说明:z.string()}).nullable()})});registerMvuSchema(S);" }] } } };
+            "import {registerMvuSchema} from 'https://example.test/mvu_zod.js';\nconst S=z.object({分数:z.number().transform(v=>Math.max(0,v)),附件:z.object({说明:z.string()}).nullable()});registerMvuSchema(S);" }] } } };
     const result = core.convert(card);
-    const group = result.schema.find(g => g.tableName === '状态表');
-    const column = group.columns.find(c => c.zh === '分数');
+    const group = result.schema.find(g => g.name === '分数');
+    const column = group.columns.find(c => c.zh === group.valueCol);
     assert.strictEqual(column.jsonKind, 'any');
-    assert.match(column.desc, /完整 JSON 值/);
+    assert.match(column.desc, /JSON (值|数据)/);
     assert.doesNotMatch(column.desc, /可空对象\/数组/);
-    const sheet = Object.values(result.template).find(s => s.name === '状态表');
-    assert.strictEqual(sheet.content[1][sheet.content[0].indexOf('分数')], '1.5');
+    const sheet = Object.values(result.template).find(s => s.name === group.tableName);
+    assert.strictEqual(sheet.content[1][sheet.content[0].indexOf(group.valueCol)], '1.5');
     for (const note of [sheet.sourceData.note, inlinePrompts().buildNote(group)]) {
-        assert.match(note, /分数：保存完整 JSON 值，类型遵循原字段规则/);
-        assert.match(note, /附件：保存 JSON 对象\/数组/);
+        assert.match(note, /内容：保存完整 JSON 值，类型遵循原字段规则/);
         assert.match(note, /标量按原类型整体更新/);
-        assert.doesNotMatch(note, /分数：保存 JSON 对象\/数组|本次要求 SQL 脚本时/);
+        assert.doesNotMatch(note, /内容：保存 JSON 对象\/数组|本次要求 SQL 脚本时/);
     }
 });
 

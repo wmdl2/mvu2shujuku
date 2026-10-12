@@ -20,12 +20,12 @@ for (const [label, fields, value] of [
     ['可空容器', '数值:z.number(),记录:z.object({说明:z.string()}).nullable()', { 数值: 1.5, 记录: null }],
     ['隐藏字段', '数值:z.number(),$缓存:z.string()', { 数值: 1.5, $缓存: '禁止复制进提示词的值' }],
     ['变换输出', '数值:z.number().transform(v=>v),说明:z.string()', { 数值: 1.5, 说明: '正常' }],
-]) for (const rows of [true, false]) test('复杂对象边界：' + label + (rows ? '行表' : '单记录表') + '保留所属记录及完整JSON', async () => {
+]) for (const rows of [true, false]) test('复杂对象边界：' + label + (rows ? '字典' : '固定对象') + '完整替换与JSON回退', async () => {
     const result = convert(fields, value, true, rows), group = result.schema.find(g => g.name === '角色');
-    assert.strictEqual(group.kind, rows ? 'rows' : 'singleton', '不把整个根对象合并成一个 JSON');
-    const column = group.columns.find(c => c.zh === '属性');
-    assert(column?.isObject);
-    assert(!group.columns.some(c => c.zh.startsWith('属性_')));
+    assert.strictEqual(group.kind, 'singleton');
+    assert(group.valueCol, '保留父容器完整替换时的缺失状态');
+    assert.strictEqual(result.schema.length,1);
+    assert(!group.overflowCol);
     assert.deepStrictEqual(core.statDataFromTables(result.layout, result.template).stat_data, result.initial);
     const sheet = Object.values(result.template).find(s => s.name === group.tableName);
     assert(!JSON.stringify(sheet.sourceData).includes('禁止复制进提示词的值'));
@@ -36,19 +36,18 @@ for (const [label, fields, value] of [
     assert.deepStrictEqual(core.statDataFromTables(result.layout, result.template).stat_data, next);
 });
 
-test('复杂对象边界：纯固定标量仍展开，未声明的脚本字段由扩展列保存', async () => {
+test('复杂对象边界：固定对象的未声明脚本字段保留在完整所属对象中', async () => {
     const result = convert('数值:z.number(),说明:z.string()', { 数值: 1.5, 说明: '正常' });
     const group = result.schema.find(g => g.name === '角色');
-    assert(group.columns.some(c => c.zh === '属性_数值' && c.type === 'REAL'));
-    assert(!group.columns.some(c => c.zh === '属性'));
-    assert(group.overflowCol, '初始为空不能证明后续脚本不增加字段');
+    assert(group.valueCol);
+    assert(!group.overflowCol, '完整JSON不再重复保存扩展字段');
     const next = structuredClone(result.initial); next.角色.甲.脚本标记 = '稍后新增';
     const written = await core.writeStatDiffToDbResult(applyingApi(result.template), result.layout, result.initial, next);
     assert(written.ok, written.reason);
     assert.deepStrictEqual(core.statDataFromTables(result.layout, result.template).stat_data, next);
 });
 
-test('复杂对象边界：无Schema行表检查全部原记录的隐藏字段', () => {
+test('复杂对象边界：无Schema字典检查全部原记录的隐藏字段', () => {
     const initial = { 角色: {
         甲: { 姓名: '甲', 属性: { 数值: 1.5, 说明: '正常' } },
         乙: { 姓名: '乙', 属性: { 数值: 2.5, 说明: '正常', $缓存: '隐藏值不得复制进提示' } },
@@ -57,8 +56,8 @@ test('复杂对象边界：无Schema行表检查全部原记录的隐藏字段',
         entries: [{ comment: '[InitVar]', content: JSON.stringify(initial) }],
     } });
     const group = result.schema.find(g => g.name === '角色');
-    assert.strictEqual(group.kind, 'rows');
-    assert(group.columns.find(c => c.zh === '属性')?.isObject);
+    assert.strictEqual(group.kind, 'singleton');
+    assert(group.columns.find(c => c.zh === group.valueCol)?.isObject);
     assert(!group.columns.some(c => c.zh.startsWith('属性_')));
     const sheet = Object.values(result.template).find(s => s.name === group.tableName);
     assert(!JSON.stringify(sheet.sourceData).includes('隐藏值不得复制进提示'));

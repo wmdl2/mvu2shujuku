@@ -1,4 +1,7 @@
 'use strict';
+// Existing scalar-record layouts remain readable and writable.
+const legacyLayoutFixture=require('./legacy-layout-fixture');
+const publishedLayoutFixture=require('./published-layout-fixture');
 const { test } = require('./runner');
 const { core, assert, applyingApi } = require('./helpers');
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -21,14 +24,14 @@ function initial() {
         列表记录: { 空值: null, 空数组: [], 有值: [1, 2, 3] }, 状态: { 记录: { 甲: null } },
         角色: { 甲: actor(1), 乙: actor(2) }, 背包: ['钥匙', 0, false, null], 普通: { 文本: '不变' } };
 }
-function fixture(stat = initial(), convert = core.convert) {
+function fixture(stat = initial(), convert = publishedLayoutFixture) {
     const result = convert(source(stat), { mode: 'sqlite' });
     return { result, template: result.template, layout: JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout) };
 }
 function rowsFixture(layout, template) {
     return layout.filter(e => e.scalarValueCol).map(e => ({ e, sheet: Object.values(template).find(s => s.name === e.table) }));
 }
-test('可空动态记录：根、单例内与多层关联记录初值无损，保留结构和业务规则', () => {
+test('旧布局可空动态记录：根、单例内与多层关联记录初值无损，保留结构和业务规则', () => {
     const before = initial(), { layout, template } = fixture(before);
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, before);
     const projected = rowsFixture(layout, template);
@@ -45,7 +48,7 @@ test('可空动态记录：根、单例内与多层关联记录初值无损，�
     assert.match(projected.find(x => x.e.table === '记录表').sheet.sourceData.note, /持有数量/);
     assert.ok(!layout.some(e => /明细/.test(e.table)), '完整记录内部不再派生重复表');
 });
-test('可空动态记录：空字典也按声明建列，新增 null 和对象可读回', async () => {
+test('旧布局可空动态记录：空字典也按声明建列，新增 null 和对象可读回', async () => {
     const before = { 记录: {}, 列表记录: {}, 状态: { 记录: {} }, 角色: {} };
     const { layout, template } = fixture(before);
     const next = clone(before); next.记录.甲 = null; next.记录.乙 = {}; next.列表记录.甲 = [];
@@ -54,7 +57,7 @@ test('可空动态记录：空字典也按声明建列，新增 null 和对象�
     assert.strictEqual(core.lastStatWriteFailed, false);
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, next);
 });
-test('可空动态记录：新增、更新、删除、改名及同名多层归属，CRUD 只传标量', async () => {
+test('旧布局可空动态记录：新增、更新、删除、改名及同名多层归属，CRUD 只传标量', async () => {
     for (const mode of ['crud', 'cell']) {
         let before = initial(); const { layout, template } = fixture(before), api = applyingApi(template);
         const calls = [];
@@ -87,7 +90,7 @@ test('可空动态记录：新增、更新、删除、改名及同名多层归�
         assert.ok(!calls.includes('updateRow'), '单列更新沿用 updateCell，不虚构 updateRow 覆盖');
     }
 });
-test('可空动态记录：错误类型在任何写入前拒绝', async () => {
+test('旧布局可空动态记录：错误类型在任何写入前拒绝', async () => {
     for (const value of [[], '错误', 3, { 数量: Infinity }]) {
         const before = initial(), { layout, template } = fixture(before), snapshot = clone(template);
         const next = clone(before); next.普通.文本 = '不能部分提交'; next.记录.空值 = value;
@@ -96,7 +99,7 @@ test('可空动态记录：错误类型在任何写入前拒绝', async () => {
         assert.deepStrictEqual(template, snapshot);
     }
 });
-test('可空动态记录：模型单元格空值、空对象和删除行读回区分', () => {
+test('旧布局可空动态记录：模型单元格空值、空对象和删除行读回区分', () => {
     const { layout, template } = fixture(), { e, sheet } = rowsFixture(layout, template).find(x => x.e.table === '记录表');
     const ci = sheet.content[0].indexOf(e.scalarValueCol);
     for (const [encoded, expected] of [['null', null], ['{}', {}], ['', undefined], ['{"数量":5}', { 数量: 5 }]]) {
@@ -110,7 +113,7 @@ test('可空动态记录：模型单元格空值、空对象和删除行读回�
 });
 module.exports = { source, fixture, initial };
 
-test('可空动态记录：浏览器序列化候选工厂支持 null 与新增，原表不变', async () => {
+test('旧布局可空动态记录：浏览器序列化候选工厂支持 null 与新增，原表不变', async () => {
     const create = require('vm').runInNewContext('(' + require('../src/extension-runtime').createCandidateBuilder.toString() + ')');
     const before = initial(), { layout, template } = fixture(before), snapshot = clone(template);
     const next = clone(before); next.记录.有值 = null; next.角色.甲.背包.新 = {}; delete next.记录.空对象;
@@ -119,7 +122,7 @@ test('可空动态记录：浏览器序列化候选工厂支持 null 与新增�
     assert.deepStrictEqual(core.statDataFromTables(layout, candidate).stat_data, next);
     assert.deepStrictEqual(template, snapshot);
 });
-test('可空动态记录：SQLite 初值哨兵、类型约束和 JSON 局部更新', () => {
+test('旧布局可空动态记录：SQLite 初值哨兵、类型约束和 JSON 局部更新', () => {
     const stat = initial(); stat.记录.哨兵甲 = { 数量: -1 }; stat.记录.哨兵乙 = { 数量: '未获得' };
     const { template } = fixture(stat), sheets = Object.values(template).filter(s => s && s.content);
     const output = require('child_process').spawnSync(require('./helpers').pythonExecutable, ['-c', `

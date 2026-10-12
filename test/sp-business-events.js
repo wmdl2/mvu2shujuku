@@ -1,4 +1,7 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+// Retained physical layouts are tested with frozen public metadata; current conversions use layout-planning.js.
+const legacyLayoutFixture = require('./legacy-layout-fixture');
 const vm = require('vm');
 const { test } = require('./runner');
 const { assert, fs, core, applyingApi } = require('./helpers');
@@ -12,7 +15,7 @@ function message(entryId = 'one', source = 'manual_crud') {
     }] } } } };
 }
 function harness(initial = { A: { life: 100, gold: 10 } }) {
-    const result = core.convert({ name: '业务修正', first_mes: '开场', character_book: { entries: [
+    const result = publishedLayoutFixture({ name: '业务修正', first_mes: '开场', character_book: { entries: [
         { comment: '[InitVar]', content: JSON.stringify(initial) },
     ] } });
     const layout = JSON.parse(result.card.extensions.mvu2shujuku.layout);
@@ -41,7 +44,7 @@ function harness(initial = { A: { life: 100, gold: 10 } }) {
     vm.runInContext(source.slice(batchStart, batchEnd) + source.slice(start, end), context);
     return { context, state, tables, layout, api };
 }
-test('SP 业务来源：基线、历史回放、自身提交和非持久化回调不重算，按日志 ID 去重', () => {
+test("旧布局：SP 业务来源：基线、历史回放、自身提交和非持久化回调不重算，按日志 ID 去重", () => {
     const { context } = harness(), tracker = context.createSpCommitTracker(), keys = new Set(['sheet_a']);
     tracker.seed(context.readSpCommitEntries([message('old')]));
     assert.strictEqual(tracker.consume(context.readSpCommitEntries([message('old')]), keys, true).length, 0);
@@ -56,7 +59,7 @@ test('SP 业务来源：基线、历史回放、自身提交和非持久化回�
     tracker.seed(context.readSpCommitEntries([message('reenter')]));
     assert.strictEqual(tracker.consume(context.readSpCommitEntries([message('reenter')]), keys, true).length, 0);
 });
-test('SP 业务修正：等待异步监听，一次提交最终值，旧楼保留 CRUD 归属', async () => {
+test("旧布局：SP 业务修正：等待异步监听，一次提交最终值，旧楼保留 CRUD 归属", async () => {
     for (const older of [false, true]) {
         const { context, state, tables, layout } = harness();
         if (older) state.chat.push({ is_user: false });
@@ -69,7 +72,7 @@ test('SP 业务修正：等待异步监听，一次提交最终值，旧楼保�
         assert.strictEqual(state.published, 1);
     }
 });
-test('SP 业务修正：监听期间切聊天、删除来源或新提交，取消旧修正且不重试业务', async () => {
+test("旧布局：SP 业务修正：监听期间切聊天、删除来源或新提交，取消旧修正且不重试业务", async () => {
     for (const change of ['session', 'delete', 'commit', 'database']) {
         const { context, state, tables } = harness();
         const original = JSON.stringify(tables);
@@ -88,7 +91,7 @@ test('SP 业务修正：监听期间切聊天、删除来源或新提交，取�
     }
 });
 
-test('旧楼业务原子边界：同一行两字段只提交一次，单次失败不拆分补写', async () => {
+test("旧布局：旧楼业务原子边界：同一行两字段只提交一次，单次失败不拆分补写", async () => {
     for (const reject of [false, true]) {
         const h = harness(); h.state.chat.push({ is_user: false });
         const original = JSON.stringify(h.tables); let rowCalls = 0, cellCalls = 0;
@@ -102,7 +105,7 @@ test('旧楼业务原子边界：同一行两字段只提交一次，单次失�
         assert.strictEqual(rowCalls, 1); assert.strictEqual(cellCalls, 0); assert.strictEqual(h.state.imports, 0);
     }
 });
-test('旧楼业务原子边界：跨表和数组多步修正在首次真实调用前拒绝', async () => {
+test("旧布局：旧楼业务原子边界：跨表和数组多步修正在首次真实调用前拒绝", async () => {
     for (const array of [false, true]) {
         const h = harness({ A: { life: 100, gold: 10 }, B: { value: 1 }, Items: ['旧一', '旧二', '旧三'] });
         h.state.chat.push({ is_user: false }); const original = JSON.stringify(h.tables); let writes = 0;
@@ -113,7 +116,7 @@ test('旧楼业务原子边界：跨表和数组多步修正在首次真实调�
         assert.strictEqual(writes, 0); assert.strictEqual(JSON.stringify(h.tables), original);
     }
 });
-test('旧楼业务原子边界：规划后来源变化，单次 CRUD 也取消', async () => {
+test("旧布局：旧楼业务原子边界：规划后来源变化，单次 CRUD 也取消", async () => {
     const h = harness(); h.state.chat.push({ is_user: false }); let writes = 0, reads = 0;
     const exp = h.api.exportTableAsJson;
     h.api.exportTableAsJson = () => { if (++reads === 4) h.state.chat[0] = { is_user: false }; return exp(); };

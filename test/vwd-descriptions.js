@@ -677,7 +677,7 @@ test('旧布局 VWD动态说明：默认关闭时 pair 写入只落当前值（�
         const previous = core.isVwdExperimental();
         if (mod === core) core.setVwdExperimental(!!enableExperimental);
         try {
-            const result = mod.convert(card(), { mode: 'both' });
+            const result = mod === core ? legacyLayoutFixture(card(), { mode: 'both' }) : mod.convert(card(), { mode: 'both' });
             const layout = JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout);
             const template = JSON.parse(JSON.stringify(result.template));
             const calls = [];
@@ -715,7 +715,7 @@ test('旧布局 VWD动态说明：默认关闭时整段 pair 写入只落当前�
     // 复刻实机序列：先整段改说明，再整段改值。旧契约会把整段数组落成一列，
     // 这条用例固定“默认关闭时与冻结基线逐字节一致”，避免本次实验改动旧卡行为。
     const runSequence = async (mod) => {
-        const result = mod.convert(card(), { mode: 'both' });
+        const result = mod === core ? legacyLayoutFixture(card(), { mode: 'both' }) : mod.convert(card(), { mode: 'both' });
         const layout = JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout);
         const template = JSON.parse(JSON.stringify(result.template));
         const api = applyingApi(template);

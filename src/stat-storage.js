@@ -242,7 +242,19 @@ function createStatStorage(options = {}) {
             }
             const base = entry.rootContainer ? split(initial).database : get(initial, prefixes(entry)[0]);
             const keyIndex = old.findIndex(c => c.zh === entry.keyCol) + 1;
+            // The final layout is the ownership plan. Delegated child tables
+            // must not also be serialized into the parent's residual JSON.
             const paths = group.columns.map(c => relative(entry, entry.cols.find(x => x.zh === c.zh) || c)).filter(Boolean);
+            for (const prefix of prefixes(entry)) {
+                const owner = [...prefix, ...(entry.kind === 'rows' ? ['*'] : [])];
+                for (const child of layout) {
+                    if (child === entry) continue;
+                    for (const path of prefixes(child)) {
+                        if (path.length > owner.length && owner.every((key, i) => key === path[i]))
+                            paths.push(path.slice(owner.length));
+                    }
+                }
+            }
             const sourceRows = (group.rows || []).map(row => row.slice());
             if (entry.kind === 'rows' && object(base)) {
                 const existing = new Set(sourceRows.map(row => String(row[keyIndex])));

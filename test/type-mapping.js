@@ -5,7 +5,7 @@ const engine = require('../src/schema-execution-node');
 const createCardApi = require('../src/card-api');
 const z = require('../src/vendor/schema-engine-libs').zod;
 const clone = value => JSON.parse(JSON.stringify(value));
-test('类型契约：原Zod静态回退输出可存入SQLite，普通列和完整JSON仍拒绝其他越界值',async()=>{
+test('类型契约：原Zod静态回退输出可存入SQLite，完整JSON仍拒绝其他越界值',async()=>{
     for(const complex of [false,true]){
         const members={枚举:z.enum(['甲','乙']).catch(''),数:z.number().min(0).max(5).catch(-1),整数:z.int().catch(0.5)};
         if(complex)members.列表=z.array(z.number());
@@ -14,17 +14,19 @@ test('类型契约：原Zod静态回退输出可存入SQLite，普通列和完�
         const schema='{组:z.object({枚举:z.enum(["甲","乙"]).catch(""),数:z.number().min(0).max(5).catch(-1),整数:z.int().catch(0.5)'+(complex?',列表:z.array(z.number())':'')+'})}';
         const result=core.convert(card(first,schema)),{layout,tables}=state(result),group=result.schema.find(g=>g.name==='组');
         assert.strictEqual((await core.writeStatDiffToDbResult(applyingApi(tables),layout,first,after,tables)).ok,true);
-        const sheet=Object.values(tables).find(t=>t?.name===group.tableName),column=group.columns.find(c=>c.zh===(complex?'内容':'数'));
+        const sheet=Object.values(tables).find(t=>t?.name===group.tableName),column=group.columns.find(c=>c.zh===group.valueCol);
+        assert.strictEqual(column.type,'TEXT');
+        assert.deepStrictEqual(column.jsonPathChecks.find(c=>c.path.join('.')==='数').outputFallbacks,[-1]);
         const script=`import json,sqlite3,sys
 p=json.load(sys.stdin); db=sqlite3.connect(':memory:'); db.execute(p['ddl'])
 cols=db.execute('pragma table_info('+p['table']+')').fetchall()
 q='insert into '+p['table']+' values ('+','.join('?' for c in cols)+')'
 for row in p['rows']: db.execute(q,row)
 rejected=False
-try: db.execute('update '+p['table']+' set '+p['column']+'='+p['invalid'])
+try: db.execute('update '+p['table']+' set '+p['column']+'=json_set('+p['column']+', ?, ?)', ('$.数',p['invalid']))
 except sqlite3.IntegrityError: rejected=True
 print(json.dumps({'rows':db.execute('select * from '+p['table']).fetchall(),'rejected':rejected}))`;
-        const invalid=complex?`json_set(${column.ident}, '$."数"', 10)`:'10';
+        const invalid=10;
         const out=JSON.parse(require('child_process').execFileSync(pythonExecutable,['-c',script],{encoding:'utf8',timeout:15000,input:JSON.stringify({ddl:sheet.sourceData.ddl,table:group.ident,column:column.ident,invalid,rows:sheet.content.slice(1)})}));
         assert.strictEqual(out.rejected,true);
         sheet.content=[sheet.content[0],...out.rows.map(row=>row.map(v=>typeof v==='number'?String(v):v))];
@@ -49,11 +51,13 @@ async function roundTrip(input, before, after) {
     assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, after);
     return result;
 }
-test('类型契约：初值为整数的普通 number 仍使用 REAL，小数写读不受初值限制', async () => {
+test('类型契约：初值为整数的 number 小数写读不受初值限制，JSON保留标量类型', async () => {
     for (const schema of [undefined, '{组:z.object({数:z.number(),布尔:z.boolean(),文本:z.string()})}']) {
         const first = { 组: { 数: 0, 布尔: false, 文本: '0001' } }, next = { 组: { 数: -1.25, 布尔: true, 文本: '0002' } };
         const result = await roundTrip(card(first, schema), first, next), group = result.schema.find(g => g.name === '组');
-        for (const [name, type] of [['数', 'REAL'], ['布尔', 'INTEGER'], ['文本', 'TEXT']]) assert.strictEqual(group.columns.find(c => c.zh === name).type, type);
+        const column=group.columns.find(c=>c.zh===group.valueCol);
+        assert.strictEqual(column.type,'TEXT');
+        assert.deepStrictEqual(JSON.parse(Object.values(result.template).find(s=>s?.name===group.tableName).content[1][1]),first.组);
     }
 });
 test('类型契约：Zod integer 元数据来自实际对象，包装及合并不丢失', () => {
@@ -61,7 +65,7 @@ test('类型契约：Zod integer 元数据来自实际对象，包装及合并�
         const source = 'const S=z.object({组:z.object({值:' + type + '.default(2)})});registerMvuSchema(S);';
         assert.strictEqual(engine.inspectSync(source).roots[0].fields.组.fields.值.integer, true, type);
         const result = core.convert(card({ 组: { 值: 2 } }, '{组:z.object({值:' + type + '.default(2)})}'));
-        assert.strictEqual(result.schema.find(g => g.name === '组').columns.find(c => c.zh === '值').type, 'INTEGER', type);
+        assert.strictEqual(result.schema.find(g => g.name === '组').columns[0].type, 'TEXT', type);
     }
     assert.strictEqual(engine.inspectSync('const S=z.object({值:z.number().multipleOf(.5)});registerMvuSchema(S);').roots[0].fields.值.integer, false);
 });
@@ -69,10 +73,9 @@ test('类型契约：YAML number 与显式 integer 按完整路径选择，不�
     const first = { 数字组: { 值: 0, 整数: 2 }, 文本组: { 值: '0001' } };
     const rules = '数字组:\n  值:\n    type: number\n    range: 0~5\n  整数:\n    type: integer\n文本组:\n  值:\n    type: string';
     const result = core.convert(card(first, undefined, rules));
-    const col = (group, name) => result.schema.find(g => g.name === group).columns.find(c => c.zh === name);
-    assert.strictEqual(col('数字组', '值').type, 'REAL');
-    assert.strictEqual(col('数字组', '整数').type, 'INTEGER');
-    assert.strictEqual(col('文本组', '值').type, 'TEXT');
+    const numeric=result.schema.find(g=>g.name==='数字组').columns[0];
+    assert.deepStrictEqual(numeric.jsonPathChecks.find(c=>c.path.join('.')==='值').range,[0,5]);
+    assert.strictEqual(result.schema.find(g=>g.name==='文本组').columns[0].type,'TEXT');
     assert.deepStrictEqual(core.statDataFromTables(...Object.values(state(result))).stat_data, first);
 });
 for (const [label, first, next] of [
@@ -89,15 +92,16 @@ test('类型契约：关系数组完整JSON保留元素类型，内部布尔仍�
     const schema = '{人物:z.record(z.string(),z.object({混合:z.array(z.any()),布尔:z.array(z.boolean())}))}';
     const result = await roundTrip(card(first, schema), first, next);
     const group = result.schema.find(g => g.name === '人物');
-    assert.equal(group.valueCol, '内容');
-    assert.equal(group.columns[0].type, 'TEXT');
-    const row = Object.values(result.template).find(s => s?.name === group.tableName).content[1];
-    assert.deepStrictEqual(JSON.parse(row[1]).甲.布尔, first.人物.甲.布尔);
+    assert.equal(group.kind, 'singleton');
+    const column=group.columns.find(c=>c.zh===group.valueCol);
+    assert(column?.isObject); assert.equal(column.type,'TEXT');
+    const sheet=Object.values(result.template).find(s=>s?.name===group.tableName);
+    assert.deepStrictEqual(JSON.parse(sheet.content[1][sheet.content[0].indexOf(column.zh)]).甲.布尔,first.人物.甲.布尔);
 });
 test('类型契约：完整JSON不被其他组的同名 number 提示改变物理类型或元素类型', () => {
     const first = { 记录: { 列表: [0, false, null, '0'] } };
     const result = core.convert(card(first, undefined, '其他组:\n  内容:\n    type: number\n    range: 0~5'));
-    const column = result.schema.find(g => g.name === '记录').columns.find(c => c.zh === '内容');
+    const column = result.schema.find(g => g.name === '记录').columns[0];
     assert(column); assert.strictEqual(column.type, 'TEXT');
     const { layout, tables } = state(result);
     assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, first);
@@ -111,8 +115,8 @@ test('类型契约：根值、固定嵌套叶子、根字典和关系字典均�
 });
 test('类型契约：任意 transform 输出完整 JSON；0–5 clamp 在原 Schema 验证后写回表格', async () => {
     const source = '{组:z.object({评分:z.coerce.number().transform(v=>_.clamp(v,0,5))})}', result = core.convert(card({ 组: { 评分: 0 } }, source));
-    const { layout, tables } = state(result), column = result.schema.find(g => g.name === '组').columns.find(c => c.zh === '评分');
-    assert.strictEqual(column.type, 'TEXT'); assert.strictEqual(column.jsonKind, 'any');
+    const { layout, tables } = state(result), column = result.schema.find(g => g.name === '组').columns[0];
+    assert.strictEqual(column.type, 'TEXT');
     const api = createCardApi({ readMetadata: () => ({ schemaKeys: ['结构'] }), isCurrent: () => true });
     api.registerSchema(z.object({ 组: z.object({ 评分: z.coerce.number().transform(v => Math.max(0, Math.min(v, 5))) }) }), '结构');
     for (const [input, expected] of [[3.75, 3.75], [8.25, 5], [-1.25, 0]]) {
@@ -122,7 +126,7 @@ test('类型契约：任意 transform 输出完整 JSON；0–5 clamp 在原 Sch
         assert.strictEqual(core.statDataFromTables(layout, tables).stat_data.组.评分, expected);
     }
 });
-test('类型契约：实际 SQLite REAL/INTEGER/TEXT DDL 和数字字符串读回保留类型及范围', () => {
+test('类型契约：实际 SQLite JSON 数字字符串读回保留小数、整数、布尔、文本及范围', () => {
     const first = { 组: { 数: 1.25, 整数: 2, 布尔: true, 文本: '0001' } }, schema = '{组:z.object({数:z.number().min(0).max(5),整数:z.number().int(),布尔:z.boolean(),文本:z.string()})}';
     const result = core.convert(card(first, schema)), { layout, tables } = state(result), group = result.schema.find(g => g.name === '组');
     const script = `import json, sqlite3, sys
@@ -130,13 +134,13 @@ p=json.load(sys.stdin); db=sqlite3.connect(':memory:'); db.execute(p['ddl'])
 cols=db.execute('pragma table_info('+p['table']+')').fetchall()
 names=','.join('"'+c[1]+'"' for c in cols); q='insert into '+p['table']+' ('+names+') values ('+','.join('?' for c in cols)+')'
 for row in p['rows']: db.execute(q,row)
-db.execute('update '+p['table']+' set '+p['number']+'=3.75')
+db.execute('update '+p['table']+' set '+p['number']+'=json_set('+p['number']+', ?, ?)', ('$.数',3.75))
 rejected=False
-try: db.execute('update '+p['table']+' set '+p['number']+'=6.25')
+try: db.execute('update '+p['table']+' set '+p['number']+'=json_set('+p['number']+', ?, ?)', ('$.数',6.25))
 except sqlite3.IntegrityError: rejected=True
 print(json.dumps({'rows':db.execute('select * from '+p['table']).fetchall(),'rejected':rejected}))`;
     const sheet = Object.values(tables).find(t => t?.name === group.tableName);
-    const out = JSON.parse(require('child_process').execFileSync(pythonExecutable, ['-c', script], { encoding: 'utf8', timeout: 15000, input: JSON.stringify({ ddl: sheet.sourceData.ddl, table: group.ident, number: group.columns.find(c => c.zh === '数').ident, rows: sheet.content.slice(1) }) }));
+    const out = JSON.parse(require('child_process').execFileSync(pythonExecutable, ['-c', script], { encoding: 'utf8', timeout: 15000, input: JSON.stringify({ ddl: sheet.sourceData.ddl, table: group.ident, number: group.columns[0].ident, rows: sheet.content.slice(1) }) }));
     assert.strictEqual(out.rejected, true);
     sheet.content = [sheet.content[0], ...out.rows.map(row => row.map(v => typeof v === 'number' ? String(v) : v))];
     assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, { 组: { 数: 3.75, 整数: 2, 布尔: true, 文本: '0001' } });

@@ -24,21 +24,22 @@ test('附属子表合并：含隐藏字段的固定对象保留JSON，独立范�
     const r = convert(fixed);
     assert.strictEqual(r.schema.filter(group => !group.publicFallback).length, 1, '不再为固定左右两侧单独建立行表');
     const group = r.schema[0], sheet = Object.values(r.template).find(s => s.name === group.tableName);
-    const container = group.columns.find(c => c.zh === '附属');
-    assert(container?.isObject);
     for (const [side, range, options] of [['左', [0, 10], ['甲', '乙']], ['右', [20, 30], ['丙', '丁']]]) {
-        const number = container.jsonPathChecks.find(c => c.path.join('.') === `${side}.数值`);
-        const label = container.jsonPathChecks.find(c => c.path.join('.') === `${side}.标记`);
+        const container=group.columns.find(c=>c.zh===group.valueCol);
+        assert(container?.isObject);
+        const number = container.jsonPathChecks.find(c => c.path.join('.') === `附属.${side}.数值`);
+        const label = container.jsonPathChecks.find(c => c.path.join('.') === `附属.${side}.标记`);
         assert.deepStrictEqual(number.range, range);
         assert.deepStrictEqual(label.enum, options);
         assert.ok(sheet.sourceData.ddl.includes(`BETWEEN ${range[0]} AND ${range[1]}`));
     }
-    assert.match(sheet.sourceData.note, /左\._维护：只由脚本维护/);
-    assert.match(sheet.sourceData.note, /右\._维护：只由脚本维护/);
+    assert.match(sheet.sourceData.note, /附属\.左/);
+    assert.match(sheet.sourceData.note, /附属\.右/);
+    assert.equal((sheet.sourceData.note.match(/_维护：只由脚本维护/g)||[]).length,2);
     assert.doesNotMatch(sheet.sourceData.note, /下划线开头字段.*只读/);
-    assert(!group.columns.some(c => c.zh.startsWith('附属_')), '混合对象不再拆列');
+    assert.equal(group.columns.length,1,'父变量完整保存，容器缺失不会被空行表混淆');
     assert.doesNotMatch(sheet.sourceData.note, /\$隐藏/, '只读范围不暴露私有列名');
-    assert.ok(!(sheet.sourceData.hiddenPhysicalColumns || []).includes(container.ident), '公开内容仍作为业务列展示');
+    assert.ok(!group.columns.filter(c=>c.zh.startsWith('附属_')).some(c=>(sheet.sourceData.hiddenPhysicalColumns||[]).includes(c.ident)), '公开内容仍作为业务列展示');
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, r.stat);
     const next = structuredClone(r.stat);
     next.状态.附属.左.数值 = 9; next.状态.附属.右.标记 = '丁';
@@ -53,7 +54,7 @@ test('附属子表合并：复杂动态后代完整保存，隐藏字段随对�
     for (const declaration of ['', 'z.record(z.string(),z.object({数值:z.number(),标记:z.string(),开启:z.boolean(),$隐藏:z.string()}))']) {
         const r = convert(declaration);
         assert.equal(r.schema.length, 1);
-        assert.equal(r.schema[0].valueCol, '内容');
+        assert(r.schema[0].valueCol);
         assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, r.stat);
     }
 });
@@ -61,7 +62,7 @@ test('附属子表合并：复杂动态后代完整保存，隐藏字段随对�
 test('附属子表合并：数组后代完整保存，不丢顺序、重复值和隐藏数据', async () => {
     const declaration = fixed.replace('左:z.object({', '左:z.object({日志:z.array(z.string()),');
     const r = convert(declaration, {}, stat => { stat.状态.附属.左.日志 = ['甲', '甲', '乙']; });
-    assert(r.schema[0].columns.some(c => c.zh === '附属' && c.isObject));
+    assert(r.schema[0].columns.some(c => c.zh === r.schema[0].valueCol && c.isObject));
     assert.deepStrictEqual(core.statDataFromTables(r.layout, r.template).stat_data, r.stat);
     const next = structuredClone(r.stat);
     next.状态.附属.左.日志 = ['甲', '乙', '丙'];

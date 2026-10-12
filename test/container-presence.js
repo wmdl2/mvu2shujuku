@@ -17,7 +17,7 @@ function fixture(stat, options = {}) {
         ] } }, { mode: 'both', ...options });
     return { result, template: result.template, layout: JSON.parse((result.card.data || result.card).extensions.mvu2shujuku.layout) };
 }
-test('整组空值：可空对象、数组与字典初值和缺表默认无损，普通表不变', () => {
+test('整组空值：可空对象、数组、字典和固定对象初值及缺表默认无损', () => {
     for (const values of [{ 状态: null, List: null, Dict: null }, { 状态: {}, List: [], Dict: {} }, {},
         { 状态: { 存量: 2, 线索: { 文本: '线索' } }, List: [{ name: '甲' }], Dict: { one: { 存量: 3 } } }]) {
         const initial = { ...values, Stable: { text: '普通字段' } };
@@ -27,7 +27,7 @@ test('整组空值：可空对象、数组与字典初值和缺表默认无损�
             assert.ok(entry && entry.kind === 'singleton' && entry.valueCol, group + ' 必须登记完整容器列');
             assert.strictEqual(entry.cols.length, 1);
         }
-        assert.strictEqual(layout.find(e => e.group === 'Stable').valueCol, '');
+        assert.strictEqual(layout.find(e => e.group === 'Stable').valueCol, '内容');
         assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, initial);
         assert.deepStrictEqual(core.statDataFromTables(layout, {}).stat_data, initial);
     }

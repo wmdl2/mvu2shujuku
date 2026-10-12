@@ -1,9 +1,12 @@
 'use strict';
+const publishedLayoutFixture=require('./published-layout-fixture');
+// Retained physical layouts are tested with frozen public metadata; current conversions use layout-planning.js.
+const legacyLayoutFixture = require('./legacy-layout-fixture');
 const { test } = require('./runner');
 const { core, assert, applyingApi } = require('./helpers');
 
 function convert(stat, rule = '', schemaScript = '') {
-    const result = core.convert({ name: '空值语义', first_mes: '开场', extensions: { tavern_helper: { scripts: [{ name: '变量结构', content: schemaScript }] } }, character_book: { entries: [
+    const result = publishedLayoutFixture({ name: '空值语义', first_mes: '开场', extensions: { tavern_helper: { scripts: [{ name: '变量结构', content: schemaScript }] } }, character_book: { entries: [
         { comment: '[InitVar]', content: JSON.stringify(stat) },
         { comment: '变量更新规则', content: rule },
     ] } }, { mode: 'both' });
@@ -14,7 +17,7 @@ const sample = () => ({
     Rows: { a: { value: null, other: 1 }, b: { value: '', other: 2 }, c: { other: 3 } },
 });
 
-test('nullable VWD：空值、空串、数字、布尔与缺失往返，缺表保持字符串默认', async () => {
+test("旧布局：nullable VWD：空值、空串、数字、布尔与缺失往返，缺表保持字符串默认", async () => {
     const initial = { A: { x: [null, '说明'], label: '默认字符串' }, Rows: { a: { x: [null, '说明'], n: 1 }, b: { x: [false, '说明'], n: 2 } } };
     const rule = '变量更新规则:\n  Rows:\n    type: |-\n      { [name: string]: { x: any; n: number; } }';
     const { layout, template } = convert(initial, rule);
@@ -34,7 +37,7 @@ test('nullable VWD：空值、空串、数字、布尔与缺失往返，缺表�
     assert.deepStrictEqual(core.statDataFromTables(declared.layout, {}).stat_data.A, { label: '默认字符串' });
 });
 
-test('nullable 列：显式 nullable/optional 声明支持首次 null 和缺失，不依赖空值样本', async () => {
+test("旧布局：nullable 列：显式 nullable/optional 声明支持首次 null 和缺失，不依赖空值样本", async () => {
     const schema = 'const Schema = z.object({ A: z.object({ x: z.number().nullable(), y: z.string().optional(), nested: z.object({ v: z.boolean().nullish() }) }), Rows: z.record(z.string(), z.object({ value: z.number().nullable(), other: z.number() })) }); registerMvuSchema(Schema);';
     const initial = { A: { x: 3, nested: {} }, Rows: { a: { value: 1, other: 2 } } };
     const { layout, template } = convert(initial, '', schema);
@@ -46,7 +49,7 @@ test('nullable 列：显式 nullable/optional 声明支持首次 null 和缺失�
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, next);
 });
 
-test('nullable 列：旧的非 nullable 列拒绝有损 null，整组 JSON 支持 null', async () => {
+test("旧布局：nullable 列：旧的非 nullable 列拒绝有损 null，整组 JSON 支持 null", async () => {
     const initial = { A: { x: 3, text: '原值' }, Log: {} };
     const { layout, template } = convert(initial);
     for (const key of ['x', 'text']) {
@@ -61,7 +64,7 @@ test('nullable 列：旧的非 nullable 列拒绝有损 null，整组 JSON 支�
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, next);
 });
 
-test('普通文本列：新布局清空字符串后不恢复初始文本，旧布局保留既有 fallback', async () => {
+test("旧布局：普通文本列：新布局清空字符串后不恢复初始文本，旧布局保留既有 fallback", async () => {
     const initial = { A: { text: '初始文本', other: 1 }, Rows: { a: { text: '初始文本', other: 1 } } };
     const { layout, template } = convert(initial);
     const next = structuredClone(initial); next.A.text = ''; next.Rows.a.text = '';
@@ -73,7 +76,7 @@ test('普通文本列：新布局清空字符串后不恢复初始文本，旧�
     assert.strictEqual(core.statDataFromTables(legacy, template).stat_data.A.text, '初始文本');
 });
 
-test('nullable 列：初始 null、空字符串、缺失、零与布尔分别往返', () => {
+test("旧布局：nullable 列：初始 null、空字符串、缺失、零与布尔分别往返", () => {
     const stat = sample(), { layout, template, schema } = convert(stat);
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, stat);
     assert.strictEqual(schema.find(g => g.name === 'A').columns.find(c => c.zh === 'y').type, 'REAL');
@@ -83,7 +86,7 @@ test('nullable 列：初始 null、空字符串、缺失、零与布尔分别往
     assert.deepStrictEqual(core.statDataFromTables(layout, JSON.parse(text)).stat_data, stat, '序列化后的表快照保持语义');
 });
 
-test('nullable 列：脚本往返有值、null、空字符串、缺失，重复提交无写入', async () => {
+test("旧布局：nullable 列：脚本往返有值、null、空字符串、缺失，重复提交无写入", async () => {
     const { layout, template } = convert(sample());
     const api = applyingApi(template);
     let before = core.statDataFromTables(layout, template).stat_data;
@@ -109,7 +112,7 @@ test('nullable 列：脚本往返有值、null、空字符串、缺失，重复�
     }
 });
 
-test('nullable 列：嵌套关系行的 null、缺失与后续写入保持独立', async () => {
+test("旧布局：nullable 列：嵌套关系行的 null、缺失与后续写入保持独立", async () => {
     const stat = { 关系: { 甲: { 好感: 0, 背包: { 钥匙: { 备注: null }, 钱包: {} } } } };
     const rule = '变量更新规则:\n  关系:\n    type: |-\n      { [名称: string]: { 好感: number; 背包: { [物品: string]: { 备注: string; } }; } }';
     const { layout, template } = convert(stat, rule);
@@ -124,7 +127,7 @@ test('nullable 列：嵌套关系行的 null、缺失与后续写入保持独立
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, next);
 });
 
-test('nullable 列：拒绝非标量写入，旧布局不猜测空字符串或 null 文本', async () => {
+test("旧布局：nullable 列：拒绝非标量写入，旧布局不猜测空字符串或 null 文本", async () => {
     const { layout, template } = convert(sample());
     const before = core.statDataFromTables(layout, template).stat_data;
     for (const value of [{ a: 1 }, [1], NaN, Infinity]) {
@@ -140,7 +143,7 @@ test('nullable 列：拒绝非标量写入，旧布局不猜测空字符串或 n
         { A: { x: 'null', y: 'fallback' } });
 });
 
-test('nullable 列：SQLite 默认值与初始行有效，JSON 编码仍执行范围和枚举约束', () => {
+test("旧布局：nullable 列：SQLite 默认值与初始行有效，JSON 编码仍执行范围和枚举约束", () => {
     const result = convert({ A: { x: null, choice: null } });
     const group = result.schema.find(g => g.name === 'A');
     group.columns.find(c => c.zh === 'x').range = [0, 10];
