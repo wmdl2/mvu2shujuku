@@ -2291,7 +2291,11 @@ function createSchemaLayout(dependencies) {
                     cols.push(column);
                     continue;
                 }
-                if (fixedSchema && (fixedSchema.kind === 'unknown' || (['object', 'array'].includes(fixedSchema.kind) && (fixedSchema.nullable || fixedSchema.optional)))) {
+                if (v === null && fixedSchema?.kind === 'object') {
+                    cols.push(optionalJsonContainerColumn(key, v, path, { ...fixedSchema, nullable: true }, usedIdents));
+                    continue;
+                }
+                if (fixedSchema && (fixedSchema.kind === 'unknown' || fixedSchema.passthrough || (['object', 'array'].includes(fixedSchema.kind) && (fixedSchema.nullable || fixedSchema.optional)))) {
                     cols.push(optionalJsonContainerColumn(key, v, path, fixedSchema, usedIdents));
                     continue;
                 }
@@ -2682,6 +2686,8 @@ function createSchemaLayout(dependencies) {
                     validatingNode = validatingNode && validatingNode.fields && validatingNode.fields[part];
                     node = node && node.fields && node.fields[part];
                 }
+                const native = shapeInfo?.mvuMetadata?.get((path || []).join('.'));
+                if (native?.extensible && native.required?.length) return { ...(node || {}), kind: 'object', passthrough: true };
                 if (node) return node;
                 // YAML 声明也按完整路径查找；不能按字段简称把同名后代提升到父表。
                 const declarations = yamlTypePaths.filter(rec => rec.path.length <= path.length && rec.path.every((part, i) => {
@@ -2930,7 +2936,7 @@ function createSchemaLayout(dependencies) {
     
             const completeRecordValue = node => node && node.dynamic && node.value
                 && ['object', 'array', 'unknown'].includes(node.value.kind) && (node.value.kind === 'unknown' || node.value.nullable || node.value.optional || node.value.kind === 'array'
-                    || node.value.dynamic || !Object.keys(node.value.fields || {}).length)
+                    || node.value.dynamic || node.value.passthrough || Object.keys(node.value.fields || {}).some(key => key.startsWith('$')) || !Object.keys(node.value.fields || {}).length)
                 ? node.value : null;
             // 根层与关系表共用声明/样本类型契约；空记录不能抹去声明，混合/null 使用 JSON 标量。
             const mixedRecordSample = values => values.some(value => Array.isArray(value) && !isPairLeaf(value))
@@ -3183,7 +3189,7 @@ function createSchemaLayout(dependencies) {
                             const sv = entry[subKey];
                             const spath = [...prefixPath, entryName, subKey];
                             const opaqueSchema = nullableNodeAt([groupName, subKey]);
-                            if (opaqueSchema && opaqueSchema.kind === 'unknown') {
+                            if (opaqueSchema && (opaqueSchema.kind === 'unknown' || opaqueSchema.passthrough)) {
                                 entryCols.push(optionalJsonContainerColumn(subKey, sv, spath, opaqueSchema, entryUsed));
                                 continue;
                             }
@@ -4137,10 +4143,9 @@ function createSchemaLayout(dependencies) {
 
     // 在已有规则/列推导完成后合并，复用其完整路径与规则归属，不另猜一套结构。
     // true 选择全部顶层容器；路径列表用于只选择指定顶层组。既有完整 JSON 组直接复用。
-    // A raw replaceMvuData snapshot may omit a mapped container regardless of
-    // its normal Schema requirement. Separate business rows do not encode that
-    // container's presence. Keep its JSON boundary until the host can commit
-    // structural metadata with every write; do not infer safety from defaults.
+    // Split stable Schema structures locally. Optional/nullable/unknown root
+    // containers retain their presence in JSON; unrepresentable raw script
+    // replacements are refused by the writer before any host mutation.
     function prepareStatStorageLayout(schema, initvar, shapeInfo, report, options = {}) {
         const root = shapeInfo.zodDefaultsRoot;
         // MVU generateSchema defaults to a closed root; only the actual root
@@ -4168,18 +4173,58 @@ function createSchemaLayout(dependencies) {
         const entries = buildLayout(schema).entries;
         const selected = new Set();
         for (const key of Object.keys(initvar || {})) {
-            if (key !== '$meta') selected.add(key);
+            if (key === '$meta') continue;
+            const node = shapeInfo.branchRootNodes?.[key] || shapeInfo.zodDefaultsRoot?.fields?.[key];
+            const native = shapeInfo.mvuMetadata?.get(key);
+            if (Array.isArray(initvar[key]) || node && (node.kind === 'unknown' || node.optional || node.nullable || node.passthrough || Object.keys(node.fields || {}).some(field => field.startsWith('$'))) || isPlainObject(initvar[key]) && Object.keys(initvar[key]).some(field => field.startsWith('$'))
+                || native?.extensible && native.required?.length) selected.add(key);
         }
         for (const entry of entries) {
             const group = schema.find(g => g.tableName === entry.table);
             const rootKey = (entry.path?.length ? entry.path : entry.writePaths?.[0] || [entry.group])[0];
             if (String(rootKey).startsWith('$')) selected.add(rootKey);
-            if (['array', 'pathArray', 'nestedArray', 'nestedRows'].includes(entry.kind)
-                || group.vwdMetaZh) {
+            if (entry.kind === 'array' || group.vwdMetaZh) {
                 selected.add((entry.path?.length ? entry.path : entry.writePaths?.[0] || [entry.group])[0]);
             }
         }
-        return preserveJsonContainers(schema, initvar, [...selected], report);
+        const prepared = preserveJsonContainers(schema, initvar, [...selected], report);
+        // Legacy pair leaves carry a value and a description. A scalar SQL
+        // column cannot retain the description as part of the source value.
+        // Preserve only that leaf, not its stable parent structure.
+        const pairLayout = buildLayout(prepared);
+        const at = (object, path) => (path || []).reduce((value, key) => value == null ? undefined : value[key], object);
+        for (const group of prepared) {
+            const entry = pairLayout.entries.find(item => item.table === group.tableName);
+            if (!entry || group.vwdMetaZh) continue;
+            for (let i = 0; i < group.columns.length; i++) {
+                const column = group.columns[i];
+                if (!column.isPair) continue;
+                const layoutColumn = entry.cols.find(item => item.zh === column.zh);
+                let path = layoutColumn.path || [];
+                if (entry.kind === 'singleton' && path[0] === entry.group) path = path.slice(1);
+                const containerPath = entry.writePaths?.[0] || entry.path || [entry.group];
+                const container = at(initvar, containerPath);
+                const values = group.rows.map(row => {
+                    const value = entry.kind === 'rows' ? container?.[row[group.columns.findIndex(item => item.zh === group.keyCol) + 1]] : container;
+                    return at(value, path);
+                });
+                const json = optionalJsonContainerColumn(column.zh, values[0], column.path, { kind: 'unknown' }, new Set(['row_id']));
+                group.columns[i] = { ...column, ...json, ident: column.ident, itemPath: column.itemPath, desc: column.desc,
+                    isPair: false, _generatedDescription: column._generatedDescription };
+                for (let ri = 0; ri < group.rows.length; ri++) group.rows[ri][i + 1] = values[ri] === undefined ? '' : JSON.stringify(values[ri]);
+            }
+        }
+        const finalLayout = buildLayout(prepared);
+        for (const entry of finalLayout.entries) {
+            const group = prepared.find(item => item.tableName === entry.table);
+            if (!group || group.rootContainer) continue;
+            group.requireLosslessWrite = true;
+            const value = entry.cols.find(column => column.zh === group.valueCol);
+            if (!(group.valueCol && value?.type === 'jsonObjectOptional')) {
+                group.requiredSourceRoot = (entry.path?.length ? entry.path : entry.writePaths?.[0] || [entry.group])[0];
+            }
+        }
+        return prepared;
     }
 
     function preserveJsonContainers(schema, initvar, selection, report) {
@@ -4880,6 +4925,8 @@ function createSchemaLayout(dependencies) {
                 if (group.overflowCol) entry.overflowCol = group.overflowCol;
                 if (group.statStorageVersion) entry.statStorageVersion = group.statStorageVersion;
                 if (group.rootContainer) entry.rootContainer = true;
+                if (group.requireLosslessWrite) entry.requireLosslessWrite = true;
+                if (group.requiredSourceRoot) entry.requiredSourceRoot = group.requiredSourceRoot;
             }
             return { entries, pathIndex, tableByName };
         }
@@ -4900,6 +4947,8 @@ function createSchemaLayout(dependencies) {
                 valueCol: e.valueCol || '',
                 scalarValueCol: e.scalarValueCol || '',
                 scalarType: e.scalarType,
+                ...(e.requireLosslessWrite ? { requireLosslessWrite: true } : {}),
+                ...(e.requiredSourceRoot ? { requiredSourceRoot: e.requiredSourceRoot } : {}),
                 ...(e.publicFallback ? { publicFallback: true } : {}),
                 emptyValue: Object.prototype.hasOwnProperty.call(e, 'emptyValue') ? e.emptyValue : undefined,
                 cols: (e.cols || []).map(c => {

@@ -20,13 +20,13 @@ test('字段说明保真：同范围各列保留各自描述、单位与格式�
             const result = core.convert(card, { mode });
             const sheet = Object.values(result.template).find(s => s.name === '状态表');
             const note = sheet.sourceData.note;
-            const description=result.schema[0].columns[0].desc;
-            if(descriptions[0])assert(description.includes('状态.左臂能量：'+descriptions[0]));
-            assert(description.includes('状态.右臂能量：'+descriptions[1]));
-            const checks=result.schema[0].columns[0].jsonPathChecks;
-            for(const name of ['左臂能量','右臂能量'])assert.deepStrictEqual(checks.find(c=>c.path.join('.')===name).range,[0,10]);
+            for(let i=0;i<2;i++) {
+                const name=['左臂能量','右臂能量'][i],column=result.schema[0].columns.find(c=>c.zh===name);
+                if(descriptions[i])assert.equal(column.desc,descriptions[i]);
+                assert.deepStrictEqual(column.range,[0,10]);
+            }
             assert.doesNotMatch(note, /\$\{左\|右\}/);
-            assert.strictEqual(JSON.parse(sheet.content[1][1]).左臂能量,5);
+            assert.strictEqual(core.statDataFromTables(JSON.parse(result.card.extensions.mvu2shujuku.layout),result.template).stat_data.状态.左臂能量,5);
         }
     }
 });

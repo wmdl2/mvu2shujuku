@@ -27,7 +27,7 @@ test('整组空值：可空对象、数组、字典和固定对象初值及缺�
             assert.ok(entry && entry.kind === 'singleton' && entry.valueCol, group + ' 必须登记完整容器列');
             assert.strictEqual(entry.cols.length, 1);
         }
-        assert.strictEqual(layout.find(e => e.group === 'Stable').valueCol, '内容');
+        assert(!layout.find(e => e.group === 'Stable').valueCol,'必填稳定对象保留普通列');
         assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, initial);
         assert.deepStrictEqual(core.statDataFromTables(layout, {}).stat_data, initial);
     }

@@ -1,6 +1,10 @@
 # 文档与维护入口
 
-v0.8.1 的完整改动见[更新日志](../CHANGELOG.md)，本次[布局与发布验证](validation/2026-10-12-layout-planning.md)记录最终包与受测范围；[v0.8.0 发布验证](validation/2026-10-11-release-v0.8.0.md)保留前版证据。
+v0.8.2 的完整改动见[更新日志](../CHANGELOG.md)，本次[精细布局与发布验证](validation/2026-10-13-fine-layout.md)记录最终包与受测范围；[v0.8.1 布局验证](validation/2026-10-12-layout-planning.md)保留前版证据；[v0.8.0 发布验证](validation/2026-10-11-release-v0.8.0.md)保留前版证据。
+
+v0.8.2 的精细布局与明确写入边界见[布局设计](design/layout-planning.md)。
+
+v0.8.2 的历史 SQL 只读接口接入、异步准备与缓存契约见[2026-10-13 验证](validation/2026-10-13-message-history.md)。
 
 状态档案、完整聊天备份、四向迁移及旧布局／声明隐藏字段续修的实现和验收状态见[2026-10-11 状态迁移](validation/2026-10-11-state-transfer.md)。
 

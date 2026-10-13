@@ -11,7 +11,7 @@ function createTableWriter(dependencies) {
         debugOn: mvu2shujukuDebugOn = () => false,
         // 调用方验证对应布局、真实 note 和运行期渲染能力。缺少能力仍整笔拒绝。
         vwdNoteSyncSupported: vwdNoteSync = () => false,
-        debug: dbg = () => {}, warn: dbgWarn = () => {}, projectStat = value => value } = dependencies;
+        debug: dbg = () => {}, warn: dbgWarn = () => {}, projectStat = value => value, readStatFromTables } = dependencies;
     if (typeof safeParseJson !== 'function') throw new Error('写入模块需要 JSON 解析函数');
     let statWriteHadFailure = false;
     function unmappedStatGroups(layout, previous, next) {
@@ -39,6 +39,13 @@ function createTableWriter(dependencies) {
             else dbgWarn(' ' + label + ' 返回失败结果。');
         };
         const entries = Array.isArray(layoutEntries) ? layoutEntries : [];
+        for (const entry of entries) {
+            if (entry.requiredSourceRoot && !Object.prototype.hasOwnProperty.call(nextStat || {}, entry.requiredSourceRoot)) {
+                writeState.failureCode = 'MVU_STAT_REPRESENTATION_UNSUPPORTED';
+                noteWriteFailure('精细布局无法无损表示必需变量「' + entry.requiredSourceRoot + '」的缺失状态；已拒绝写入并保留原数据');
+                return 0;
+            }
+        }
         try { prevStat = projectStat(prevStat, entries); nextStat = projectStat(nextStat, entries); }
         catch (error) { noteWriteFailure(error.message); return 0; }
         const unmapped = unmappedStatGroups(entries, prevStat, nextStat);
@@ -397,6 +404,21 @@ function createTableWriter(dependencies) {
             seen.delete(value);
             return true;
         };
+        const managedPaths = entry => {
+            const managed = (entry.layout.cols || []).map(c => {
+                let path = Array.isArray(c) ? (c[3] || []) : (c.path || []);
+                if (entry.kind === 'singleton' && path[0] === entry.layout.group) path = path.slice(1);
+                return path;
+            }).filter(path => Array.isArray(path) && path.length);
+            const owner = [...entry.prefix, ...(['rows', 'nestedRows'].includes(entry.kind) ? ['*'] : [])];
+            for (const child of entries) {
+                if (child === entry.layout) continue;
+                const paths = child.writePaths?.length ? child.writePaths : [child.path?.length ? child.path : [child.group]];
+                for (const path of paths) if (path.length > owner.length && owner.every((part, i) => part === '*' || path[i] === '*' || part === path[i])) managed.push(path.slice(owner.length));
+            }
+            return managed;
+        };
+        const pathPrefix = (short, long) => short.length <= long.length && short.every((part, i) => part === '*' || long[i] === '*' || part === long[i]);
         const collect = (prevObj, nextObj, pathStr) => {
             const keys = Object.keys(nextObj || {});
             // 仅新 nullable 编码有“删除已建列叶子”的无损表示。父行/旧布局的删除
@@ -508,21 +530,7 @@ function createTableWriter(dependencies) {
                             // Sharing a first segment is not ownership of every
                             // sibling beneath that segment.
                             const logicalPath = rel.slice(fIdx);
-                            const managed = (entry.layout.cols || []).map(c => {
-                                let cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                                if (entry.kind === 'singleton' && cp[0] === entry.layout.group) cp = cp.slice(1);
-                                return cp;
-                            }).filter(cp => Array.isArray(cp) && cp.length);
-                            const owner = [...entry.prefix, ...(['rows', 'nestedRows'].includes(entry.kind) ? ['*'] : [])];
-                            for (const child of entries) {
-                                if (child === entry.layout) continue;
-                                const paths = child.writePaths?.length ? child.writePaths : [child.path?.length ? child.path : [child.group]];
-                                for (const path of paths) {
-                                    if (path.length > owner.length && owner.every((part, i) => part === '*' || path[i] === '*' || part === path[i]))
-                                        managed.push(path.slice(owner.length));
-                                }
-                            }
-                            const mapped = managed.some(cp => logicalPath.length <= cp.length && logicalPath.every((part, i) => part === cp[i] || cp[i] === '*'));
+                            const mapped = managedPaths(entry).some(path => pathPrefix(logicalPath, path));
                             if (!mapped) {
                                 const echoCandidate = String(logicalPath[0]).charAt(0) === '_' && pv === undefined && isStructurallyDefault(nv);
                                 ops.push({ np, entry, value: nv, prev: pv, overflow: true, echoCandidate,
@@ -644,35 +652,15 @@ function createTableWriter(dependencies) {
                     continue;
                 }
                 const entry = tableEntryByPath(np);
-                if (!entry || (entry.kind !== 'singleton' && entry.kind !== 'rows')) continue;
-                const rel = np.slice(entry.prefix.length);
-                const fIdx = entry.kind === 'rows' ? 1 : 0;
-                // 仅“第一层未声明字段”整个消失时处理；整行删除由 row-delete 检测负责，
-                // 更深层子键消失由整对象写回覆盖。
-                if (rel.length !== fIdx + 1) continue;
-                const fld = rel[fIdx];
-                // 与 mergeOverflow 同一套排除：声明列、子表（如 主角.气运/储物袋）、
-                // 已展平为列的嵌套容器（如 主角.炼丹 → 炼丹阶级）都不属于溢出字段，
-                // 删除/缺失时不得当作 _扩展数据 里的动态字段清理。
-                const groupName = String(entry.layout.group || entry.prefix[0] || '');
-                const childGroupKeys = new Set();
-                for (const L2 of entries) {
-                    if (L2 === entry.layout) continue;
-                    const wp = (L2.writePaths || [])[0] || L2.path;
-                    if (Array.isArray(wp) && wp.length >= 2 && wp[0] === groupName) childGroupKeys.add(wp[1]);
-                }
-                const flattenedContainers = new Set();
-                for (const c of (entry.layout.cols || [])) {
-                    const cp = Array.isArray(c) ? (c[3] || []) : (c.path || []);
-                    if (!Array.isArray(cp) || cp.length <= 1) continue;
-                    flattenedContainers.add(entry.kind === 'rows' ? cp[0] : (cp[0] === groupName ? cp[1] : cp[0]));
-                }
-                if (entry.layout.cols.some(c => c[0] === fld) || childGroupKeys.has(fld) || flattenedContainers.has(fld)) continue;
+                if (!entry || !['singleton', 'rows', 'nestedRows'].includes(entry.kind)) continue;
+                const rel = np.slice(entry.prefix.length), rowTable = ['rows', 'nestedRows'].includes(entry.kind);
+                const logicalPath = rowTable ? rel.slice(1) : rel;
+                if (!logicalPath.length || managedPaths(entry).some(path => pathPrefix(logicalPath, path) || pathPrefix(path, logicalPath))) continue;
                 ops.push({
                     np, entry,
                     overflowRemove: true,
-                    mergeKey: fld,
-                    rowKey: entry.kind === 'rows' ? rel[0] : undefined,
+                    mergeKey: logicalPath[0], mergePath: logicalPath,
+                    rowKey: rowTable ? rel[0] : undefined,
                 });
             }
         };
@@ -902,7 +890,7 @@ function createTableWriter(dependencies) {
                     if (ovRow === -1) continue; // 行已不存在，无需清理
                 }
                 // 删除在运行时读取当前单元格再执行，避免覆盖同批次的溢出写入（见 runDirectOps）
-                directOps.push({ kind: 'overflow-remove', key: found.key, sheet, header, layout: L, rowIndex: ovRow, rowKey: op.rowKey, ancestorValues, removeKey: op.mergeKey });
+                directOps.push({ kind: 'overflow-remove', key: found.key, sheet, header, layout: L, rowIndex: ovRow, rowKey: op.rowKey, ancestorValues, removeKey: op.mergeKey, mergePath: op.mergePath });
                 continue;
             }
             if (op.overflow) {
@@ -1565,7 +1553,12 @@ function createTableWriter(dependencies) {
                         const ovcIdx = curRow && Array.isArray(d.header) ? d.header.indexOf(d.layout.overflowCol || '_扩展数据') : -1;
                         if (curRow && ovcIdx !== -1) {
                             const cur = parseObj(curRow[ovcIdx]);
-                            if (d.kind === 'overflow-remove') delete cur[d.removeKey];
+                            if (d.kind === 'overflow-remove') {
+                                const path = d.mergePath || [d.removeKey];
+                                let owner = cur;
+                                for (const part of path.slice(0, -1)) owner = owner && owner[part];
+                                if (owner && typeof owner === 'object') delete owner[path.at(-1)];
+                            }
                             else setNestedValue(cur, d.mergePath || [d.mergeKey], d.value);
                             const out = JSON.stringify(cur);
                             if (!sameValue(curRow[ovcIdx], out)) {
@@ -1585,21 +1578,122 @@ function createTableWriter(dependencies) {
             }
         }
     }
+    function normalizeDraftCell(value) {
+        return value === null || value === undefined ? '' : typeof value === 'boolean' ? (value ? 1 : 0) : typeof value === 'object' ? JSON.stringify(value) : value;
+    }
+    function sameRepresentation(a, b) {
+        if (Object.is(a, b)) return true;
+        if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+        const keys = Object.keys(a);
+        return keys.length === Object.keys(b).length && keys.every(key => Object.prototype.hasOwnProperty.call(b, key) && sameRepresentation(a[key], b[key]));
+    }
+    function createTableDraft(baseTemplate, sourceApi) {
+        const tables = JSON.parse(JSON.stringify(baseTemplate || {}));
+        const operations = [];
+        const fakeApi = {
+            exportTableAsJson: () => tables,
+            importTableAsJson: async json => {
+                const candidate = JSON.parse(json);
+                for (const key of Object.keys(tables)) delete tables[key];
+                Object.assign(tables, candidate);
+                return true;
+            },
+            updateCell: async (tableName, rowIndex, col, value) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s || !s.content[rowIndex]) return false;
+                const ci = s.content[0].indexOf(col);
+                if (ci === -1) return false;
+                s.content[rowIndex][ci] = normalizeDraftCell(value);
+                return true;
+            },
+            updateRow: async (tableName, rowIndex, payload) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s || !s.content[rowIndex] || !payload || typeof payload !== 'object') return false;
+                if (Object.keys(payload).some(col => s.content[0].indexOf(col) < 0)) return false;
+                for (const col of Object.keys(payload)) {
+                    const ci = s.content[0].indexOf(col);
+                    if (ci >= 0) s.content[rowIndex][ci] = normalizeDraftCell(payload[col]);
+                }
+                return true;
+            },
+            insertRow: async (tableName, obj) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s) return -1;
+                const row = s.content[0].map(h => '');
+                for (const k of Object.keys(obj || {})) {
+                    const ci = s.content[0].indexOf(k);
+                    if (ci >= 0) row[ci] = normalizeDraftCell(obj[k]);
+                }
+                // 行号取现有最大行号 +1：deleteRow 发生后 content.length 会与已有
+                // 行号重复（row[0] 是主键列），重复主键会让整表导入被拒或产生重复行。
+                let maxRowId = 0;
+                for (let ri = 1; ri < s.content.length; ri++) {
+                    const rn = Number(s.content[ri] && s.content[ri][0]);
+                    if (Number.isFinite(rn) && rn > maxRowId) maxRowId = rn;
+                }
+                row[0] = maxRowId + 1;
+                s.content.push(row);
+                return row[0];
+            },
+            deleteRow: async (tableName, rowIndex) => {
+                const s = Object.values(tables).find(x => x && x.name === tableName);
+                if (!s || !s.content[rowIndex]) return false;
+                s.content.splice(rowIndex, 1);
+                return true;
+            },
+        };
+        if (sourceApi) {
+            if (typeof sourceApi.updateRow !== 'function') delete fakeApi.updateRow;
+            if (typeof sourceApi.getTableTemplate === 'function') fakeApi.getTableTemplate = (...args) => sourceApi.getTableTemplate(...args);
+            for (const method of ['updateCell', 'updateRow', 'insertRow', 'deleteRow', 'importTableAsJson']) {
+                const apply = fakeApi[method];
+                if (!apply) continue;
+                fakeApi[method] = async (...args) => {
+                    // import 的最终内容统一取 tables，不额外保留整份 JSON 字符串。
+                    const savedArgs = method === 'importTableAsJson' ? null : JSON.parse(JSON.stringify(args));
+                    const result = await apply(...args);
+                    operations.push({ method, args: savedArgs });
+                    return result;
+                };
+            }
+        }
+        return { tables, fakeApi, operations };
+    }
+
+    async function planStatDiffToDb(api, layoutEntries, prevStat, nextStat, persistedTables) {
+        const before = api.exportTableAsJson() || {};
+        const beforeJson = JSON.stringify(before);
+        const draft = createTableDraft(before, api);
+        const state = { failed: false, failureReason: null };
+        const plannedChanges = await runStatDiffWrite(draft.fakeApi, layoutEntries, prevStat, nextStat, persistedTables, state);
+        if (!state.failed && (layoutEntries || []).some(entry => entry.requireLosslessWrite)) {
+            const actual = typeof readStatFromTables === 'function' ? readStatFromTables(layoutEntries, draft.tables)?.stat_data : undefined;
+            if (!sameRepresentation(nextStat, actual)) {
+                state.failed = true;
+                state.failureCode = 'MVU_STAT_REPRESENTATION_UNSUPPORTED';
+                state.failureReason = '精细布局无法无损保存本次替换的结构或类型；已拒绝写入并保留原数据';
+            }
+        }
+        return { ok: !state.failed, plannedChanges, failureReason: state.failureReason, ...(state.failureCode ? { failureCode: state.failureCode } : {}),
+            tables: draft.tables, operations: draft.operations, beforeJson };
+    }
     async function writeStatDiffToDbResult(api, layoutEntries, prevStat, nextStat, persistedTables) {
+        if ((layoutEntries || []).some(entry => entry.requireLosslessWrite)) {
+            const plan = await planStatDiffToDb(api, layoutEntries, prevStat, nextStat, persistedTables);
+            if (!plan.ok) return { ok: false, plannedChanges: 0, failureReason: plan.failureReason, ...(plan.failureCode ? { failureCode: plan.failureCode } : {}) };
+        }
         const state = { failed: false, failureReason: null };
         const plannedChanges = await runStatDiffWrite(api, layoutEntries, prevStat, nextStat, persistedTables, state);
         return { ok: !state.failed, plannedChanges, failureReason: state.failureReason };
     }
     async function writeStatDiffToDb(api, layoutEntries, prevStat, nextStat, persistedTables) {
-        const state = { failed: false, failureReason: null };
         statWriteHadFailure = false;
-        try {
-            return await runStatDiffWrite(api, layoutEntries, prevStat, nextStat, persistedTables, state);
-        } finally {
-            statWriteHadFailure = state.failed;
-        }
+        const result = await writeStatDiffToDbResult(api, layoutEntries, prevStat, nextStat, persistedTables);
+        statWriteHadFailure = !result.ok;
+        return result.plannedChanges;
     }
-    return { unmappedStatGroups, writeStatDiffToDb, writeStatDiffToDbResult, get lastStatWriteFailed() { return statWriteHadFailure; } };
+
+    return { unmappedStatGroups, createTableDraft, planStatDiffToDb, writeStatDiffToDb, writeStatDiffToDbResult, get lastStatWriteFailed() { return statWriteHadFailure; } };
 }
 
 if (typeof module !== 'undefined' && module.exports) module.exports = createTableWriter;

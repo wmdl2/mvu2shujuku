@@ -81,11 +81,11 @@ test('完整JSON容器：保留原业务规则与 SQL 路径指导，旧关联�
     assert.match(sheet.sourceData.note, /对象的说明/);
     assert.ok(JSON.parse(sheet.content[1][1]).档案 === undefined, '单元格就是容器本身，不重复包一层组名');
 });
-test('完整JSON容器：旧选定组选项不能关闭当前容器缺失的安全边界', () => {
+test('完整JSON容器：选定组保留JSON，未选定稳定结构仍可拆分', () => {
     const card = source(), legacy = core.convert(card), off = core.convert(card, { jsonContainers: false });
     assert.deepStrictEqual(off.template, legacy.template);
     const { layout, template } = fixture({ jsonContainers: ['档案', '列表'] });
-    assert.strictEqual(layout.find(e => e.group === '状态').valueCol, '内容');
+    assert(!layout.find(e => e.group === '状态').valueCol);
     assert.strictEqual(layout.find(e => e.group === '背包').valueCol, '内容');
     assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, initial);
 });

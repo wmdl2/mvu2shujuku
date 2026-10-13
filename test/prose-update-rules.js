@@ -2,12 +2,13 @@
 const { test } = require('./runner');
 const { core, assert } = require('./helpers');
 
-function convert(rule, init = { 世界: { 时间: '', 冻结: false }, 任务: { 当前: [] }, 名字: '' }, enabled = true) {
+// This suite explicitly exercises full JSON rule binding; fine ordinary columns are checked separately.
+function convert(rule, init = { 世界: { 时间: '', 冻结: false }, 任务: { 当前: [] }, 名字: '' }, enabled = true, options) {
     return core.convert({ name: '公开散文规则测试', first_mes: '', character_book: { entries: [
         { id: 1, comment: '[InitVar]', content: JSON.stringify(init), enabled: false },
         { id: 2, comment: '[mvu_update]通用规则', content: rule, enabled },
         { id: 3, comment: '名字读取处', content: '人物名：{{getvar::名字}}', enabled: true },
-    ] } });
+    ] } }, options || { jsonContainers: Object.keys(init) });
 }
 function sheet(r, name) { return Object.values(r.template).find(s => s && s.name === name); }
 function retained(r) { return (r.card.data || r.card).character_book.entries.find(e => e.id === 2); }
@@ -138,7 +139,7 @@ test('原变量说明：下划线根保持公开，整数原值以JSON数字保�
     assert.notStrictEqual(s.updateConfig.updateFrequency, 0);
     assert.doesNotMatch(s.sourceData.note, /原变量路径|结构迁移/);
     assert.strictEqual(s.content[1][1],'2');
-    assert.match(s.sourceData.note,/保持原类型/);
+    assert.equal(r.schema.find(g=>g.name==='_schema_version').columns[0].type,'INTEGER');
     assert.match(s.sourceData.updateNode, /禁止/);
 });
 test('普通表说明：不再默认添加原路径、类型与世界书引用清单', () => {
@@ -177,7 +178,7 @@ test('只读作用域：通配根仅匹配同层名称，字段只读不关闭�
 
 test('只读频率：单例全部业务列明确只读时关闭自动更新，行表不扩大权限', () => {
     const r = convert(pathFormat(['/世界/时间 readonly(脚本维护)', '/世界/冻结 readonly(玩家开关)',
-        '/成员/{全名}/值 readonly(脚本维护)']), { 世界: { 时间: '', 冻结: false }, 成员: { 甲: { 值: 1 } } });
+        '/成员/{全名}/值 readonly(脚本维护)']), { 世界: { 时间: '', 冻结: false }, 成员: { 甲: { 值: 1 } } },true,{});
     assert.strictEqual(sheet(r, '世界表').updateConfig.updateFrequency, 0);
     assert.notStrictEqual(sheet(r, '成员表').updateConfig.updateFrequency, 0);
 });
@@ -230,19 +231,20 @@ test('只读冲突：父只读与子可写声明不能自动禁用整表', () =>
 });
 
 test('类型冲突：原声明与实际列不一致时保留报告，不提供第二套类型指令', () => {
-    const r = convert(pathFormat(['/世界/时间 replace:number 当剧情改变时更新']));
+    const r = convert(pathFormat(['/世界/时间 replace:number 当剧情改变时更新']),undefined,true,{});
     assert.ok(retained(r));
     assert.match(r.reportText, /原类型说明与已解析字段类型不一致/);
-    assert.match(sheet(r, '世界表').sourceData.note, /\/世界\/时间 replace:number 当剧情改变时更新/);
+    assert.match(retained(r).content,/\/世界\/时间 replace:number 当剧情改变时更新/);
+    assert.doesNotMatch(sheet(r,'世界表').sourceData.note,/type: number/);
     assert.match(r.reportText, /原变量路径映射（仅供核对/);
 });
 
 test('类型冲突：整数声明与初值小数冲突仍报告，完整JSON不静默取整', () => {
-    const r = convert(pathFormat(['/世界/评分 replace:integer 必须整数']), { 世界: { 评分: 1.5 } });
+    const r = convert(pathFormat(['/世界/评分 replace:integer 必须整数']), { 世界: { 评分: 1.5 } },true,{});
     assert.ok(retained(r));
     assert.match(r.reportText, /原类型说明与已解析字段类型不一致/);
-    assert.strictEqual(JSON.parse(sheet(r,'世界表').content[1][1]).评分,1.5);
-    assert.match(sheet(r,'世界表').sourceData.note,/必须整数/);
+    assert.strictEqual(core.statDataFromTables(JSON.parse(r.card.extensions.mvu2shujuku.layout),r.template).stat_data.世界.评分,1.5);
+    assert.match(retained(r).content,/必须整数/);
 });
 
 test('散文规则：完整JSON内部替换保留清空值和条件', () => {
@@ -250,7 +252,7 @@ test('散文规则：完整JSON内部替换保留清空值和条件', () => {
         { id: 1, comment: '[InitVar]', content: '{"任务":{"支线":{"名称":"","进度":""}}}', enabled: false },
         { id: 2, comment: '[mvu_update]', content: '支线:\n  - 非空时 replace /任务/支线 为 {"名称":"","进度":""}', enabled: true },
     ] }, extensions: { tavern_helper: { scripts: [{ name: '结构', enabled: true, content:
-        "import {registerMvuSchema} from 'https://example.test/mvu_zod.js';registerMvuSchema(z.object({任务:z.object({支线:z.object({名称:z.string(),进度:z.string()})})}));" }] } } });
+        "import {registerMvuSchema} from 'https://example.test/mvu_zod.js';registerMvuSchema(z.object({任务:z.object({支线:z.object({名称:z.string(),进度:z.string()})})}));" }] } } }, {jsonContainers:true});
     const note = sheet(r, '任务表').sourceData.note;
     assert.match(note, /非空时 更新 「内容」内部路径 \/支线/);
     assert.match(note, /为 \{"名称":"","进度":""\}/);

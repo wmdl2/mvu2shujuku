@@ -53,9 +53,9 @@ test('旧布局关系生命周期：省略整个父组属于部分写入，不�
     assertNoOrphans(layout, template);
 });
 
-test('关系生命周期：完整对象替换省略所属根时清除其全部内部数据', async () => {
+test('关系生命周期：精细布局拒绝不可表示的所属根缺失，保留完整原数据', async () => {
     const { initial, template, layout } = fixture();
     await core.writeStatDiffToDb(applyingApi(template), layout, initial, {});
-    assert.strictEqual(core.lastStatWriteFailed, false);
-    assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, {});
+    assert.strictEqual(core.lastStatWriteFailed, true);
+    assert.deepStrictEqual(core.statDataFromTables(layout, template).stat_data, initial);
 });
