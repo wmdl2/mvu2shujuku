@@ -3586,6 +3586,7 @@ function installExtensionRuntime(window) {
 
     let tableUpdateHookApi = null;
     let tableUpdateHookTimer = null;
+    let databaseHistoryPrepareTimer = null;
     let tableUpdateHookPendingData = null;
     let tableUpdateHookSession = null;
     let tableUpdateHookRetryCount = 0;
@@ -3984,7 +3985,7 @@ function installExtensionRuntime(window) {
     const tableUpdateHookCallback = (latestTableData, meta) => {
         if (!activeLayout) return;
         databaseMessageHistory.invalidate();
-        prepareDatabaseHistory().catch(error => dbgWarn(' 提交后历史状态准备失败:', error));
+        scheduleDatabaseHistoryPreparation();
         syncTableBusinessBaseline(latestTableData);
         const currentSnapshot = mvuDataFromCompleteTableSnapshot(latestTableData);
         const sheetNames = new Set((activeLayout || []).map(layout => layout.table));
@@ -4025,6 +4026,8 @@ function installExtensionRuntime(window) {
     }
 
     function uninstallTableUpdateHook() {
+        if (databaseHistoryPrepareTimer !== null) hostWindow.clearTimeout(databaseHistoryPrepareTimer);
+        databaseHistoryPrepareTimer = null;
         if (tableUpdateHookApi && typeof tableUpdateHookApi.unregisterTableUpdateCallback === 'function') {
             try { tableUpdateHookApi.unregisterTableUpdateCallback(tableUpdateHookCallback); } catch (e) {}
         }
@@ -6263,7 +6266,8 @@ function installExtensionRuntime(window) {
         readApi: getAcuApi,
         readChat: () => getContextSafe().chat || [],
         readSessionKey: () => { const session = captureRuntimeSession(); return session.key + ':' + session.epoch; },
-        readLayoutKey: () => JSON.stringify(activeLayout),
+        readLayoutKey: () => activeLayout,
+        yieldToHost: () => new Promise(resolve => hostWindow.setTimeout(resolve, 0)),
         project: (tables, index) => mvuDataFromCompleteTableSnapshot(tables, index, true, false),
         readFallback: index => {
             const tables = readPersistedTableData(index);
@@ -6290,6 +6294,13 @@ function installExtensionRuntime(window) {
             if (!target.missing && !target.current) await databaseMessageHistory.prepare([target.index]);
             else dbgWarn(' 历史状态批次准备失败:', error);
         }
+    }
+    function scheduleDatabaseHistoryPreparation() {
+        if (databaseHistoryPrepareTimer !== null) hostWindow.clearTimeout(databaseHistoryPrepareTimer);
+        databaseHistoryPrepareTimer = hostWindow.setTimeout(() => {
+            databaseHistoryPrepareTimer = null;
+            prepareDatabaseHistory().catch(error => dbgWarn(' 提交后历史状态准备失败:', error));
+        }, 120);
     }
     function databaseVariableTarget(options, writing) {
         const messageId = options && options.message_id;

@@ -303,3 +303,8 @@ node test/sp-version-browser.js
 状态迁移续验 `node test/real-host.js --only=state-transfer-failure --keep-server` 依赖主迁移夹具已经生成的公开合成档案和普通聊天目标；覆盖真正的 HTTP 保存失败、回退重载、取消备份不下载、原生 chat 部分迁移，以及纯 Zod 字段范围／类型筛选后的 SQLite 重载。自包含 CardApi 工厂也必须在无 Node 外部作用域 VM 中测试，断言恢复检查没有调用作者变换、动态默认、跨字段 refine 或 provider。
 
 精细布局回归入口为 `node test/run-tests.js --grep '布局规划|复杂对象边界|类型契约'`；真实 SQLite 使用 `node test/real-host.js --only=fine-layout`，同一服务补验显式传 `--reuse-server`。复用历史公开夹具时可传 `MVU_HISTORY_REUSE_STATE=1 MVU_HISTORY_RECHECK_WRITES=1` 与 `--only=message-history`，按实际包装读取角色元数据，等待提交值而非待写覆盖值。服务身份从 `MVU_REFERENCE_ROOT` 或真实参考目录、dataRoot 与端口核验，不猜测工作树内另有 refs 副本。
+
+
+## 历史缓存校验与调度验证
+
+历史缓存修改使用生产工厂，覆盖深层等长修改、数组换位／增项、字段增删与布局原位修改；不能只测根引用或最终值。后台合并须验证立即失效、显式准备不等待防抖、卸载清理和让出主线程后的过期拒绝。公开断言放在 `test/message-history.js`，性能对照只说明具体合成输入，不推算手机倍率；SQLite 验收固定公开历史接口版本并核对实际 SQL 模式、读回与重开。避免为减少准备次数删掉隔离来源保护。

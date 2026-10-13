@@ -3,7 +3,7 @@ const vm = require('vm');
 const { test } = require('./runner');
 const { assert, core } = require('./helpers');
 const factory = require('../src/message-history');
-function harness(create = factory) {
+function harness(create = factory, extra = {}) {
     const chat = [{ swipe_id: 0, TavernDB_ACU_IsolatedData: '{"revision":1}' }, { swipe_id: 0 }];
     let session = 'chat-A', layout = 'layout-A', runtime = {}, calls = [], respond;
     const api = { exportTableAsJson: () => runtime, exportTableSnapshotsAtMessages: async indices => {
@@ -13,7 +13,7 @@ function harness(create = factory) {
     } };
     const reader = create({ readApi: () => api, readChat: () => chat, readSessionKey: () => session,
         readLayoutKey: () => layout, project: data => data && { stat_data: { value: data.value } },
-        readFallback: index => ({ stat_data: { legacy: index } }), onError: () => {} });
+        readFallback: index => ({ stat_data: { legacy: index } }), onError: () => {}, ...extra });
     return { reader, api, chat, calls, session: value => { session = value; }, layout: value => { layout = value; },
         slot: () => { runtime = {}; }, respond: value => { respond = value; } };
 }
@@ -32,6 +32,51 @@ test('历史接口适配：同一修订的并发准备共享宿主回放', async
     const first = h.reader.prepare([0]), second = h.reader.prepare([0]);
     assert.equal(h.calls.length, 1); resolve(); await Promise.all([first, second]);
     assert.equal(h.calls.length, 1);
+});
+test('历史缓存优化：命中读取不再序列化宿主数据帧，深层等长修改仍失效', async () => {
+    let storageSerializations = 0;
+    const create = vm.runInNewContext('(' + factory.toString() + ')', { JSON: {
+        parse: JSON.parse, stringify(value) {
+            if (value && value.storageFrame) storageSerializations++;
+            return JSON.stringify(value);
+        },
+    } });
+    const h = harness(create);
+    const frame = { storageFrame: { version: 2, logEntries: [{ sql: 'value=1' }] } };
+    h.chat[0].TavernDB_ACU_IsolatedData = frame;
+    await h.reader.prepare([0]); const before = storageSerializations;
+    for (let index = 0; index < 100; index++) assert.equal(h.reader.read(0).stat_data.value, 10);
+    assert.equal(storageSerializations, before); assert.equal(h.calls.length, 1);
+    frame.storageFrame.logEntries[0].sql = 'value=2';
+    await h.reader.prepare([0]); assert.equal(h.calls.length, 2);
+});
+test('历史缓存优化：数组变更、同长换位和深层字段增删均使缓存失效', async () => {
+    for (const change of [frame => { frame.rows.reverse(); }, frame => { frame.rows[0].value = 'new'; },
+        frame => { delete frame.rows[0].value; }, frame => { frame.rows[0].other = 'added'; },
+        frame => { frame.rows.push({ value: 'third' }); }]) {
+        const h = harness(), frame = { rows: [{ value: 'one' }, { value: 'two' }] };
+        h.chat[0].TavernDB_ACU_IsolatedData = frame; await h.reader.prepare([0]);
+        change(frame); await h.reader.prepare([0]); assert.equal(h.calls.length, 2);
+    }
+});
+test('历史缓存优化：布局对象原位修改也拒绝旧历史缓存', async () => {
+    const h = harness(), layout = [{ table: 'one', columns: ['value'] }];
+    h.layout(layout); await h.reader.prepare([0]); layout[0].columns[0] = 'other';
+    await h.reader.prepare([0]); assert.equal(h.calls.length, 2);
+});
+test('历史缓存优化：准备期间让出主线程，修订变化拒绝发布半批结果', async () => {
+    const create = vm.runInNewContext('(' + factory.toString() + ')', { Date: { now: (() => { let time = 0; return () => time += 9; })() } });
+    let h, yields = 0;
+    h = harness(create, { yieldToHost: async () => { yields++; h.chat[0].swipe_id = 1; } });
+    await assert.rejects(h.reader.prepare([0, 1]), { code: 'MVU_HISTORY_CONTEXT_CHANGED' });
+    assert.equal(yields, 1);
+    await h.reader.prepare([0, 1]); assert.equal(h.reader.read(0).stat_data.value, 10);
+});
+test('历史缓存优化：索引保持宿主重复快照的首次命中语义', async () => {
+    const h = harness(); h.respond(() => ({ success: true, snapshots: [
+        { messageIndex: 0, data: { value: 10 } }, { messageIndex: 0, data: { value: 99 } },
+    ] }));
+    await h.reader.prepare([0]); assert.equal(h.reader.read(0).stat_data.value, 10);
 });
 test('历史接口适配：聊天、布局、swipe、等长字符串帧和已发布隔离运行时变化使缓存失效', async () => {
     for (const change of [h => h.session('chat-B'), h => h.layout('layout-B'),
@@ -96,6 +141,23 @@ test('历史接口接入：真实运行时在EJS执行前准备，TH与Mvu同步
     h.context.chat[0].swipe_id = 1;
     await h.win.EjsTemplate.evalTemplate(code, { message_id: 0 });
     assert(calls > count);
+});
+test('历史缓存优化：连续提交回调立即失效，但只安排一次后台准备', async () => {
+    const { nativeRuntime } = require('./runtime-native');
+    const h = await nativeRuntime(undefined, ({ win, context }) => {
+        win._ = require('../src/vendor/schema-engine-libs').lodash;
+        context.chat.push({ is_user: true }, { is_user: false });
+    });
+    let calls = 0;
+    h.api.exportTableSnapshotsAtMessages = async indices => { calls++; return { success: true,
+        snapshots: indices.map(messageIndex => ({ messageIndex, data: h.tables })) }; };
+    for (let round = 0; round < 3; round++) {
+        for (const callback of h.tableCallbacks) callback(h.tables, { persisted: false });
+    }
+    assert.equal(calls, 0);
+    await h.advance(119); assert.equal(calls, 0);
+    await h.advance(1); assert.equal(calls, 1);
+    assert.equal(typeof h.win.Mvu.getMvuData({ message_id: 0 }).stat_data.状态.金币, 'number');
 });
 test('历史接口接入：历史回放失败不冒充当前数据，当前读取仍可用', async () => {
     const { nativeRuntime } = require('./runtime-native');
