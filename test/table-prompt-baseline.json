@@ -2,17 +2,17 @@
   "description": "SQL 专用公开输入摘要；复杂嵌套对象保留 JSON、纯固定标量仍可展开；扩展数据说明按用户确认精简。作者业务原文及必要 SQL 操作指导保留。",
   "cases": {
     "basic/sqlite/split/static": {
-      "template": "a3dd71b8f9ec021589d5e1f7fd186c9396f5e4e08969406931ed656beafa61db",
-      "layout": "3b66c1d1842f7e8ae35fd8b165bc9f41cbb58b3da5e1fcff9c53a32978c22e2a",
+      "template": "a5715606d2af986e424cec07cd796d1ba3a591cc1502182ac79e090208c342c2",
+      "layout": "8783e38ea43830eca670433e93843e51024e1d64d2936591fdcde84ad8be3622",
       "sourceData": {
-        "状态表": "882e3558ed41260a650696532a7928132c78053a01d6427e991ec1d44ba93687",
+        "状态表": "5ebd5bbf6e1791811e2d00ccf82baa9090ff62ed7edaf05831320f0e7e86e23e",
         "背包表": "0285496ad66707edeed820f7ecb4f1e519e954aac5d279a44503d075609a59f0",
-        "行程表": "fb0c4bc38a95f996e9c7dae9d0912d1699b985c96800be4783ceafd228829a53"
+        "行程表": "34e8af1381d4b5098690d73215f1a248d7a44b1f5239c694e5f596a83fe47811"
       }
     },
     "basic/sqlite/json/static": {
       "template": "a3dd71b8f9ec021589d5e1f7fd186c9396f5e4e08969406931ed656beafa61db",
-      "layout": "3b66c1d1842f7e8ae35fd8b165bc9f41cbb58b3da5e1fcff9c53a32978c22e2a",
+      "layout": "c7dc0c74e05142e29a5a1d66f5cda325d025d5bacaec816ab44479a255d00b94",
       "sourceData": {
         "状态表": "882e3558ed41260a650696532a7928132c78053a01d6427e991ec1d44ba93687",
         "背包表": "0285496ad66707edeed820f7ecb4f1e519e954aac5d279a44503d075609a59f0",
@@ -20,17 +20,17 @@
       }
     },
     "relationships/sqlite/split/static": {
-      "template": "8da147e2595ee6c97744084aa2ea2c58010336bddbc22a5df0c6d882f519b0ad",
-      "layout": "a0aad13eeda7cd8117e3848bbb131e9c8fddc58ac58f2bf0e180e3305b7395a8",
+      "template": "4e66e4fe62b63e141bbc8194b515b2bc71fda06d1b0ed8305aa23a562d188058",
+      "layout": "7c9fcc02a2df283f863b66fc172603d72a5f36750958736cc74b316bffeb3231",
       "sourceData": {
-        "状态表": "882e3558ed41260a650696532a7928132c78053a01d6427e991ec1d44ba93687",
+        "状态表": "5ebd5bbf6e1791811e2d00ccf82baa9090ff62ed7edaf05831320f0e7e86e23e",
         "背包表": "0285496ad66707edeed820f7ecb4f1e519e954aac5d279a44503d075609a59f0",
-        "关系表": "22eb28216f7d675d47e5fae8c160ff0f7db35cf562ecaa1b3a9177165358ee89"
+        "关系表": "138c83dc410c22db802ecb0c7c5c2c8fc6f224436caf8997c25cf9171cc2e866"
       }
     },
     "relationships/sqlite/json/static": {
       "template": "8da147e2595ee6c97744084aa2ea2c58010336bddbc22a5df0c6d882f519b0ad",
-      "layout": "a0aad13eeda7cd8117e3848bbb131e9c8fddc58ac58f2bf0e180e3305b7395a8",
+      "layout": "3467e806e82a274ffc377bf9dd9a083a0504bd7e0b342a7ac1c5387dcda72382",
       "sourceData": {
         "状态表": "882e3558ed41260a650696532a7928132c78053a01d6427e991ec1d44ba93687",
         "背包表": "0285496ad66707edeed820f7ecb4f1e519e954aac5d279a44503d075609a59f0",
@@ -38,17 +38,17 @@
       }
     },
     "typed/sqlite/split/static": {
-      "template": "b61d542e2da604443f5fad00a1acf1089ba5f91fd39b8530fd55e62c346b4fe0",
-      "layout": "af9e6c342bda0cafba1a96c731bcd5f1334b1d9bd1258bee39c625120de94b68",
+      "template": "e004a8d55dedc97b64344ca7c2875c2ee5b38d282bfa446574bccd5466bd399c",
+      "layout": "b971f3677974e5568bc3818f08b045c918faa48727390698d1e4d5de54678ad5",
       "sourceData": {
         "状态表": "ada1c1035a8b893656063157055aa8cb3a5b0acb5b130bd1eddc0623f7a7cd79",
-        "清单表": "7ca6302d91d2bf3f6ac39fce104cd891d832daa4eff51dc17613f6950080d9d8",
+        "清单表": "519df5134515ead2a440bf8e767b731ca37e7e28341c35fdecbc956a852a5127",
         "队列表": "69c2bd585bfdef5227673df280f0925c4142b25ba87ca0081c652e97e864dc47"
       }
     },
     "typed/sqlite/json/static": {
       "template": "b61d542e2da604443f5fad00a1acf1089ba5f91fd39b8530fd55e62c346b4fe0",
-      "layout": "c330fdb3ee1de6976e4a8e00e986227bcd3d0a538df3cd609aa924b4cf061044",
+      "layout": "2966c061fdb850b4a426182b61a73bc11c3ffafeb35abae86beae6e4b0c369fb",
       "sourceData": {
         "状态表": "ada1c1035a8b893656063157055aa8cb3a5b0acb5b130bd1eddc0623f7a7cd79",
         "清单表": "7ca6302d91d2bf3f6ac39fce104cd891d832daa4eff51dc17613f6950080d9d8",
@@ -56,28 +56,28 @@
       }
     },
     "vwd/sqlite/split/static": {
-      "template": "4d0fb6d8d1ce35ccd890cf0c1d03006dd230240e54ab56e2df6a011e0291d779",
-      "layout": "7b7c21622e5e640cce9fa5d2db414a090674b64e3bae73b16987f1b0ffaf9a96",
+      "template": "2d02febeb40e50462cf89a9c8ef03bf3075ed49e5ad3c1c9dfb1b6c45b3ee753",
+      "layout": "b6d58602739eff1a6ba04a09c391bb1b9a2e5b757fe52c07ccfbf8e042acaafe",
       "sourceData": {
-        "状态表": "882e3558ed41260a650696532a7928132c78053a01d6427e991ec1d44ba93687",
+        "状态表": "5ebd5bbf6e1791811e2d00ccf82baa9090ff62ed7edaf05831320f0e7e86e23e",
         "背包表": "0285496ad66707edeed820f7ecb4f1e519e954aac5d279a44503d075609a59f0",
-        "好感系统表": "b83a5494258b4e951857f79383aab04af3a4975720968309d11be73f0f2cb3ff",
-        "配对记录表": "772f0242cd10384b3e1a0e74d0def0b55df6854f94d967b26422dfa3fa83c81c"
+        "好感系统表": "6e9f09395c068a3420f52c6b829df73c91f871ef45ff17b39f2ee2010ed501db",
+        "配对记录表": "8e4860ce453ef2fffff19fde9f6073fb20a77356e27d8561a6256b990d1b409c"
       }
     },
     "vwd/sqlite/split/vwd": {
-      "template": "4d0fb6d8d1ce35ccd890cf0c1d03006dd230240e54ab56e2df6a011e0291d779",
-      "layout": "7b7c21622e5e640cce9fa5d2db414a090674b64e3bae73b16987f1b0ffaf9a96",
+      "template": "00cf717bc6e3d9c6955c35e02444b56f4c54de7cc10210ee0e951c68917409f3",
+      "layout": "aa6a57bdb2d0c5fb076c9cf07ab8f1bdb758d065565c6c492d3f8882ff892096",
       "sourceData": {
-        "状态表": "882e3558ed41260a650696532a7928132c78053a01d6427e991ec1d44ba93687",
+        "状态表": "5ebd5bbf6e1791811e2d00ccf82baa9090ff62ed7edaf05831320f0e7e86e23e",
         "背包表": "0285496ad66707edeed820f7ecb4f1e519e954aac5d279a44503d075609a59f0",
         "好感系统表": "b83a5494258b4e951857f79383aab04af3a4975720968309d11be73f0f2cb3ff",
-        "配对记录表": "772f0242cd10384b3e1a0e74d0def0b55df6854f94d967b26422dfa3fa83c81c"
+        "配对记录表": "8e4860ce453ef2fffff19fde9f6073fb20a77356e27d8561a6256b990d1b409c"
       }
     },
     "vwd/sqlite/json/static": {
       "template": "4d0fb6d8d1ce35ccd890cf0c1d03006dd230240e54ab56e2df6a011e0291d779",
-      "layout": "7b7c21622e5e640cce9fa5d2db414a090674b64e3bae73b16987f1b0ffaf9a96",
+      "layout": "ab40b5c64bedaf695a31ac6b797254935bc2e50f3a59ff275774e3892526edfa",
       "sourceData": {
         "状态表": "882e3558ed41260a650696532a7928132c78053a01d6427e991ec1d44ba93687",
         "背包表": "0285496ad66707edeed820f7ecb4f1e519e954aac5d279a44503d075609a59f0",
@@ -87,7 +87,7 @@
     },
     "vwd/sqlite/json/vwd": {
       "template": "4d0fb6d8d1ce35ccd890cf0c1d03006dd230240e54ab56e2df6a011e0291d779",
-      "layout": "7b7c21622e5e640cce9fa5d2db414a090674b64e3bae73b16987f1b0ffaf9a96",
+      "layout": "ab40b5c64bedaf695a31ac6b797254935bc2e50f3a59ff275774e3892526edfa",
       "sourceData": {
         "状态表": "882e3558ed41260a650696532a7928132c78053a01d6427e991ec1d44ba93687",
         "背包表": "0285496ad66707edeed820f7ecb4f1e519e954aac5d279a44503d075609a59f0",
@@ -96,12 +96,12 @@
       }
     },
     "reminders/sqlite": {
-      "template": "197f7580bd76c1fc96b2f14a85504c26062de07dbc64b56b2b4222a696738d6c",
-      "layout": "3b66c1d1842f7e8ae35fd8b165bc9f41cbb58b3da5e1fcff9c53a32978c22e2a",
+      "template": "4aed808cb1f22acdcc4bd2d0be3353d7fb274a5288563f02b48463a943843fa9",
+      "layout": "8783e38ea43830eca670433e93843e51024e1d64d2936591fdcde84ad8be3622",
       "sourceData": {
-        "状态表": "90b3436cc8a232510d080b3342aca3726422441411088abaaa3d8a04b297d10b",
+        "状态表": "646a318526ede234e0dae339500fe5267bfe9499ed5d098708b62136e29bd8e0",
         "背包表": "0285496ad66707edeed820f7ecb4f1e519e954aac5d279a44503d075609a59f0",
-        "行程表": "fb0c4bc38a95f996e9c7dae9d0912d1699b985c96800be4783ceafd228829a53"
+        "行程表": "34e8af1381d4b5098690d73215f1a248d7a44b1f5239c694e5f596a83fe47811"
       }
     }
   }

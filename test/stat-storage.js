@@ -199,8 +199,8 @@ test('存储归属：readonly自然语言不改变存储位置', () => {
     const content = '变量输出格式:\n  valid_paths: |\n    /角色/姓名 readonly(人物姓名)\n    /角色/按钮 readonly(前端维护)\n  format: |\n    <UpdateVariable>\n    <Analysis>...</Analysis>\n    <JSONPatch>[]</JSONPatch>\n    </UpdateVariable>';
     const r = convert({ 角色: { 姓名: '甲', 按钮: false, 好感: 1 } }, { entries: [{ comment: '[mvu_update]变量输出格式', content }] });
     const sheet = Object.values(r.template).find(s => s?.name === '角色表');
-    assert.equal(r.entries.find(e=>e.group==='角色').valueCol,'内容');
-    assert.deepStrictEqual(JSON.parse(sheet.content[1][1]),{姓名:'甲',按钮:false,好感:1});
+    assert(!r.entries.find(e=>e.group==='角色').valueCol);
+    assert.deepStrictEqual(core.statDataFromTables(r.entries,r.template).stat_data.角色,{姓名:'甲',按钮:false,好感:1});
     assert.deepStrictEqual(r.policy.initial, {});
     assert.match(sheet.sourceData.note, /姓名.*只读|只读.*姓名/);
 });
@@ -342,7 +342,7 @@ test('根对象契约：模板名称清理控制字符，空名回退，物理�
 for (const [kind, schema, initial] of [
     ['可空容器', 'z.object({档案:z.object({数量:z.number().min(0).max(5).describe("仅在消耗道具时调整数量"),状态:z.enum(["开","关"])}).nullable()})',
         { 档案: { 数量: 2, 状态: '开' } }],
-    ['合并容器', 'z.object({档案:z.object({数量:z.number().min(0).max(5).describe("仅在消耗道具时调整数量"),状态:z.enum(["开","关"]),列表:z.array(z.string())})})',
+    ['开放容器', 'z.object({档案:z.object({数量:z.number().min(0).max(5).describe("仅在消耗道具时调整数量"),状态:z.enum(["开","关"]),列表:z.array(z.string())}).passthrough()})',
         { 档案: { 数量: 2, 状态: '开', 列表: [] } }],
 ]) {
     test('JSON说明精简：' + kind + ' 保留原规则、SQL示例和实际范围枚举约束', () => {

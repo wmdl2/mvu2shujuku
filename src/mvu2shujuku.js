@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.8.1';
+    const VERSION = '0.8.2';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -277,6 +277,7 @@
         if (!sharedTableWriter) sharedTableWriter = getTableWriterFactory()({
             parseJson: safeParseJson, debugOn: mvu2shujukuDebugOn, debug: dbg, warn: dbgWarn,
             vwdNoteSyncSupported: canWriteVwdDescriptions,
+            readStatFromTables: statDataFromTables,
             projectStat: (stat, layout) => getStatStorageFactory()().project(stat, layout),
             readCachedTemplate: () => {
                 const holder = typeof window !== 'undefined' ? window : root;
@@ -1605,6 +1606,13 @@
     // 新调用直接取本次结果；旧数字接口及失败 getter 仅供已有调用方兼容。
     // plannedChanges 是计划差异数量，不代表成功次数或实际宿主 API 调用次数。
     function unmappedStatGroups(...args) { return getTableWriter().unmappedStatGroups(...args); }
+    function createStatTableDraft(baseTemplate, sourceApi) {
+        return getTableWriter().createTableDraft(baseTemplate, sourceApi);
+    }
+    async function planStatDiffToDb(api, layoutEntries, prevStat, nextStat, persistedTables) {
+        return getTableWriter().planStatDiffToDb(api, layoutEntries, prevStat, nextStat, persistedTables);
+    }
+
     async function writeStatDiffToDbResult(api, layoutEntries, prevStat, nextStat, persistedTables) {
         return getTableWriter().writeStatDiffToDbResult(api, layoutEntries, prevStat, nextStat, persistedTables);
     }
@@ -3469,6 +3477,12 @@
         throw new Error('填表模板上下文桥缺失');
     }
 
+    function getMessageHistoryFactory() {
+        if (typeof root.__MVU2SHUJUKU_MESSAGE_HISTORY_FACTORY__ === 'function') return root.__MVU2SHUJUKU_MESSAGE_HISTORY_FACTORY__;
+        if (typeof require === 'function') return require('./message-history.js');
+        throw new Error('历史状态读取适配缺失');
+    }
+
     function getWorldbookSaveFactory() {
         if (typeof root.__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__;
         if (typeof require === 'function') return require('./worldbook-save.js');
@@ -3534,6 +3548,7 @@
             ['__MVU2SHUJUKU_CANDIDATE_BUILDER_FACTORY__', getCandidateBuilderFactory],
             ['__MVU2SHUJUKU_WORLDBOOK_REQUEST_FILTER_FACTORY__', getWorldbookRequestFilterFactory],
             ['__MVU2SHUJUKU_EJS_EVAL_BRIDGE_FACTORY__', getEjsEvalBridgeFactory],
+            ['__MVU2SHUJUKU_MESSAGE_HISTORY_FACTORY__', getMessageHistoryFactory],
             ['__MVU2SHUJUKU_WORLDBOOK_SAVE_FACTORY__', getWorldbookSaveFactory],
             ['__MVU2SHUJUKU_WORLDBOOK_STORAGE_FACTORY__', getWorldbookStorageFactory],
             ['__MVU2SHUJUKU_CARD_BRIDGE_INSTALLER__', getCardBridgeInstaller],
@@ -3629,6 +3644,7 @@
         getMvuSchemaFactory,
         getWorldbookRequestFilterFactory,
         getEjsEvalBridgeFactory,
+        getMessageHistoryFactory,
         prepareFillPrompt,
         fillEntryRequestView,
         fillAdaptationGuidance,
@@ -3636,6 +3652,7 @@
         getWorldbookStorageFactory,
         setVwdExperimental,
         isVwdExperimental,
+        createStatTableDraft, planStatDiffToDb,
         writeStatDiffToDbResult,
         unmappedStatGroups,
         writeStatDiffToDb,

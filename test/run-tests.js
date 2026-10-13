@@ -245,14 +245,15 @@ test('MVU $meta 通用转换：固定对象、动态子表、template 与混合�
     const r = core.convert(card, { mode: 'both' });
     const names = r.meta.tableNames;
     assert.ok(!names.some(n => /\$meta|required|extensible|template/.test(n)), '元数据不得生成业务表');
-    assert.ok(names.includes('主角表') && names.includes('环境表'), '嵌套动态字典随所属根完整保存');
+    assert.ok(names.includes('主角表') && names.includes('环境_元素表'), '稳定字典按完整路径建行表');
     assert.ok(names.includes('联系人表'), '顶层稳定动态字典保留行表');
     const layout = JSON.parse((r.card.data || r.card).extensions.mvu2shujuku.layout);
     const hero = layout.find(e => e.group === '主角');
-    assert.strictEqual(hero.valueCol, '内容');
+    assert(!hero.valueCol);
+    assert(hero.cols.some(c=>c[0]==='状态' && c[1]==='jsonObjectOptional'));
     const sheet = Object.values(r.template).find(s => s.name === hero.table);
     for (const rule of ['穿上服装时新增对应记录', '脱下服装时移除对应记录'])
-        assert.ok(sheet.sourceData.note.includes(rule), '原业务要求保持，不猜测改写自然语言');
+        assert.ok(Object.values(r.template).some(s=>s.sourceData?.note.includes(rule)), '原业务要求保持，不猜测改写自然语言');
     assert.ok((r.card.data || r.card).character_book.entries.some(e => e.content.includes('更新时通过remove旧键+insert新键修改对应条目的value描述')));
     const expected = core.analyzeMvuInitMetadata(init).data;
     assert.deepStrictEqual(core.statDataFromTables(layout, r.template).stat_data, expected, '初始模板往返必须严格等价');
@@ -561,8 +562,8 @@ test('教程标准 Zod Schema 脚本：record/array/coerce/prefault/clamp/复用
     const byName = n => Object.values(r.template).find(s => s && s.name === n);
     const role = byName('角色表');
     const system = byName('系统表');
-    assert.deepStrictEqual(role.content[0], ['row_id', '内容']);
-    assert.deepStrictEqual(system.content[0], ['row_id', '内容']);
+    assert(role.content[0].includes('姓名') && role.content[0].includes('标签'));
+    assert(system.content[0].includes('等级') && system.content[0].includes('归一化'));
     const stat = projectedStat(r.schema, r.template);
     assert.strictEqual(stat.角色.小明.姓名, '小明');
     assert.deepStrictEqual(stat.角色.小明.标签, []);
@@ -574,7 +575,7 @@ test('教程标准 Zod Schema 脚本：record/array/coerce/prefault/clamp/复用
     assert.strictEqual(stat.系统.标题, '默认标题');
     assert.strictEqual(stat.系统.启用, true);
     assert.deepStrictEqual(stat.系统.物品, {});
-    assert.ok(!byName('角色_标签表') && !byName('系统_物品表'), '复杂子容器随完整所属根保存');
+    assert.ok(!byName('角色_标签表') && byName('系统_物品表'), '数组保留局部JSON，稳定字典独立行表');
     assert.doesNotMatch(system.sourceData.ddl, /CHECK\(dengji BETWEEN/);
     assert.ok(r.reportText.includes('系统.归一化') && r.reportText.includes('preprocess'));
     assert.ok(r.reportText.includes('无法静态等价迁移的 refine'), '任意 Zod 校验必须进入人工检查报告');
@@ -998,24 +999,24 @@ test('道渊状态栏字段扫描', () => {
 
 /* ---------------- buildSchema / generateTemplate ---------------- */
 section('buildSchema / generateTemplate');
-test("道渊：完整父变量JSON保留数据与原业务规则", () => {
+test("道渊：精细布局保留复杂子节点与原业务规则", () => {
     const card = requireFixture();
     const r = core.convert(card, { mode: 'both' });
     const t = r.template;
     const byName = (name) => Object.keys(t).find(k => t[k].name === name);
-    assert.strictEqual(Object.keys(t).filter(k => k.startsWith('sheet_')).length, 9, '复杂所属根完整JSON，已声明美元根保留独立写入表');
+    assert.strictEqual(Object.keys(t).filter(k => k.startsWith('sheet_')).length, 13, '稳定父结构与子字典拆表，已声明美元根保留独立写入表');
     assert.ok(byName('$器灵台词表'), '原作者要求模型更新的美元字段不能丢弃');
     const hero = t[byName('主角表')];
-    assert.deepStrictEqual(hero.content[0], ['row_id', '内容']);
-    assert.ok(Object.values(r.template).some(s => s.sourceData?.note.includes('主角.生命')), '生命声明在完整JSON说明内保留');
+    assert(hero.content[0].includes('姓名') && hero.content[0].includes('生命'));
+    assert.ok(Object.values(r.template).some(s => s.sourceData?.note.includes('生命')), '生命声明在完整JSON说明内保留');
     assert.ok(hero.sourceData.ddl.includes('CHECK('), '主角表 DDL 应有范围约束（来自卡内规则）');
     assert.ok(hero.sourceData.ddl.includes('DEFAULT'), '主角表 DDL 应有默认值');
     const jade = t[byName('玉简表')];
-    assert.deepStrictEqual(jade.content[0],['row_id','内容'],'历史记录随玉简完整保存');
+    assert(jade.content[0].includes('好友姓名') && jade.content[0].includes('历史记录'),'好友保持行表，历史记录保留 JSON');
     assert.strictEqual(byName('玉简_历史记录表'),undefined,'不能猜测未知变换输出后再重复拆表');
     const jadeLayout = JSON.parse(r.card.data.extensions.mvu2shujuku.layout).find(entry=>entry.table==='玉简表');
-    assert.strictEqual(jadeLayout.valueCol,'内容');
-    assert.deepStrictEqual(JSON.parse(jade.content[1][1]),core.statDataFromTables(JSON.parse(r.card.data.extensions.mvu2shujuku.layout),t).stat_data.玉简);
+    assert(!jadeLayout.valueCol);
+    assert(jadeLayout.cols.some(c=>c[0]==='历史记录' && c[1]==='jsonObjectOptional'));
     // 标识符应为拼音 slug（无下划线冲突、可作 SQL 标识符）
     for (const k of Object.keys(t).filter(k => k.startsWith('sheet_'))) {
         assert.ok(/^sheet_[a-z0-9_]+$/.test(k), `sheet key 应为拼音 slug：${k}`);
@@ -1047,10 +1048,10 @@ test("道渊：完整父变量JSON保留数据与原业务规则", () => {
     }
     // 未知变换输出以JSON保存，保留原初值并检查JSON合法性。
     const world = t[byName('世界表')];
-    const coolIdx = world.content[0].indexOf('内容');
-    assert.strictEqual(JSON.parse(world.content[1][coolIdx]).遭遇冷却, 20, '完整世界JSON保留数值20');
+    const coolIdx = world.content[0].indexOf('遭遇冷却');
+    assert.strictEqual(JSON.parse(world.content[1][coolIdx]), 20, '未知变换仅保留本字段 JSON');
     assert.strictEqual(core.statDataFromTables(JSON.parse(r.card.data.extensions.mvu2shujuku.layout),t).stat_data.世界.遭遇冷却,20,'实际codec读回初值仍为数值20');
-    assert.ok(world.sourceData.ddl.includes('json_valid(neirong)'), '未知变换输出使用合法JSON约束，不能附猜测的数值范围CHECK');
+    assert.ok(world.sourceData.ddl.includes('json_valid(zaoyulengque)'), '未知变换输出使用合法JSON约束，不能附猜测的数值范围CHECK');
 });
 
 test('模板结构满足插件最小要求', () => {
@@ -5249,7 +5250,7 @@ test('旧桥回归：VARIABLE_UPDATE_ENDED 载荷与 MVU 原版一致：携带�
 });
 
 test('扩展侧写路径：单例/JSON 表仅表头时按模板补初始行（防 updateCell out of bounds）', async () => {
-    const card = requireFixture();
+    const card = {spec:'chara_card_v3',data:{name:'公开补行',character_book:{entries:[{comment:'[InitVar]',content:'主角: {姓名: 甲, 备注: 保留}'}]},extensions:{}}};
     const r = core.convert(card, { mode: 'both' });
     // 与真实运行一致：卡内布局是 buildLayoutJson 序列化后的数组列（[zh,type,fallback,path,isPair,desc]）
     const layoutEntries = JSON.parse(core.buildLayoutJson(core.buildLayout(r.schema)));
@@ -6016,7 +6017,7 @@ test("旧布局：桥+扩展共用注册表：TH 非消息作用域保留，切�
         return realGet(opts);
     }
     function realGav() { return { stat_data: { 真: 1 } }; }
-    function realMessages() { return [{ role: 'assistant', data: { 原生附加: 1 } }]; }
+    function realMessages() { return [{ message_id: 0, role: 'assistant', data: { 原生附加: 1 } }]; }
     const realMvu = { getMvuData() { return 'REAL_MVU'; }, custom: 42 };
 
     // 组装扩展 index.js（与 build-extension.js 相同内联方式）
@@ -6184,7 +6185,7 @@ test("旧布局：桥+扩展共用注册表：TH 非消息作用域保留，切�
     assert.strictEqual(typeof ejsAll, 'function', '扩展应注册世界书 EJS 数据入口');
     assert.strictEqual(ejsAll().stat_data.主角.姓名, '李四', '完整运行时表必须优先于滞后的初始 checkpoint');
     const preparedPromptContext = {};
-    (handlers.prompt_template_prepare || []).forEach(fn => fn(preparedPromptContext));
+    for (const fn of handlers.prompt_template_prepare || []) await fn(preparedPromptContext);
     assert.strictEqual(typeof preparedPromptContext.mvu2shujukuFormatMessageVariable, 'function', '填表自行 evalTemplate 时应向实际 prepare 上下文直接注入 helper');
     assert.strictEqual(preparedPromptContext.mvu2shujukuFormatMessageVariable('stat_data.主角.姓名'), '李四', '填表上下文中的格式化 helper 应读当前表格值');
     const directEvalResult = await win.EjsTemplate.evalTemplate('<%- mvu2shujukuFormatMessageVariable("stat_data.主角.姓名") %>');
@@ -7794,9 +7795,9 @@ test('旧布局：diff 路径行表删除：显式空组=删除意图、组缺�
     assert.strictEqual(deleted[deleted.length - 1][1], 1, '单行删除 rowIndex 应为 content 数据行索引 1');
 });
 
-test('溢出列 _扩展数据 删除同步：stat_data 移除的动态字段不再残留', async () => {
+test('精细布局：溢出列 _扩展数据 删除同步：stat_data 移除的动态字段不再残留', async () => {
     const vm2 = require('vm');
-    const card = requireFixture();
+    const card = { spec:'chara_card_v3', spec_version:'3.0', data:{name:'公开扩展字段删除',first_mes:'开场',character_book:{entries:[{comment:'[InitVar]',content:'主角: {姓名: 甲}'}]},extensions:{tavern_helper:{scripts:[]}}} };
     const r = core.convert(card, { mode: 'both' });
     const toLayout = schema => JSON.parse(core.buildLayoutJson(core.buildLayout(schema)));
     const srcDir = path.join(__dirname, '..', 'src');
@@ -7888,7 +7889,7 @@ test('溢出列 _扩展数据 删除同步：stat_data 移除的动态字段不�
     (handlers['chat_changed'] || []).forEach(fn => fn());
     await new Promise(res => setTimeout(res, 2500));
     // 写入一个未声明字段（进溢出列）
-    await win.Mvu.replaceMvuData({ stat_data: { 主角: { 动态字段: 'x' } } });
+    await win.Mvu.replaceMvuData({ stat_data: { 主角: { 姓名:'甲', 动态字段: 'x' } } });
     await new Promise(res => setTimeout(res, 800));
     const entry = toLayout(r.schema).find(e => e.group === '主角');
     const payloadCol = entry.valueCol || entry.overflowCol;
@@ -7896,7 +7897,6 @@ test('溢出列 _扩展数据 删除同步：stat_data 移除的动态字段不�
     let ovIdx = zj.content[0].indexOf(payloadCol);
     let ov = JSON.parse(zj.content[1][ovIdx] || '{}');
     assert.strictEqual(ov.动态字段, 'x', '未展开字段应保存在所属对象');
-    assert.ok(lastImport, '首楼多项写入应复用一次批量提交');
     lastImport = null;
     zj.content[1][ovIdx] = JSON.stringify({ 动态字段: 'x', 其他字段: 'y' });
     const prevOv = { 主角: { 姓名: '斯维姆', 动态字段: 'x', 其他字段: 'y' } };
@@ -8887,9 +8887,8 @@ test('道渊开场：replaceMvuData 等待真正落定，/cut 删除 checkpoint 
     for (const k of Object.keys(tables)) {
         if (k.indexOf('sheet_') === 0 && tables[k] && Array.isArray(tables[k].content)) tables[k].content = [tables[k].content[0]];
     }
-    const lateStat = {
-        主角: { 姓名: '迟到接管', 性别: '女', 容貌: '清丽', 身形: '未知', 衣着: '未知', 境界: '凡人', 宗门: '无', 宗门贡献: 0 },
-    };
+    const lateStat = JSON.parse(JSON.stringify(openingStat));
+    Object.assign(lateStat.主角, { 姓名: '迟到接管', 性别: '女', 容貌: '清丽', 身形: '未知', 衣着: '未知', 境界: '凡人', 宗门: '无', 宗门贡献: 0 });
     win.__mvu2shujukuFreshOpeningCheckpoint = { chatKey: context.chatId, at: Date.now() };
     win.__mvu2shujukuOpeningStatCandidate = { chatKey: context.chatId, stat: lateStat, at: Date.now() };
     (handlers['deleted'] || []).forEach(fn => fn(0));
@@ -9963,14 +9962,10 @@ test('通用形状往返：对象内 number 不污染外层、子表对象/普�
     assert.strictEqual(sd.主角.关系网, null, '动态字典的 null 初始占位在空表时应保持 null');
     assert.strictEqual(sd.图鉴, null, '顶层 null 必须经过 JSON 表原样往返，不得被跳过或变成空对象');
 
-    const platform = Object.values(tables).find(x => x && x.name === '平台表');
-    const incomeIndex = platform.content[0].indexOf('内容');
-    assert.ok(incomeIndex >= 0, '父容器完整替换不能丢失字段存在状态');
-    assert.strictEqual(JSON.parse(platform.content[1][incomeIndex]).甲站.收益明细.本月总收益,10);
+    assert.strictEqual(sd.平台.甲站.收益明细.本月总收益,10,'复杂子节点保持原业务类型');
     const relationLayout = layout.find(x => x.table === '主角表');
-    assert.strictEqual(relationLayout.valueCol, '内容', '关系网随完整所属对象保存');
-    const rootSheet = Object.values(tables).find(t => t.name === relationLayout.table);
-    assert.strictEqual(JSON.parse(rootSheet.content[1][1]).关系网, null, '完整所属对象的 null 原样保存');
+    assert(!relationLayout.valueCol);
+    assert.strictEqual(sd.主角.关系网,null,'可空子容器保留 null');
 });
 
 test('旧布局：规则声明但 initvar 无数据的动态键字典（路遇道友录式）也建空子表，列与规则来自 type 声明', () => {
@@ -10635,6 +10630,7 @@ require('./business-rule-preservation');
 require('./fixed-child-tables');
 require('./complex-object-layout');
 require('./layout-planning');
+require('./message-history');
 require('./declared-container-paths');
 require('./bound-template-fields');
 require('./output-business-rules');

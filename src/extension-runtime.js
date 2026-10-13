@@ -2883,12 +2883,18 @@ function installExtensionRuntime(window) {
                                     ? await commitCurrentReplyBatch(api, prev, effectiveTarget, persistedForWrite, writeSession)
                                     : await tryOpeningBulkInit(api, prev, effectiveTarget, chatKeyNow, isInitializationWrite, writeSession);
                         } catch (e) {
-                            if (replySnapshot) bulkInit = 'retry';
+                            if (e?.code === 'MVU_STAT_REPRESENTATION_UNSUPPORTED') {
+                                bulkInit = 'rejected';
+                                console.warn('[mvu2shujuku] ' + e.message);
+                            } else if (replySnapshot) bulkInit = 'retry';
                             dbgWarn(' 回复写入或开局提交异常：' + (e && e.message ? e.message : e));
                         }
                         try {
                             assertRuntimeSession(writeSession);
-                            if (bulkInit === 'retry') {
+                            if (bulkInit === 'rejected') {
+                                writeUnsettled = true;
+                                n = 0;
+                            } else if (bulkInit === 'retry') {
                                 writeUnsettled = true;
                                 if (overlayFlushRetries < 6) {
                                     overlayFlushRetries += 1;
@@ -3690,13 +3696,13 @@ function installExtensionRuntime(window) {
         return true;
     }
 
-    function mvuDataFromCompleteTableSnapshot(data, messageIndex, allowEmptyRows = false) {
+    function mvuDataFromCompleteTableSnapshot(data, messageIndex, allowEmptyRows = false, includeNative = true) {
         try {
             if (!activeLayout || !tableSnapshotCoversLayout(data, activeLayout, allowEmptyRows)) return null;
             const core = window.MVU2SHUJUKU_CORE;
             if (!core || typeof core.statDataFromTables !== 'function') return null;
             const after = core.statDataFromTables(activeLayout, data);
-            return after && after.stat_data ? nativeStatStorage.merge(after, messageIndex) : null;
+            return after && after.stat_data ? (includeNative ? nativeStatStorage.merge(after, messageIndex) : after) : null;
         } catch (e) { return null; }
     }
 
@@ -3977,6 +3983,8 @@ function installExtensionRuntime(window) {
     }
     const tableUpdateHookCallback = (latestTableData, meta) => {
         if (!activeLayout) return;
+        databaseMessageHistory.invalidate();
+        prepareDatabaseHistory().catch(error => dbgWarn(' 提交后历史状态准备失败:', error));
         syncTableBusinessBaseline(latestTableData);
         const currentSnapshot = mvuDataFromCompleteTableSnapshot(latestTableData);
         const sheetNames = new Set((activeLayout || []).map(layout => layout.table));
@@ -4435,22 +4443,31 @@ function installExtensionRuntime(window) {
                 // 浅副本上投影 stat_data，不污染真实聊天消息，并兼容同步/异步 TH API。
                 if (originalRec && originalRec.hasMsg && !isOursShimFn(w.getChatMessages)) {
                     const messageReadDefine = function () {
+                        assertRuntimeSession(shimSession);
                         const result = originalRec.msg.apply(this, arguments);
                         const decorate = (list) => {
+                            assertRuntimeSession(shimSession);
                             if (!Array.isArray(list)) return list;
-                            const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                            const stat = pendingStatWrite && typeof pendingStatWrite === 'object'
-                                ? pendingStatWrite
-                                : ((all && all.stat_data) || {});
                             return list.map((item) => {
-                                if (!item || typeof item !== 'object') return item;
-                                // 旧 MVU 状态栏常用 display_data || stat_data。数据库只持久化
-                                // 当前状态，因此消息副本中两个视图都投影同一份实时快照；
-                                // 否则原消息残留的空 display_data（空对象也是 truthy）会遮住 stat_data。
-                                return Object.assign({}, item, { data: Object.assign({}, item.data || {}, { stat_data: stat, display_data: stat }) });
+                                // The helper's ordinary result has message_id/data.
+                                // include_swipes returns a different shape; do not
+                                // invent independent state for unselected swipes.
+                                if (!item || !Number.isInteger(item.message_id) || !Object.prototype.hasOwnProperty.call(item, 'data')) return item;
+                                const target = ejsEvalBridge.selectMessage({ withMsg: { id: item.message_id, swipe_id: item.swipe_id } });
+                                const wrap = target.missing ? {} : readDatabaseVariables({ type: 'message', message_id: target.index });
+                                const stat = wrap.stat_data || {};
+                                return Object.assign({}, item, { data: Object.assign({}, item.data || {}, {
+                                    stat_data: stat, display_data: wrap.display_data || stat,
+                                }) });
                             });
                         };
-                        return result && typeof result.then === 'function' ? result.then(decorate) : decorate(result);
+                        return result && typeof result.then === 'function' ? result.then(async list => {
+                            assertRuntimeSession(shimSession);
+                            const indices = Array.isArray(list) ? list.filter(item => Number.isInteger(item?.message_id)
+                                && Object.prototype.hasOwnProperty.call(item, 'data')).map(item => item.message_id) : [];
+                            if (indices.length) await databaseMessageHistory.prepare(indices);
+                            return decorate(list);
+                        }) : decorate(result);
                     };
                     messageReadDefine.__mvu2shujuku = true;
                     w.getChatMessages = messageReadDefine;
@@ -4474,6 +4491,9 @@ function installExtensionRuntime(window) {
                                 while (isRuntimeSessionCurrent(shimSession)) {
                                     const all = window.getAllVariables && window.getAllVariables();
                                     if (all && all.__mvu2shujukuReadUnavailable !== true) {
+                                        const messageId = typeof w.getCurrentMessageId === 'function' ? w.getCurrentMessageId() : undefined;
+                                        await prepareDatabaseHistory({ message_id: messageId });
+                                        if (!isRuntimeSessionCurrent(shimSession)) throw new Error('MVU 所属聊天已切换，已取消等待');
                                         runtimeGlobals.publishMvu(w, sessionReadMvu);
                                         return sessionReadMvu;
                                     }
@@ -4545,6 +4565,7 @@ function installExtensionRuntime(window) {
                 const gvFn = function (opts) { return makeGetVariables(opts); };
                 gvFn.__mvu2shujuku = true;
                 w.getVariables = gvFn;
+                prepareDatabaseHistory().catch(error => dbgWarn(' 前端历史状态准备失败:', error));
                 const deepEqualCanon = (a, b) => {
                     if (a === b) return true;
                     if (typeof a !== typeof b) return false;
@@ -6235,9 +6256,40 @@ function installExtensionRuntime(window) {
         return false;
     }
     function readDatabaseMessageHistory(index) {
-        const tables = readPersistedTableData(index);
-        const wrap = tables ? mvuDataFromCompleteTableSnapshot(tables, index) : null;
+        const wrap = databaseMessageHistory.read(index);
         return wrap ? nativeStatStorage.merge(wrap, index) : undefined;
+    }
+    const databaseMessageHistory = window.MVU2SHUJUKU_CORE.getMessageHistoryFactory()({
+        readApi: getAcuApi,
+        readChat: () => getContextSafe().chat || [],
+        readSessionKey: () => { const session = captureRuntimeSession(); return session.key + ':' + session.epoch; },
+        readLayoutKey: () => JSON.stringify(activeLayout),
+        project: (tables, index) => mvuDataFromCompleteTableSnapshot(tables, index, true, false),
+        readFallback: index => {
+            const tables = readPersistedTableData(index);
+            return tables ? mvuDataFromCompleteTableSnapshot(tables, index) : undefined;
+        },
+        onError: error => dbgWarn(' 历史状态准备失败:', error),
+    });
+    async function prepareDatabaseHistory(context) {
+        if (!isConvertedMvuCard(currentCharacter()) || !ensureActiveLayoutLazy()) return;
+        const chat = getContextSafe().chat || [];
+        const latest = ejsEvalBridge.selectMessage().index;
+        const indices = [];
+        let inherited = false;
+        for (let index = 0; index < chat.length; index++) {
+            if (!inherited) inherited = hasDatabaseMessageData(index);
+            if (inherited && index !== latest) indices.push(index);
+        }
+        if (!indices.length) return;
+        try { await databaseMessageHistory.prepare(indices); }
+        catch (error) {
+            // A later damaged frame must not stop current reads or an earlier
+            // valid render. The host truncates a selected-floor retry itself.
+            const target = ejsEvalBridge.selectMessage({}, context || {});
+            if (!target.missing && !target.current) await databaseMessageHistory.prepare([target.index]);
+            else dbgWarn(' 历史状态批次准备失败:', error);
+        }
     }
     function databaseVariableTarget(options, writing) {
         const messageId = options && options.message_id;
@@ -6313,6 +6365,7 @@ function installExtensionRuntime(window) {
         readSessionKey: () => { const session = captureRuntimeSession(); return session.key + ":" + session.epoch; },
         hasMessageData: hasDatabaseMessageData,
         readHistory: readDatabaseMessageHistory,
+        prepareHistory: prepareDatabaseHistory,
         readTemplate: () => window.EjsTemplate || hostWindow.EjsTemplate,
         onWriteError: error => dbgWarn(' EJS 数据库变量写入失败:', error),
         lodash: window._ || hostWindow._,
@@ -6364,11 +6417,12 @@ function installExtensionRuntime(window) {
         try {
             // 只在首次 prepare 时打一行确认，避免每次生成都刷屏
             let firstPreparedLogged = false;
-            es.on('prompt_template_prepare', (prepared) => {
+            es.on('prompt_template_prepare', async (prepared) => {
                 // defines 是插件级默认上下文；填表插件会自行调用
                 // evalTemplate(finalContent)，不同窗口/缓存时它可能不带当前 defines。
                 // prepare 事件上再直接注入实际执行上下文，避免任意一个 helper
                 // ReferenceError 使 SP 整份提示退回未处理原文。
+                await prepareDatabaseHistory(prepared);
                 if (prepared && typeof prepared === 'object') Object.assign(prepared, templateDatabaseDefines(prepared));
                 installFrontendEjsLiteralGuard(prepared);
                 if (firstPreparedLogged) return;
@@ -6548,86 +6602,11 @@ function createCandidateBuilderFactory(deps) {
 
     // 开场候选与当前回复批次共用内存适配器。只在草稿中执行真实 writer，
     // 记录其最终 API 调用，不另写一套字段/数组/关联变更规划器。
-    function createTableDraft(baseTemplate, sourceApi) {
-        const tables = JSON.parse(JSON.stringify(baseTemplate || {}));
-        const operations = [];
-        const fakeApi = {
-            exportTableAsJson: () => tables,
-            importTableAsJson: async json => {
-                const candidate = JSON.parse(json);
-                for (const key of Object.keys(tables)) delete tables[key];
-                Object.assign(tables, candidate);
-                return true;
-            },
-            updateCell: async (tableName, rowIndex, col, value) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s || !s.content[rowIndex]) return false;
-                const ci = s.content[0].indexOf(col);
-                if (ci === -1) return false;
-                s.content[rowIndex][ci] = normalizeCellForSync(value);
-                return true;
-            },
-            updateRow: async (tableName, rowIndex, payload) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s || !s.content[rowIndex] || !payload || typeof payload !== 'object') return false;
-                if (Object.keys(payload).some(col => s.content[0].indexOf(col) < 0)) return false;
-                for (const col of Object.keys(payload)) {
-                    const ci = s.content[0].indexOf(col);
-                    if (ci >= 0) s.content[rowIndex][ci] = normalizeCellForSync(payload[col]);
-                }
-                return true;
-            },
-            insertRow: async (tableName, obj) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s) return -1;
-                const row = s.content[0].map(h => '');
-                for (const k of Object.keys(obj || {})) {
-                    const ci = s.content[0].indexOf(k);
-                    if (ci >= 0) row[ci] = normalizeCellForSync(obj[k]);
-                }
-                // 行号取现有最大行号 +1：deleteRow 发生后 content.length 会与已有
-                // 行号重复（row[0] 是主键列），重复主键会让整表导入被拒或产生重复行。
-                let maxRowId = 0;
-                for (let ri = 1; ri < s.content.length; ri++) {
-                    const rn = Number(s.content[ri] && s.content[ri][0]);
-                    if (Number.isFinite(rn) && rn > maxRowId) maxRowId = rn;
-                }
-                row[0] = maxRowId + 1;
-                s.content.push(row);
-                return row[0];
-            },
-            deleteRow: async (tableName, rowIndex) => {
-                const s = Object.values(tables).find(x => x && x.name === tableName);
-                if (!s || !s.content[rowIndex]) return false;
-                s.content.splice(rowIndex, 1);
-                return true;
-            },
-        };
-        if (sourceApi) {
-            if (typeof sourceApi.updateRow !== 'function') delete fakeApi.updateRow;
-            if (typeof sourceApi.getTableTemplate === 'function') fakeApi.getTableTemplate = (...args) => sourceApi.getTableTemplate(...args);
-            for (const method of ['updateCell', 'updateRow', 'insertRow', 'deleteRow', 'importTableAsJson']) {
-                const apply = fakeApi[method];
-                if (!apply) continue;
-                fakeApi[method] = async (...args) => {
-                    // import 的最终内容统一取 tables，不额外保留整份 JSON 字符串。
-                    const savedArgs = method === 'importTableAsJson' ? null : JSON.parse(JSON.stringify(args));
-                    const result = await apply(...args);
-                    operations.push({ method, args: savedArgs });
-                    return result;
-                };
-            }
-        }
-        return { tables, fakeApi, operations };
-    }
 
     async function planCurrentReplyWrites(api, layoutEntries, prevStat, nextStat, persistedTables) {
-        const before = api.exportTableAsJson() || {};
-        const beforeJson = JSON.stringify(before);
-        const draft = createTableDraft(before, api);
-        const result = await coreNow.writeStatDiffToDbResult(draft.fakeApi, layoutEntries, prevStat, nextStat, persistedTables);
-        if (!result.ok) throw new Error('当前回复批次规划失败，未调用宿主写入：' + result.failureReason);
-        return { tables: draft.tables, operations: draft.operations, beforeJson };
+        const plan = await coreNow.planStatDiffToDb(api, layoutEntries, prevStat, nextStat, persistedTables);
+        if (!plan.ok) throw Object.assign(new Error('当前回复批次规划失败，未调用宿主写入：' + plan.failureReason), { code: plan.failureCode });
+        return plan;
     }
 
     function buildUpdatedTemplateFromStat(layoutEntries, prevStat, nextStat, baseTemplate) {
@@ -6637,7 +6616,7 @@ function createCandidateBuilderFactory(deps) {
             dbgWarn(' VWD 说明变化无法与提示词同步，候选构造已在任何写入前拒绝：' + rejection);
             return null;
         }
-        const { tables, fakeApi } = createTableDraft(baseTemplate);
+        const { tables, fakeApi } = coreNow.createStatTableDraft(baseTemplate);
         const normalizedPrevStat = collapseLegacyPairLeaves(prevStat, layoutEntries);
         const normalizedNextStat = collapseLegacyPairLeaves(nextStat, layoutEntries);
         // 内存模板必须先追平当前数据库状态，再应用 prev→next。本次调用可能只带
@@ -6649,11 +6628,11 @@ function createCandidateBuilderFactory(deps) {
             : {};
         return Promise.resolve(coreNow.writeStatDiffToDbResult(fakeApi, layoutEntries, baseStat, normalizedPrevStat, tables))
             .then(result => {
-                if (!result.ok) throw new Error('构建开场模板失败：无法追平当前数据库快照：' + result.failureReason);
+                if (!result.ok) throw Object.assign(new Error('构建开场模板失败：无法追平当前数据库快照：' + result.failureReason), { code: result.failureCode });
                 return coreNow.writeStatDiffToDbResult(fakeApi, layoutEntries, normalizedPrevStat, normalizedNextStat, tables);
             })
             .then(result => {
-                if (!result.ok) throw new Error('构建开场模板失败：无法应用当前开场快照：' + result.failureReason);
+                if (!result.ok) throw Object.assign(new Error('构建开场模板失败：无法应用当前开场快照：' + result.failureReason), { code: result.failureCode });
                 return tables;
             });
     }
@@ -7015,7 +6994,8 @@ function createEjsEvalBridgeFactory(deps) {
                 actualContext = typeof ejs.prepareContext === 'function' ? await ejs.prepareContext(defines, -1) : {};
             }
             // Per invocation: no shared mutable group, dice or guide cache.
-            Object.assign(actualContext, makeDefines(actualContext, { publicEval: true }));
+            if (deps.prepareHistory) await deps.prepareHistory(actualContext);
+            Object.assign(actualContext, makeDefines(actualContext, { publicEval: context == null }));
             return original.call(this, view.text, actualContext, options);
         };
         wrapped.__mvu2shujuku = true;

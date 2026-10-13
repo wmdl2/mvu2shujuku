@@ -177,6 +177,7 @@ test("旧布局：开场快照：追平或应用失败时拒绝候选，不能�
     for (const failAt of [1, 2]) {
         let calls = 0;
         const failingCore = {
+            createStatTableDraft: core.createStatTableDraft,
             statDataFromTables: core.statDataFromTables,
             writeStatDiffToDbResult: async () => { calls += 1; return {
                 ok: calls !== failAt, plannedChanges: 1, failureReason: calls === failAt ? '规划失败' : null,
@@ -251,8 +252,8 @@ test("旧布局：消息持久化：缺少导入、提交失败或规划期间�
     assert.strictEqual(writes, 0);
 });
 
-async function nativeRuntime(source = require('./synthetic-card')(), configure) {
-    const result = publishedLayoutFixture(source, { installMvuShim: true });
+async function nativeRuntime(source = require('./synthetic-card')(), configure, converter = publishedLayoutFixture) {
+    const result = converter(source, { installMvuShim: true });
     result.card.data.avatar = 'public-native.png';
     const tables = clone(result.template), api = applyingApi(tables);
     const tableCallbacks = [];
@@ -577,10 +578,10 @@ test("旧布局：原生模式：SQL 读取 getter 隐藏时，已就绪的 CRUD
 for (const recover of [true, false]) test('写入结果：真实运行时按本次失败重试且忽略旧状态 ' + (recover ? '恢复' : '持续失败'), async () => {
     const h = await nativeRuntime();
     const runtimeCore = h.win.MVU2SHUJUKU_CORE;
-    const write = runtimeCore.writeStatDiffToDbResult;
+    const write = runtimeCore.planStatDiffToDb;
     const beforeGold = h.win.Mvu.getMvuData().stat_data.状态.金币;
     let calls = 0;
-    runtimeCore.writeStatDiffToDbResult = (...args) => {
+    runtimeCore.planStatDiffToDb = (...args) => {
         calls++;
         if (recover && calls > 1) return write(...args);
         return Promise.resolve({ ok: false, plannedChanges: 1, failureReason: '临时写入失败' });
@@ -812,10 +813,8 @@ test("旧布局：当前楼批次：缺少整表接口时多步写入在任何 C
 test("旧布局：当前楼批次：草稿规划中途失败不调用宿主、不提交半成品", async () => {
     const h = await nativeRuntime(); addReplyWithFrame(h);
     const calls = observeHostWrites(h), before = JSON.stringify(h.tables);
-    const runtimeCore = h.win.MVU2SHUJUKU_CORE, original = runtimeCore.writeStatDiffToDbResult;
-    runtimeCore.writeStatDiffToDbResult = (api, ...rest) => original({ ...api,
-        updateCell: (...args) => args[2] === '金币' ? false : api.updateCell(...args),
-    }, ...rest);
+    const runtimeCore = h.win.MVU2SHUJUKU_CORE, original = runtimeCore.planStatDiffToDb;
+    runtimeCore.planStatDiffToDb = async (...args) => ({ ...(await original(...args)), ok: false, failureReason: '草稿第二项操作失败' });
     assert.strictEqual(await settleMutation(h, stat => { stat.状态.金币 = 2; stat.背包.push('药'); }), false);
     assert.deepStrictEqual(calls, []);
     assert.strictEqual(JSON.stringify(h.tables), before);
@@ -862,8 +861,8 @@ test("旧布局：当前楼批次：规划期间数据库变化或来源失效�
         after.状态.金币 = 2; after.背包.push('药');
         let invalid = false, calls = 0;
         for (const name of ['updateRow', 'updateCell', 'insertRow', 'deleteRow', 'importTableAsJson']) api[name] = () => { calls++; throw new Error('不可写入'); };
-        const trackedCore = { ...core, writeStatDiffToDbResult: async (...args) => {
-            const result = await core.writeStatDiffToDbResult(...args);
+        const trackedCore = { ...core, planStatDiffToDb: async (...args) => {
+            const result = await core.planStatDiffToDb(...args);
             if (invalidation === 'database') tables.concurrentMarker = true;
             else invalid = true;
             return result;
