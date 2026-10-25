@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.8.3';
+    const VERSION = '0.8.4';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -56,6 +56,16 @@
         if (typeof root.__MVU2SHUJUKU_SP_VERSION_FACTORY__ === 'function') return root.__MVU2SHUJUKU_SP_VERSION_FACTORY__;
         if (typeof require === 'function') return require('./sp-version.js');
         throw new Error('SP 版本识别模块未加载，请使用构建后的 index.js');
+    }
+    function getFrontendReadinessFactory() {
+        if (typeof root.__MVU2SHUJUKU_FRONTEND_READINESS_FACTORY__ === 'function') return root.__MVU2SHUJUKU_FRONTEND_READINESS_FACTORY__;
+        if (typeof require === 'function') return require('./frontend-readiness.js');
+        throw new Error('前端变量就绪模块未加载，请使用构建后的 index.js');
+    }
+    function getVariableApiFactory() {
+        if (typeof root.__MVU2SHUJUKU_VARIABLE_API_FACTORY__ === 'function') return root.__MVU2SHUJUKU_VARIABLE_API_FACTORY__;
+        if (typeof require === 'function') return require('./variable-api.js');
+        throw new Error('变量接口模块未加载，请使用构建后的 index.js');
     }
     function getRuntimeGlobalsFactory() {
         if (typeof root.__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__ === 'function') return root.__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__;
@@ -2842,10 +2852,10 @@
             newEntries.push(copy);
         }
         const guideId = newEntries.reduce((max, e) => Math.max(max, Number(e.id) || 0), 0) + 1;
-        newEntries.push({
+        newEntries.unshift({
             id: guideId, keys: [], comment: adaptation.guideTitle, content: adaptation.guideContent,
             enabled: true, constant: true, selective: false, position: 'before_char',
-            insertion_order: 9991, depth: 2, prevent_recursion: true,
+            insertion_order: 0, prevent_recursion: true,
             extensions: { mvu2shujukuFillGuide: 1 },
         });
         report.note('已在现有世界书新增「[M2SJK]填表适配说明」。填表世界书选择须包含此条目；作者业务原文保留，输出以宿主当前协议为准，不新增路径清单或分组说明。');
@@ -3537,6 +3547,8 @@
             ['__MVU2SHUJUKU_RUNTIME_SESSION_FACTORY__', getRuntimeSessionFactory],
             ['__MVU2SHUJUKU_RUNTIME_WINDOWS_FACTORY__', getRuntimeWindowsFactory],
             ['__MVU2SHUJUKU_RUNTIME_GLOBALS_FACTORY__', getRuntimeGlobalsFactory],
+            ['__MVU2SHUJUKU_VARIABLE_API_FACTORY__', getVariableApiFactory],
+            ['__MVU2SHUJUKU_FRONTEND_READINESS_FACTORY__', getFrontendReadinessFactory],
             ['__MVU2SHUJUKU_SP_VERSION_FACTORY__', getSpVersionFactory],
             ['__MVU2SHUJUKU_MVU_COMMANDS_FACTORY__', getMvuCommandsFactory],
             ['__MVU2SHUJUKU_SP_ADAPTER_FACTORY__', getSpAdapterFactory],

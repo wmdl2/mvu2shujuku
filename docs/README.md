@@ -1,5 +1,9 @@
 # 文档与维护入口
 
+v0.8.4 发布收尾、各阶段验证与已知边界见[本版记录](validation/2026-10-25-release-v0.8.4.md)。
+
+v0.8.4 的[变量接口统一适配与契约清单](validation/2026-10-25-variable-api.md)涵盖 MVU、酒馆助手命名空间、iframe 注入及宏路径分流。
+
 v0.8.3 的历史缓存性能优化及 SQLite 读回边界见[本轮验证](validation/2026-10-13-history-cache-optimization.md)。
 
 完整改动见[更新日志](../CHANGELOG.md)，v0.8.2 的[精细布局与发布验证](validation/2026-10-13-fine-layout.md)记录最终包与受测范围；[v0.8.1 布局验证](validation/2026-10-12-layout-planning.md)保留前版证据；[v0.8.0 发布验证](validation/2026-10-11-release-v0.8.0.md)保留前版证据。

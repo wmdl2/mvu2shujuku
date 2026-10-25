@@ -56,12 +56,19 @@ function createStatStorage(options = {}) {
         if (completeContainers() && displayOnly !== true) {
             const database = {}, native = {};
             const policy = options.readPolicy?.() || {};
-            const roots = new Set(policy.roots || []);
+            // Runtime layout paths have already passed through the host's macro
+            // substitution. Routing by the frozen conversion-time names would
+            // misclassify e.g. {{user}} as an unmapped native root.
+            const layout = options.readLayout?.();
+            const hasLayout = Array.isArray(layout) && layout.length > 0;
+            const declaredRoots = hasLayout ? layout.flatMap(entry => prefixes(entry).map(path => path[0]).filter(Boolean)) : policy.roots;
+            const roots = new Set(declaredRoots || []);
+            const rootContainer = hasLayout ? layout.some(entry => entry.rootContainer) : policy.rootContainer;
             // Root entries have independent ownership. Hidden descendants stay
             // inside their complete object while SQL executes the operation once.
             for (const key of Object.keys(stat || {})) {
                 if (key === '$internal') continue;
-                const unmapped = Array.isArray(policy.roots) && !roots.has(key) && !policy.rootContainer;
+                const unmapped = Array.isArray(declaredRoots) && !roots.has(key) && !rootContainer;
                 put(unmapped || key.startsWith('$') && !declaredDollarWrites() ? native : database, key, stat[key]);
             }
             return { database, native };

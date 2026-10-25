@@ -295,6 +295,18 @@ async function nativeRuntime(source = require('./synthetic-card')(), configure, 
     const document = { querySelector: () => null, querySelectorAll: () => [], getElementById: () => null,
         addEventListener() {}, body: { appendChild() {} } };
     const win = { console, document, TextDecoder, TextEncoder, Uint8Array, Blob,
+        _: require('../src/vendor/schema-engine-libs').lodash,
+        getVariables(options = { type: 'chat' }) {
+            if (options.type !== 'message') return clone(context.chat_metadata.variables || {});
+            const message = context.chat.at(Number.isInteger(options.message_id) ? options.message_id : -1);
+            return clone(message?.variables?.[message.swipe_id || 0] || {});
+        },
+        replaceVariables(value, options = { type: 'chat' }) {
+            if (options.type !== 'message') { context.chat_metadata.variables = clone(value); return; }
+            const message = context.chat.at(Number.isInteger(options.message_id) ? options.message_id : -1);
+            message.variables ||= [];
+            message.variables[message.swipe_id || 0] = clone(value);
+        },
         atob: value => Buffer.from(value, 'base64').toString('binary'),
         setTimeout: (fn, ms = 0) => schedule(fn, ms), clearTimeout: key => timers.delete(key),
         setInterval: (fn, ms) => schedule(fn, ms, ms), clearInterval: key => timers.delete(key),
@@ -441,7 +453,7 @@ test("旧布局：变量回放：未加载的 JSON 标量骨架不能被脚本�
         }, error => error.code === 'MVU_DATA_NOT_READY');
         assert.throws(() => h.win.getVariables({ type: 'message' }), error => error.code === 'MVU_DATA_NOT_READY');
         let called = false;
-        assert.strictEqual(await h.win.updateVariablesWith(data => { called = true; data.stat_data.主角名 = String(data.stat_data.主角名); return data; }, { type: 'message' }), false);
+        await assert.rejects(h.win.updateVariablesWith(data => { called = true; data.stat_data.主角名 = String(data.stat_data.主角名); return data; }, { type: 'message' }), error => error.code === 'MVU_DATA_NOT_READY');
         assert.strictEqual(called, false, '没有真实基线时不执行业务回调');
         await h.advance(500);
         assert.strictEqual(JSON.stringify(h.tables), original, '拒绝骨架读写后物理数据保持原样');
@@ -1204,7 +1216,7 @@ test("旧布局：统一变量入口实装：MVU与TH历史读取限定消息边
     historical.stat_data.状态.金币 = 49;
     assert.strictEqual(await h.win.Mvu.replaceMvuData(historical, { type: 'message', message_id: 0 }), false);
     let called = false;
-    assert.strictEqual(await h.win.updateVariablesWith(value => { called = true; return value; }, { type: 'message', message_id: 0 }), false);
+    await assert.rejects(h.win.updateVariablesWith(value => { called = true; return value; }, { type: 'message', message_id: 0 }), /历史|只读/);
     assert.strictEqual(called, false); assert.strictEqual(JSON.stringify(h.tables), snapshot);
     assert.deepStrictEqual(clone(h.context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame.checkpoint.data), original);
 });

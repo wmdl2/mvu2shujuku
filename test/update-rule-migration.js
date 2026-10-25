@@ -28,6 +28,10 @@ test('统一填表适配：原业务原文、设置和ID保留，仅新增一个
     assert.strictEqual(guide(r).comment, '[M2SJK]填表适配说明');
     assert.strictEqual(r.card.character_book.entries.filter(e => e.extensions?.mvu2shujukuFillGuide).length, 1);
     assert(guide(r).enabled && guide(r).constant);
+    assert.strictEqual(r.card.character_book.entries[0], guide(r));
+    assert.strictEqual(guide(r).position, 'before_char');
+    assert.strictEqual(guide(r).insertion_order, 0);
+    assert.strictEqual(Object.hasOwn(guide(r), 'depth'), false);
     assert.strictEqual(new Set(r.card.character_book.entries.map(e => e.id)).size, r.card.character_book.entries.length);
     assert(!Object.values(r.template).some(s => s?.sourceData?.note?.includes('你务必')));
     assert(!r.reportText.includes('无法绑定更新路径'));
@@ -114,6 +118,45 @@ test('统一填表适配：指引去重仅限真实模板调用，业务字符�
     assert.strictEqual(core.prepareFillPrompt(call, { extensions: {} }).adapted, false);
     for (const text of ['业务字符串 ' + call, '<% const example = `' + migration.guideCall + '`; %>']) assert.strictEqual(core.prepareFillPrompt(text, r.card).adapted, false);
     assert.doesNotMatch(core.fillAdaptationGuidance(), /原变量路径|更新组|布局对应/);
+});
+test('统一填表适配：发送副本将完整说明置于业务之前，原条目和其他文本顺序不变', () => {
+    const text = '业务甲：冻结时禁止修改评分。\n业务乙：其余条件保持。';
+    const r = run(text), source = guide(r).content;
+    const input = '原请求前言\n\n' + text + '\n\n' + source + '\n\n原请求结尾';
+    const result = core.prepareFillPrompt(input, r.card);
+    assert(result.text.startsWith(core.fillAdaptationGuidance() + '\n\n'));
+    assert(result.text.indexOf('原请求前言') < result.text.indexOf(text));
+    assert(result.text.indexOf(text) < result.text.indexOf('原请求结尾'));
+    assert.strictEqual(sourceEntry(r).content, text);
+    assert.strictEqual(guide(r).content, source);
+    assert.strictEqual(result.text.split(core.fillAdaptationGuidance()).length - 1, 1);
+});
+test('统一填表适配：完整指引副本去重前置，用户修改的指引不抽取或重排', () => {
+    const r = run('原业务');
+    const source = guide(r).content;
+    const result = core.prepareFillPrompt('业务前\n' + source + '\n业务中\n' + source + '\n业务后', r.card).text;
+    assert(result.startsWith(core.fillAdaptationGuidance()));
+    assert.strictEqual(result.split(core.fillAdaptationGuidance()).length - 1, 1);
+    assert(result.indexOf('业务前') < result.indexOf('业务中'));
+    assert(result.indexOf('业务中') < result.indexOf('业务后'));
+    for (const custom of [source.replace('本次任务', '自定义任务'), source + '（作者追加限制）']) {
+        const input = '业务前\n' + custom + '\n业务后';
+        assert.strictEqual(core.prepareFillPrompt(input, r.card).text, input.replace(migration.guideCall, ''));
+    }
+});
+test('统一填表适配：原更新条目顺序为零时，发送顺序仍由副本前置保证', () => {
+    const text = '冻结时禁止修改评分；原格式使用JSONPatch。';
+    const r = run(text, entry(text, '[mvu_update]变量更新规则', {
+        position: 'before_char', insertion_order: 0, extensions: { position: 0, depth: 4 },
+    }));
+    const original = sourceEntry(r);
+    assert.strictEqual(original.position, 'before_char');
+    assert.strictEqual(original.insertion_order, 0);
+    assert.strictEqual(original.extensions.position, 0);
+    assert.strictEqual(original.extensions.depth, 4);
+    const view = core.prepareFillPrompt(text + '\n\n' + guide(r).content, r.card).text;
+    assert(view.startsWith(core.fillAdaptationGuidance()));
+    assert.strictEqual(view.slice(view.indexOf(text)), text + '\n\n');
 });
 test('统一填表适配：未启用和不完整匹配的源内容不被请求过滤', () => {
     const r = run(output(), entry(output(), '[mvu_update]变量输出格式', { enabled: false }));

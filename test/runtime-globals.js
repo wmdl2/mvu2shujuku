@@ -13,6 +13,35 @@ function setup(factory = createRuntimeGlobals, existing = { list: [] }) {
     return { shared, globals };
 }
 
+test('runtime globals：早期iframe绑定保存真正原始函数，后加载的宿主接口也可还原', () => {
+    const { globals } = setup();
+    const first = () => 1, late = () => 2;
+    const early = shim(); early.__mvu2shujukuNative = first;
+    const w = { document: {}, getVariables: early };
+    assert.strictEqual(globals.note(w).get, first);
+    assert.strictEqual(globals.original(w, 'getVariables'), first);
+    globals.patch(w, 'getVariables', shim());
+    w.getVariables = late;
+    assert.strictEqual(globals.original(w, 'getVariables'), late);
+    assert.strictEqual(globals.note(w).get, late);
+    globals.patch(w, 'getVariables', shim());
+    globals.restoreAll();
+    assert.strictEqual(w.getVariables, late);
+});
+
+test('runtime globals：不可配置但可写的函数保持描述符，失败接管不留下伪补丁', () => {
+    const { globals, shared } = setup();
+    const original = () => 1, w = { document: {} };
+    Object.defineProperty(w, 'getVariables', { value: original, configurable: false, writable: true });
+    assert.strictEqual(globals.patch(w, 'getVariables', shim()), true);
+    assert.strictEqual(Object.getOwnPropertyDescriptor(w, 'getVariables').configurable, false);
+    Object.defineProperty(w, 'fixed', { get: () => 1, configurable: false });
+    assert.strictEqual(globals.patch(w, 'fixed', 2), false);
+    assert.strictEqual(shared.list[0].patches.has('fixed'), false);
+    globals.restoreAll();
+    assert.strictEqual(w.getVariables, original);
+});
+
 test('runtime globals：旧版本事件兜底没有清理句柄也能撤销，不阻断还原', () => {
     const eventOn = () => {}, eventOff = () => {};
     eventOn.__mvu2shujukuFallback = eventOff.__mvu2shujukuFallback = true;

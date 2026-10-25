@@ -12,6 +12,7 @@
  */
 'use strict';
 const publishedLayoutFixture=require('./published-layout-fixture');
+const provideHelperVariables = require('./helper-variable-host');
 
 const { test, runTests, parseArgs } = require('./runner');
 const {
@@ -131,7 +132,7 @@ test('表名宏静态规范化：保留逻辑路径并对重名表消歧', () =>
 
 test('表名静态但 MVU 逻辑路径按当前聊天解析 user 宏', () => {
     const original = [{
-        kind: 'singleton', group: '{{user}}', table: 'user表', keyCol: '键名', keyValue: '{{user}}',
+        kind: 'singleton', group: '{{user}}', requiredSourceRoot: '{{user}}', table: 'user表', keyCol: '键名', keyValue: '{{user}}',
         cols: [
             ['当前地点和动作', 'text', '', ['{{user}}', '当前地点和动作'], false, ''],
             ['身体', 'text', '', ['{{user}}', '身体'], false, ''],
@@ -142,6 +143,7 @@ test('表名静态但 MVU 逻辑路径按当前聊天解析 user 宏', () => {
     const resolved = core.resolveLayoutMacros(original, s => String(s).replace(/\{\{user\}\}/gi, '林海'));
     assert.strictEqual(resolved[0].table, 'user表', '数据库表名必须保持稳定');
     assert.strictEqual(resolved[0].group, '林海');
+    assert.strictEqual(resolved[0].requiredSourceRoot, '林海');
     assert.strictEqual(resolved[0].keyValue, '林海');
     assert.deepStrictEqual(resolved[0].cols[0][3], ['林海', '当前地点和动作']);
     assert.deepStrictEqual(resolved[0].writePaths[0], ['林海']);
@@ -4755,6 +4757,7 @@ test("旧布局：扩展 owner 端到端：仅含 JSONPatch 的首楼合并初�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm.createContext(win);
+    provideHelperVariables(win);
     vm.runInContext(extIndex, win);
     (handlers.chat_changed || []).forEach(fn => fn());
     await new Promise(resolve => setTimeout(resolve, 2800));
@@ -5803,6 +5806,8 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     win.globalThis = win;
     win.__mvu2shujukuDebug = true;
     vm2.createContext(win);
+    provideHelperVariables(win);
+    const nativeVariableGet = win.getVariables, nativeVariableReplace = win.replaceVariables;
     vm2.runInContext(extIndex, win);
 
     // 阶段1：非转换卡——等待开局自动建表定时器执行，必须零接管、零建表
@@ -5810,9 +5815,9 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     assert.strictEqual(initCalls, 0, '非转换卡不应触发任何建表');
     assert.strictEqual(win.Mvu, undefined, '非转换卡不应接管 window.Mvu');
     assert.strictEqual(win.getAllVariables, undefined, '非转换卡不应定义 getAllVariables');
-    assert.strictEqual(win.getVariables, undefined, '非转换卡不应接管 getVariables');
+    assert.strictEqual(win.getVariables, nativeVariableGet, '非转换卡不应接管 getVariables');
     assert.strictEqual(win.updateVariablesWith, undefined, '非转换卡不应接管 updateVariablesWith');
-    assert.strictEqual(win.replaceVariables, undefined, '非转换卡不应接管 replaceVariables');
+    assert.strictEqual(win.replaceVariables, nativeVariableReplace, '非转换卡不应接管 replaceVariables');
 
     // 阶段2：切到带独有标记的转换卡——触发 CHAT_CHANGED 后应接管并建表
     context.characters[0] = converted;
@@ -5965,9 +5970,9 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     assert.strictEqual(initCalls, initCallsBefore, '切回普通卡后不应再触发建表');
     assert.strictEqual(win.Mvu, undefined, '切回普通卡后应撤销 window.Mvu');
     assert.strictEqual(win.getAllVariables, undefined, '切回普通卡后应撤销 getAllVariables');
-    assert.strictEqual(win.getVariables, undefined, '切回普通卡后应撤销 getVariables');
+    assert.strictEqual(win.getVariables, nativeVariableGet, '切回普通卡后应还原 getVariables');
     assert.strictEqual(win.updateVariablesWith, undefined, '切回普通卡后应撤销 updateVariablesWith');
-    assert.strictEqual(win.replaceVariables, undefined, '切回普通卡后应撤销 replaceVariables');
+    assert.strictEqual(win.replaceVariables, nativeVariableReplace, '切回普通卡后应还原 replaceVariables');
 });
 
 test("旧布局：桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU 卡后还原全部原始函数", async () => {
@@ -6151,6 +6156,7 @@ test("旧布局：桥+扩展共用注册表：TH 非消息作用域保留，切�
     vm2.createContext(win);
     // 先跑卡内桥（tavern_helper 先于扩展接管加载），再跑扩展
     vm2.runInContext(bridge, win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
     const ours = (fn) => !!(fn && typeof fn === 'function' && (fn.__mvu2shujukuBridge || fn.__mvu2shujuku));
     const oursMvu = (m) => !!(m && (m.__mvu2shujukuFake || m.__mvu2shujukuBridgeFake));
@@ -6951,6 +6957,7 @@ test('懒加载角色：缓存键用列表对象（带 avatar），开场写入�
     win.window = win;
     win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -7112,6 +7119,7 @@ test('刷新后运行时表空但 checkpoint 有数据：写库以 checkpoint �
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -7224,6 +7232,7 @@ test('运行时 sheet key 与模板不一致（插件稳定 key）：快照合�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -7324,6 +7333,7 @@ test('旧布局：行表键同时存在于 seedRows 与 content：差异写入�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     const prev = { 主角: { 气运: { 测试气运: { 名称: '测试气运', 类型: '被动' } } } };
@@ -7438,6 +7448,7 @@ test('旧布局：删除行表条目（如删气运）：差异路径 deleteRow 
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -7557,6 +7568,7 @@ test('旧布局：条目只在 seedRows（content 无行）时删除：扩展不
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -7667,6 +7679,7 @@ test('旧布局：首写缺锚点：写库前 initGameSession 建锚，差异写
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -7773,6 +7786,7 @@ test('旧布局：diff 路径行表删除：显式空组=删除意图、组缺�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     const prev = { 主角: { 气运: { 测试气运: { 名称: '测试气运' }, 其他气运: { 名称: '其他气运' } } } };
@@ -7884,6 +7898,7 @@ test('精细布局：溢出列 _扩展数据 删除同步：stat_data 移除的�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -8016,6 +8031,7 @@ test('重进聊天：扩展不再手工物化/取最大 checkpoint，运行时�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -8131,6 +8147,7 @@ test('无 full checkpoint 但有 data_replace：扩展不手工恢复，运行�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -8280,6 +8297,7 @@ test('长聊天（楼层>4）刷新后：checkpoint 有行、运行时仅表头�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -8394,6 +8412,7 @@ test('单例表已有 content 行时写库不再 insertRow 垫脚行：不产生
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -8542,6 +8561,7 @@ test('读侧 SQL 回放由数据库负责：加载空窗拒绝旧 checkpoint，�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -8668,6 +8688,7 @@ test("旧布局：全新聊天运行时仅表头且无 checkpoint：读侧退回
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -8829,6 +8850,7 @@ test('道渊开场：replaceMvuData 等待真正落定，/cut 删除 checkpoint 
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -9007,6 +9029,7 @@ test('首楼替换丢失插件作用域字段后重进：拷回 InternalSheetGui
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -9106,6 +9129,7 @@ test('首楼替换后作用域整体缺失：修复只拷回 InternalSheetGuide�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -9201,6 +9225,7 @@ test('聊天尚无 AI 楼层（首楼未就绪/切换加载中）时不调 initG
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     (handlers['chat_changed'] || []).forEach(fn => fn());
@@ -9303,6 +9328,7 @@ test('运行时仅表头但持久化已有数据行时，补行必须跳过（�
     };
     win.top = win; win.parent = win; win.window = win; win.globalThis = win;
     vm2.createContext(win);
+    provideHelperVariables(win);
     vm2.runInContext(extIndex, win);
 
     const prev = { 主角: { 姓名: '未知' } };
@@ -10618,6 +10644,8 @@ require('./schema-execution');
 require('./type-mapping');
 require('./script-entrypoints');
 require('./mvu-public-api');
+require('./variable-api');
+require('./frontend-readiness');
 require('./early-event-fallback');
 require('./mvu-update-views');
 require('./table-order');

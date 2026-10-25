@@ -4982,6 +4982,7 @@ function createSchemaLayout(dependencies) {
             for (const entry of entries) {
                 if (!entry || typeof entry !== 'object') continue;
                 entry.group = resolveValue(entry.group);
+                entry.requiredSourceRoot = resolveValue(entry.requiredSourceRoot);
                 entry.keyValue = resolveValue(entry.keyValue);
                 entry.childKey = resolveValue(entry.childKey);
                 entry.parentPath = resolvePath(entry.parentPath);

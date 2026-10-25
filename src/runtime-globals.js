@@ -14,6 +14,16 @@ function createRuntimeGlobals(options) {
         }
         return reg;
     }
+    const native = value => value && value.__mvu2shujukuNative || value;
+    function descriptorWithNative(w, key) {
+        const descriptor = Object.getOwnPropertyDescriptor(w, key);
+        return descriptor && 'value' in descriptor ? { ...descriptor, value: native(descriptor.value) } : descriptor;
+    }
+    function refreshOriginal(w, key, saved) {
+        if (w[key] === saved.installed || isOursShimFn(w[key])) return;
+        saved.descriptor = descriptorWithNative(w, key);
+        saved.value = native(w[key]);
+    }
     function note(w) {
         try {
             const reg = registry();
@@ -33,28 +43,38 @@ function createRuntimeGlobals(options) {
             rec.document = doc;
             if (!reg.list.includes(rec)) reg.list.push(rec);
             reg.originalsByWindow.set(w, rec);
-            if (!rec.hasGet && typeof w.getVariables === 'function' && !isOursShimFn(w.getVariables)) { rec.get = w.getVariables; rec.hasGet = true; }
-            if (!rec.hasUpd && typeof w.updateVariablesWith === 'function' && !isOursShimFn(w.updateVariablesWith)) { rec.upd = w.updateVariablesWith; rec.hasUpd = true; }
-            if (!rec.hasRep && typeof w.replaceVariables === 'function' && !isOursShimFn(w.replaceVariables)) { rec.rep = w.replaceVariables; rec.hasRep = true; }
-            if (!rec.hasIns && typeof w.insertOrAssignVariables === 'function' && !isOursShimFn(w.insertOrAssignVariables)) { rec.ins = w.insertOrAssignVariables; rec.hasIns = true; }
+            if (typeof native(w.getVariables) === 'function' && !isOursShimFn(native(w.getVariables))) { rec.get = native(w.getVariables); rec.hasGet = true; }
+            if (typeof native(w.updateVariablesWith) === 'function' && !isOursShimFn(native(w.updateVariablesWith))) { rec.upd = native(w.updateVariablesWith); rec.hasUpd = true; }
+            if (typeof native(w.replaceVariables) === 'function' && !isOursShimFn(native(w.replaceVariables))) { rec.rep = native(w.replaceVariables); rec.hasRep = true; }
+            if (typeof native(w.insertOrAssignVariables) === 'function' && !isOursShimFn(native(w.insertOrAssignVariables))) { rec.ins = native(w.insertOrAssignVariables); rec.hasIns = true; }
             if (!rec.hasMvu && w.Mvu && !isOursShimFn(w.Mvu) && !w.Mvu.__mvu2shujukuBridgeFake && !w.Mvu.__mvu2shujukuFake) { rec.mvu = w.Mvu; rec.hasMvu = true; }
-            if (!rec.hasGav && typeof w.getAllVariables === 'function' && !isOursShimFn(w.getAllVariables)) { rec.gav = w.getAllVariables; rec.hasGav = true; }
+            if (typeof native(w.getAllVariables) === 'function' && !isOursShimFn(native(w.getAllVariables))) { rec.gav = native(w.getAllVariables); rec.hasGav = true; }
             if (!rec.hasWait && typeof w.waitGlobalInitialized === 'function' && !isOursShimFn(w.waitGlobalInitialized)) { rec.wait = w.waitGlobalInitialized; rec.hasWait = true; }
-            if (!rec.hasMsg && typeof w.getChatMessages === 'function' && !isOursShimFn(w.getChatMessages)) { rec.msg = w.getChatMessages; rec.hasMsg = true; }
+            if (typeof native(w.getChatMessages) === 'function' && !isOursShimFn(native(w.getChatMessages))) { rec.msg = native(w.getChatMessages); rec.hasMsg = true; }
             return rec;
         } catch (e) { return null; }
     }
     function patch(w, key, value) {
         const rec = note(w); if (!rec) return false;
-        let saved = rec.patches.get(key);
-        if (!saved) { saved = { descriptor: Object.getOwnPropertyDescriptor(w, key), value: w[key] }; rec.patches.set(key, saved); }
         const descriptor = Object.getOwnPropertyDescriptor(w, key);
-        if (descriptor && !descriptor.configurable && !descriptor.writable) return false;
-        try { Object.defineProperty(w, key, { value, configurable: true, writable: true, enumerable: descriptor ? descriptor.enumerable : true }); }
+        if (descriptor && !descriptor.configurable && (!('value' in descriptor) || !descriptor.writable)) return false;
+        let saved = rec.patches.get(key);
+        if (!saved) {
+            saved = { descriptor: descriptorWithNative(w, key), value: native(w[key]) };
+        } else refreshOriginal(w, key, saved);
+        try { Object.defineProperty(w, key, descriptor && !descriptor.configurable
+            ? { ...descriptor, value }
+            : { value, configurable: true, writable: true, enumerable: descriptor ? descriptor.enumerable : true }); }
         catch (_) { return false; }
+        rec.patches.set(key, saved);
         saved.installed = value; return true;
     }
-    function original(w, key) { const rec = note(w); return rec && rec.patches.has(key) ? rec.patches.get(key).value : w[key]; }
+    function original(w, key) {
+        const rec = note(w), saved = rec && rec.patches.get(key);
+        if (!saved) return native(w[key]);
+        refreshOriginal(w, key, saved);
+        return saved.value;
+    }
     function sameDescriptor(a, b) {
         return !!a && !!b && ['value', 'get', 'set', 'writable', 'configurable', 'enumerable'].every(key => a[key] === b[key]);
     }

@@ -1,10 +1,10 @@
 # MVU转数据库（SillyTavern 扩展）
 
-v0.8.3 降低历史状态读取成本，合并连续表更新通知的后台准备，并让较大的历史投影批次让出主线程；保留历史失效保护。验证范围见[历史缓存优化](docs/validation/2026-10-13-history-cache-optimization.md)。
+v0.8.4 统一 MVU／酒馆助手变量接口，修复宏路径写入、初始化与状态栏加载恢复，并将完整填表适配说明前置。范围和验证见[本版记录](docs/validation/2026-10-25-release-v0.8.4.md)。
 
 把 **MVU 变量角色卡**（MagVarUpdate / `[InitVar]` + `stat_data`）转换为 **龙血玄黄·数据库**（原 SP·数据库）角色卡的 SillyTavern 原生扩展。
 
-**v0.8.3** 统一生成 SQL 模板，保留作者业务要求并新增 `[M2SJK]填表适配说明`；按实际 Schema 精细拆分稳定结构，复杂子节点局部保存 JSON；可缺失根保留缺失、null 与空容器，旧布局继续兼容。新增当前状态导入／导出，支持普通 MVU 与转换卡互导、相容额外表格匹配、兼容字段迁移和可选完整聊天备份。说明见[完整更新日志](CHANGELOG.md)及[兼容清单](COMPATIBILITY.md)。
+**v0.8.4** 统一生成 SQL 模板，保留作者业务要求并新增 `[M2SJK]填表适配说明`；按实际 Schema 精细拆分稳定结构，复杂子节点局部保存 JSON；可缺失根保留缺失、null 与空容器，旧布局继续兼容。支持当前状态导入／导出，支持普通 MVU 与转换卡互导、相容额外表格匹配、兼容字段迁移和可选完整聊天备份。说明见[完整更新日志](CHANGELOG.md)及[兼容清单](COMPATIBILITY.md)。
 
 使用新的世界书处理和布局，需从原卡重新转换并同步世界书；填表世界书选择应包含适配说明条目。旧聊天不自动升级，可通过状态迁移恢复到使用新模板的聊天中。社区15卡及额外样本的转换、关键流程和验证边界见[验收记录](docs/validation/2026-10-10-community-acceptance.md)。
 
@@ -147,7 +147,8 @@ v0.4.11 补齐注册 Schema 中初始数据没有的模块，并保留可接入�
   `display_data` 在会话内保存 `旧->新(原因)` 镜像（与 MVU 的 display 字符串同格式）。
 - 公开 MVU 更新事件链由兼容层接管；`COMMAND_PARSED` 监听器可改写或追加命令，`VARIABLE_UPDATE_ENDED` 携带更新前后的完整 `MvuData`。具体参数语义和边界见兼容清单。
 - 普通表格 CRUD、自动填表以及删除楼层、切换 swipe、增改消息造成的历史变化，都会在数据库快照稳定后同步转换卡前端；兼容 MVU 更新事件、数据库更新事件、安全内联重读入口和明确刷新控件。
-- 扩展同时提供 `TavernHelper.getVariables()` shim，兼容教程中「纯文本状态栏」的读取写法。
+- 标准 TH 变量接口默认仍为聊天作用域；读取转换卡消息数据使用 `TavernHelper.getVariables({type:'message'})`。全局函数、命名空间及 iframe 绑定共用适配，详见[接口清单](docs/validation/2026-10-25-variable-api.md)。
+- 消息状态栏若在加载窗口读过未就绪的合并变量，待同楼快照就绪后会通过助手原生接口自动刷新一次；这会再运行一次作者启动脚本，并有会话、楼层、swipe、正文、页面及次数保护。
 - 对只在首次挂载时调用一次 `getVariables({type:'message'})` 的内联开场前端，转换器会等待数据库变量 shim 就绪后再启动，避免选项列表在异步建表窗口读空。
 
 ### 卡片清理
@@ -175,7 +176,7 @@ v0.3.16 支持 `variables_update_rules` 英文规则外壳，并将 TypeScript �
 不随其他字段的写入顺带持久化。
 
 旧式 `getAllVariables().stat_data`、`allVariables().stat_data`、`all_variables.stat_data`、
-`window.stat_data` / `globalThis.stat_data` 和 `TavernHelper.getVariables().stat_data`
+`window.stat_data` / `globalThis.stat_data` 和 `TavernHelper.getVariables({type:'message'}).stat_data`
 等直接读取仍通过兼容入口转接。扩展从卡内布局与实际表格惰性重建 `stat_data`，
 不要求卡内桥先运行。仅在 EJS 条件中出现、不在 `[InitVar]` 中的字段也会补进列定义。
 

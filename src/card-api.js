@@ -153,6 +153,11 @@ function createCardApi(options) {
     function facade(original, facadeOptions = {}) {
         if (!original || typeof original !== 'object') return original;
         const out = Object.create(original);
+        // TH's iframe predefine uses Lodash merge. This facade has a custom
+        // prototype, so merge can share it with the parent rather than clone it.
+        // Keep the native namespace accessible before any variable method is
+        // installed, avoiding wrapping the same facade as its own backend.
+        Object.defineProperty(out, '__mvu2shujukuNative', { value: original.__mvu2shujukuNative || original });
         const set = (name, value) => Object.defineProperty(out, name, { value, writable: true, configurable: true, enumerable: true });
         const metadata = () => isCurrent() ? readMetadata() : {};
         const resolve = name => {

@@ -525,10 +525,31 @@ test('原消息状态变量接口：混合替换保存失败仍保留原隐藏�
     value.stat_data.$界面缓存.开关 = false;
     value.stat_data.状态.金币 = 23;
     h.context.saveChatConditional = async () => { throw new Error('公开保存失败'); };
-    let result;
-    h.win.replaceVariables(value, { type: 'message' }).then(value => { result = value; });
+    const rejected = assert.rejects(h.win.replaceVariables(value, { type: 'message' }), /未能保存变量/);
     await h.advance(15000);
-    assert.equal(result, false);
+    await rejected;
     assert.equal(h.context.chat[0].variables[0].stat_data.$脚本缓存.开关, true);
     assert.equal(h.win.Mvu.getMvuData().stat_data.$界面缓存.开关, true);
+});
+
+test('原状态存储：运行时使用已展开布局路径，不把宏命名变量错分到原消息', () => {
+    const isolatedFactory = vm.runInNewContext('(' + factory.toString() + ')');
+    const layout = [{ kind: 'singleton', group: '测试用户', path: ['测试用户'] }];
+    const store = isolatedFactory({ enabled: () => true, readPolicy: () => ({ version: 3, roots: ['{{user}}'] }), readLayout: () => layout });
+    const stat = { 测试用户: { value: 3 }, $脚本缓存: { index: 1 } };
+    assert.deepStrictEqual(plain(store.split(stat)), { database: { 测试用户: { value: 3 } }, native: { $脚本缓存: { index: 1 } } });
+    assert.deepStrictEqual(plain(store.merge({ stat_data: { 测试用户: { value: 4 } } }).stat_data), { 测试用户: { value: 4 } });
+});
+
+test('原状态存储：宏布局完整写入同时通过分流和必需根守卫，不改变物理表名', async () => {
+    const r = convert({ '{{user}}': { 数值: 1 }, 世界: { 时间: '白天' } });
+    const resolved = core.resolveLayoutMacros(r.entries, text => text.replace(/\{\{user\}\}/g, '测试用户'));
+    assert(resolved.some(entry => entry.requiredSourceRoot === '测试用户'));
+    assert.deepStrictEqual(resolved.map(e => e.table), r.entries.map(e => e.table));
+    const store = factory({ readPolicy: () => r.policy, readLayout: () => resolved });
+    const tables = plain(r.template), before = core.statDataFromTables(resolved, tables).stat_data;
+    const next = plain(before); next.测试用户.数值 = 2.5;
+    const result = await core.writeStatDiffToDbResult(applyingApi(tables), resolved, before, store.split(next).database, tables);
+    assert.strictEqual(result.ok, true, result.failureReason);
+    assert.deepStrictEqual(core.statDataFromTables(resolved, tables).stat_data, next);
 });

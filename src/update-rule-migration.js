@@ -174,10 +174,17 @@ function createUpdateRuleMigration({ YAML, isProtocolRule = () => false }) {
                 } else from = end;
             }
         }
+        let moveGuide = false;
         for (const token of guideTokens(text).slice().reverse()) {
-            const duplicate = token.index !== guideTokens(text)[0].index && text.slice(token.index).startsWith(guideContent);
-            text = text.slice(0, token.index) + text.slice(token.index + (duplicate ? guideContent.length : guideCall.length));
+            const end = token.index + guideContent.length;
+            const complete = text.startsWith(guideContent, token.index) &&
+                (end === text.length || /[\r\n]/.test(text[end]));
+            // Only our complete static guide can move. Custom wording stays at
+            // its source position; the ordinary private marker is still removed.
+            moveGuide ||= complete;
+            text = text.slice(0, token.index) + text.slice(token.index + (complete ? guideContent.length : guideCall.length));
         }
+        if (moveGuide) text = guidance + '\n\n' + text;
         return { text, adapted: true };
     }
     return { guideCall, guideContent, guideTitle, guidance, fillTitle, plan, preparePrompt };

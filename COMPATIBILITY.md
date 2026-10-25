@@ -1,6 +1,6 @@
 # MVU 转换与兼容清单
 
-v0.8.3 的新转换仅支持 SQLite／SQL 填表，停用参数 `native`／`both` 按 SQLite 转换并报告。必须在数据库宿主中启用实际 SQLite 模式，转换器不修改全局设置、不自动迁移旧聊天。历史原生模式验证记录不代表新转换仍支持原生填表；新布局作者脚本写入在 SQLite 能力未发布时有限等待后失败；宿主内部模型填表仍以实际启用 SQLite 为前置，不承诺统一取消原生填表。
+v0.8.4 的新转换仅支持 SQLite／SQL 填表，停用参数 `native`／`both` 按 SQLite 转换并报告。必须在数据库宿主中启用实际 SQLite 模式，转换器不修改全局设置、不自动迁移旧聊天。历史原生模式验证记录不代表新转换仍支持原生填表；新布局作者脚本写入在 SQLite 能力未发布时有限等待后失败；宿主内部模型填表仍以实际启用 SQLite 为前置，不承诺统一取消原生填表。
 
 当前运行时已接管 EJS 上下文中的动态 `stat_data` 读写、变量选项及已有历史快照读取；项目维持 MIT，沿用宿主公开接口。v0.8.2 的历史 SQL 接入使用下述上游公开接口；已发布 0.8.1 不包含该接入。任意历史写入明确拒绝，详见[变量适配与验证](docs/validation/2026-10-08-variable-adapter.md)。
 
@@ -275,11 +275,15 @@ Zod/TS 替代写法的字段基础类型不作为唯一建表依据；实际表�
 
 `getMvuVariable/setMvuVariable` 支持 Lodash 风格的点号、数字下标与引号键路径；getter 不拆普通两元素数值/布尔数组。`setMvuVariable(..., { is_recursive: true })` 等待兼容总线异步监听器完成，调用方随后提交时可包含监听器修正。公共 setter 保留输入类型，不提前转换数字字符串或 Date；数据库写入仍受列类型约束。
 
+裸全局、`TavernHelper` 命名空间及助手 iframe 绑定的变量入口使用同一适配。`getVariables` 等 TH 接口默认仍为聊天作用域，仅显式消息作用域映射数据库；对象合并插入、仅补缺失字段和路径删除保留各自语义。消息写入需 `await`，其他作用域委派原宿主。当前消息 `getChatMessages/setChatMessages` 的 `data` 同样接入；任意历史消息写入、多个消息变量的一次提交及独立 `swipes_data` 写入仍明确拒绝。接口清单与本轮验证见[统一变量接口](docs/validation/2026-10-25-variable-api.md)。
+
+消息 HTML 状态栏读到未就绪的合并变量时，待同楼快照就绪后可自动调用原生 `reloadIframe` 一次；会额外执行一次作者启动脚本，用户已确认此恢复方式。历史页面、swipe 或正文变动会取消旧任务，不重载脚本 iframe，不循环刷新。
+
 **部分等价项：**
 
-- `reloadInitVar` 从转换后的初始数据库模板恢复。
+- `reloadInitVar` 从转换后的初始模板补缺少的顶层变量并按转换世界书去重，已有组、展示与差量不重置；不动态重新转换外部世界书 InitVar。
 - `isDuringExtraAnalysis()` 当前固定返回 `false`。
-- `getMvuData(options)` 返回当前数据库视图，不承诺历史 message_id 或 iframe 所在楼层查询。
+- `getMvuData(options)` 支持宿主历史只读接口可提供的对应楼层；同步读取需要先完成回放准备。无参数及仅提供 `message_id` 的转换卡兼容形式保留。
 - 普通 `replaceMvuData` 绑定调用时的最新 AI 回复；无法证明本楼可安全追加时，正式提交最终快照。已有可靠帧的当前回复先在内存完成批次规划：单次 CRUD 保留差量，多步混合更新合为一次导入，提交被拒绝不拆分补写。删楼、编辑、换 swipe 或新 AI 回复出现会取消旧任务。历史 `message_id` 定点写入仍不承诺；多作用域或旧格式可能持续使用快照，见[楼层归属修复](docs/validation/2026-09-16-write-floor.md)及[混合批次范围与失败边界](docs/validation/2026-09-16-atomic-batch.md)。
 - MVU 的 `MvuData.stat_data` 在转换卡中映射到当前聊天数据库；TavernHelper 的
   `chat` / `character` / `global` / `preset` / `script` / `extension` 作用域仍是彼此独立的原生存储。

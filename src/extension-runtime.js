@@ -1495,6 +1495,16 @@ function installExtensionRuntime(window) {
         }, 2000);
     }
 
+    async function prepareFrontendChatVariables() {
+        if (!isConvertedMvuCard(currentCharacter())) return;
+        const session = captureRuntimeSession();
+        // Prepare read-only host snapshots before TH renders. Do not initialize
+        // or mutate the DB from a render listener: its own chat loader may still
+        // be selecting the runtime. Include the current floor for that window.
+        await prepareDatabaseHistory(undefined, true);
+        if (isRuntimeSessionCurrent(session)) applyWindowMvuShim();
+    }
+
     function bindAutoInit(context) {
         worldbookRequestFilter.bind(context);
         installGreetingSwipeWatcher();
@@ -1503,6 +1513,10 @@ function installExtensionRuntime(window) {
         if (!es || !et || typeof es.on !== 'function') return;
         try {
             if (!autoInitState.inited) {
+                for (const event of new Set([et.CHAT_LOADED || 'chatLoaded', et.CHARACTER_MESSAGE_RENDERED,
+                    et.USER_MESSAGE_RENDERED, et.MESSAGE_UPDATED, et.MESSAGE_SWIPED, et.MORE_MESSAGES_LOADED].filter(Boolean))) {
+                    if (typeof es.makeFirst === 'function') es.makeFirst(event, prepareFrontendChatVariables);
+                }
                 if (et.CHAT_CREATED) es.on(et.CHAT_CREATED, async () => {
                     // A database seed is already a checkpoint by the time ST emits
                     // CHAT_CREATED. The explicit lifecycle event, rather than the
@@ -4206,6 +4220,29 @@ function installExtensionRuntime(window) {
     function noteGlobalOriginals(w) { return runtimeGlobals.note(w); }
     function restoreGlobalOriginals() { runtimeGlobals.restoreAll(); }
     let currentCardApi = null;
+    let currentVariableApi = null;
+    const frontendReadiness = window.__MVU2SHUJUKU_FRONTEND_READINESS_FACTORY__({
+        capture: captureRuntimeSession,
+        sameSession: (a, b) => a.key === b.key && a.epoch === b.epoch,
+        current: session => !!windowMvuFake && isRuntimeSessionCurrent(session),
+        target: frame => {
+            try {
+                const element = frame.frameElement;
+                if (!element || !element.isConnected || !/^TH-message--\d+--\d+(?:_\d+)?$/.test(element.id)) return null;
+                const index = frame.getCurrentMessageId();
+                const message = getContextSafe().chat?.[index];
+                return message ? { index, message, swipe: message.swipe_id || 0, text: message.mes } : null;
+            } catch (_) { return null; }
+        },
+        prepare: index => databaseMessageHistory.prepare([index]),
+        read: index => readDatabaseVariables({ type: 'message', message_id: index }),
+        wait: ms => new Promise(resolve => hostWindow.setTimeout(resolve, ms)),
+        reload: frame => {
+            if (typeof frame.reloadIframe !== 'function') throw new Error('酒馆助手未提供 reloadIframe');
+            frame.reloadIframe();
+        },
+        onError: error => dbgWarn(' 状态栏就绪刷新失败:', error),
+    });
     function readCardApiMetadata() {
         const ch = currentCharacter(); const data = ch && (ch.data || ch);
         return data && data.extensions && data.extensions.mvu2shujuku
@@ -4237,6 +4274,7 @@ function installExtensionRuntime(window) {
             windowMvuGlobalAnnounced = false;
             windowMvuInitializedFunctions = new WeakSet();
             const sessionMvu = windowMvuFake;
+            let sessionVariables;
             const sessionCardApi = window.__MVU2SHUJUKU_CARD_API_FACTORY__({
                 readMetadata: readCardApiMetadata, isCurrent: () => isRuntimeSessionCurrent(shimSession) && currentCardApi === sessionCardApi,
                 readMvu: () => sessionMvu,
@@ -4255,24 +4293,15 @@ function installExtensionRuntime(window) {
                 SINGLE_VARIABLE_UPDATED: 'mag_variable_updated',
             };
             windowMvuFake.getMvuData = function (options) {
-                if (options && options.type && options.type !== 'message') {
-                    const original = noteGlobalOriginals(window);
-                    return original.hasGet ? original.get.call(window, options) : {};
-                }
-                if (options && options.message_id != null && options.message_id !== 'latest') return readDatabaseVariables(options);
-                if (!isRuntimeSessionCurrent(shimSession)) return { stat_data: {}, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
-                // 有待写快照时直接返回，保证 写→读 一致（持久化由合并定时器落库）
-                if (pendingStatWrite) {
-                    return { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
-                }
-                const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                assertMvuReadReady(all);
-                return { stat_data: all.stat_data || {}, display_data: all.display_data || {}, delta_data: {}, initialized_lorebooks: {} };
+                // Retain the converted-card no-option current-state convenience;
+                // explicit stores follow the helper's public variable contract.
+                return sessionVariables.getVariables(options?.type ? options : { type: 'message', ...options });
             };
             windowMvuFake.getMvuVariable = function (mvu_data, path, opts) {
                 try {
                     opts = opts || {};
                     const cat = opts.category || 'stat';
+                    if (!['stat', 'display', 'delta'].includes(cat)) return opts.default_value;
                     const data = cat === 'display' ? (mvu_data && mvu_data.display_data) : cat === 'delta' ? (mvu_data && mvu_data.delta_data) : (mvu_data && mvu_data.stat_data);
                     const parts = mvuVariablePathParts(path, data);
                     let cur = data;
@@ -4285,7 +4314,7 @@ function installExtensionRuntime(window) {
                 if (!mvu_data) return undefined;
                 if (category === 'display') return mvu_data.display_data;
                 if (category === 'delta') return mvu_data.delta_data;
-                return mvu_data.stat_data;
+                return category === 'stat' ? mvu_data.stat_data : undefined;
             };
             windowMvuFake.setMvuVariable = async function (mvu_data, path, new_value, opts) {
                 try {
@@ -4346,7 +4375,7 @@ function installExtensionRuntime(window) {
                 }
                 return false;
             };
-            windowMvuFake.replaceMvuData = async function (data, options) {
+            const commitMvuData = async function (data, options) {
                 try {
                     if (options && options.type && options.type !== 'message') {
                         const original = noteGlobalOriginals(window);
@@ -4392,6 +4421,53 @@ function installExtensionRuntime(window) {
                     return false;
                 }
             };
+            currentVariableApi = window.__MVU2SHUJUKU_VARIABLE_API_FACTORY__({
+                lodash: window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__?.lodash || window._ || hostWindow._,
+                readDatabase: readDatabaseVariables,
+                replaceDatabase: commitMvuData,
+                assertCurrent: () => assertRuntimeSession(shimSession),
+                assertWritable: assertDatabaseMessageWrite,
+                onUnavailableRead: frame => frontendReadiness.request(frame),
+                readAll: receiver => {
+                    assertRuntimeSession(shimSession);
+                    const id = currentVariableApi.messageIdForWindow(receiver);
+                    return readDatabaseVariables({ type: 'message', message_id: id });
+                },
+                prepareMessages: list => {
+                    const indices = Array.isArray(list) ? list.filter(item => Number.isInteger(item?.message_id)
+                        && Object.prototype.hasOwnProperty.call(item, 'data')).map(item => item.message_id) : [];
+                    return indices.length ? databaseMessageHistory.prepare(indices) : Promise.resolve();
+                },
+                projectMessages: list => {
+                    assertRuntimeSession(shimSession);
+                    if (!Array.isArray(list)) return list;
+                    return list.map(item => {
+                        // include_swipes has a different shape. Do not invent state
+                        // for swipes which the host has not selected/replayed.
+                        if (!item || !Number.isInteger(item.message_id) || !Object.prototype.hasOwnProperty.call(item, 'data')) return item;
+                        const target = ejsEvalBridge.selectMessage({ withMsg: { id: item.message_id, swipe_id: item.swipe_id } });
+                        const wrap = target.missing ? {} : readDatabaseVariables({ type: 'message', message_id: target.index });
+                        return { ...item, data: { ...item.data, stat_data: wrap.stat_data || {},
+                            display_data: item.data?.display_data ?? wrap.display_data ?? wrap.stat_data ?? {} } };
+                    });
+                },
+                nativeState: opts => readCardApiMetadata().statStorage?.version >= 1
+                    ? nativeStatStorage.read(databaseVariableTarget(opts, false).index) : undefined,
+            });
+            const originalHelper = runtimeGlobals.original(window, 'TavernHelper');
+            const nativeVariables = Object.fromEntries(currentVariableApi.names.map(name => [name,
+                runtimeGlobals.original(window, name) || (typeof originalHelper?.[name] === 'function'
+                    ? originalHelper[name].bind(originalHelper) : undefined)]));
+            sessionVariables = currentVariableApi.bind(nativeVariables, window);
+            windowMvuFake.replaceMvuData = async function (data, options) {
+                if (options && options.type && options.type !== 'message') {
+                    return sessionVariables.replaceVariables(data, options);
+                }
+                try {
+                    await sessionVariables.replaceVariables(data, { type: 'message', ...options });
+                    return true;
+                } catch (e) { dbgWarn(' Mvu.replaceMvuData 异常:', e); return false; }
+            };
             windowMvuFake.parseMessage = async function (message, old_data) {
                 try {
                     assertRuntimeSession(shimSession);
@@ -4408,11 +4484,11 @@ function installExtensionRuntime(window) {
                     const tpl = cachedTemplateForCurrentCard();
                     if (!mvu_data || !core || typeof core.statDataFromTables !== 'function' || !activeLayout || !tpl) return false;
                     const initial = core.statDataFromTables(activeLayout, tpl) || {};
-                    mvu_data.stat_data = JSON.parse(JSON.stringify(initial.stat_data || {}));
-                    mvu_data.display_data = JSON.parse(JSON.stringify(initial.display_data || initial.stat_data || {}));
-                    mvu_data.delta_data = {};
-                    mvu_data.initialized_lorebooks = mvu_data.initialized_lorebooks || {};
-                    return true;
+                    const metadata = readCardApiMetadata();
+                    const book = Object.values(metadata.worldbookAliases || {})[0] || ('mvu2shujuku:' + metadata.templateUid);
+                    return currentVariableApi.reloadInitial(mvu_data, {
+                        ...(metadata.statStorage?.initial || {}), ...(initial.stat_data || {}),
+                    }, book);
                 } catch (e) { return false; }
             };
             windowMvuFake.getCurrentMvuData = function () { return sessionMvu.getMvuData({ type: 'message', message_id: 'latest' }); };
@@ -4420,8 +4496,10 @@ function installExtensionRuntime(window) {
             windowMvuFake.isDuringExtraAnalysis = function () { return false; };
         }
         const sessionReadMvu = windowMvuFake;
+        const variableApi = currentVariableApi;
         const targets = getRuntimeWindows();
         runtimeGlobals.retainWindows(targets);
+        prepareDatabaseHistory().catch(error => dbgWarn(' 前端历史状态准备失败:', error));
         for (const w of targets) {
             try {
                 // 覆盖前先登记真原始值（Mvu/getAllVariables/三个全局函数），
@@ -4441,39 +4519,9 @@ function installExtensionRuntime(window) {
                     const create = currentCardApi.wrapCreate(runtimeGlobals.original(w, 'createChatMessages'), w);
                     create.__mvu2shujuku = true; create.__mvu2shujukuCardApi = currentCardApi; runtimeGlobals.patch(w, 'createChatMessages', create);
                 }
-                // 旧 MVU 状态栏常直接读 getChatMessages(id)[0].data.stat_data，
-                // 而数据库不再把当前状态物理存入消息 data。只在读取结果的
-                // 浅副本上投影 stat_data，不污染真实聊天消息，并兼容同步/异步 TH API。
-                if (originalRec && originalRec.hasMsg && !isOursShimFn(w.getChatMessages)) {
-                    const messageReadDefine = function () {
-                        assertRuntimeSession(shimSession);
-                        const result = originalRec.msg.apply(this, arguments);
-                        const decorate = (list) => {
-                            assertRuntimeSession(shimSession);
-                            if (!Array.isArray(list)) return list;
-                            return list.map((item) => {
-                                // The helper's ordinary result has message_id/data.
-                                // include_swipes returns a different shape; do not
-                                // invent independent state for unselected swipes.
-                                if (!item || !Number.isInteger(item.message_id) || !Object.prototype.hasOwnProperty.call(item, 'data')) return item;
-                                const target = ejsEvalBridge.selectMessage({ withMsg: { id: item.message_id, swipe_id: item.swipe_id } });
-                                const wrap = target.missing ? {} : readDatabaseVariables({ type: 'message', message_id: target.index });
-                                const stat = wrap.stat_data || {};
-                                return Object.assign({}, item, { data: Object.assign({}, item.data || {}, {
-                                    stat_data: stat, display_data: wrap.display_data || stat,
-                                }) });
-                            });
-                        };
-                        return result && typeof result.then === 'function' ? result.then(async list => {
-                            assertRuntimeSession(shimSession);
-                            const indices = Array.isArray(list) ? list.filter(item => Number.isInteger(item?.message_id)
-                                && Object.prototype.hasOwnProperty.call(item, 'data')).map(item => item.message_id) : [];
-                            if (indices.length) await databaseMessageHistory.prepare(indices);
-                            return decorate(list);
-                        }) : decorate(result);
-                    };
-                    messageReadDefine.__mvu2shujuku = true;
-                    w.getChatMessages = messageReadDefine;
+                if (originalRec && originalRec.hasMsg) {
+                    const readMessages = variableApi.bind({ getChatMessages: originalRec.msg }, w).getChatMessages;
+                    runtimeGlobals.patch(w, 'getChatMessages', readMessages);
                 }
                 const oldM = w.Mvu;
                 if (oldM && typeof oldM === 'object' && oldM !== windowMvuFake) {
@@ -4494,7 +4542,7 @@ function installExtensionRuntime(window) {
                                 while (isRuntimeSessionCurrent(shimSession)) {
                                     const all = window.getAllVariables && window.getAllVariables();
                                     if (all && all.__mvu2shujukuReadUnavailable !== true) {
-                                        const messageId = typeof w.getCurrentMessageId === 'function' ? w.getCurrentMessageId() : undefined;
+                                        const messageId = variableApi.messageIdForWindow(w);
                                         await prepareDatabaseHistory({ message_id: messageId });
                                         if (!isRuntimeSessionCurrent(shimSession)) throw new Error('MVU 所属聊天已切换，已取消等待');
                                         runtimeGlobals.publishMvu(w, sessionReadMvu);
@@ -4510,195 +4558,33 @@ function installExtensionRuntime(window) {
                     waitFn.__mvu2shujuku = true;
                     w.waitGlobalInitialized = waitFn;
                 }
-                // 前端状态栏直接调 window.getAllVariables()：把扩展侧读取函数同步到
-                // 消息 iframe/子窗口，否则 iframe 里没有该函数，前端永远读不到数据。
-                if (typeof window.getAllVariables === 'function' && w.getAllVariables !== window.getAllVariables) {
-                    w.getAllVariables = window.getAllVariables;
+                // Keep the helper's merged auxiliary scopes, then project the selected
+                // message's database state. Parent getAllVariables remains the internal
+                // current-state reader; forwarding it into every frame loses history.
+                if (w !== window && originalRec && originalRec.hasGav) {
+                    const allRead = variableApi.bind({ getAllVariables: originalRec.gav }, w).getAllVariables;
+                    runtimeGlobals.patch(w, 'getAllVariables', allRead);
                 }
-                // 与 MVU/TH 生态一致：接管裸全局 getVariables / updateVariablesWith /
-                // replaceVariables / insertOrAssignVariables（游戏逻辑脚本常直接调用，如 人妻公寓 的
-                // updateVariablesWith(t => …)）。必须是“接管式”而不是“缺省才补”：
-                // 若宿主（旧酒馆助手 TH）已定义这些全局，卡脚本直接调用会走 TH 自己的
-                // 变量存储，读写不到数据库，前端自然读不到数据/两边不同步。
-                // 只接管默认/消息作用域中的 stat_data。chat / character / global /
-                // preset / script / extension 是 TavernHelper 自身的独立存储，必须原样委派。
-                // 消息作用域中的其他辅助键也与数据库视图合并，供动态正则/卡内 UI 使用。
-                const isDbVariableScope = (opts) => !opts || !opts.type || String(opts.type) === 'message';
-                const cloneRecord = (value) => {
-                    try { return value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : {}; }
-                    catch (e) { return value && typeof value === 'object' ? Object.assign({}, value) : {}; }
-                };
-                const stripDbVariableKeys = (value) => {
-                    const out = cloneRecord(value);
-                    delete out.stat_data;
-                    delete out.display_data;
-                    delete out.delta_data;
-                    delete out.initialized_lorebooks;
-                    return out;
-                };
-                const readOriginalVariables = (opts) => {
-                    try {
-                        return originalRec && originalRec.hasGet
-                            ? (originalRec.get.call(w, opts) || {})
-                            : {};
-                    } catch (e) { return {}; }
-                };
-                // 原消息现在保存独立的原生状态。辅助变量整份替换先保留它，
-                // 真正的 stat_data 变更仍由既有暂存/数据库提交/回滚流程接管。
-                const auxiliaryWithNativeState = (auxiliary, opts) => {
-                    if (!(readCardApiMetadata().statStorage?.version >= 1)) return auxiliary;
-                    const target = databaseVariableTarget(opts, false);
-                    return { ...auxiliary, stat_data: nativeStatStorage.read(target.index) };
-                };
-                const makeGetVariables = (opts) => {
-                    try {
-                        if (!isDbVariableScope(opts)) {
-                            return originalRec && originalRec.hasGet
-                                ? originalRec.get.call(w, opts)
-                                : {};
-                        }
-                        const auxiliary = readOriginalVariables(opts);
-                        const dbView = readDatabaseVariables(opts);
-                        return Object.assign({}, auxiliary, dbView);
-                    } catch (e) {
-                        if (e && (e.code === 'MVU_DATA_NOT_READY' || String(e.code || '').startsWith('MVU_HISTORY'))) throw e;
-                        return { stat_data: {} };
+                const nativeVariables = Object.fromEntries([...variableApi.names, 'setChatMessages'].map(name => [name, runtimeGlobals.original(w, name)]));
+                const globals = variableApi.bind(nativeVariables, w);
+                for (const name of variableApi.names) runtimeGlobals.patch(w, name, globals[name]);
+                if (globals.setChatMessages) runtimeGlobals.patch(w, 'setChatMessages', globals.setChatMessages);
+                // Namespace methods are separate functions, not aliases of the bare
+                // globals. Bind the original namespace receiver, never the facade.
+                const nativeHelper = runtimeGlobals.original(w, 'TavernHelper');
+                const helper = w.TavernHelper;
+                if (nativeHelper && helper?.__mvu2shujukuCardApi === currentCardApi) {
+                    const namespace = variableApi.bind(nativeHelper, nativeHelper);
+                    if (namespace.getChatMessages) Object.defineProperty(helper, 'getChatMessages', { value: namespace.getChatMessages, configurable: true, writable: true, enumerable: true });
+                    if (namespace.setChatMessages) Object.defineProperty(helper, 'setChatMessages', { value: namespace.setChatMessages, configurable: true, writable: true, enumerable: true });
+                    if (nativeHelper._bind && helper.__mvu2shujukuVariableApi !== variableApi) {
+                        Object.defineProperty(helper, '_bind', { value: variableApi.bindIframe(nativeHelper._bind), configurable: true, enumerable: true });
+                        Object.defineProperty(helper, '__mvu2shujukuVariableApi', { value: variableApi, configurable: true });
                     }
-                };
-                const gvFn = function (opts) { return makeGetVariables(opts); };
-                gvFn.__mvu2shujuku = true;
-                w.getVariables = gvFn;
-                prepareDatabaseHistory().catch(error => dbgWarn(' 前端历史状态准备失败:', error));
-                const deepEqualCanon = (a, b) => {
-                    if (a === b) return true;
-                    if (typeof a !== typeof b) return false;
-                    if (a === null || b === null) return a === b;
-                    if (Array.isArray(a) || Array.isArray(b)) {
-                        if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-                        for (let i = 0; i < a.length; i++) if (!deepEqualCanon(a[i], b[i])) return false;
-                        return true;
+                    for (const name of variableApi.names) {
+                        Object.defineProperty(helper, name, { value: namespace[name], configurable: true, writable: true, enumerable: true });
                     }
-                    if (typeof a === 'object') {
-                        const ka = Object.keys(a).sort();
-                        const kb = Object.keys(b).sort();
-                        if (ka.length !== kb.length) return false;
-                        for (let i = 0; i < ka.length; i++) {
-                            if (ka[i] !== kb[i]) return false;
-                            if (!deepEqualCanon(a[ka[i]], b[kb[i]])) return false;
-                        }
-                        return true;
-                    }
-                    return a === b;
-                };
-                const updFn = async function (updater, opts) {
-                    try {
-                        if (typeof updater !== 'function') return false;
-                        if (!isDbVariableScope(opts)) {
-                            return originalRec && originalRec.hasUpd
-                                ? await originalRec.upd.call(w, updater, opts)
-                                : false;
-                        }
-                        assertRuntimeSession(shimSession);
-                        assertDatabaseMessageWrite(opts);
-                        const all = window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
-                        if (!pendingStatWrite) assertMvuReadReady(all);
-                        const base = (pendingStatWrite && typeof pendingStatWrite === 'object')
-                            ? pendingStatWrite
-                            : (all.stat_data || {});
-                        const next = JSON.parse(JSON.stringify(base));
-                        const wrapper = Object.assign({}, readOriginalVariables(opts), {
-                            stat_data: next,
-                            display_data: all.display_data || {},
-                            delta_data: all.delta_data || {},
-                            initialized_lorebooks: all.initialized_lorebooks || {},
-                        });
-                        const result = await Promise.resolve(updater(wrapper)) || wrapper;
-                        assertRuntimeSession(shimSession);
-                        const nextStat = result.stat_data || wrapper.stat_data || {};
-                        const oldAux = stripDbVariableKeys(readOriginalVariables(opts));
-                        const nextAux = stripDbVariableKeys(result);
-                        if (!deepEqualCanon(nextAux, oldAux) && originalRec && originalRec.hasRep) {
-                            await Promise.resolve(originalRec.rep.call(w, auxiliaryWithNativeState(nextAux, opts), opts));
-                            assertRuntimeSession(shimSession);
-                        }
-                        // 无变化不写库、不发事件：外部 UI 的自动清理/回写 effect 经常重复写相同数据，
-                        // 如果每次都落库会触发 VARIABLE_UPDATE_ENDED → 前端刷新 → 再写 → 死循环。
-                        if (!deepEqualCanon(nextStat, base)) {
-                            const saved = await windowMvuFake.replaceMvuData({
-                                stat_data: nextStat,
-                                display_data: result.display_data || all.display_data || {},
-                                delta_data: result.delta_data || all.delta_data || {},
-                                initialized_lorebooks: result.initialized_lorebooks || all.initialized_lorebooks || {},
-                            }, opts);
-                            if (!saved) return false;
-                        }
-                        return result;
-                    } catch (e) {
-                        dbgWarn(' updateVariablesWith 异常:', e);
-                        return false;
-                    }
-                };
-                updFn.__mvu2shujuku = true;
-                w.updateVariablesWith = updFn;
-                const repFn = async function (variables, opts) {
-                    try {
-                        if (!isDbVariableScope(opts)) {
-                            return originalRec && originalRec.hasRep
-                                ? await Promise.resolve(originalRec.rep.call(w, variables, opts))
-                                : false;
-                        }
-                        assertRuntimeSession(shimSession);
-                        const input = variables && typeof variables === 'object' ? variables : {};
-                        if (Object.prototype.hasOwnProperty.call(input, 'stat_data')) assertDatabaseMessageWrite(opts);
-                        if (originalRec && originalRec.hasRep) {
-                            await Promise.resolve(originalRec.rep.call(w, Object.prototype.hasOwnProperty.call(input, 'stat_data')
-                                ? auxiliaryWithNativeState(stripDbVariableKeys(input), opts) : stripDbVariableKeys(input), opts));
-                            assertRuntimeSession(shimSession);
-                        }
-                        if (Object.prototype.hasOwnProperty.call(input, 'stat_data')) {
-                            if (!await windowMvuFake.replaceMvuData(input, opts)) return false;
-                        }
-                        return input;
-                    } catch (e) {
-                        dbgWarn(' replaceVariables 异常:', e);
-                        return false;
-                    }
-                };
-                repFn.__mvu2shujuku = true;
-                w.replaceVariables = repFn;
-                const insFn = async function (variables, opts) {
-                    try {
-                        if (!isDbVariableScope(opts)) {
-                            return originalRec && originalRec.hasIns
-                                ? await Promise.resolve(originalRec.ins.call(w, variables, opts))
-                                : false;
-                        }
-                        assertRuntimeSession(shimSession);
-                        const input = variables && typeof variables === 'object' ? variables : {};
-                        if (Object.prototype.hasOwnProperty.call(input, 'stat_data')) assertDatabaseMessageWrite(opts);
-                        const auxiliary = stripDbVariableKeys(input);
-                        if (Object.keys(auxiliary).length && originalRec && originalRec.hasIns) {
-                            await Promise.resolve(originalRec.ins.call(w, auxiliary, opts));
-                            assertRuntimeSession(shimSession);
-                        }
-                        if (Object.prototype.hasOwnProperty.call(input, 'stat_data')) {
-                            const all = makeGetVariables(opts);
-                            const saved = await windowMvuFake.replaceMvuData({
-                                stat_data: input.stat_data || {},
-                                display_data: all.display_data || {},
-                                delta_data: all.delta_data || {},
-                                initialized_lorebooks: all.initialized_lorebooks || {},
-                            }, opts);
-                            if (!saved) return false;
-                        }
-                        return makeGetVariables(opts);
-                    } catch (e) {
-                        dbgWarn(' insertOrAssignVariables 异常:', e);
-                        return false;
-                    }
-                };
-                insFn.__mvu2shujuku = true;
-                w.insertOrAssignVariables = insFn;
+                }
                 // 前端状态栏在消息 iframe 里用 eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, ...) 监听刷新。
                 // 若 iframe 没有 TH 注入的 eventOn，就补一个绑定到 CustomEvent 的兜底，
                 // 这样 emitMvuEvent 的 dispatchEvent 一定能触发前端刷新（不会因事件源不一致而收不到）。
@@ -4733,7 +4619,7 @@ function installExtensionRuntime(window) {
                     w.eventOn.__mvu2shujukuFallback = true;
                     w.eventOff.__mvu2shujukuFallback = true;
                 }
-            } catch (e) {}
+            } catch (e) { dbgWarn(' 变量接口安装失败:', e); }
         }
         // waitGlobalInitialized('Mvu') 不只检查 window.Mvu：酒馆助手的正式共享协议
         // 需要 initializeGlobal，MVU 原版同时发送 global_Mvu_initialized。
@@ -6275,7 +6161,7 @@ function installExtensionRuntime(window) {
         },
         onError: error => dbgWarn(' 历史状态准备失败:', error),
     });
-    async function prepareDatabaseHistory(context) {
+    async function prepareDatabaseHistory(context, includeCurrent = false) {
         if (!isConvertedMvuCard(currentCharacter()) || !ensureActiveLayoutLazy()) return;
         const chat = getContextSafe().chat || [];
         const latest = ejsEvalBridge.selectMessage().index;
@@ -6283,7 +6169,7 @@ function installExtensionRuntime(window) {
         let inherited = false;
         for (let index = 0; index < chat.length; index++) {
             if (!inherited) inherited = hasDatabaseMessageData(index);
-            if (inherited && index !== latest) indices.push(index);
+            if (inherited && (includeCurrent || index !== latest)) indices.push(index);
         }
         if (!indices.length) return;
         try { await databaseMessageHistory.prepare(indices); }
@@ -6313,6 +6199,14 @@ function installExtensionRuntime(window) {
         if (!target.current) return readDatabaseMessageHistory(target.index) || {};
         const all = pendingStatWrite ? { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} }
             : window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+        if (all && all.__mvu2shujukuReadUnavailable === true) {
+            try {
+                const prepared = readDatabaseMessageHistory(target.index);
+                if (prepared) return prepared;
+            } catch (error) {
+                if (error.code !== 'MVU_HISTORY_NOT_READY') throw error;
+            }
+        }
         assertMvuReadReady(all);
         return all;
     }
