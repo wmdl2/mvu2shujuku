@@ -112,13 +112,37 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
         area.readOnly = true;
         area.setAttribute('aria-label', '完整转换报告');
         full.appendChild(area);
+        full.appendChild(button('复制报告', 'mvu2shujuku-sm mvu2shujuku-copy-report', async () => {
+            const text = area.value;
+            const nav = (doc.defaultView && doc.defaultView.navigator) || (typeof navigator !== 'undefined' ? navigator : null);
+            try {
+                if (!nav || !nav.clipboard || typeof nav.clipboard.writeText !== 'function') throw new Error('剪贴板接口不可用');
+                await nav.clipboard.writeText(text);
+            } catch (e) {
+                // 非安全上下文没有剪贴板接口：退回选中文本复制，失败时保留选中便于手动复制。
+                area.focus(); area.select();
+                let copied = false;
+                try { copied = doc.execCommand('copy'); } catch (ignored) {}
+                if (!copied) { notify('无法自动复制，已选中报告文本，请按 Ctrl+C', 'warning'); return; }
+            }
+            notify('报告已复制', 'success');
+        }));
         wrap.appendChild(full);
         box.appendChild(wrap);
     }
     function renderEditor(box, rows) {
         if (!rows.length) return;
-        const wrap = el('section', 'mvu2shujuku-param-editor');
-        wrap.appendChild(el('h4', '', '表格设置'));
+        // 与报告、合并区一致做成可折叠块；表少时默认展开，表多时收起，标题显示改动数。
+        const editor = el('details', 'mvu2shujuku-detail mvu2shujuku-param-editor');
+        editor.open = rows.length <= 8;
+        const head = el('summary', '');
+        editor.appendChild(head);
+        const wrap = el('div', 'mvu2shujuku-detail-body');
+        editor.appendChild(wrap);
+        function syncHead() {
+            const changed = rowEls.filter(row => summarize(row.sheet) !== '全部沿用全局').length;
+            head.textContent = '表格设置（' + rows.length + ' 张表' + (changed ? ' · 已改 ' + changed + ' 张' : '') + '）';
+        }
         wrap.appendChild(el('p', 'mvu2shujuku-help', '修改会随下载或保存带入新模板，不自动更改已有聊天。数值 -1 表示沿用全局；更新频率 0 表示停用自动更新。'));
         const tools = el('div', 'mvu2shujuku-row mvu2shujuku-table-tools');
         const search = input('search', 'mvu2shujuku-table-search', '筛选表名');
@@ -159,6 +183,7 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
                 if (key === injectionKey) {
                     setInjection(row.sheet, toggle.value === 'true');
                     row.injection.checked = getInjection(row.sheet);
+                    row.syncSummary();
                 } else {
                     setParam(row.sheet, key, value.value);
                     paramState[row.uid] = key;
@@ -173,6 +198,12 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
         bulk.appendChild(selectedButton);
         wrap.appendChild(bulk);
         const grid = el('div', 'mvu2shujuku-param-grid');
+        // 只列出改过的参数，避免逐个切换下拉框才能看到。
+        function summarize(sheet) {
+            const parts = options.filter(o => getParam(sheet, o.key) !== -1).map(o => o.label + ' ' + getParam(sheet, o.key));
+            if (!getInjection(sheet)) parts.push('不注入世界书');
+            return parts.length ? '已改：' + parts.join(' · ') : '全部沿用全局';
+        }
         function syncSelection() {
             const visible = rowEls.filter(row => !row.node.hidden);
             const selected = rowEls.filter(row => row.check.checked).length;
@@ -206,36 +237,40 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
             param.value = options.some(o => o.key === paramState[uid]) ? paramState[uid] : options[0].key;
             const number = input('number', 'mvu2shujuku-param-value', name + '的参数数值');
             number.min = '-1'; number.step = '1';
+            const summary = el('span', 'mvu2shujuku-row-summary mvu2shujuku-hint');
+            const syncSummary = () => { summary.textContent = summarize(sheet); syncHead(); };
             const syncParam = () => {
                 number.value = String(getParam(sheet, param.value));
                 number.title = param.title = options.find(o => o.key === param.value).hint;
+                syncSummary();
             };
             syncParam();
             param.addEventListener('change', () => { paramState[uid] = param.value; syncParam(); });
             // 输入过程中保留空串和负号，避免每个按键都格式化打断编辑；失焦再归一化。
             number.addEventListener('input', () => {
                 if (number.value !== '' && Number.isFinite(Number(number.value))) {
-                    setParam(sheet, param.value, number.value); onChange();
+                    setParam(sheet, param.value, number.value); syncSummary(); onChange();
                 }
             });
             number.addEventListener('change', () => { setParam(sheet, param.value, number.value); syncParam(); onChange(); });
             node.appendChild(param); node.appendChild(number);
             const injection = input('checkbox', 'mvu2shujuku-table-injection', name + '：注入到世界书条目');
             injection.checked = getInjection(sheet);
-            injection.addEventListener('change', () => { setInjection(sheet, injection.checked); onChange(); });
+            injection.addEventListener('change', () => { setInjection(sheet, injection.checked); syncSummary(); onChange(); });
             const injectionLabel = el('label', 'mvu2shujuku-injection-label mvu2shujuku-check-inline');
             injectionLabel.appendChild(injection); injectionLabel.appendChild(el('span', '', '注入世界书'));
             injectionLabel.title = '数据库中的“注入到世界书条目”开关；不影响自动填表';
             node.appendChild(injectionLabel);
+            node.appendChild(summary);
             if (sheet.exportConfig && sheet.exportConfig.extraIndexEnabled === true) {
                 node.appendChild(el('span', 'mvu2shujuku-row-note mvu2shujuku-hint', '此表另有额外索引，当前开关不关闭索引条目。'));
             }
             const columns = createColumnsToggle(sheet);
             if (columns) { columns.classList.add('mvu2shujuku-table-columns'); node.appendChild(columns); }
             grid.appendChild(node);
-            rowEls.push({ uid, sheet, node, name, check, param, injection, syncParam });
+            rowEls.push({ uid, sheet, node, name, check, param, injection, syncParam, syncSummary });
         }
-        wrap.appendChild(grid); box.appendChild(wrap); syncSelection();
+        wrap.appendChild(grid); box.appendChild(editor); syncHead(); syncSelection();
     }
     return { options, normalizeValue, getParam, setParam, getInjection, setInjection, captureConfig, applyConfig, renderReport, renderEditor };
 }

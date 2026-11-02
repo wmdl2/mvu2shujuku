@@ -2841,13 +2841,15 @@ function createSchemaLayout(dependencies) {
                 const zodField = nullableNodeAt(column.path) || declaredZodField(group, field);
                 const kind = zodField && zodField.kind || declaredFieldKind(group, field);
                 const schema = (shapeObjectSchemas[group] || {})[field];
-                if ((column.value === '' || column.value === undefined) && zodField && zodField.hasDefault) {
+                const usesDeclaredDefault = (column.value === '' || column.value === undefined) && zodField && zodField.hasDefault;
+                if (usesDeclaredDefault) {
                     const dv = zodField.defaultValue;
                     column.value = (dv && typeof dv === 'object') ? JSON.stringify(dv) : dv;
                 }
                 if (kind === 'unknown') {
                     if (column.logicalType === 'jsonObjectOptional' && column.jsonKind === 'any') return column;
-                    const original = leafInfo(column.value).value;
+                    // Schema 默认值是原始值；对象/数组不能把上面生成的 JSON 文本再编码一次。
+                    const original = usesDeclaredDefault ? zodField.defaultValue : leafInfo(column.value).value;
                     column.type = 'TEXT'; column.isObject = true; column.logicalType = 'jsonObjectOptional';
                     column.jsonKind = 'any'; column.objectSchema = zodField;
                     column.value = original === undefined ? undefined : JSON.stringify(original);

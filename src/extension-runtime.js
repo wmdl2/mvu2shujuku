@@ -173,7 +173,9 @@ function installExtensionRuntime(window) {
     function isRuntimeSessionCurrent(session) { return runtimeSessions.isCurrent(session); }
     function runtimeScopedChatKey(chatKey) { return runtimeSessions.scopedChatKey(chatKey); }
     function assertRuntimeSession(session) { return runtimeSessions.assertCurrent(session); }
-    function runtimeApiForSession(api, session) { return runtimeSessions.apiForSession(api, session); }
+    function runtimeApiForSession(api, session) {
+        return runtimeSessions.apiForSession(window.__MVU2SHUJUKU_DATABASE_WRITE_API_FACTORY__(api), session);
+    }
     let runtimeWindows = null;
     let windowMvuLoadSyncPending = false;
     function getRuntimeWindows() {
@@ -1270,6 +1272,18 @@ function installExtensionRuntime(window) {
             greetingState.pendingFp = fp;
             activePendingFp = fp;
             const finalStat = (prepared.finalWrap && prepared.finalWrap.stat_data) || prepared.baseStat;
+            if (sourceSnapshot.schemaOnly && !prepared.schemaDeferred &&
+                canonicalJsonForSync(finalStat) === canonicalJsonForSync(prepared.baseStat)) {
+                // 无变化的延后 Schema 初始化不需要落库；旧快照排队后会覆盖期间的新记录。
+                greetingState.schemaInitialized = true;
+                greetingState.appliedFp = fp;
+                greetingState.appliedSourceFp = sourceFp;
+                greetingState.pendingFp = '';
+                greetingState.pendingSourceFp = '';
+                greetingState.pendingAt = 0;
+                dbg('[开场分支] Schema 未改变初始状态，初始化已完成，不重写数据库。');
+                return;
+            }
             // The opening evaluator already ran the author's Schema/update cycle.
             // Persist its complete result, as MVU does after initialization, rather
             // than applying non-idempotent transforms again in the write adapter.
@@ -1495,13 +1509,22 @@ function installExtensionRuntime(window) {
         }, 2000);
     }
 
-    async function prepareFrontendChatVariables() {
+    function renderedHistoryMessageIndices(messageId) {
+        const chat = getContextSafe().chat || [];
+        const explicit = messageId != null && Number.isInteger(Number(messageId)) ? Number(messageId) : null;
+        const indices = explicit !== null ? [explicit] : [...hostDocument.querySelectorAll('#chat .mes[mesid]')]
+            .map(node => Number(node.getAttribute('mesid')));
+        if (!indices.length) indices.push(ejsEvalBridge.selectMessage().index);
+        return [...new Set(indices)].filter(index => Number.isInteger(index) && index >= 0 && index < chat.length);
+    }
+    async function prepareFrontendChatVariables(messageId, wholeChat = false) {
         if (!isConvertedMvuCard(currentCharacter())) return;
         const session = captureRuntimeSession();
-        // Prepare read-only host snapshots before TH renders. Do not initialize
-        // or mutate the DB from a render listener: its own chat loader may still
-        // be selecting the runtime. Include the current floor for that window.
-        await prepareDatabaseHistory(undefined, true);
+        // Prepare before TH renders, without initializing or writing the DB.
+        // A chat load preserves the initial broad warm-up; an individual render
+        // only needs that floor, and pagination needs the mounted message range.
+        await prepareDatabaseHistory(messageId == null ? undefined : { message_id: messageId }, true,
+            wholeChat ? undefined : renderedHistoryMessageIndices(messageId));
         if (isRuntimeSessionCurrent(session)) applyWindowMvuShim();
     }
 
@@ -1513,9 +1536,37 @@ function installExtensionRuntime(window) {
         if (!es || !et || typeof es.on !== 'function') return;
         try {
             if (!autoInitState.inited) {
+                // ST awaits these listeners but catches their errors. Keep a
+                // request failure for the official interceptor's abort callback.
+                if (et.GENERATION_AFTER_COMMANDS) {
+                    const beforeGeneration = async (type, _options, dryRun) => {
+                        generationWriteAttempt = null;
+                        if (dryRun || !isConvertedMvuCard(currentCharacter())) return;
+                        const attempt = newGenerationWriteAttempt();
+                        generationWriteAttempt = attempt;
+                        // A normal send may append its user message and prepare
+                        // the prompt in parallel with persistence. The official
+                        // interceptor below waits before an AI reply can appear.
+                        // Regeneration removes the old reply earlier in ST, so
+                        // it must finish its accepted writes before that removal.
+                        if (type === 'regenerate' && statWriteFlushPromise) {
+                            context.deactivateSendButtons?.();
+                            try { await waitForPendingStatWrites(attempt.session, attempt); }
+                            catch (error) { attempt.error = error; }
+                        }
+                    };
+                    if (typeof es.makeFirst === 'function') es.makeFirst(et.GENERATION_AFTER_COMMANDS, beforeGeneration);
+                    else es.on(et.GENERATION_AFTER_COMMANDS, beforeGeneration);
+                }
+                if (et.GENERATION_STOPPED) es.on(et.GENERATION_STOPPED, () => {
+                    generationWriteAttempt?.cancel();
+                });
                 for (const event of new Set([et.CHAT_LOADED || 'chatLoaded', et.CHARACTER_MESSAGE_RENDERED,
                     et.USER_MESSAGE_RENDERED, et.MESSAGE_UPDATED, et.MESSAGE_SWIPED, et.MORE_MESSAGES_LOADED].filter(Boolean))) {
-                    if (typeof es.makeFirst === 'function') es.makeFirst(event, prepareFrontendChatVariables);
+                    if (typeof es.makeFirst === 'function') es.makeFirst(event,
+                        event === (et.CHAT_LOADED || 'chatLoaded') ? () => prepareFrontendChatVariables(undefined, true)
+                            : event === et.MORE_MESSAGES_LOADED ? () => prepareFrontendChatVariables()
+                                : messageId => prepareFrontendChatVariables(messageId));
                 }
                 if (et.CHAT_CREATED) es.on(et.CHAT_CREATED, async () => {
                     // A database seed is already a checkpoint by the time ST emits
@@ -1706,15 +1757,19 @@ function installExtensionRuntime(window) {
             ? JSON.parse(rawLayout)
             : JSON.parse(JSON.stringify(Array.isArray(rawLayout) ? rawLayout : []));
         const core = window.MVU2SHUJUKU_CORE;
+        let resolved = parsed;
         try {
             const context = getContextSafe();
             if (core && typeof core.resolveLayoutMacros === 'function' && context && typeof context.substituteParams === 'function') {
-                return core.resolveLayoutMacros(parsed, context.substituteParams.bind(context));
+                resolved = core.resolveLayoutMacros(parsed, context.substituteParams.bind(context));
             }
         } catch (e) {
             dbgWarn(' 解析 layout 运行时宏失败，暂用原逻辑路径:', e && e.message ? e.message : e);
         }
-        return parsed;
+        // Repeated registration/synchronization can decode the same layout.
+        // Keep its identity only when the effective, macro-resolved mapping is
+        // unchanged; a macro or in-place mapping edit must still invalidate.
+        return activeLayout && JSON.stringify(activeLayout) === JSON.stringify(resolved) ? activeLayout : resolved;
     }
 
     // 查找 SP·数据库 插件暴露的 window.AutoCardUpdaterAPI（兼容 iframe/顶层窗口）
@@ -1818,6 +1873,10 @@ function installExtensionRuntime(window) {
         const filtered = keyword
             ? chars.map((ch, i) => ({ ch, i })).filter(({ ch }) => String(ch && ch.name || '').toLowerCase().includes(keyword))
             : chars.map((ch, i) => ({ ch, i }));
+        // 过滤结果不含原选择时置顶保留，避免搜索时悄悄换成另一张卡。
+        const pinnedIndex = previousKey && !filtered.some(f => characterOptionKey(f.ch) === previousKey)
+            ? chars.findIndex(ch => characterOptionKey(ch) === previousKey) : -1;
+        if (pinnedIndex >= 0) filtered.unshift({ ch: chars[pinnedIndex], i: pinnedIndex, pinned: true });
         if (!filtered.length) {
             const opt = hostDocument.createElement('option');
             opt.value = '-1';
@@ -1825,10 +1884,10 @@ function installExtensionRuntime(window) {
             sel.appendChild(opt);
             return;
         }
-        filtered.forEach(({ ch, i }) => {
+        filtered.forEach(({ ch, i, pinned }) => {
             const opt = hostDocument.createElement('option');
             opt.value = String(i);
-            opt.textContent = (ch && ch.name) ? ch.name : ('角色 ' + i);
+            opt.textContent = ((ch && ch.name) ? ch.name : ('角色 ' + i)) + (pinned ? '（当前所选）' : '');
             sel.appendChild(opt);
         });
         // 列表增删会改变数组下标：按 avatar+名称保留原选择，不按旧下标误选其他卡。
@@ -1843,10 +1902,13 @@ function installExtensionRuntime(window) {
         const tick = () => {
             characterRefreshTimer = null;
             try {
-                if (!hostDocument.getElementById(PANEL_ID)) return;
-                const context = getContextSafe();
-                const next = currentCharacterListFingerprint(context);
-                if (next !== characterListFingerprint) populateCharacterSelect(panel);
+                const live = hostDocument.getElementById(PANEL_ID);
+                if (!live) return;
+                const drawer = live.querySelector('.inline-drawer-content');
+                if (!drawer || drawer.offsetParent) {
+                    const next = currentCharacterListFingerprint(getContextSafe());
+                    if (next !== characterListFingerprint) populateCharacterSelect(panel);
+                }
             } catch (e) {}
             characterRefreshTimer = hostWindow.setTimeout(tick, 2500);
         };
@@ -2131,6 +2193,47 @@ function installExtensionRuntime(window) {
     let statWriteFlushPromise = null;
     let statWriteOverlayGen = 0;
     let pendingStatWriteIsInitialization = false;
+    let generationWriteAttempt = null;
+    const writeBarrier = window.__MVU2SHUJUKU_WRITE_BARRIER_FACTORY__({
+        readPending: () => statWriteFlushPromise,
+        assertCurrent: assertRuntimeSession,
+        yieldTurn: () => new Promise(resolve => hostWindow.setTimeout(resolve, 0)),
+    });
+    function newGenerationWriteAttempt() {
+        let cancel;
+        const attempt = { session: captureRuntimeSession(), cancelled: false,
+            promise: new Promise(resolve => { cancel = resolve; }) };
+        attempt.cancel = () => { attempt.cancelled = true; cancel(); };
+        return attempt;
+    }
+    function reportWriteBarrierFailure(error) {
+        if (error?.__mvu2shujukuReported) return;
+        if (error && typeof error === 'object') error.__mvu2shujukuReported = true;
+        console.error('[mvu2shujuku] 变量写入未完成，本次操作已停止', error);
+        try { (window.toastr || hostWindow.toastr)?.error('变量保存未完成，已停止本次操作，请检查后重试。', 'MVU转数据库'); } catch (_) {}
+    }
+    async function waitForPendingStatWrites(session, cancellation) {
+        // No extra task/timer or database read on the idle path. Capture the
+        // current floor separately at each boundary: native regeneration is
+        // allowed to remove the old reply after the first boundary completes.
+        assertRuntimeSession(session);
+        if (!statWriteFlushPromise) return;
+        await writeBarrier.wait(bindWriteTarget(session), cancellation);
+    }
+    window.mvu2shujukuBeforeGeneration = async function (_chat, _size, abort) {
+        const attempt = generationWriteAttempt;
+        if (!attempt && !isConvertedMvuCard(currentCharacter())) return;
+        try {
+            if (attempt?.error) throw attempt.error;
+            if (attempt?.cancelled) throw new Error('本次生成已取消');
+            await waitForPendingStatWrites(attempt?.session || captureRuntimeSession(), attempt);
+        } catch (error) {
+            abort(true);
+            if (!attempt?.cancelled && (!attempt || isRuntimeSessionCurrent(attempt.session))) reportWriteBarrierFailure(error);
+        } finally {
+            if (generationWriteAttempt === attempt) generationWriteAttempt = null;
+        }
+    };
     // 当前待写快照所属的聊天 key：切聊天时据此作废 pending 写入与挂起的 flush Promise。
     let pendingStatWriteOriginKey = '';
     // 模板缓存未就绪时写库重试次数（每次新写入在调度入口重置，避免重试自身把
@@ -3998,7 +4101,8 @@ function installExtensionRuntime(window) {
     }
     const tableUpdateHookCallback = (latestTableData, meta) => {
         if (!activeLayout) return;
-        databaseMessageHistory.invalidate();
+        // The reader observes actual runtime/frame revisions. A notification
+        // alone must not discard an unchanged, already prepared history prefix.
         scheduleDatabaseHistoryPreparation();
         syncTableBusinessBaseline(latestTableData);
         const currentSnapshot = mvuDataFromCompleteTableSnapshot(latestTableData);
@@ -4278,6 +4382,10 @@ function installExtensionRuntime(window) {
             const sessionCardApi = window.__MVU2SHUJUKU_CARD_API_FACTORY__({
                 readMetadata: readCardApiMetadata, isCurrent: () => isRuntimeSessionCurrent(shimSession) && currentCardApi === sessionCardApi,
                 readMvu: () => sessionMvu,
+                beforeChatMutation: async () => {
+                    try { await waitForPendingStatWrites(shimSession); }
+                    catch (error) { reportWriteBarrierFailure(error); throw error; }
+                },
                 wait: ms => new Promise(resolve => hostWindow.setTimeout(resolve, ms)),
                 unmapped: stat => readCardApiMetadata().statStorage?.version >= 1 ? [] : core.unmappedStatGroups(activeLayout, {}, stat),
             });
@@ -4453,11 +4561,20 @@ function installExtensionRuntime(window) {
                 },
                 nativeState: opts => readCardApiMetadata().statStorage?.version >= 1
                     ? nativeStatStorage.read(databaseVariableTarget(opts, false).index) : undefined,
+                beforeChatMutation: async () => {
+                    try { await waitForPendingStatWrites(shimSession); }
+                    catch (error) { reportWriteBarrierFailure(error); throw error; }
+                },
             });
-            const originalHelper = runtimeGlobals.original(window, 'TavernHelper');
-            const nativeVariables = Object.fromEntries(currentVariableApi.names.map(name => [name,
-                runtimeGlobals.original(window, name) || (typeof originalHelper?.[name] === 'function'
-                    ? originalHelper[name].bind(originalHelper) : undefined)]));
+            // The helper may load after this session. Resolve its native public
+            // methods when called instead of freezing an absent startup API.
+            const nativeVariables = Object.fromEntries(currentVariableApi.names.map(name => [name, undefined]));
+            for (const name of currentVariableApi.names) Object.defineProperty(nativeVariables, name, { get() {
+                const original = runtimeGlobals.original(window, name);
+                if (typeof original === 'function') return original;
+                const helper = runtimeGlobals.original(window, 'TavernHelper');
+                return typeof helper?.[name] === 'function' ? helper[name].bind(helper) : undefined;
+            } });
             sessionVariables = currentVariableApi.bind(nativeVariables, window);
             windowMvuFake.replaceMvuData = async function (data, options) {
                 if (options && options.type && options.type !== 'message') {
@@ -4499,7 +4616,7 @@ function installExtensionRuntime(window) {
         const variableApi = currentVariableApi;
         const targets = getRuntimeWindows();
         runtimeGlobals.retainWindows(targets);
-        prepareDatabaseHistory().catch(error => dbgWarn(' 前端历史状态准备失败:', error));
+        prepareDatabaseHistory(undefined, false, mountedHistoryMessageIndices()).catch(error => dbgWarn(' 前端历史状态准备失败:', error));
         for (const w of targets) {
             try {
                 // 覆盖前先登记真原始值（Mvu/getAllVariables/三个全局函数），
@@ -4518,6 +4635,11 @@ function installExtensionRuntime(window) {
                 if (typeof w.createChatMessages === 'function' && w.createChatMessages.__mvu2shujukuCardApi !== currentCardApi) {
                     const create = currentCardApi.wrapCreate(runtimeGlobals.original(w, 'createChatMessages'), w);
                     create.__mvu2shujuku = true; create.__mvu2shujukuCardApi = currentCardApi; runtimeGlobals.patch(w, 'createChatMessages', create);
+                }
+                if (typeof w.deleteChatMessages === 'function' && w.deleteChatMessages.__mvu2shujukuCardApi !== currentCardApi) {
+                    const remove = currentCardApi.wrapMutation(runtimeGlobals.original(w, 'deleteChatMessages'), w);
+                    remove.__mvu2shujuku = true; remove.__mvu2shujukuCardApi = currentCardApi;
+                    runtimeGlobals.patch(w, 'deleteChatMessages', remove);
                 }
                 if (originalRec && originalRec.hasMsg) {
                     const readMessages = variableApi.bind({ getChatMessages: originalRec.msg }, w).getChatMessages;
@@ -4543,7 +4665,7 @@ function installExtensionRuntime(window) {
                                     const all = window.getAllVariables && window.getAllVariables();
                                     if (all && all.__mvu2shujukuReadUnavailable !== true) {
                                         const messageId = variableApi.messageIdForWindow(w);
-                                        await prepareDatabaseHistory({ message_id: messageId });
+                                        await prepareDatabaseHistory({ message_id: messageId }, false, [messageId]);
                                         if (!isRuntimeSessionCurrent(shimSession)) throw new Error('MVU 所属聊天已切换，已取消等待');
                                         runtimeGlobals.publishMvu(w, sessionReadMvu);
                                         return sessionReadMvu;
@@ -4567,7 +4689,12 @@ function installExtensionRuntime(window) {
                 }
                 const nativeVariables = Object.fromEntries([...variableApi.names, 'setChatMessages'].map(name => [name, runtimeGlobals.original(w, name)]));
                 const globals = variableApi.bind(nativeVariables, w);
-                for (const name of variableApi.names) runtimeGlobals.patch(w, name, globals[name]);
+                // Do not advertise a bare global the host does not provide.
+                // Author scripts use its presence to choose between globals and
+                // TavernHelper; iframe predefine will supply its own bindings.
+                for (const name of variableApi.names) if (typeof nativeVariables[name] === 'function') {
+                    runtimeGlobals.patch(w, name, globals[name]);
+                }
                 if (globals.setChatMessages) runtimeGlobals.patch(w, 'setChatMessages', globals.setChatMessages);
                 // Namespace methods are separate functions, not aliases of the bare
                 // globals. Bind the original namespace receiver, never the facade.
@@ -4835,6 +4962,7 @@ function installExtensionRuntime(window) {
 
     async function performConversion(inputBytes, sourceIsPng, sourceCharacter) {
         const settings = getSettings();
+        const conversionSettings = readConversionSettings(settings);
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.convert !== 'function') {
             throw new Error('转换核心未加载（MVU2SHUJUKU_CORE 不可用）');
@@ -4843,16 +4971,16 @@ function installExtensionRuntime(window) {
         const opts = {
             mode,
             targetSpVersion: await readTargetSpVersion(),
-            jsonContainers: settings.jsonContainers === true,
+            jsonContainers: conversionSettings.jsonContainers,
             vwdDescriptions: !!(window.EjsTemplate && window.EjsTemplate.evalTemplate
                 && window.EjsTemplate.evalTemplate.__mvu2shujukuContextBridge),
             asPng: settings.asPng === 'auto' ? sourceIsPng : settings.asPng === 'png',
-            appendPlaceholder: settings.appendPlaceholder !== false,
-            ddlIncludeCheck: settings.ddlIncludeCheck !== false,
-            translateSimpleEjs: !!settings.translateSimpleEjs,
+            appendPlaceholder: conversionSettings.appendPlaceholder,
+            ddlIncludeCheck: conversionSettings.ddlIncludeCheck,
+            translateSimpleEjs: conversionSettings.translateSimpleEjs,
         };
-        if (settings.installMvuShim !== 'auto') {
-            opts.installMvuShim = settings.installMvuShim === 'yes';
+        if (conversionSettings.installMvuShim !== 'auto') {
+            opts.installMvuShim = conversionSettings.installMvuShim === 'yes';
         }
         let result = await core.convertWithRemoteSchemas(inputBytes, opts);
         mergeState.appliedRefs = [];
@@ -4874,12 +5002,15 @@ function installExtensionRuntime(window) {
         }
         result.meta.sourceCharacter = sourceCharacter ? { name: characterDisplayName(sourceCharacter), avatar: sourceCharacter.avatar || '' } : null;
         lastResult = result;
+        lastConversionSettings = conversionSettings;
         renderResult(result);
         return result;
     }
 
     // 合并数据库插件现有模板：选择来源 → 列出表 → 勾选 → 并入转换结果
     let mergeSourceTimer = null;
+    let mergeSourceRetries = 0;
+    const MERGE_SOURCE_MAX_RETRIES = 24;
     async function populateMergeSource(panel) {
         const sel = panel.querySelector('#mvu2shujuku-merge-source');
         if (!sel) return;
@@ -4914,16 +5045,22 @@ function installExtensionRuntime(window) {
         );
         // 插件未就绪或预设尚未读到：持续重试（每 2.5 秒），直到成功读到一次预设列表
         if (!presetOk) {
-            if (!mergeSourceTimer) {
+            if (!mergeSourceTimer && mergeSourceRetries >= MERGE_SOURCE_MAX_RETRIES) {
+                if (mergeSourceRetries++ === MERGE_SOURCE_MAX_RETRIES) dbgWarn(' 数据库预设列表持续不可读，停止自动重试；点「加载表列表」会重新读取');
+            } else if (!mergeSourceTimer) {
+                mergeSourceRetries++;
                 mergeSourceTimer = hostWindow.setTimeout(() => {
                     mergeSourceTimer = null;
                     const p = hostDocument.getElementById(PANEL_ID);
                     if (p) populateMergeSource(p);
                 }, 2500);
             }
-        } else if (mergeSourceTimer) {
-            hostWindow.clearTimeout(mergeSourceTimer);
-            mergeSourceTimer = null;
+        } else {
+            mergeSourceRetries = 0;
+            if (mergeSourceTimer) {
+                hostWindow.clearTimeout(mergeSourceTimer);
+                mergeSourceTimer = null;
+            }
         }
         if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
     }
@@ -4931,16 +5068,9 @@ function installExtensionRuntime(window) {
     function createColumnsToggle(sheet) {
         const details = hostDocument.createElement('details');
         details.className = 'mvu2shujuku-cols-toggle';
-        details.style.margin = '2px 0 4px 0';
         const summary = hostDocument.createElement('summary');
         summary.textContent = '列名';
-        summary.style.cursor = 'pointer';
-        summary.style.fontSize = '12px';
-        summary.style.opacity = '0.8';
         const body = hostDocument.createElement('div');
-        body.style.padding = '4px 6px';
-        body.style.fontSize = '12px';
-        body.style.wordBreak = 'break-all';
         const hdr = Array.isArray(sheet && sheet.content && sheet.content[0]) ? sheet.content[0] : [];
         const cols = hdr.filter(h => h !== 'row_id');
         if (!cols.length) {
@@ -4952,7 +5082,7 @@ function installExtensionRuntime(window) {
                 const span = hostDocument.createElement('span');
                 span.textContent = c;
                 if (c === '_扩展数据') {
-                    span.style.opacity = '0.55';
+                    span.className = 'mvu2shujuku-cols-internal';
                     span.title = '内部列';
                 }
                 body.appendChild(span);
@@ -4969,6 +5099,7 @@ function installExtensionRuntime(window) {
         const status = panel.querySelector('#mvu2shujuku-merge-status');
         if (!sel || !box) return;
         // 每次点击都重新拉取来源列表（预设可能刚导入）
+        mergeSourceRetries = 0;
         await populateMergeSource(panel);
         // 重渲染后下拉可能暂时为空：回退到上次加载成功的来源（合并后的自动刷新不会误报）
         const v = sel.value || mergeState.source || '';
@@ -5006,7 +5137,6 @@ function installExtensionRuntime(window) {
             const s = tpl[uid];
             const dup = existing.has(String(s.name || '').trim());
             const label = hostDocument.createElement('label');
-            label.style.display = 'block';
             const cb = hostDocument.createElement('input');
             cb.type = 'checkbox';
             cb.value = uid;
@@ -5018,7 +5148,7 @@ function installExtensionRuntime(window) {
             ));
             if (dup) cb.disabled = true;
             const row = hostDocument.createElement('div');
-            row.style.margin = '2px 0';
+            row.className = 'mvu2shujuku-merge-row';
             row.appendChild(label);
             row.appendChild(createColumnsToggle(s));
             box.appendChild(row);
@@ -5049,16 +5179,10 @@ function installExtensionRuntime(window) {
         dbg(' applyMergeTables: 勾选=' + checked.join('、') + ' | 新增=' + merged.added.join('、') + ' | 跳过=' + merged.skipped.join('、') + ' | 合并后表数=' + Object.keys(merged.template).filter(k => k.startsWith('sheet_')).length);
         if (!merged.added.length) { toast('没有可并入的表（全部重名或无效）', 'error'); return; }
         const settings = getSettings();
-        const mode = 'sqlite';
         const opts = {
-            mode,
             template: merged.template,
             asPng: settings.asPng === 'auto' ? !!lastResult.meta.isPngInput : settings.asPng === 'png',
-            appendPlaceholder: settings.appendPlaceholder !== false,
-            ddlIncludeCheck: settings.ddlIncludeCheck !== false,
-            translateSimpleEjs: !!settings.translateSimpleEjs,
         };
-        if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
         toast('正在合并表格…');
         try {
             const result = core.refreshConversion(lastResult, opts);
@@ -5069,7 +5193,7 @@ function installExtensionRuntime(window) {
             }
             lastResult = result;
             mergeState.appliedRefs = manualPlan.refs;
-            renderResult(result);
+            renderResult(result, { changed: true });
             dbg(' applyMergeTables 产物更新完成: meta.tableCount=' + result.meta.tableCount + ' | tableNames=' + result.meta.tableNames.join('、'));
             const msg = '合并完成：新增 ' + merged.added.length + ' 张表' + (merged.skipped.length ? '，跳过重名：' + merged.skipped.join('、') : '');
             if (status) status.textContent = msg;
@@ -5427,29 +5551,28 @@ function installExtensionRuntime(window) {
     // 结果视图只改本次模板；下载/保存时刷新卡内模板与登记桥。
     const updateParamState = {};
     let updateParamsDirty = false;
+    // 界面提示用：'' 无结果，'unsaved' 未保存，'dirty' 保存后又修改，'saved' 已保存。
+    let resultSaveState = '';
+    let resultEditedSinceConvert = false;
+    let lastConversionSettings = null;
     const resultView = window.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__({
         document: hostDocument, paramState: updateParamState, createColumnsToggle,
-        onChange: () => { updateParamsDirty = true; }, notify: toast,
+        onChange: () => { updateParamsDirty = true; markResultChanged(); }, notify: toast,
     });
     const conversionProfileTools = window.__MVU2SHUJUKU_CONVERSION_PROFILES_FACTORY__({
         core: window.MVU2SHUJUKU_CORE, resultView, readTemplateSource, listSheets: updateParamSheetRows,
     });
 
     function refreshConvertedResult() {
-        // 模板参数编辑仅刷新产物；转换规则变化时核心自动退回完整转换。
+        // 模板参数和输出格式可实时刷新；转换规则沿用核心会话快照，重新转换才应用上方新设置。
         if (!lastInput || !lastResult) return null;
         const settings = getSettings();
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.refreshConversion !== 'function') throw new Error('转换核心不可用');
         const opts = {
-            mode: 'sqlite',
             template: lastResult.template,
             asPng: settings.asPng === 'auto' ? !!lastResult.meta.isPngInput : settings.asPng === 'png',
-            appendPlaceholder: settings.appendPlaceholder !== false,
-            ddlIncludeCheck: settings.ddlIncludeCheck !== false,
-            translateSimpleEjs: !!settings.translateSimpleEjs,
         };
-        if (settings.installMvuShim !== 'auto') opts.installMvuShim = settings.installMvuShim === 'yes';
         const result = core.refreshConversion(lastResult, opts);
         result.meta.sourceCharacter = lastResult.meta.sourceCharacter || null;
         if (result.meta.isPngInput) {
@@ -5488,11 +5611,12 @@ function installExtensionRuntime(window) {
             '  <select id="mvu2shujuku-merge-source" title="选择模板来源：当前聊天模板 / 全局模板 / 全局预设"></select>' +
             '  <button id="mvu2shujuku-merge-load" class="menu_button">加载表列表</button>' +
             '</div>' +
-            '<div id="mvu2shujuku-merge-tables" class="mvu2shujuku-hint">选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。</div>' +
+            '<div id="mvu2shujuku-merge-tables" class="mvu2shujuku-hint"></div>' +
             '<div class="mvu2shujuku-row">' +
             '  <button id="mvu2shujuku-merge-apply" class="menu_button" style="display:none">合并到转换结果</button>' +
             '  <span id="mvu2shujuku-merge-status" class="mvu2shujuku-hint"></span>' +
             '</div>';
+        sec.querySelector('#mvu2shujuku-merge-tables').textContent = MERGE_TABLES_HINT;
         box.appendChild(sec);
         const loadBtn = sec.querySelector('#mvu2shujuku-merge-load');
         if (loadBtn && loadBtn.dataset.bound !== 'true') {
@@ -5508,29 +5632,39 @@ function installExtensionRuntime(window) {
         // 加载成功后「合并到转换结果」按钮才会出现
         const srcSel = sec.querySelector('#mvu2shujuku-merge-source');
         if (srcSel) srcSel.value = mergeState.source || 'global';
-        // 每次渲染都刷新来源下拉（预设可能刚导入）；内部有 2.5s 未就绪重试
+        // 每次渲染都刷新来源下拉（预设可能刚导入）；内部有 2.5s 未就绪重试，次数有上限
+        mergeSourceRetries = 0;
         populateMergeSource(panel);
     }
 
-    function renderResult(result) {
+    function renderResult(result, options = {}) {
         const panel = hostDocument.getElementById(PANEL_ID);
         if (!panel) return;
         const box = panel.querySelector('.mvu2shujuku-result');
         if (!box) return;
+        placeResultActions(panel, null);
         box.innerHTML = '';
+        if (options.changed) markResultChanged();
+        else { resultSaveState = 'unsaved'; resultEditedSinceConvert = false; }
         // 每次渲染出的转换结果都是最新状态（含刚合并/刚改完参数），重置“待刷新”标记
         updateParamsDirty = false;
         resultView.renderReport(box, result);
         renderUpdateConfigEditor(box, result);
         renderMergeSection(box, panel);
+        placeResultActions(panel, box);
         // 最后一步：下载与保存到酒馆（放在合并模板区块之后）
         const downloadsBox = panel.querySelector('#mvu2shujuku-downloads');
         if (downloadsBox) {
             downloadsBox.innerHTML = '';
             for (const f of result.files) {
                 const btn = hostDocument.createElement('button');
-                btn.className = 'menu_button';
-                btn.textContent = f.kind === 'bridge' ? '下载数据桥源码（仅供调试）' : ('下载 ' + f.name);
+                btn.className = 'menu_button mvu2shujuku-sm' + (f.kind === 'bridge' ? ' mvu2shujuku-ghost' : '');
+                const ext = String(f.name || '').split('.').pop().toUpperCase();
+                btn.textContent = f.kind === 'bridge' ? '下载数据桥源码（仅供调试）'
+                    : f.kind === 'card' ? '角色卡 ' + ext : f.kind === 'template' ? '表格模板 JSON'
+                        : f.kind === 'report' ? '转换报告' : f.name;
+                btn.dataset.fileKind = f.kind;
+                btn.title = '下载 ' + f.name;
                 if (f.kind === 'bridge') {
                     btn.title = '该 .js 是已内嵌进转换后角色卡的纯源码备份，无需再导入；它不是酒馆助手要求的 .json 导入包。';
                 }
@@ -5564,7 +5698,90 @@ function installExtensionRuntime(window) {
         }
         const saveBtn = panel.querySelector('#mvu2shujuku-save-card');
         if (saveBtn) saveBtn.style.display = '';
+        updateSaveStatus(panel);
+        updateReconvertNotice();
         toast('转换完成，共 ' + result.meta.tableCount + ' 张表');
+    }
+
+    const MERGE_TABLES_HINT = '选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。';
+
+    function updateSaveStatus(panel) {
+        const status = panel && panel.querySelector('#mvu2shujuku-save-status');
+        if (!status) return;
+        const text = {
+            unsaved: '尚未保存到酒馆',
+            dirty: '有未保存的修改，需重新保存',
+            saved: '已保存到酒馆',
+        }[resultSaveState] || '';
+        status.textContent = text;
+        status.className = 'mvu2shujuku-hint mvu2shujuku-save-status' + (resultSaveState ? ' is-' + resultSaveState : '');
+    }
+
+    function markResultChanged() {
+        if (!lastResult) return;
+        resultEditedSinceConvert = true;
+        if (resultSaveState === 'saved') resultSaveState = 'dirty';
+        updateSaveStatus(hostDocument.getElementById(PANEL_ID));
+    }
+
+    function readConversionSettings(settings) {
+        return {
+            jsonContainers: settings.jsonContainers === true,
+            ddlIncludeCheck: settings.ddlIncludeCheck !== false,
+            translateSimpleEjs: !!settings.translateSimpleEjs,
+            installMvuShim: settings.installMvuShim || 'auto',
+            appendPlaceholder: settings.appendPlaceholder !== false,
+        };
+    }
+
+    function confirmDiscardEditedResult() {
+        return !lastResult || !resultEditedSinceConvert || resultSaveState === 'saved'
+            || hostWindow.confirm('当前转换结果有未保存的表格修改，重新转换会丢失这些修改。是否继续？');
+    }
+
+    function updateReconvertNotice() {
+        const panel = hostDocument.getElementById(PANEL_ID);
+        const box = panel && panel.querySelector('.mvu2shujuku-result');
+        if (!box || !lastResult || !lastConversionSettings) return;
+        const settings = getSettings(), current = readConversionSettings(settings);
+        const labels = { jsonContainers: '完整 JSON 容器', ddlIncludeCheck: 'DDL CHECK',
+            translateSimpleEjs: '简单 EJS 翻译', installMvuShim: 'MVU 兼容层', appendPlaceholder: '状态栏刷新' };
+        const changed = Object.keys(labels).filter(key => current[key] !== lastConversionSettings[key]);
+        let notice = box.querySelector('.mvu2shujuku-reconvert-notice');
+        if (!notice) {
+            notice = hostDocument.createElement('div');
+            notice.className = 'mvu2shujuku-notice mvu2shujuku-reconvert-notice';
+            notice.setAttribute('role', 'status');
+            const text = hostDocument.createElement('span');
+            notice.appendChild(text);
+            const button = hostDocument.createElement('button');
+            button.type = 'button';
+            button.className = 'menu_button mvu2shujuku-sm';
+            button.textContent = '重新转换';
+            button.addEventListener('click', () => {
+                const source = panel.querySelector('input[name="mvu2shujuku-source"]:checked');
+                const convert = panel.querySelector(source && source.value === 'file'
+                    ? '#mvu2shujuku-convert-file' : '#mvu2shujuku-convert-current');
+                if (convert && !convert.disabled) convert.click();
+            });
+            notice.appendChild(button);
+            box.prepend(notice);
+        }
+        notice.hidden = !changed.length;
+        notice.querySelector('span').textContent = changed.length
+            ? '转换选项已更改：' + changed.map(key => labels[key]).join('、') + '。重新转换后生效，当前结果保持不变。' : '';
+        const asPng = settings.asPng === 'auto' ? !!lastResult.meta.isPngInput : settings.asPng === 'png';
+        const cardButton = panel.querySelector('#mvu2shujuku-downloads button[data-file-kind="card"]');
+        if (cardButton) cardButton.textContent = '角色卡 ' + (asPng ? 'PNG' : 'JSON');
+    }
+
+    // 下载/保存区默认位于结果框之后并隐藏；有结果时放到结果区末尾（看完报告、改完设置再导出）。
+    function placeResultActions(panel, box) {
+        const actions = panel && panel.querySelector('#mvu2shujuku-actions');
+        const resultBox = panel && panel.querySelector('.mvu2shujuku-result');
+        if (!actions || !resultBox) return;
+        if (!box) { resultBox.after(actions); return; }
+        box.appendChild(actions);
     }
 
     function findSettingsMount() {
@@ -5581,7 +5798,9 @@ function installExtensionRuntime(window) {
         return null;
     }
 
-    function renderSettingsPanel(panel) { panel.innerHTML = window.__MVU2SHUJUKU_SETTINGS_VIEW__(getSettings()); }
+    function renderSettingsPanel(panel) {
+        panel.innerHTML = window.__MVU2SHUJUKU_SETTINGS_VIEW__(getSettings(), window.MVU2SHUJUKU_CORE && window.MVU2SHUJUKU_CORE.VERSION);
+    }
 
     const stateTransfer = window.MVU2SHUJUKU_CORE.getStateTransferFactory()();
     let stateTransferBusy = false;
@@ -5795,12 +6014,12 @@ function installExtensionRuntime(window) {
                 snapshot.helper.replaceVariables(stateTransfer.clone(plan.variables), snapshot.variableOption);
                 return rollbackStage;
             },
-            importTables: tables => snapshot.api.importTableAsJson(JSON.stringify(tables), { persist: true }),
+            importTables: tables => runtimeApiForSession(snapshot.api, snapshot.session).importTableAsJson(JSON.stringify(tables), { persist: true }),
             restoreTables: async () => {
                 const current = await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(snapshot.tables));
                 if (stateTransfer.equalRuntimeTables(current, snapshot.tables)) return;
                 if (!stateTransfer.equalRuntimeTables(current, plan.tables)) throw new Error('表格状态与本次候选不一致，未强制覆盖；请检查并手动恢复');
-                const result = await snapshot.api.importTableAsJson(JSON.stringify(snapshot.tables), { persist: true });
+                const result = await runtimeApiForSession(snapshot.api, snapshot.session).importTableAsJson(JSON.stringify(snapshot.tables), { persist: true });
                 if (result !== true && result?.success !== true) throw new Error('数据库拒绝回退');
             },
             // importTableAsJson 的持久提交已保存同一份暂存变量；沿用现有批量写入
@@ -5904,7 +6123,15 @@ function installExtensionRuntime(window) {
         const searchBox = panel.querySelector('#mvu2shujuku-char-search');
         if (searchBox && searchBox.dataset.bound !== 'true') {
             searchBox.dataset.bound = 'true';
-            searchBox.addEventListener('input', () => populateCharacterSelect(panel));
+            let searchTimer = null;
+            searchBox.addEventListener('input', () => {
+                hostWindow.clearTimeout(searchTimer);
+                searchTimer = hostWindow.setTimeout(() => populateCharacterSelect(panel), 150);
+            });
+            const drawerToggle = panel.querySelector('.inline-drawer-toggle');
+            if (drawerToggle) drawerToggle.addEventListener('click', () => hostWindow.setTimeout(() => {
+                if (currentCharacterListFingerprint(getContextSafe()) !== characterListFingerprint) populateCharacterSelect(panel);
+            }, 0));
         }
         bind('#mvu2shujuku-char-refresh', async () => {
             try {
@@ -5947,7 +6174,8 @@ function installExtensionRuntime(window) {
             if (fileArea) fileArea.style.display = isChar ? 'none' : '';
             // 二选一：只显示当前来源对应的转换按钮
             if (btnCurrent) { btnCurrent.style.display = isChar ? '' : 'none'; btnCurrent.disabled = !isChar; }
-            if (btnFile) { btnFile.style.display = isChar ? 'none' : ''; btnFile.disabled = isChar; }
+            const picked = panel.querySelector('#mvu2shujuku-file');
+            if (btnFile) { btnFile.style.display = isChar ? 'none' : ''; btnFile.disabled = isChar || !(picked && picked.files && picked.files.length); }
         };
         const sourceRadios = panel.querySelectorAll('input[name="mvu2shujuku-source"]');
         sourceRadios.forEach((radio) => {
@@ -5958,10 +6186,15 @@ function installExtensionRuntime(window) {
         });
         const checkedSource = panel.querySelector('input[name="mvu2shujuku-source"]:checked');
         applySource(checkedSource ? checkedSource.value : 'character');
+        let convertRequestBusy = false;
         bind('#mvu2shujuku-convert-current', async () => {
+            if (convertRequestBusy || conversionOperation) return;
             const ch = selectedCharacter(panel);
             if (!ch) { toast('请先在角色卡下拉栏中选择角色', 'error'); return; }
-            toast('正在转换…');
+            if (!confirmDiscardEditedResult()) return;
+            const btn = panel.querySelector('#mvu2shujuku-convert-current');
+            convertRequestBusy = true;
+            if (btn) btn.disabled = true;
             try {
                 const full = await fetchFullCharacter(ch);
                 if (!full) {
@@ -5972,6 +6205,10 @@ function installExtensionRuntime(window) {
                 await doConvert(full, false, ch);
             } catch (e) {
                 toast('转换失败：' + (e && e.message ? e.message : e), 'error');
+            } finally {
+                convertRequestBusy = false;
+                const charMode = panel.querySelector('input[name="mvu2shujuku-source"][value="character"]');
+                if (btn && !conversionOperation) btn.disabled = !(charMode && charMode.checked);
             }
         });
         bind('#mvu2shujuku-pick-file', () => {
@@ -5984,23 +6221,79 @@ function installExtensionRuntime(window) {
             fileInput.addEventListener('change', () => {
                 const nameEl = panel.querySelector('#mvu2shujuku-file-name');
                 if (nameEl) nameEl.textContent = fileInput.files && fileInput.files.length ? '已选择：' + fileInput.files[0].name : '';
+                const fileBtn = panel.querySelector('#mvu2shujuku-convert-file');
+                if (fileBtn && !conversionOperation) fileBtn.disabled = !(fileInput.files && fileInput.files.length);
+            });
+        }
+        // 把文件拖到转换卡片上：只选中文件并切到“本地文件”，仍由用户点击转换。
+        const fileInputForDrop = panel.querySelector('#mvu2shujuku-file');
+        // 拖入只是便利功能：宿主节点缺少相应 DOM 能力时跳过，不能影响扩展初始化。
+        const dropCard = fileInputForDrop && typeof fileInputForDrop.closest === 'function' ? fileInputForDrop.closest('.mvu2shujuku-card') : null;
+        if (dropCard && dropCard.classList && dropCard.dataset && dropCard.dataset.dropBound !== 'true') {
+            dropCard.dataset.dropBound = 'true';
+            let depth = 0;
+            const hasFiles = e => !!(e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files'));
+            const leave = () => { depth = 0; dropCard.classList.remove('mvu2shujuku-dragover'); };
+            dropCard.addEventListener('dragenter', e => {
+                if (!hasFiles(e) || conversionOperation) return;
+                e.preventDefault(); depth++; dropCard.classList.add('mvu2shujuku-dragover');
+            });
+            dropCard.addEventListener('dragover', e => {
+                if (!hasFiles(e) || conversionOperation) return;
+                e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
+            });
+            dropCard.addEventListener('dragleave', e => {
+                if (!hasFiles(e)) return;
+                if (--depth <= 0) leave();
+            });
+            dropCard.addEventListener('drop', e => {
+                if (!hasFiles(e)) return;
+                e.preventDefault(); e.stopPropagation(); leave();
+                if (conversionOperation) return;
+                const file = e.dataTransfer.files && e.dataTransfer.files[0];
+                if (!file) return;
+                if (!/\.(json|png)$/i.test(file.name)) { toast('只支持 .json 或 .png 角色卡文件', 'error'); return; }
+                try {
+                    const transfer = new DataTransfer();
+                    transfer.items.add(file);
+                    fileInputForDrop.files = transfer.files;
+                } catch (err) { toast('当前浏览器不支持拖入文件，请点「选择文件…」', 'error'); return; }
+                const fileRadio = panel.querySelector('input[name="mvu2shujuku-source"][value="file"]');
+                if (fileRadio && !fileRadio.checked) { fileRadio.checked = true; fileRadio.dispatchEvent(new Event('change')); }
+                fileInputForDrop.dispatchEvent(new Event('change'));
+                toast('已选择 ' + file.name + '，点「转换所选文件」开始', 'info');
             });
         }
         bind('#mvu2shujuku-convert-file', async () => {
+            if (convertRequestBusy || conversionOperation) return;
             const input = panel.querySelector('#mvu2shujuku-file');
             if (!input || !input.files || !input.files.length) { toast('请先选择文件', 'error'); return; }
             const file = input.files[0];
-            toast('正在转换 ' + file.name + ' …');
+            if (!confirmDiscardEditedResult()) return;
+            const btn = panel.querySelector('#mvu2shujuku-convert-file');
+            convertRequestBusy = true;
+            if (btn) btn.disabled = true;
             try {
                 const bytes = await readFileAsBytes(file);
                 const isPng = /\.png$/i.test(file.name) || (bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50);
                 await doConvert(bytes, isPng);
             } catch (e) {
                 toast('转换失败：' + (e && e.message ? e.message : e), 'error');
+            } finally {
+                convertRequestBusy = false;
+                const fileMode = panel.querySelector('input[name="mvu2shujuku-source"][value="file"]');
+                if (btn && !conversionOperation) btn.disabled = !(fileMode && fileMode.checked && input.files && input.files.length);
             }
         });
         bind('#mvu2shujuku-clear', () => {
+            if (lastResult && resultSaveState !== 'saved'
+                && !hostWindow.confirm('转换结果' + (resultSaveState === 'dirty' ? '有修改' : '') + '尚未保存到酒馆，清空后表格设置的修改会丢失。确定清空？')) return;
             lastResult = null;
+            lastConversionSettings = null;
+            resultEditedSinceConvert = false;
+            resultSaveState = '';
+            updateSaveStatus(panel);
+            placeResultActions(panel, null);
             const box = panel.querySelector('.mvu2shujuku-result');
             if (box) box.innerHTML = '';
             const saveBtn = panel.querySelector('#mvu2shujuku-save-card');
@@ -6009,14 +6302,18 @@ function installExtensionRuntime(window) {
             if (downloadsBox) downloadsBox.innerHTML = '';
             mergeState.sourceTemplate = null;
             const tablesBox = panel.querySelector('#mvu2shujuku-merge-tables');
-            if (tablesBox) tablesBox.innerHTML = '选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。';
+            if (tablesBox) tablesBox.textContent = MERGE_TABLES_HINT;
             const applyBtn = panel.querySelector('#mvu2shujuku-merge-apply');
             if (applyBtn) applyBtn.style.display = 'none';
             const statusEl = panel.querySelector('#mvu2shujuku-merge-status');
             if (statusEl) statusEl.textContent = '';
         });
         bind('#mvu2shujuku-save-card', async () => {
-            await saveCardToSillyTavern();
+            const saved = await saveCardToSillyTavern();
+            if (saved) {
+                resultSaveState = 'saved';
+                updateSaveStatus(panel);
+            }
         });
         const shimSel = panel.querySelector('#mvu2shujuku-shim');
         if (shimSel && shimSel.dataset.bound !== 'true') {
@@ -6024,6 +6321,7 @@ function installExtensionRuntime(window) {
             shimSel.addEventListener('change', () => {
                 getSettings().installMvuShim = shimSel.value;
                 saveSettings();
+                updateReconvertNotice();
             });
         }
         const ph = panel.querySelector('#mvu2shujuku-placeholder');
@@ -6032,6 +6330,7 @@ function installExtensionRuntime(window) {
             ph.addEventListener('change', () => {
                 getSettings().appendPlaceholder = ph.checked;
                 saveSettings();
+                updateReconvertNotice();
             });
         }
         const debugBox = panel.querySelector('#mvu2shujuku-debug');
@@ -6051,9 +6350,7 @@ function installExtensionRuntime(window) {
             ddlCheckBox.addEventListener('change', () => {
                 getSettings().ddlIncludeCheck = ddlCheckBox.checked;
                 saveSettings();
-                if (lastResult) {
-                    toast('DDL CHECK 开关已保存；重新转换后生效（现有转换结果不变）', 'info');
-                }
+                updateReconvertNotice();
             });
         }
         const jsonContainersBox = panel.querySelector('#mvu2shujuku-json-containers');
@@ -6062,7 +6359,7 @@ function installExtensionRuntime(window) {
             jsonContainersBox.addEventListener('change', () => {
                 getSettings().jsonContainers = jsonContainersBox.checked;
                 saveSettings();
-                if (lastResult) toast('完整 JSON 容器选项已保存；重新转换后生效', 'info');
+                updateReconvertNotice();
             });
         }
         const ejsTranslateBox = panel.querySelector('#mvu2shujuku-ejs-translate');
@@ -6071,6 +6368,7 @@ function installExtensionRuntime(window) {
             ejsTranslateBox.addEventListener('change', () => {
                 getSettings().translateSimpleEjs = ejsTranslateBox.checked;
                 saveSettings();
+                updateReconvertNotice();
             });
         }
         const pngSel = panel.querySelector('#mvu2shujuku-png');
@@ -6079,6 +6377,7 @@ function installExtensionRuntime(window) {
             pngSel.addEventListener('change', () => {
                 getSettings().asPng = pngSel.value;
                 saveSettings();
+                updateReconvertNotice();
             });
         }
     }
@@ -6133,19 +6432,16 @@ function installExtensionRuntime(window) {
         return original;
     }
     function hasDatabaseMessageData(index) {
-        const chat = getContextSafe().chat || [];
-        // Unchanged AI replies and user messages inherit the preceding database
-        // state even when no new storage frame was required on that floor.
-        for (let i = index; i >= 0; i--) {
-            let isolated = chat[i] && chat[i].TavernDB_ACU_IsolatedData;
-            if (typeof isolated === 'string') { try { isolated = JSON.parse(isolated); } catch (_) { continue; } }
-            if (isolated && typeof isolated === 'object' && Object.values(isolated).some(tag =>
-                tag && tag.storageFrame && tag.storageFrame.version === 2)) return true;
-        }
-        return false;
+        // The batch collector handles inheritance in one forward pass. Looking
+        // backwards independently for every requested floor is quadratic when
+        // the first frame is late or has not been initialized yet.
+        let isolated = getContextSafe().chat?.[index]?.TavernDB_ACU_IsolatedData;
+        if (typeof isolated === 'string') { try { isolated = JSON.parse(isolated); } catch (_) { return false; } }
+        return !!(isolated && typeof isolated === 'object' && Object.values(isolated).some(tag =>
+            tag && tag.storageFrame && tag.storageFrame.version === 2));
     }
-    function readDatabaseMessageHistory(index) {
-        const wrap = databaseMessageHistory.read(index);
+    function readDatabaseMessageHistory(index, options) {
+        const wrap = databaseMessageHistory.read(index, { copy: options?.deferClone !== true });
         return wrap ? nativeStatStorage.merge(wrap, index) : undefined;
     }
     const databaseMessageHistory = window.MVU2SHUJUKU_CORE.getMessageHistoryFactory()({
@@ -6161,15 +6457,39 @@ function installExtensionRuntime(window) {
         },
         onError: error => dbgWarn(' 历史状态准备失败:', error),
     });
-    async function prepareDatabaseHistory(context, includeCurrent = false) {
+    function mountedHistoryMessageIndices() {
+        const indices = [];
+        for (const frame of getRuntimeWindows()) {
+            try {
+                const index = currentVariableApi && currentVariableApi.messageIdForWindow(frame);
+                if (Number.isInteger(index)) indices.push(index);
+            } catch (_) {}
+        }
+        return [...new Set(indices)];
+    }
+    async function prepareDatabaseHistory(context, includeCurrent = false, requestedIndices) {
         if (!isConvertedMvuCard(currentCharacter()) || !ensureActiveLayoutLazy()) return;
         const chat = getContextSafe().chat || [];
         const latest = ejsEvalBridge.selectMessage().index;
         const indices = [];
-        let inherited = false;
-        for (let index = 0; index < chat.length; index++) {
-            if (!inherited) inherited = hasDatabaseMessageData(index);
-            if (inherited && (includeCurrent || index !== latest)) indices.push(index);
+        if (Array.isArray(requestedIndices)) {
+            const requested = [...new Set(requestedIndices)].filter(index => Number.isInteger(index)
+                && index >= 0 && index < chat.length && (includeCurrent || index !== latest));
+            const last = requested.reduce((maximum, index) => Math.max(maximum, index), -1);
+            let first = -1;
+            for (let index = 0; index <= last; index++) {
+                if (hasDatabaseMessageData(index)) { first = index; break; }
+            }
+            if (first >= 0) for (const index of requested) if (index >= first) indices.push(index);
+        } else {
+            // Arbitrary author EJS may synchronously select another floor.
+            // Keep its conservative full preparation instead of re-executing
+            // author code or pretending that all reads use the current floor.
+            let inherited = false;
+            for (let index = 0; index < chat.length; index++) {
+                if (!inherited) inherited = hasDatabaseMessageData(index);
+                if (inherited && (includeCurrent || index !== latest)) indices.push(index);
+            }
         }
         if (!indices.length) return;
         try { await databaseMessageHistory.prepare(indices); }
@@ -6185,7 +6505,7 @@ function installExtensionRuntime(window) {
         if (databaseHistoryPrepareTimer !== null) hostWindow.clearTimeout(databaseHistoryPrepareTimer);
         databaseHistoryPrepareTimer = hostWindow.setTimeout(() => {
             databaseHistoryPrepareTimer = null;
-            prepareDatabaseHistory().catch(error => dbgWarn(' 提交后历史状态准备失败:', error));
+            prepareDatabaseHistory(undefined, false, mountedHistoryMessageIndices()).catch(error => dbgWarn(' 提交后历史状态准备失败:', error));
         }, 120);
     }
     function databaseVariableTarget(options, writing) {
@@ -6194,14 +6514,16 @@ function installExtensionRuntime(window) {
             ? {} : { withMsg: { id: messageId } }, {}, writing);
     }
     function readDatabaseVariables(options) {
+        // The variable API clones the merged public result; avoid cloning the
+        // same historical JSON once here and again in mergeRead.
         const target = databaseVariableTarget(options, false);
         if (target.missing) return {};
-        if (!target.current) return readDatabaseMessageHistory(target.index) || {};
+        if (!target.current) return readDatabaseMessageHistory(target.index, { deferClone: true }) || {};
         const all = pendingStatWrite ? { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} }
             : window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
         if (all && all.__mvu2shujukuReadUnavailable === true) {
             try {
-                const prepared = readDatabaseMessageHistory(target.index);
+                const prepared = readDatabaseMessageHistory(target.index, { deferClone: true });
                 if (prepared) return prepared;
             } catch (error) {
                 if (error.code !== 'MVU_HISTORY_NOT_READY') throw error;

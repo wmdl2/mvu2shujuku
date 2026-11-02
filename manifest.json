@@ -5,9 +5,10 @@
   "optional": [],
   "dependencies": [],
   "js": "index.js",
+  "generate_interceptor": "mvu2shujukuBeforeGeneration",
   "css": "style.css",
   "author": "mvu2shujuku",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "homePage": "https://github.com/wmdl2/mvu2shujuku",
   "auto_update": false,
   "minimum_client_version": "1.12.0"

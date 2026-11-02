@@ -1588,7 +1588,10 @@ function createTableWriter(dependencies) {
         return keys.length === Object.keys(b).length && keys.every(key => Object.prototype.hasOwnProperty.call(b, key) && sameRepresentation(a[key], b[key]));
     }
     function createTableDraft(baseTemplate, sourceApi) {
-        const tables = JSON.parse(JSON.stringify(baseTemplate || {}));
+        return createTableDraftFromJson(JSON.stringify(baseTemplate || {}), sourceApi);
+    }
+    function createTableDraftFromJson(baseJson, sourceApi) {
+        const tables = JSON.parse(baseJson);
         const operations = [];
         const fakeApi = {
             exportTableAsJson: () => tables,
@@ -1663,7 +1666,8 @@ function createTableWriter(dependencies) {
     async function planStatDiffToDb(api, layoutEntries, prevStat, nextStat, persistedTables) {
         const before = api.exportTableAsJson() || {};
         const beforeJson = JSON.stringify(before);
-        const draft = createTableDraft(before, api);
+        // 并发检查和草稿使用同一次序列化；草稿仍独立解析，不持有宿主表格引用。
+        const draft = createTableDraftFromJson(beforeJson, api);
         const state = { failed: false, failureReason: null };
         const plannedChanges = await runStatDiffWrite(draft.fakeApi, layoutEntries, prevStat, nextStat, persistedTables, state);
         if (!state.failed && (layoutEntries || []).some(entry => entry.requireLosslessWrite)) {

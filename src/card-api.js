@@ -195,6 +195,7 @@ function createCardApi(options) {
             return result && typeof result.then === 'function' ? result.then(apply) : apply(result);
         });
         if (typeof original.createChatMessages === 'function') set('createChatMessages', wrapCreate(original.createChatMessages, original));
+        if (typeof original.deleteChatMessages === 'function') set('deleteChatMessages', wrapMutation(original.deleteChatMessages, original));
         return out;
     }
     function patchWorldbookGlobals(w, globals, facadeOptions) {
@@ -218,6 +219,8 @@ function createCardApi(options) {
     function wrapCreate(original, receiver) {
         return async function (messages, ...args) {
             if (!isCurrent()) throw new Error('创建消息所属会话已变化');
+            await options.beforeChatMutation?.();
+            if (!isCurrent()) throw new Error('等待写入期间会话已变化');
             const snapshots = (Array.isArray(messages) ? messages : []).filter(m => m?.data?.stat_data && typeof m.data.stat_data === 'object');
             // Multiple snapshots require per-message transactions rather than silently keeping only the last.
             if (snapshots.length > 1) throw new Error('一次创建多个 MVU 档案暂不支持，请逐条提交');
@@ -233,7 +236,15 @@ function createCardApi(options) {
             return result;
         };
     }
-    const api = { registerSchema, ready, validate, stateImportRules, proofOf, facade, patchWorldbookGlobals, wrapCreate };
+    function wrapMutation(original, receiver) {
+        return async function (...args) {
+            if (!isCurrent()) throw new Error('修改消息所属会话已变化');
+            await options.beforeChatMutation?.();
+            if (!isCurrent()) throw new Error('等待写入期间会话已变化');
+            return original.apply(receiver, args);
+        };
+    }
+    const api = { registerSchema, ready, validate, stateImportRules, proofOf, facade, patchWorldbookGlobals, wrapCreate, wrapMutation };
     return api;
 }
 module.exports = createCardApi;

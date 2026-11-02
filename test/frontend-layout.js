@@ -23,9 +23,16 @@ async function main() {
         const page = await browser.newPage();
         const errors = [];
         page.on('pageerror', error => errors.push(error.message));
-        for (const [viewport, width] of [[1280, 314], [390, 390], [1024, 760]]) {
+        const themes = [
+            { name: 'dark', fg: '#dddddd', bg: '#202020', border: '#555555', accent: '#79bbd1', tint: '#242424' },
+            { name: 'light', fg: '#252525', bg: '#ffffff', border: '#bbbbbb', accent: '#167a9c', tint: '#f7f8fa' },
+            { name: 'custom', fg: '#fff4fb', bg: '#2e1830', border: '#aa6f9b', accent: '#f2a3dd', tint: '#3c213c' },
+        ];
+        for (const theme of themes) for (const [viewport, width] of [[1280, 314], [390, 390], [1024, 760]]) {
             await page.setViewportSize({ width: viewport, height: 900 });
-            await page.setContent('<style>' + fontCss + 'body{margin:0;background:#202020;color:#ddd;font:14px TestChinese,sans-serif}button,input,select,textarea{font:inherit}*{box-sizing:border-box}' + core.extensionStyle() + '</style><div id="mvu2shujuku-settings" style="width:' + width + 'px"></div>');
+            const themeCss = ':root{--SmartThemeBodyColor:' + theme.fg + ';--SmartThemeBorderColor:' + theme.border
+                + ';--SmartThemeQuoteColor:' + theme.accent + ';--SmartThemeBlurTintColor:' + theme.tint + '}';
+            await page.setContent('<style>' + fontCss + themeCss + 'body{margin:0;background:' + theme.bg + ';color:' + theme.fg + ';font:14px TestChinese,sans-serif}button,input,select,textarea{font:inherit}*{box-sizing:border-box}' + core.extensionStyle() + '</style><div id="mvu2shujuku-settings" style="width:' + width + 'px"></div>');
             await page.evaluate(({ viewSource, settingsSource, result, rows }) => {
                 const panel = document.getElementById('mvu2shujuku-settings');
                 panel.innerHTML = (0, eval)('(' + settingsSource + ')')({ installMvuShim: 'auto', asPng: 'auto' });
@@ -47,7 +54,9 @@ async function main() {
                 return { width: node.clientWidth, scrollWidth: node.scrollWidth, gridWidth: grid.clientWidth, gridScrollWidth: grid.scrollWidth,
                     numberStyleCount: new Set(numberStyles).size, explanationRemoved: !node.textContent.includes('世界书注入与自动更新有什么区别') };
             });
-            if (width === 314) {
+            assert.strictEqual(await page.locator('#mvu2shujuku-settings').evaluate(node =>
+                getComputedStyle(node).getPropertyValue('--mvu2shujuku-fg').trim()), theme.fg);
+            if (theme.name === 'dark' && width === 314) {
                 const tableRows = page.locator('.mvu2shujuku-table-row');
                 assert.strictEqual(await tableRows.count(), 3);
                 assert.strictEqual(await page.locator('.mvu2shujuku-apply-all').count(), 0);
@@ -101,9 +110,9 @@ async function main() {
                     emptyHint: '未报告需额外核对的兼容事项；详细转换记录可在下方展开。',
                 });
             }
-            const filename = 'frontend-' + width + '.png';
+            const filename = 'frontend-' + theme.name + '-' + width + '.png';
             await page.locator('.mvu2shujuku-result').screenshot({ path: path.join(work, filename) });
-            results.push({ viewport, container: width, ...dimensions, filename });
+            results.push({ theme: theme.name, viewport, container: width, ...dimensions, filename });
         }
         fs.writeFileSync(path.join(work, 'results.json'), JSON.stringify({ results, errors }, null, 2));
         console.log(JSON.stringify({ results, errors }));

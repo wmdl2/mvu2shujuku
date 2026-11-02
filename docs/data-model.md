@@ -24,6 +24,8 @@ SQLite 的非 STRICT `INTEGER` 亲和性本身仍允许小数；整数校验由�
 
 更新插件不会修改已有聊天的 DDL 或布局；新声明需要重新转换卡及模板。旧 `INTEGER` 数值布局继续按 number 读写。
 
+输出类型未知的变换字段使用 JSON 列时，Schema 默认值必须从原始值编码一次：数组 `[]` 不能先变成文本 `"[]"` 再编码为 JSON 字符串。外观相同的原始字符串 `"[]"` 仍应保留字符串类型。此规则同时约束列默认值及省略列新增后的读回，见[默认值与初始化验证](validation/2026-10-31-schema-defaults-and-initialization.md)。
+
 建表前必须先按对应版本 MVU 上游 `schema.ts` 的初始化顺序分析 `$meta`、`$arrayMeta` 和
 `$__META_EXTENSIBLE__$`，再执行与 `cleanUpMetadata` 等价的清理。元数据只提供固定/开放对象、
 递归开放、必需键和动态条目模板的结构证据，绝不能成为业务列或表。多开场分支的开放性按并集

@@ -11,7 +11,7 @@ const output = rules => 'variables_update_format:\n  rule:\n' + rules.map(r=>'  
 test('输出约束：格式源文保留，请求视图排除纯格式且保留未知业务', () => {
     const rules = ['数量不能少于零，清空时保留等级记录', 'When a typed variable requires an empty state, assign a concrete empty value. Do not use null.', 'When updating variables, preserve EVERY piece of information verbatim', '不得把 JSONPatch 阵营的物品移出仓库'];
     const r = run(output(rules));
-    const entry = r.card.character_book.entries.find(e => /\[M2SJK\]/.test(e.comment));
+    const entry = r.card.character_book.entries.find(e => /^\[M2SJK\]更新要求（/.test(e.comment));
     assert(entry);
     for (const rule of rules) assert(entry.content.includes(rule));
     assert.match(entry.content, /<UpdateVariable>|<JSONPatch>/, "源格式保留");
@@ -23,7 +23,7 @@ test('输出约束：未知字段不因短长措辞或协议名而整条删除',
     for (const delta of ['update the value of existing number paths by a delta value', 'update the value of existing number paths by a delta value (the delta value MUST be a number without quotes)']) {
         const content = '变量输出格式:\n  rule:\n    - JSON Patch:\n        - delta: '+delta+'\n    - 字段只读要求\n  format: |-\n'+format.split('\n').map(x=>'    '+x).join('\n');
         const r = run(content, '[mvu_update]变量输出格式');
-        const entry = r.card.character_book.entries.find(e=>/\[M2SJK\]/.test(e.comment));
+        const entry = r.card.character_book.entries.find(e=>/^\[M2SJK\]更新要求（/.test(e.comment));
         assert(entry.content.includes(delta));
         assert(entry.content.includes('字段只读要求'));
         assert.match(entry.content, /<UpdateVariable>|<JSONPatch>/, "源格式保留");
@@ -52,7 +52,7 @@ test('输出约束：剧情条目和非输出文档不因名称或关键词删�
 });
 
 function ruleEntry(result) {
-    return result.card.character_book.entries.find(e => /\[M2SJK\]/.test(e.comment));
+    return result.card.character_book.entries.find(e => /^\[M2SJK\]更新要求（/.test(e.comment));
 }
 test('规则拆分：已映射字段原文保留，任意未匹配分组及注入设置保留', () => {
     const content = '变量更新规则:\n  状态:\n    数量:\n      type: number\n      range: 0~10\n      check: 数量变化时更新\n  任意分组:\n    # 保留此处的补充说明\n    check: 发现占位值时按设定补全\n';

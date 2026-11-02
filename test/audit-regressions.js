@@ -38,7 +38,7 @@ function runtime(extra = {}) {
 
 function writeQueue() {
     let timerId = 0;
-    const timers = new Map(), win = {};
+    const timers = new Map(), win = { __MVU2SHUJUKU_WRITE_BARRIER_FACTORY__: require('../src/write-barrier') };
     const r = runtime({ window: win, hostWindow: {
         setTimeout(fn) { const id = ++timerId; timers.set(id, fn); return id; },
         clearTimeout(id) { timers.delete(id); },
@@ -292,11 +292,11 @@ test('审查：完整卡接口接受空世界书问候语初始化并保留源�
 
 test('审查：点击数据桥下载按钮得到可执行 JS 而非报告', async () => {
     const result = core.convert(card()), buttons = [], downloads = [];
-    const node = () => ({ style: {}, appendChild() {}, addEventListener(event, fn) { this.click = fn; } });
+    const node = () => ({ style: {}, dataset: {}, appendChild() {}, after() {}, prepend() {}, querySelector: () => null, addEventListener(event, fn) { this.click = fn; } });
     const box = node(), downloadBox = { appendChild(button) { buttons.push(button); } };
     const panel = { querySelector: selector => selector === '.mvu2shujuku-result' ? box : selector === '#mvu2shujuku-downloads' ? downloadBox : node() };
     const context = { hostDocument: { getElementById: () => panel, createElement: node }, PANEL_ID: 'test',
-        renderUpdateConfigEditor() {}, renderMergeSection() {}, resultView: { renderReport() {} }, toast() {}, lastResult: result,
+        renderUpdateConfigEditor() {}, renderMergeSection() {}, resultView: { renderReport() {} }, toast() {}, lastResult: result, lastConversionSettings: null,
         download: (...args) => downloads.push(args) };
     vm.createContext(context);
     vm.runInContext(extract('    function renderResult(', '    function findSettingsMount('), context);

@@ -146,6 +146,8 @@ function createVariableApi(options) {
                     assertWritable({ type: 'message', message_id: item.message_id });
                 }
                 if (writes.length > 1) throw new Error('一次更新多个消息变量暂不支持，请逐条提交');
+                await options.beforeChatMutation?.();
+                assertCurrent();
                 if (!writes.length) return call('setChatMessages', [messages, ...args]);
                 const item = writes[0], opts = { type: 'message', message_id: item.message_id };
                 await replace(item.data, opts);

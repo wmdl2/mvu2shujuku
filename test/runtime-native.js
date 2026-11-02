@@ -95,6 +95,39 @@ test("旧布局：开场 Schema：已有世界书初值存档只建基线，不�
     assert.deepStrictEqual(stored.stat_data, { 账户: { 等级: 23 } });
 });
 
+test('开场 Schema：无变化的延后初始化不提交旧快照，不覆盖期间新增的记录', async () => {
+    const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const start = source.indexOf('    async function applyActiveGreetingInitvar(');
+    const end = source.indexOf('    // 扩展成为唯一 runtime owner', start);
+    const snapshot = plainGreetingSource({ schemaKeys: ['public'] })();
+    const state = { ready: true, baselineNext: false };
+    const initial = { 记录: {}, 图鉴: {} };
+    let live = clone(initial), commits = 0, finishValidation;
+    const validation = new Promise(resolve => { finishValidation = resolve; });
+    const apply = vm.runInNewContext(source.slice(start, end) + '\napplyActiveGreetingInitvar;', {
+        captureRuntimeSession: () => ({}), autoInitChatId: () => 'deferred', greetingInitState: () => state,
+        activeGreetingSourceSnapshot: () => snapshot, mvuMessageWrites: new Map(), guardGreetingSource: () => {},
+        isRuntimeSessionCurrent: () => true, readCardApiMetadata: () => ({ schemaKeys: ['public'] }),
+        canonicalJsonForSync: value => JSON.stringify(value), currentCardApi: { proofOf: () => undefined },
+        computeActiveGreetingSnapshot: async () => { await validation; return {
+            fp: 'no-initvar|', baseStat: clone(initial), finalWrap: { stat_data: clone(initial) }, schemaDeferred: false,
+            first: snapshot.first, hasInitvar: false, updateSource: '',
+        }; },
+        scheduleWindowStatOverlay: (stat, done) => { commits++; live = clone(stat); done(true); },
+        scheduleGreetingMessageWrite: () => {}, dbg: () => {},
+        dbgWarn: (...args) => { throw args.find(value => value instanceof Error) || new Error('unexpected failure'); },
+    });
+    const pending = apply();
+    live.记录.新角色 = { 分值: 12 };
+    finishValidation(); await pending;
+    assert.strictEqual(commits, 0, 'unchanged Schema initialization must not replace newer database data');
+    assert.deepStrictEqual(live, { 记录: { 新角色: { 分值: 12 } }, 图鉴: {} });
+    assert.strictEqual(state.schemaInitialized, true);
+    assert.strictEqual(state.appliedSourceFp, snapshot.sourceFp);
+    assert.strictEqual(state.pendingSourceFp, '');
+    await apply(); assert.strictEqual(commits, 0, 'unchanged initialization is marked complete');
+});
+
 test("旧布局：开场 Schema：纯 InitVar 先运行作者预处理，旧名删除、新名和记录保留", async () => {
     const { zod: z } = require('../src/vendor/schema-engine-libs');
     const api = require('../src/card-api')({ readMetadata: () => ({ schemaKeys: ['public'] }), isCurrent: () => true });
@@ -314,6 +347,10 @@ async function nativeRuntime(source = require('./synthetic-card')(), configure, 
         SillyTavern: { getContext: () => context }, AutoCardUpdaterAPI: api,
     };
     win.window = win; win.parent = win; win.top = win; win.globalThis = win;
+    win.updateVariablesWith = async (updater, options) => {
+        const value = await updater(win.getVariables(options));
+        await win.replaceVariables(value, options); return value;
+    };
     if (configure) configure({ win, context, tables, api, now: () => now });
     vm.createContext(win);
     vm.runInContext(core.assembleExtension({ coreSource: fs.readFileSync(require.resolve('../src/mvu2shujuku'), 'utf8') })['index.js'], win);
@@ -861,6 +898,27 @@ test("旧布局：当前楼批次：序列化工厂的完整数组JSON和标量�
     assert.ok(plan.operations.length > 1, '数组内部导入仍须与外层标量合并提交');
 });
 
+test("当前楼批次：完整表格只序列化一次，草稿与并发基线一致且不共享引用", async () => {
+    const result = publishedLayoutFixture(require('./synthetic-card')());
+    const layout = JSON.parse(result.card.data.extensions.mvu2shujuku.layout);
+    const tables = clone(result.template);
+    tables.sheet_other = { name: '其它表', content: [['row_id', '保留'], [7, '原值']] };
+    const before = core.statDataFromTables(layout, tables).stat_data, after = clone(before);
+    const original = JSON.stringify(tables);
+    let serializations = 0;
+    Object.defineProperty(tables, 'toJSON', { value() { serializations++; return { ...this }; } });
+    after.状态.金币 = 2;
+    after.背包 = ['药', true];
+    const plan = await core.planStatDiffToDb(applyingApi(tables), layout, before, after, tables);
+    assert.strictEqual(plan.ok, true, plan.failureReason);
+    assert.strictEqual(serializations, 1, '同一份完整表格仅用于建立一次基线');
+    assert.strictEqual(plan.beforeJson, original);
+    assert.deepStrictEqual(core.statDataFromTables(layout, plan.tables).stat_data, after);
+    assert.strictEqual(JSON.stringify(tables), original, '规划不得修改宿主表格');
+    plan.tables.sheet_other.content[1][1] = '草稿修改';
+    assert.strictEqual(tables.sheet_other.content[1][1], '原值', '未登记表也不共享可变引用');
+});
+
 test("旧布局：当前楼批次：规划期间数据库变化或来源失效，不提交过时草稿", async () => {
     const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
     const start = source.indexOf('    async function commitCurrentReplyBatch(');
@@ -1234,6 +1292,36 @@ test("旧布局：统一变量入口实装：MVU显式chat/global作用域仍调
         assert.strictEqual(await h.win.Mvu.replaceMvuData({ native: type }, options), true);
         assert.strictEqual(calls.at(-1)[2], options);
     }
+});
+
+test("统一变量入口：不发布宿主缺失的裸全局，作者可回退到助手命名空间", async () => {
+    const h = await nativeRuntime(undefined, ({ win, context }) => {
+        context.chat_metadata = { variables: {} };
+        const getVariables = win.getVariables, replaceVariables = win.replaceVariables;
+        win.TavernHelper = { getVariables, replaceVariables };
+        delete win.getVariables; delete win.replaceVariables;
+    });
+    assert.strictEqual(h.win.getVariables, undefined);
+    assert.strictEqual(h.win.replaceVariables, undefined);
+    await h.win.TavernHelper.replaceVariables({ opening: 'pending' }, { type: 'chat' });
+    assert.strictEqual(h.win.TavernHelper.getVariables({ type: 'chat' }).opening, 'pending');
+    assert.strictEqual(h.win.Mvu.getMvuData({ type: 'chat' }).opening, 'pending');
+    await h.win.Mvu.replaceMvuData({ opening: 'done' }, { type: 'chat' });
+    assert.strictEqual(h.win.TavernHelper.getVariables({ type: 'chat' }).opening, 'done');
+});
+
+test("统一变量入口：会话创建后助手接口晚到仍保留非消息作用域", async () => {
+    let helper;
+    const h = await nativeRuntime(undefined, ({ win, context }) => {
+        context.chat_metadata = { variables: {} };
+        helper = { getVariables: win.getVariables, replaceVariables: win.replaceVariables };
+        delete win.getVariables; delete win.replaceVariables;
+    });
+    h.win.TavernHelper = helper;
+    await h.advance(3000);
+    assert.strictEqual(h.win.getVariables, undefined);
+    await h.win.Mvu.replaceMvuData({ opening: 'late' }, { type: 'chat' });
+    assert.strictEqual(h.win.Mvu.getMvuData({ type: 'chat' }).opening, 'late');
 });
 
 

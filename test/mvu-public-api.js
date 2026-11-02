@@ -31,7 +31,7 @@ test('公共 MVU API：普通两元素数组与 VWD 按上游 getter 语义区�
 
 function frontendPreparation(deps) {
     const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
-    const start = source.indexOf('    async function prepareFrontendChatVariables() {');
+    const start = source.indexOf('    async function prepareFrontendChatVariables(');
     const end = source.indexOf('    function bindAutoInit(context)', start);
     assert(start >= 0 && end > start);
     return vm.runInNewContext(source.slice(start, end) + '\nprepareFrontendChatVariables;', deps);
@@ -45,7 +45,7 @@ test('变量前端准备：原生渲染前等待只读快照，不触发数据�
         autoInitDatabase: async () => { throw Error('must not mutate in render hook'); },
         prepareDatabaseHistory: async (_context, includeCurrent) => { assert.strictEqual(includeCurrent, true); calls.push('history'); await gate; },
         applyWindowMvuShim: () => calls.push('publish') });
-    const pending = prepare();
+    const pending = prepare(undefined, true);
     assert.deepStrictEqual(calls, ['history']);
     release(); await pending;
     assert.deepStrictEqual(calls, ['history', 'publish']);
@@ -57,8 +57,8 @@ test('变量前端准备：普通卡不介入，等待期间切卡不发布旧�
         isRuntimeSessionCurrent: () => current,
         prepareDatabaseHistory: async () => { calls++; current = false; },
         applyWindowMvuShim: () => { throw Error('stale publish'); } });
-    await prepare(); assert.strictEqual(calls, 0);
-    converted = true; await prepare(); assert.strictEqual(calls, 1);
+    await prepare(undefined, true); assert.strictEqual(calls, 0);
+    converted = true; await prepare(undefined, true); assert.strictEqual(calls, 1);
 });
 
 test('公共 MVU API：setter 保留普通值类型、Date 身份、普通数组和 VWD 描述符', async () => {

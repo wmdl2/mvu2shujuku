@@ -54,7 +54,7 @@ for (const parentKey of ['甲.乙', '']) test('转换契约：多层关系表字
 });
 function ruleResult(stat, text) {
     const r = core.convert(card(stat, '', text));
-    return { result: r, body: r.card.character_book.entries.find(e => /\[M2SJK\]/.test(e.comment))?.content || '',
+    return { result: r, body: r.card.character_book.entries.find(e => /^\[M2SJK\]更新要求（/.test(e.comment))?.content || '',
         note: Object.values(r.template).filter(t => t.sourceData).map(t => t.sourceData.note).join('\n') };
 }
 for (const field of ['$私有']) test('转换契约：未进入填表说明的规则保留原文 ' + field, () => {
@@ -79,7 +79,7 @@ test('转换契约：自定义模板没有实际承接约束时保留有限绑�
     const template = clone(core.convert(input).template);
     for (const sheet of Object.values(template)) if (sheet.sourceData) sheet.sourceData.note = sheet.sourceData.note.replaceAll('PARTIAL_FINITE_RECEIPT', '用户自定义说明');
     const r = core.convert(input, { template });
-    assert.match(r.card.character_book.entries.find(e => /\[M2SJK\]/.test(e.comment)).content, /PARTIAL_FINITE_RECEIPT/);
+    assert.match(r.card.character_book.entries.find(e => /^\[M2SJK\]更新要求（/.test(e.comment)).content, /PARTIAL_FINITE_RECEIPT/);
 });
 test('转换契约：多层有限绑定的子字段保留原来源路径，源节点与说明同时保留', () => {
     const { body, note } = ruleResult({ 面板: { 甲: { 值: 1 }, 乙: { 值: 2 } } }, '变量更新规则:\n  面板.${项}:\n    项: [甲, 乙]\n    值:\n      check: NESTED_FINITE_RECEIPT');

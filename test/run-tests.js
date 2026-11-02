@@ -5767,6 +5767,9 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     };
     const frontendWin = {
         document: frontendDoc,
+        // TH predefine supplies the frame's native variable reader before
+        // author code; the shim must not invent it in an uninitialized window.
+        getVariables: () => ({}),
         CustomEvent: function () {},
         addEventListener: () => {},
         dispatchEvent: () => true,
@@ -5827,7 +5830,7 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     assert.ok(win.Mvu && typeof win.Mvu.getMvuData === 'function', '转换卡应接管 window.Mvu');
     assert.strictEqual(typeof win.getAllVariables, 'function', '转换卡应定义 getAllVariables');
     assert.strictEqual(typeof win.getVariables, 'function', '转换卡应接管 getVariables');
-    assert.strictEqual(typeof win.updateVariablesWith, 'function', '转换卡应接管 updateVariablesWith');
+    assert.strictEqual(win.updateVariablesWith, undefined, '宿主未提供裸 updateVariablesWith 时不发布无原生绑定的接口');
     assert.strictEqual(typeof win.replaceVariables, 'function', '转换卡应接管 replaceVariables');
     // 模板缓存键：应使用“读取时会看到的角色对象”（带 avatar），并同时记录名称兜底
     assert.strictEqual(win.__mvu2shujukuTemplateCacheFor, '转换卡|b.png', '缓存键应含 avatar');
@@ -10695,4 +10698,6 @@ require('./input-parser');
 require('./card-bridge');
 require('./card-conversion-fixes');
 require('./converter-contracts');
+require('./write-barrier');
+require('./database-write-api');
 runTests(parseArgs());

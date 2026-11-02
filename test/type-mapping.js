@@ -44,6 +44,34 @@ function card(initial, schema, rules) {
 function state(result) {
     return { layout: JSON.parse(result.card.extensions.mvu2shujuku.layout), tables: clone(result.template) };
 }
+test('类型契约：动态记录变换字段的结构默认值只编码一次，SQLite省略列新增等价读回', () => {
+    const initial = { 记录: {} };
+    const source = '{记录:z.record(z.string(),z.object({' +
+        '数组:z.array(z.string()).transform(v=>v).prefault([]),' +
+        '双元素:z.array(z.string()).transform(v=>v).prefault(["甲","乙"]),' +
+        '对象:z.object({值:z.number()}).transform(v=>v).prefault({值:2}),' +
+        '文本:z.string().transform(v=>v).prefault("[]"),' +
+        '数:z.number().transform(v=>v).prefault(0),' +
+        '布尔:z.boolean().transform(v=>v).prefault(false),' +
+        '空:z.null().transform(v=>v).prefault(null)' +
+        '})).prefault({})}';
+    const result = core.convert(card(initial, source));
+    const { layout, tables } = state(result), group = result.schema.find(g => g.name === '记录');
+    assert.strictEqual(group.kind, 'rows');
+    const sheet = Object.values(tables).find(s => s.name === group.tableName);
+    const script = `import json,sqlite3,sys
+p=json.load(sys.stdin);db=sqlite3.connect(':memory:');db.executescript(p['ddl'])
+db.execute('INSERT INTO "'+p['table']+'" ("'+p['key']+'") VALUES (?)',('新增记录',))
+print(json.dumps(db.execute('SELECT * FROM "'+p['table']+'"').fetchall(),ensure_ascii=False))`;
+    const rows = JSON.parse(require('child_process').execFileSync(pythonExecutable, ['-c', script], {
+        encoding: 'utf8', timeout: 15000,
+        input: JSON.stringify({ ddl: sheet.sourceData.ddl, table: group.ident, key: group.columns[0].ident }),
+    }));
+    sheet.content = [sheet.content[0], ...rows.map(row => row.map(v => typeof v === 'number' ? String(v) : v))];
+    assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, { 记录: { 新增记录: {
+        数组: [], 双元素: ['甲', '乙'], 对象: { 值: 2 }, 文本: '[]', 数: 0, 布尔: false, 空: null,
+    } } });
+});
 async function roundTrip(input, before, after) {
     const result = core.convert(input), { layout, tables } = state(result);
     assert.deepStrictEqual(core.statDataFromTables(layout, tables).stat_data, before);

@@ -59,20 +59,49 @@ function createMessageHistory(deps) {
     function failure(code, message) {
         const error = new Error(message); error.code = code; return error;
     }
+    function historySourceKey(api) {
+        // Optional public source identity. Never infer isolation from equal data
+        // or persisted/private settings; old hosts retain the runtime guard.
+        if (typeof api.getTableHistoryContext !== 'function') return null;
+        try {
+            const context = api.getTableHistoryContext();
+            const id = value => typeof value === 'string' || typeof value === 'number' && Number.isFinite(value);
+            if (!context || context.version !== 1 || !id(context.chatId) || context.chatId === ''
+                || context.characterId != null && !id(context.characterId)
+                || context.groupId != null && !id(context.groupId) || typeof context.isolationKey !== 'string') return null;
+            return JSON.stringify([context.chatId, context.characterId ?? null, context.groupId ?? null, context.isolationKey]);
+        } catch (_) { return null; }
+    }
     function capture() {
         const api = deps.readApi(), chat = deps.readChat();
         if (!api || typeof api.exportTableSnapshotsAtMessages !== 'function') return null;
-        const runtime = api.exportTableAsJson?.();
+        const source = historySourceKey(api);
+        const runtime = source === null ? api.exportTableAsJson?.() : null;
         const session = deps.readSessionKey(), layout = deps.readLayoutKey();
-        const slotsMatch = generation && generation.slots.length === chat.length && generation.slots.every((slot, index) =>
-            slot.swipe === chat[index]?.swipe_id && slot.storage === chat[index]?.TavernDB_ACU_IsolatedData);
-        if (!generation || generation.api !== api || generation.chat !== chat
-            || generation.runtime !== runtime || generation.session !== session || generation.layout !== layout
-            || !slotsMatch || !propertiesMatch(generation.properties)) {
-            const slots = chat.map(message => ({ swipe: message?.swipe_id, storage: message?.TavernDB_ACU_IsolatedData }));
-            generation = { api, chat, runtime, session, layout, slots,
-                properties: captureProperties([layout, ...slots.map(slot => slot.storage)]), values: new Map(), pending: new Set() };
-        }
+        const old = generation;
+        const contextChanged = !old || old.api !== api || old.chat !== chat
+            || old.source !== source || old.runtime !== runtime || old.session !== session || old.layout !== layout
+            || !propertiesMatch(old.layoutProperties);
+        // A replay at floor N only depends on the prefix through N. Appending
+        // or changing a later floor must not throw away earlier committed reads.
+        // Without the optional public source contract, runtime replacement
+        // remains a full boundary: value equality is no proof of isolation.
+        let changed = contextChanged || old.slots.length !== chat.length;
+        let firstChanged = contextChanged ? 0 : Math.min(old.slots.length, chat.length);
+        const slots = chat.map((message, index) => {
+            const previous = !contextChanged && old.slots[index];
+            const swipe = message?.swipe_id, storage = message?.TavernDB_ACU_IsolatedData;
+            if (previous && previous.swipe === swipe
+                && previous.storage === storage && propertiesMatch(previous.properties)) return previous;
+            changed = true;
+            firstChanged = Math.min(firstChanged, index);
+            return { swipe, storage, properties: captureProperties([storage]) };
+        });
+        if (!changed) return old;
+        generation = { api, chat, source, runtime, session, layout, slots,
+            layoutProperties: contextChanged ? captureProperties([layout]) : old.layoutProperties,
+            values: new Map(old && !contextChanged ? [...old.values].filter(([index]) => index < firstChanged) : []),
+            pending: new Set() };
         return generation;
     }
     function current(owner) { return capture() === owner; }
@@ -81,9 +110,17 @@ function createMessageHistory(deps) {
         if (!owner) return false;
         const requested = [...new Set(indices)].filter(index => Number.isInteger(index)
             && index >= 0 && index < owner.chat.length);
+        // Cached floors do not depend on an unrelated cold replay in flight.
+        if (requested.every(index => owner.values.has(index))) return true;
         // Share in-flight batches. Failures are not cached, so a later explicit
         // preparation can recover after the host has finished loading.
-        if (owner.pending.size) await Promise.all([...owner.pending]);
+        // Another waiter may start a new batch after the one we awaited ends.
+        // Recheck before claiming missing floors, while keeping ready reads fast.
+        while (owner.pending.size) {
+            await Promise.all([...owner.pending]);
+            if (!current(owner)) throw failure('MVU_HISTORY_CONTEXT_CHANGED', '历史读取期间聊天或数据库状态已变化');
+            if (requested.every(index => owner.values.has(index))) return true;
+        }
         if (!current(owner)) throw failure('MVU_HISTORY_CONTEXT_CHANGED', '历史读取期间聊天或数据库状态已变化');
         const missing = requested.filter(index => !owner.values.has(index));
         if (!missing.length) return true;
@@ -118,7 +155,7 @@ function createMessageHistory(deps) {
         try { await task; } finally { owner.pending.delete(task); }
         return true;
     }
-    function read(index) {
+    function read(index, options) {
         const owner = capture();
         if (!owner) return deps.readFallback(index);
         if (!owner.values.has(index)) {
@@ -127,7 +164,11 @@ function createMessageHistory(deps) {
             prepare([index]).catch(deps.onError || (() => {}));
             throw failure('MVU_HISTORY_NOT_READY', '历史状态尚未准备完成，请等待状态栏就绪后读取');
         }
-        return clone(owner.values.get(index));
+        // Only the internal TH adapter defers this copy: its mergeRead always
+        // clones the complete public result. EJS/ordinary reads keep a private
+        // copy here, including callers whose second argument is a swipe index.
+        const value = owner.values.get(index);
+        return options?.copy === false ? value : clone(value);
     }
     function invalidate() { generation = null; }
     return { prepare, read, invalidate };
