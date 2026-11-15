@@ -70,11 +70,12 @@ test('完整JSON容器：真实候选工厂保留动态记录/数组元素说明
     assert.deepStrictEqual(template, snapshot);
 });
 test('完整JSON容器：保留原业务规则与 SQL 路径指导，旧关联表定位说明不混入', () => {
-    const { template } = fixture();
+    const { result, template } = fixture();
     const sheet = Object.values(template).find(s => s.name === '档案表');
     assert.match(sheet.sourceData.note, /完成任务后才能增加数量/);
     assert.match(sheet.sourceData.note, /保留每个人的完整记录/);
-    assert.match(sheet.sourceData.note, /json_set/);
+    assert.doesNotMatch(sheet.sourceData.note, /对象\/数组优先用 json_set/);
+    assert.match((result.card.data || result.card).character_book.entries.find(entry => entry.extensions?.mvu2shujukuFillGuide === 1).content, /json_set/);
     assert.match(sheet.sourceData.note, /内容/);
     assert.doesNotMatch(sheet.sourceData.note, /说明覆盖|父键|祖先键|FOREIGN KEY/);
     assert.match(sheet.sourceData.note, /数量说明/);

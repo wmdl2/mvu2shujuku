@@ -285,6 +285,27 @@ test("旧布局：消息持久化：缺少导入、提交失败或规划期间�
     assert.strictEqual(writes, 0);
 });
 
+test('聊天重新加载：同身份的新消息对象不重跑旧更新块，后续新回复仍更新', async () => {
+    const h = await nativeRuntime(undefined, ({ context, tables }) => {
+        context.event_types = { CHAT_LOADED: 'loaded', MESSAGE_RECEIVED: 'received', GENERATION_ENDED: 'ended' };
+        context.eventSource.makeFirst = (name, callback) => context.eventSource.on(name, callback);
+        const sheet = Object.values(tables).find(item => item.name === '状态表');
+        sheet.content[1][sheet.content[0].indexOf('金币')] = 37;
+        context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame.checkpoint.data = clone(tables);
+        context.chat.push({ is_user: true, mes: '旧用户消息' }, { is_user: false,
+            mes: '<UpdateVariable><JSONPatch>[{"op":"replace","path":"/状态/金币","value":999}]</JSONPatch></UpdateVariable>' });
+    });
+    await h.advance(2000);
+    assert.equal(h.win.Mvu.getMvuData().stat_data.状态.金币, 37);
+    h.context.chat.splice(0, h.context.chat.length, ...clone(h.context.chat));
+    await h.context.eventSource.emit('loaded');
+    await h.context.eventSource.emit('ended'); await h.advance(2000);
+    assert.equal(h.win.Mvu.getMvuData().stat_data.状态.金币, 37, '重新加载不能把历史指令当新回复');
+    h.context.chat.push({ is_user: false, mes: '<UpdateVariable><JSONPatch>[{"op":"replace","path":"/状态/金币","value":52}]</JSONPatch></UpdateVariable>' });
+    await h.context.eventSource.emit('received', h.context.chat.length - 1); await h.advance(2000);
+    assert.equal(h.win.Mvu.getMvuData().stat_data.状态.金币, 52, '后续新消息仍按原更新路径处理');
+});
+
 async function nativeRuntime(source = require('./synthetic-card')(), configure, converter = publishedLayoutFixture) {
     const result = converter(source, { installMvuShim: true });
     result.card.data.avatar = 'public-native.png';

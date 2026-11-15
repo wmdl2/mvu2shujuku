@@ -10640,6 +10640,8 @@ require('./array-writer');
 require('./runtime-native');
 require('./stat-storage');
 require('./state-transfer');
+require('./chat-transfer');
+require('./chat-transfer-host-unit');
 require('./card-api-compatibility');
 require('./community-card-contracts');
 require('./remote-schema');

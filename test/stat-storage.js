@@ -159,7 +159,8 @@ test('声明美元字段：初值和 Schema 声明均可由 SQL 更新，隐藏�
             assert(!/PRIVATE_VALUE_MARKER|PRIVATE_OBJECT_MARKER/.test(JSON.stringify(sheet.sourceData)));
             assert.doesNotMatch(sheet.sourceData.note + sheet.sourceData.updateNode, /全部字段由脚本|全部字段均为脚本|AI 无需填表|AI 不应修改本表/);
             assert.match(sheet.sourceData.updateNode, /只允许更新现有记录/);
-            assert.match(sheet.sourceData.note, /json_set/);
+            assert.doesNotMatch(sheet.sourceData.note, /SQLite JSON 更新要点/);
+            assert.match((r.card.data || r.card).character_book.entries.find(entry => entry.comment === '[M2SJK]填表适配说明').content, /json_set/);
             const outer = sheet.updateConfig.sendRowsSqlTemplate.slice('{[sql "'.length, -'"]}'.length);
             const inner = Object.values(db.prepare(outer).get())[0];
             assert.deepStrictEqual(db.prepare(inner.slice("{[sql '".length, -"']}".length)).all(), [], '默认展示不发送私有值');

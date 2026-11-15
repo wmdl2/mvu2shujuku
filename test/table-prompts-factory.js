@@ -43,9 +43,10 @@ test('表格提示工厂：未知变换输出的 JSON 数值不误称对象，�
     assert.doesNotMatch(column.desc, /可空对象\/数组/);
     const sheet = Object.values(result.template).find(s => s.name === group.tableName);
     assert.strictEqual(sheet.content[1][sheet.content[0].indexOf(group.valueCol)], '1.5');
+    assert.match((result.card.data || result.card).character_book.entries.find(entry => entry.extensions?.mvu2shujukuFillGuide === 1).content, /标量按原类型整体更新/);
     for (const note of [sheet.sourceData.note, inlinePrompts().buildNote(group)]) {
         assert.match(note, /内容：保存完整 JSON 值，类型遵循原字段规则/);
-        assert.match(note, /标量按原类型整体更新/);
+        assert.doesNotMatch(note, /标量按原类型整体更新/);
         assert.doesNotMatch(note, /内容：保存 JSON 对象\/数组|本次要求 SQL 脚本时/);
     }
 });

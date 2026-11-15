@@ -771,8 +771,8 @@ function createSchemaLayout(dependencies) {
                 // YAML 失败回退正则：注明原因，便于发现“回退后个别声明丢失”（如大荒组级 type）。
                 if (report && (/\[mvu[ _-]?update\]|\[mvuupdate\]/i.test(comment) || /变量更新规则|变量输出格式/.test(comment))) {
                     report.warn(
-                        `规则条目「${String(comment).slice(0, 30)}」的 YAML 解析失败（非法语法/多文档），` +
-                        `已回退正则路径；组级与深层声明按缩进正则提取，若解析异常请人工核对。`,
+                        `规则条目「${String(comment).slice(0, 30)}」未能完整按 YAML 结构提取，已回退正则路径补充识别。` +
+                        `规则原文仍保留供填表读取；这不代表 MVU 无法更新，请结合原文和 Zod 核对转换后的字段结构。`,
                         'schema'
                     );
                 }

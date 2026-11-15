@@ -235,14 +235,15 @@ JSON 说明仅保留容器定位、编码／SQL 操作要求与作者原文。�
 
 ### JSON 列的 SQL 局部更新
 
-可写 JSON 列在 SQLite 或双模式 note 中提示 `json_set/json_replace/json_remove`：仅修改规则
+每张表的 note 标明可写 JSON 列；通用 SQL JSON 操作说明集中在 `[M2SJK]填表适配说明`
+世界书条目中，填表时应包含此条目，不逐表重复。说明保留 `json_set/json_replace/json_remove`：仅修改规则
 允许的路径，保留其他字段。对象、数组、布尔及 JSON null 新值用 `json('...')` 保留类型；
 空单元格/JSON null 容器先按原规则初始化。数组末尾追加可用 `[#]`，中间插入/移动需正确重建
 受影响数组；不把 SQL `json_patch`（Merge Patch，null 删键）当作 MVU JSON Patch。
 
 SQLite 专用 UPDATE 示例从实际 JSON 中选择一条可表示的公开叶子路径，并正确转义 SQL 字符串。
 没有安全示例路径时不编造键、不用空对象覆盖原值；整组 JSON 的路径权限来自规则，不猜示例。
-普通表与纯只读 JSON 表不追加这段说明。native 仍提交完整的新单元格 JSON，不增加新补丁协议。
+没有安全公开路径时不生成具体 JSON UPDATE 示例，不增加新的补丁协议。
 这是模型输出方式的优化，程序与数据库内部仍可序列化完整单元格；不承诺完整请求 token 按同等比例下降。
 
 ### 通配路径

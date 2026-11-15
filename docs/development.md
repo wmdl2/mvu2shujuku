@@ -302,6 +302,8 @@ node test/sp-version-browser.js
 
 ## 状态迁移验证
 
+聊天复制相关回归：`node test/run-tests.js --grep 聊天迁移`；真实宿主使用 `MVU_HOST_SCENARIO_FILE=test/chat-transfer-host-case.js node test/real-host.js --only=chat-transfer`。夹具创建两条状态不同的源聊天，再用名称不同、增加字段的新卡经真实保存按钮迁移，核对所选分支、源文件不变和新聊天重开状态。`MVU_CHAT_TRANSFER_NATIVE_SOURCE=1` 额外覆盖无须打开来源的普通 MVU 文件路径；复用本批已经生成的来源夹具可用 `MVU_CHAT_TRANSFER_RESUME_SOURCE=1`，不得跨未核对的版本复用。详见[验收记录](validation/2026-11-15-chat-transfer.md)。
+
 公开回归：`node test/run-tests.js --grep 状态存档`；真实宿主：`node test/real-host.js --only=state-transfer`。启动前运行 `node -e "require('./test/state-transfer-host').preflight()"`，冻结源码／根构建。验收实际按钮与预览、全聊天 JSONL 备份、四向迁移、额外表在普通目标匹配、隐藏值、小数、跨布局和重载持久化，并核对取消／过期预览不写入。
 
 状态迁移续验 `node test/real-host.js --only=state-transfer-failure --keep-server` 依赖主迁移夹具已经生成的公开合成档案和普通聊天目标；覆盖真正的 HTTP 保存失败、回退重载、取消备份不下载、原生 chat 部分迁移，以及纯 Zod 字段范围／类型筛选后的 SQLite 重载。自包含 CardApi 工厂也必须在无 Node 外部作用域 VM 中测试，断言恢复检查没有调用作者变换、动态默认、跨字段 refine 或 provider。

@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.8.5';
+    const VERSION = '0.8.6';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -101,6 +101,26 @@
         if (typeof root.__MVU2SHUJUKU_STAT_STORAGE_FACTORY__ === 'function') return root.__MVU2SHUJUKU_STAT_STORAGE_FACTORY__;
         if (typeof require === 'function') return require('./stat-storage.js');
         throw new Error('变量存储模块未加载');
+    }
+    function getChatTransferFactory() {
+        if (typeof root.__MVU2SHUJUKU_CHAT_TRANSFER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CHAT_TRANSFER_FACTORY__;
+        if (typeof require === 'function') return require('./chat-transfer.js');
+        throw new Error('聊天迁移模块未加载');
+    }
+    function getChatTransferViewFactory() {
+        if (typeof root.__MVU2SHUJUKU_CHAT_TRANSFER_VIEW_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CHAT_TRANSFER_VIEW_FACTORY__;
+        if (typeof require === 'function') return require('./chat-transfer-view.js');
+        throw new Error('聊天迁移视图未加载');
+    }
+    function getChatTransferHostFactory() {
+        if (typeof root.__MVU2SHUJUKU_CHAT_TRANSFER_HOST_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CHAT_TRANSFER_HOST_FACTORY__;
+        if (typeof require === 'function') return require('./chat-transfer-host.js');
+        throw new Error('聊天迁移宿主模块未加载');
+    }
+    function getChatTransferRunnerFactory() {
+        if (typeof root.__MVU2SHUJUKU_CHAT_TRANSFER_RUNNER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_CHAT_TRANSFER_RUNNER_FACTORY__;
+        if (typeof require === 'function') return require('./chat-transfer-runner.js');
+        throw new Error('聊天迁移流程未加载');
     }
     function getStateTransferFactory() {
         if (typeof root.__MVU2SHUJUKU_STATE_TRANSFER_FACTORY__ === 'function') return root.__MVU2SHUJUKU_STATE_TRANSFER_FACTORY__;
@@ -3362,7 +3382,13 @@
 
     function extensionStyle() {
         return [
+            '.mvu2shujuku-chat-list { max-height: 220px; overflow: auto; margin: .5em 0; }',
+            '.mvu2shujuku-chat-row { display: flex; align-items: flex-start; gap: .5em; text-align: left; margin: .4em 0; overflow-wrap: anywhere; }',
+            '.mvu2shujuku-chat-row input { flex: 0 0 auto; width: auto; margin-top: .25em; }',
+            '#mvu2shujuku-chat-transfer select { width: 100%; max-width: 100%; }',
             '.mvu2shujuku-operation-overlay { position: fixed; inset: 0; z-index: 2147483647; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }',
+            '.mvu2shujuku-operation-overlay.mvu2shujuku-migration-progress { inset: auto 12px 12px auto; width: min(90vw,420px); background: none; pointer-events: none; z-index: 1000; }',
+            '.mvu2shujuku-migration-progress .mvu2shujuku-operation-box { pointer-events: auto; width: 100%; }',
             '.mvu2shujuku-operation-box { max-width: min(420px, 90vw); padding: 24px; border-radius: 12px; background: var(--SmartThemeBlurTintColor, #222); color: var(--SmartThemeBodyColor, #eee); border: 1px solid var(--SmartThemeBorderColor, #555); text-align: center; }',
             '.mvu2shujuku-operation-box strong { display: block; margin: 12px 0; }',
             '.mvu2shujuku-operation-box p { margin: 0; }',
@@ -3538,6 +3564,10 @@
             ['__MVU2SHUJUKU_DATABASE_WRITE_API_FACTORY__', getDatabaseWriteApiFactory],
             ['__MVU2SHUJUKU_STAT_STORAGE_FACTORY__', getStatStorageFactory],
             ['__MVU2SHUJUKU_STATE_TRANSFER_FACTORY__', getStateTransferFactory],
+            ['__MVU2SHUJUKU_CHAT_TRANSFER_FACTORY__', getChatTransferFactory],
+            ['__MVU2SHUJUKU_CHAT_TRANSFER_VIEW_FACTORY__', getChatTransferViewFactory],
+            ['__MVU2SHUJUKU_CHAT_TRANSFER_RUNNER_FACTORY__', getChatTransferRunnerFactory],
+            ['__MVU2SHUJUKU_CHAT_TRANSFER_HOST_FACTORY__', getChatTransferHostFactory],
             ['__MVU2SHUJUKU_MVU_SCHEMA_FACTORY__', getMvuSchemaFactory],
             ['__MVU2SHUJUKU_JS_SOURCE_FACTORY__', getJsSourceFactory],
             ['__MVU2SHUJUKU_REMOTE_SCHEMA_FACTORY__', getRemoteSchemaFactory],
@@ -3657,6 +3687,10 @@
         vwdDescriptionDelta,
         getCandidateBuilderFactory,
         getStateTransferFactory,
+        getChatTransferFactory,
+        getChatTransferViewFactory,
+        getChatTransferRunnerFactory,
+        getChatTransferHostFactory,
         getMvuSchemaFactory,
         getWorldbookRequestFilterFactory,
         getEjsEvalBridgeFactory,

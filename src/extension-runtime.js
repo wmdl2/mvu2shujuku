@@ -1564,7 +1564,12 @@ function installExtensionRuntime(window) {
                 for (const event of new Set([et.CHAT_LOADED || 'chatLoaded', et.CHARACTER_MESSAGE_RENDERED,
                     et.USER_MESSAGE_RENDERED, et.MESSAGE_UPDATED, et.MESSAGE_SWIPED, et.MORE_MESSAGES_LOADED].filter(Boolean))) {
                     if (typeof es.makeFirst === 'function') es.makeFirst(event,
-                        event === (et.CHAT_LOADED || 'chatLoaded') ? () => prepareFrontendChatVariables(undefined, true)
+                        event === (et.CHAT_LOADED || 'chatLoaded') ? () => {
+                            // Native reload replaces message objects even when chat identity stays the same.
+                            // Stored update blocks are history, not newly received model instructions.
+                            if (mvu2shujukuChatHasFullCheckpoint()) baselineMessageUpdateBlocks(true);
+                            return prepareFrontendChatVariables(undefined, true);
+                        }
                             : event === et.MORE_MESSAGES_LOADED ? () => prepareFrontendChatVariables()
                                 : messageId => prepareFrontendChatVariables(messageId));
                 }
@@ -5233,13 +5238,14 @@ function installExtensionRuntime(window) {
 
     function beginConversionOperation(kind) {
         if (conversionOperation) return null;
-        const title = kind === 'save' ? '正在保存角色卡…' : '正在转换角色卡…';
+        const title = kind === 'migrate' ? '正在迁移聊天…' : kind === 'save' ? '正在保存角色卡…' : '正在转换角色卡…';
         const panel = hostDocument.getElementById(PANEL_ID);
         const controls = panel ? [...panel.querySelectorAll('button, input, select, textarea')].map(node => [node, node.disabled]) : [];
         const overlay = hostDocument.createElement('div');
         overlay.className = 'mvu2shujuku-operation-overlay';
-        overlay.setAttribute('role', 'dialog');
-        overlay.setAttribute('aria-modal', 'true');
+        if (kind === 'migrate') overlay.classList.add('mvu2shujuku-migration-progress');
+        overlay.setAttribute('role', kind === 'migrate' ? 'status' : 'dialog');
+        if (kind !== 'migrate') overlay.setAttribute('aria-modal', 'true');
         overlay.setAttribute('aria-label', title);
         overlay.tabIndex = -1;
         overlay.innerHTML = '<div class="mvu2shujuku-operation-box"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i><strong></strong><p aria-live="polite"></p></div>';
@@ -5249,6 +5255,17 @@ function installExtensionRuntime(window) {
         const operation = {
             update(text) { detail.textContent = text; timings.push({ stage: text, ms: Date.now() - started }); },
             paint() { return new Promise(resolve => hostWindow.setTimeout(resolve, 30)); },
+            async review(task) {
+                overlay.style.display = 'none';
+                try { return await task(); }
+                finally { if (conversionOperation === operation) overlay.style.display = ''; }
+            },
+            setCancel(callback) {
+                const button = hostDocument.createElement('button'); button.type = 'button'; button.className = 'menu_button';
+                button.textContent = '停止后续迁移';
+                button.addEventListener('click', () => { callback(); button.disabled = true; button.textContent = '将在当前聊天处理完成后停止'; });
+                overlay.querySelector('.mvu2shujuku-operation-box').appendChild(button);
+            },
             close() {
                 if (conversionOperation !== operation) return;
                 overlay.remove();
@@ -5284,18 +5301,18 @@ function installExtensionRuntime(window) {
         return worldbookSaver;
     }
 
-    async function saveCardToSillyTavern() {
+    async function saveCardToSillyTavern(options = {}) {
         if (conversionOperation) return false;
         if (!lastResult) { toast('请先转换', 'error'); return false; }
         const result = lastResult;
         const operation = beginConversionOperation('save');
         try {
             await operation.paint();
-            return await saveConvertedCard(operation, result);
+            return await saveConvertedCard(operation, result, options);
         } finally { operation.close(); }
     }
 
-    async function saveConvertedCard(operation, result) {
+    async function saveConvertedCard(operation, result, options = {}) {
         if (!result) {
             toast('请先转换', 'error');
             return false;
@@ -5316,6 +5333,7 @@ function installExtensionRuntime(window) {
         const context = getContextSafe();
         const log = [];
         let worldbookPlan;
+        let savedAvatar = '', savedAvatarVerified = false;
         const displayName = String((result.card && (result.card.data || result.card).name) || '').trim() || '角色';
         try {
             operation.update('准备角色卡与头像…');
@@ -5350,7 +5368,6 @@ function installExtensionRuntime(window) {
 
             // 优先用新版 API；老版本 createCharacterData 是表单状态对象时走直接接口
             let saved = false;
-            let savedAvatar = '';
             operation.update('写入角色卡…');
             if (typeof context.createCharacterData === 'function') {
                 const created = await context.createCharacterData(undefined, avatarBlob || new Blob(), cardData, false);
@@ -5472,6 +5489,7 @@ function installExtensionRuntime(window) {
                         failure = '读回的酒馆助手脚本数据与转换结果不一致';
                     }
                     if (!failure) {
+                        savedAvatar = avatar; savedAvatarVerified = true;
                         log.push(synced ? '✓ 已同步并读回确认酒馆助手脚本与转换结果一致' : '✓ 已读回确认酒馆助手脚本与转换结果一致');
                     } else {
                         const detail = syncReason && syncReason !== failure ? failure + '；' + syncReason : failure;
@@ -5525,9 +5543,10 @@ function installExtensionRuntime(window) {
                 ? '\n\n进入新聊天且表格为空时会自动建表，无需手动切换；模板已存为插件预设「' + presetName + '」备用，也可在插件模板面板手动切换。'
                 : ''));
         operation.update('保存转换配置…');
+        result.meta.savedAvatar = savedAvatarVerified ? savedAvatar : '';
         if (lastResult === result) await autoSaveConversionProfile();
         operation.close();
-        showInfoPopup(hasError ? '保存完成（有失败项）' : '保存完成', body);
+        if (hasError || !options.quiet) showInfoPopup(hasError ? '保存完成（有失败项）' : '保存完成', body);
         return !hasError;
     }
 
@@ -5652,6 +5671,7 @@ function installExtensionRuntime(window) {
         renderUpdateConfigEditor(box, result);
         renderMergeSection(box, panel);
         placeResultActions(panel, box);
+        chatTransferView.setResult(result);
         // 最后一步：下载与保存到酒馆（放在合并模板区块之后）
         const downloadsBox = panel.querySelector('#mvu2shujuku-downloads');
         if (downloadsBox) {
@@ -5803,6 +5823,47 @@ function installExtensionRuntime(window) {
     }
 
     const stateTransfer = window.MVU2SHUJUKU_CORE.getStateTransferFactory()();
+    const chatTransferTools = window.MVU2SHUJUKU_CORE.getChatTransferFactory()();
+    const chatTransferHost = window.MVU2SHUJUKU_CORE.getChatTransferHostFactory()({
+        window: hostWindow, readContext: getContextSafe, readCharacter: currentCharacter, stateTransfer,
+        tools: chatTransferTools, runner: window.MVU2SHUJUKU_CORE.getChatTransferRunnerFactory()(chatTransferTools),
+        readFullCharacter: character => fetchFullCharacter(character, true), assertIdle: assertStateTransferIdle,
+        async prepareTarget() {
+            await autoInitDatabase();
+            const session = captureRuntimeSession();
+            if (!ensureActiveLayoutLazy()) throw new Error('目标布局尚未就绪');
+            const api = runtimeApiForSession(getAcuApi(), session);
+            if (!api || !await waitRuntimeTablesReady(api, activeLayout, 15000)) throw new Error('目标数据库运行时尚未就绪');
+            assertRuntimeSession(session);
+        },
+        captureSnapshot: captureStateTransferSnapshot, prepareImport: prepareStateTransferImportOnce, commitImport: commitStateTransferImport,
+        async confirm(title, text, okButton) {
+            const context = getContextSafe();
+            if (typeof context.callGenericPopup !== 'function' || !context.POPUP_TYPE) throw new Error('宿主未提供迁移预检确认界面');
+            const esc = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return await context.callGenericPopup('<h3>' + esc(title) + '</h3><pre style="white-space:pre-wrap;text-align:left;max-height:50vh;overflow:auto">' + esc(text) + '</pre>', context.POPUP_TYPE.CONFIRM, '', { okButton, cancelButton: '取消迁移' }) === 1;
+        },
+    });
+    const chatTransferView = window.MVU2SHUJUKU_CORE.getChatTransferViewFactory()({
+        document: hostDocument, listCharacters: () => getContextSafe().characters || [],
+        listChats: chatTransferHost.listChats, onRun: migrateConvertedChats, notify: text => toast(text, 'warning'),
+    });
+    async function migrateConvertedChats(result, selection) {
+        if (conversionOperation || stateTransferBusy) throw new Error('已有转换、保存或迁移正在进行');
+        if (result !== lastResult || resultSaveState !== 'saved') throw new Error('请先保存当前角色卡和模板，再迁移聊天');
+        assertStateTransferIdle();
+        const operation = beginConversionOperation('migrate');
+        stateTransferBusy = true; stateTransferProgress('正在迁移聊天…'); chatTransferView.setBusy(true);
+        try {
+            await operation.paint();
+            const outcome = await chatTransferHost.run(result, selection, operation);
+            const text = ['已迁移 ' + outcome.completed.length + ' / ' + selection.chats.length + ' 条聊天。'];
+            if (outcome.cancelled) text.push('已停止后续迁移。');
+            for (const row of outcome.rows) text.push(row.completed ? '✓ ' + row.name + ' → ' + row.target : '跳过 ' + row.name + '：' + (row.error || '未确认迁移') + (row.retained ? '（新副本已保留供检查）' : ''));
+            operation.close(); showInfoPopup('聊天迁移结果', text.join('\n'));
+        } catch (error) { operation.close(); showInfoPopup('聊天迁移未完成', error.message); }
+        finally { stateTransferBusy = false; stateTransferProgress('聊天迁移处理已结束'); operation.close(); chatTransferView.setBusy(false); chatTransferView.setResult(lastResult); }
+    }
     let stateTransferBusy = false;
     function stateTransferProgress(text) {
         const panel = hostDocument.getElementById(PANEL_ID);
@@ -6085,6 +6146,7 @@ function installExtensionRuntime(window) {
     }
 
     function bindSettingsPanel(panel, context) {
+        chatTransferView.mount(panel.querySelector('#mvu2shujuku-chat-transfer'));
         const bind = (id, fn) => {
             const el = panel.querySelector(id);
             if (el && el.dataset.bound !== 'true') {
@@ -6309,10 +6371,15 @@ function installExtensionRuntime(window) {
             if (statusEl) statusEl.textContent = '';
         });
         bind('#mvu2shujuku-save-card', async () => {
-            const saved = await saveCardToSillyTavern();
+            let selection;
+            try { selection = chatTransferView.selection(); }
+            catch (error) { toast(error.message, 'warning'); return; }
+            const saved = await saveCardToSillyTavern({ quiet: !!selection });
             if (saved) {
                 resultSaveState = 'saved';
                 updateSaveStatus(panel);
+                chatTransferView.setResult(lastResult);
+                if (selection) await migrateConvertedChats(lastResult, selection);
             }
         });
         const shimSel = panel.querySelector('#mvu2shujuku-shim');

@@ -111,6 +111,7 @@ function settingsView(settings, version) {
             '      <div class="mvu2shujuku-result"></div>',
             // 转换完成后由运行时移到结果区末尾；清空时移回此处并隐藏。
             '      <div id="mvu2shujuku-actions">',
+            '        <div id="mvu2shujuku-chat-transfer"></div>',
             '        <div class="mvu2shujuku-actions">',
             '          <button id="mvu2shujuku-save-card" class="menu_button mvu2shujuku-primary" style="display:none" title="转换完成后出现：把角色卡保存进 sillytavern 角色列表，并顺带把表格模板存为插件预设"><i class="fa-solid fa-floppy-disk" aria-hidden="true"></i>保存角色卡和模板到 SillyTavern</button>',
             '          <span id="mvu2shujuku-save-status" class="mvu2shujuku-hint mvu2shujuku-save-status" aria-live="polite"></span>',

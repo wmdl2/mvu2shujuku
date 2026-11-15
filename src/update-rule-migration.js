@@ -6,7 +6,8 @@ function createUpdateRuleMigration({ YAML, isProtocolRule = () => false }) {
     const guideCall = '<% /* mvu2shujuku:fill-adaptation:v1 */ %>';
     const guideTitle = '[M2SJK]填表适配说明';
     const guidance = '本次任务是根据当前对话、数据库状态和作者业务要求更新数据库。输出格式、表列名称和记录定位遵循本次数据库填表协议及提供的表结构、列说明。\n' +
-        '保留作者要求中的条件、数值、阈值、例外和禁止事项。原文要求使用 JSONPatch、UpdateVariable 等旧格式时，执行其业务要求，输出改用本次数据库协议。具体操作列表中的目标和值仍是变更要求；这些名称若属于业务数据，保留原值。';
+        '保留作者要求中的条件、数值、阈值、例外和禁止事项。原文要求使用 JSONPatch、UpdateVariable 等旧格式时，执行其业务要求，输出改用本次数据库协议。具体操作列表中的目标和值仍是变更要求；这些名称若属于业务数据，保留原值。\n' +
+        `涉及 JSON 列时：对象/数组优先用 json_set(列, '$."键"', 新值)、json_replace 或 json_remove 局部更新，仅操作规则允许的路径；标量按原类型整体更新。对象/数组/布尔/null 新值用 json('...')；内部路径写入字符串用 SQL 字符串，整列替换为 JSON 字符串用 json_quote('新值')。数组从 0 索引，末尾追加用 [#]，中间插入/移动需重建受影响数组。空单元格或 JSON null 容器先按规则初始化，保留未改字段；json_patch 的 null 会删键，不作路径更新替代。`;
     const guideContent = guideCall + '\n' + guidance;
     const blockedTitleTerms = ['规则', '思维链', 'cot', 'MVU', 'mvu', '变量', '状态',
         'Status', 'Rule', 'rule', '检定', '判断', '叙事', '文风', 'InitVar', '格式'];

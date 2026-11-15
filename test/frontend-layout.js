@@ -10,6 +10,7 @@ const { chromium } = require(path.join(refs, '测试工具/node_modules/playwrig
 const core = require('../src/mvu2shujuku');
 const settingsView = require('../src/settings-view');
 const resultView = require('../src/result-view');
+const chatTransferView = require('../src/chat-transfer-view');
 
 async function main() {
     fs.mkdirSync(work, { recursive: true });
@@ -33,25 +34,39 @@ async function main() {
             const themeCss = ':root{--SmartThemeBodyColor:' + theme.fg + ';--SmartThemeBorderColor:' + theme.border
                 + ';--SmartThemeQuoteColor:' + theme.accent + ';--SmartThemeBlurTintColor:' + theme.tint + '}';
             await page.setContent('<style>' + fontCss + themeCss + 'body{margin:0;background:' + theme.bg + ';color:' + theme.fg + ';font:14px TestChinese,sans-serif}button,input,select,textarea{font:inherit}*{box-sizing:border-box}' + core.extensionStyle() + '</style><div id="mvu2shujuku-settings" style="width:' + width + 'px"></div>');
-            await page.evaluate(({ viewSource, settingsSource, result, rows }) => {
+            await page.evaluate(async ({ viewSource, settingsSource, chatViewSource, result, rows }) => {
                 const panel = document.getElementById('mvu2shujuku-settings');
                 panel.innerHTML = (0, eval)('(' + settingsSource + ')')({ installMvuShim: 'auto', asPng: 'auto' });
                 const box = panel.querySelector('.mvu2shujuku-result');
                 const view = (0, eval)('(' + viewSource + ')')({ document });
                 view.renderReport(box, result);
                 view.renderEditor(box, rows);
+                const migration = (0, eval)('(' + chatViewSource + ')')({ document,
+                    listCharacters: () => [{ avatar: 'old.png', name: '名称不同且包含很长说明的旧角色卡' }],
+                    listChats: async () => [{ file_name: 'A-很长很长的历史聊天名称用于检查窄屏排版.jsonl' }, { file_name: 'B.jsonl' }],
+                    onRun: async () => {}, notify: text => { throw Error(text); } });
+                migration.mount(panel.querySelector('#mvu2shujuku-chat-transfer'));
+                panel.querySelector('#mvu2shujuku-actions').style.display = 'block';
+                migration.setResult({ meta: { sourceCharacter: { avatar: 'old.png' }, savedAvatar: 'new.png' }, card: { extensions: { mvu2shujuku: { convertedAt: 'layout' } } } });
+                panel.querySelector('#mvu2shujuku-chat-transfer details').open = true;
+                panel.querySelector('[data-chat-enable]').click();
+                await new Promise(resolve => setTimeout(resolve, 0));
+                panel.querySelector('[data-chat-all]').click();
+                if (migration.selection().chats.length !== 2) throw Error('多选聊天结果不完整');
                 panel.querySelector('#mvu2shujuku-file-area').style.display = '';
                 panel.querySelector('#mvu2shujuku-char-area').style.display = 'none';
-            }, { viewSource: resultView.toString(), settingsSource: settingsView.toString(),
+            }, { viewSource: resultView.toString(), settingsSource: settingsView.toString(), chatViewSource: chatTransferView.toString(),
                 result: JSON.parse(JSON.stringify({ meta: result.meta, report: result.report, reportText: result.reportText })), rows });
             await page.evaluate(() => document.fonts.ready);
             const dimensions = await page.locator('.mvu2shujuku-param-editor').evaluate(node => {
                 const grid = node.querySelector('.mvu2shujuku-param-grid');
+                const migration = document.querySelector('#mvu2shujuku-chat-transfer');
                 const numberStyles = [...node.querySelectorAll('input[type="number"]')].map(input => {
                     const style = getComputedStyle(input);
                     return JSON.stringify(['backgroundColor', 'color', 'borderTopColor', 'borderRadius', 'paddingTop', 'fontSize', 'height'].map(key => style[key]));
                 });
                 return { width: node.clientWidth, scrollWidth: node.scrollWidth, gridWidth: grid.clientWidth, gridScrollWidth: grid.scrollWidth,
+                    migrationWidth: migration.clientWidth, migrationScrollWidth: migration.scrollWidth,
                     numberStyleCount: new Set(numberStyles).size, explanationRemoved: !node.textContent.includes('世界书注入与自动更新有什么区别') };
             });
             assert.strictEqual(await page.locator('#mvu2shujuku-settings').evaluate(node =>
@@ -112,6 +127,7 @@ async function main() {
             }
             const filename = 'frontend-' + theme.name + '-' + width + '.png';
             await page.locator('.mvu2shujuku-result').screenshot({ path: path.join(work, filename) });
+            await page.locator('#mvu2shujuku-chat-transfer').screenshot({ path: path.join(work, 'chat-transfer-' + theme.name + '-' + width + '.png') });
             results.push({ theme: theme.name, viewport, container: width, ...dimensions, filename });
         }
         fs.writeFileSync(path.join(work, 'results.json'), JSON.stringify({ results, errors }, null, 2));
@@ -119,6 +135,7 @@ async function main() {
         assert.deepStrictEqual(errors, []);
         for (const result of results) {
             assert.ok(result.scrollWidth <= result.width + 1 && result.gridScrollWidth <= result.gridWidth + 1, JSON.stringify(result));
+            assert.ok(result.migrationScrollWidth <= result.migrationWidth + 1, JSON.stringify(result));
             assert.strictEqual(result.numberStyleCount, 1, '批量与逐表数值框必须一致');
             assert.strictEqual(result.explanationRemoved, true);
         }

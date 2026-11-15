@@ -39,7 +39,8 @@ test('散文规则：整组 JSON 的业务条件位于实际可写路径范围�
     const note = sheet(r, '自由表').sourceData.note;
     assert.ok(retained(r), "作者规则源条目保留");
     assert.match(note,/新增 「内容」内部路径 \/甲\/值 为正文明确的数字/);
-    assert.match(note,/仅操作规则允许的路径/);
+    assert.match((r.card.data || r.card).character_book.entries.find(entry => entry.extensions?.mvu2shujukuFillGuide === 1).content, /仅操作规则允许的路径/);
+    assert.doesNotMatch(note,/仅操作规则允许的路径/);
     assert.doesNotMatch(note,/内部数据，AI 不应直接修改/);
     assert.doesNotMatch(note, /未列出的字段一律只读/);
     assert.doesNotMatch(note, /【可写路径与约束】\n【更新守卫】/);

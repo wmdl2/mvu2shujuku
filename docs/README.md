@@ -6,7 +6,7 @@
 
 | 当前问题 | 入口 |
 | --- | --- |
-| 安装、转换、状态导入导出 | [用户说明](../README.md) |
+| 安装、转换、状态导入导出与多聊天迁移 | [用户说明](../README.md) |
 | 支持的结构、宿主 API 与已知边界 | [兼容清单](../COMPATIBILITY.md) |
 | 转换器职责、独立填表基线、产物与保留边界 | [转换架构](architecture.md) |
 | 行表／JSON 布局、字段类型、隐藏数据与约束 | [数据映射](data-model.md)、[布局设计](design/layout-planning.md) |
@@ -26,6 +26,7 @@
 | 变量 API、原消息数据与表格编解码／写入 | `src/variable-api.js`、`src/stat-storage.js`、`src/table-codec.js`、`src/table-writer.js` |
 | 会话、窗口、历史与首次前端就绪 | `src/runtime-session.js`、`src/runtime-windows.js`、`src/runtime-globals.js`、`src/message-history.js`、`src/frontend-readiness.js` |
 | 状态迁移、转换配置 | `src/state-transfer.js`、`src/conversion-profiles.js` |
+| 转换时复制多聊天、批量预检及原生聊天读写 | `src/chat-transfer.js`、`src/chat-transfer-runner.js`、`src/chat-transfer-host.js`、`src/chat-transfer-view.js` |
 | 宿主适配与界面 | `src/sp-adapter.js`、`src/st-adapter.js`、`src/settings-view.js`、`src/result-view.js` |
 | 以上模块的运行时调用与宿主操作绑定 | `src/extension-runtime.js`；先按函数定位，避免全文读取 |
 
@@ -42,7 +43,7 @@
 - 本版实施界面：[设置面板与转换结果工作流](validation/2026-11-01-frontend-workflow.md)。包括重转保护、选项生效一致性和真实浏览器组件验证。
 
 - 本版实施修复：[Schema 默认值与延后初始化](validation/2026-10-31-schema-defaults-and-initialization.md)。记录默认值重复编码、初始化并发修复及受测范围，不代表已经发布。
-- 最近发布：[v0.8.5 收尾](validation/2026-11-02-release-v0.8.5.md)；前版：[v0.8.4 收尾](validation/2026-10-25-release-v0.8.4.md)、[变量接口清单](validation/2026-10-25-variable-api.md)。
+- 最近发布：[v0.8.6 收尾](validation/2026-11-15-release-v0.8.6.md)；前版：[v0.8.5 收尾](validation/2026-11-02-release-v0.8.5.md)、[变量接口清单](validation/2026-10-25-variable-api.md)。
 - 更早证据按需检索[历史验证索引](validation/README.md)及[性能测量](benchmarks/)。日期记录描述当时受测版本，不能直接当作当前待办或当前规范。
 
 ## 更新与读取

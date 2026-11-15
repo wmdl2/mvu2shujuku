@@ -296,7 +296,7 @@ test('审查：点击数据桥下载按钮得到可执行 JS 而非报告', asyn
     const box = node(), downloadBox = { appendChild(button) { buttons.push(button); } };
     const panel = { querySelector: selector => selector === '.mvu2shujuku-result' ? box : selector === '#mvu2shujuku-downloads' ? downloadBox : node() };
     const context = { hostDocument: { getElementById: () => panel, createElement: node }, PANEL_ID: 'test',
-        renderUpdateConfigEditor() {}, renderMergeSection() {}, resultView: { renderReport() {} }, toast() {}, lastResult: result, lastConversionSettings: null,
+        renderUpdateConfigEditor() {}, renderMergeSection() {}, resultView: { renderReport() {} }, chatTransferView: { setResult() {} }, toast() {}, lastResult: result, lastConversionSettings: null,
         download: (...args) => downloads.push(args) };
     vm.createContext(context);
     vm.runInContext(extract('    function renderResult(', '    function findSettingsMount('), context);

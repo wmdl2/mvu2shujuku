@@ -59,7 +59,8 @@ test('整组空值：模型直接修改单元格能表示三态，不依赖隐�
     assert.match(sheet.sourceData.note, /存量/);
     const group = result.schema.find(g => g.name === '状态');
     assert.deepStrictEqual(group.columns[0].jsonPathChecks.find(c => c.path.join('.') === '存量').range, [0, 10]);
-    assert.match(sheet.sourceData.note, /json_set/);
+    assert.doesNotMatch(sheet.sourceData.note, /对象\/数组优先用 json_set/);
+    assert.match((result.card.data || result.card).character_book.entries.find(entry => entry.extensions?.mvu2shujukuFillGuide === 1).content, /json_set/);
 });
 test('整组空值：错误容器和不可序列化内容在宿主写入前拒绝', async () => {
     const initial = { 状态: { 存量: 1 }, List: [], Dict: {}, Stable: { text: '普通字段' } };
