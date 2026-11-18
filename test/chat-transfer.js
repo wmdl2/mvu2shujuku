@@ -42,6 +42,74 @@ test('聊天迁移：准备聊天不执行历史命令，不沿用旧表或旧�
     assert.strictEqual(seed.header.chat_metadata.variables.other, 2);
     assert.strictEqual(seed.messages.length, selected.messages.length);
 });
+test('聊天迁移：相容表沿用原历史，身份或列改变不能冒用原进度', () => {
+    const tables = { sheet_extra: { uid: 'sheet_extra', name: '纪要表', content: [['row_id', '纪要'], [1, '已填内容']], sourceData: { ddl: 'DDL' } } };
+    const template = clone(tables); template.sheet_extra.content = [['row_id', '纪要']];
+    template.sheet_mvu = { uid: 'sheet_mvu', name: 'MVU表', content: [['row_id', '内容'], [1, '{}']] };
+    const plan = tools.databasePlan(tables, template, 'slot');
+    assert.equal(plan.preserve, true);
+    const original = tools.selected(source()), before = clone(original);
+    const seeded = tools.seed(original, { character: '新卡', token: 'copy', database: plan });
+    assert.deepStrictEqual(seeded.messages[1].TavernDB_ACU_IsolatedData, original.messages[1].TavernDB_ACU_IsolatedData);
+    assert.deepStrictEqual(seeded.header.chat_metadata.TavernDB_ACU_ScopedConfig, original.header.chat_metadata.TavernDB_ACU_ScopedConfig);
+    assert(seeded.messages.every(row => row.mes === '[迁移准备中]'));
+    assert.equal(seeded.header.chat_metadata.mvu2shujuku_chat_transfer.databaseHistory, 'preserved');
+    assert.deepStrictEqual(original, before);
+    for (const change of [t => { t.sheet_extra.uid = 'other'; }, t => { t.sheet_extra.content[0].push('新列'); },
+        t => { t.sheet_extra.sourceData.ddl = 'different'; }, t => { delete t.sheet_extra; }]) {
+        const changed = clone(template); change(changed);
+        assert.equal(tools.databasePlan(tables, changed, 'slot').preserve, false);
+    }
+    assert.equal(tools.databasePlan(tables, template, null).preserve, false);
+    const normalized = clone(template); normalized.sheet_compact = normalized.sheet_extra;
+    normalized.sheet_compact.uid = 'sheet_compact'; delete normalized.sheet_extra;
+    const rebound = tools.databasePlan(tables, normalized, 'slot');
+    assert.equal(rebound.preserve, true);
+    assert.equal(rebound.template.sheet_extra.uid, 'sheet_extra');
+    assert.equal(rebound.template.sheet_compact, undefined);
+});
+test('聊天迁移：按实际载体识别覆盖能力，不依赖软件版本或其他隔离槽', () => {
+    const tag = { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } };
+    const messages = [{ is_user: false, TavernDB_ACU_IsolatedData: { slot: { _acu_storage_version: 1 } } },
+        { is_user: false, TavernDB_ACU_IsolatedData: { slot: clone(tag), other: { storageFrame: { version: 3 } } } },
+        { is_user: true }, { is_user: false }];
+    assert.equal(tools.supportsCoverage(messages, 'slot'), true, '最新回复尚无载体时检查最近已保存格式');
+    assert.equal(tools.supportsCoverage(messages, 'other'), false);
+    assert.equal(tools.supportsCoverage(messages, 'missing'), false);
+    for (const change of [t => { t._acu_storage_version = 3; }, t => { t.storageFrame.version = 3; },
+        t => { t.storageFrame.logEntries = {}; }, t => { t.storageFrame.checkpoint = { kind: 'unknown', data: {} }; },
+        t => { t.storageFrame.checkpoint = { kind: 'full', data: {}, scheduleSummary: [] }; }]) {
+        const modified = clone(messages); change(modified[1].TavernDB_ACU_IsolatedData.slot);
+        assert.equal(tools.supportsCoverage(modified, 'slot'), false, '不回退到更旧的格式假定兼容');
+    }
+});
+test('聊天迁移：只为导入MVU表增加覆盖基线，不伪造填表事件或更改原副本', () => {
+    const tables = { sheet_m: { uid: 'sheet_m', name: 'MVU', content: [['row_id', '内容'], [1, '{}']] } };
+    const chat = { header: { chat_metadata: { mvu2shujuku_chat_transfer: {} } }, messages: Array.from({ length: 20 }, () => ({ is_user: false, mes: 'AI' })) };
+    const frame = { version: 2, headRevision: 'kept', logEntries: [{ seq: 1, operations: [] }],
+        perSheetCheckpoints: { sheet_extra: { kind: 'sheet_full', sheetKey: 'sheet_extra', data: {}, scheduleSummary: { lastFilledAiFloor: 12 } } } };
+    chat.messages[19].TavernDB_ACU_IsolatedData = { slot: { _acu_storage_version: 2, storageFrame: frame } };
+    const before = clone(chat), updated = tools.coverImportedTables(chat, 19, tables, ['MVU'], 'slot');
+    const result = updated.messages[19].TavernDB_ACU_IsolatedData.slot.storageFrame;
+    assert.deepStrictEqual(chat, before);
+    assert.deepStrictEqual(result.perSheetCheckpoints.sheet_extra, frame.perSheetCheckpoints.sheet_extra);
+    assert.deepStrictEqual(result.logEntries, frame.logEntries);
+    assert.equal(result.headRevision, 'kept');
+    assert.deepStrictEqual(result.perSheetCheckpoints.sheet_m.scheduleSummary, { lastImportBaselineAiFloor: 20 });
+    assert.equal(result.perSheetCheckpoints.sheet_m.event, undefined);
+    const full = clone(chat); full.messages[19].TavernDB_ACU_IsolatedData.slot.storageFrame.checkpoint =
+        { kind: 'full', data: clone(tables), scheduleSummary: { sheet_extra: { lastFilledAiFloor: 12 } } };
+    const root = tools.coverImportedTables(full, 19, tables, ['MVU'], 'slot').messages[19].TavernDB_ACU_IsolatedData.slot.storageFrame.checkpoint;
+    assert.equal(root.scheduleSummary.sheet_m.lastImportBaselineAiFloor, 20);
+    assert.equal(root.scheduleSummary.sheet_extra.lastFilledAiFloor, 12);
+    const existing = clone(chat); existing.messages[19].TavernDB_ACU_IsolatedData.slot.storageFrame.perSheetCheckpoints.sheet_m =
+        { kind: 'sheet_full', sheetKey: 'sheet_m', data: { kept: 'seed' }, timeline: { kind: 'sheet_introduction' } };
+    const preserved = tools.coverImportedTables(existing, 19, tables, ['MVU'], 'slot').messages[19].TavernDB_ACU_IsolatedData.slot.storageFrame.perSheetCheckpoints.sheet_m;
+    assert.deepStrictEqual(preserved.data, { kept: 'seed' }); assert.equal(preserved.timeline.kind, 'sheet_introduction');
+    assert.throws(() => tools.coverImportedTables(chat, 19, tables, ['MVU'], 'other'), /载体/);
+    const newerFormat = clone(chat); newerFormat.messages[19].TavernDB_ACU_IsolatedData.slot.storageFrame.version = 3;
+    assert.throws(() => tools.coverImportedTables(newerFormat, 19, tables, ['MVU'], 'slot'), /格式/);
+});
 test('聊天迁移：只搬运宿主生成的数据载体，恢复正文、时间和辅助变量', () => {
     const selected = tools.selected(source());
     const seed = tools.seed(selected, { character: '新名字', token: 'new' });
@@ -76,6 +144,7 @@ function batchHost(options = {}) {
         cancelled: () => cancelled, progress() {},
         async collect(_source, chat) { calls.push('read:' + chat.file_name); return { source: original, archive: { stat_data: { 生命: chat.value } }, name: chat.file_name }; },
         async prepareChat(item) { current = { name: item.name + '-new', token: 'token' + ++counter }; calls.push('new:' + item.name); return current; },
+        async openPrepared(prepared) { current = prepared; calls.push('resume:' + prepared.name); },
         async prepareImport(archive) { return { snapshot: { index: 1 }, importedStat: clone(archive.stat_data), fields: null, extras: { matches: [], skipped: [] } }; },
         async confirm(rows) { calls.push('confirm'); return options.confirm !== false; },
         async commit(plan) { committed++; calls.push('commit:' + plan.importedStat.生命); assert.strictEqual(plan.backup, false); },
@@ -92,17 +161,18 @@ test('聊天迁移：多选分别预检及提交，各自建立独立的新聊�
     const h = batchHost(); const result = await makeRunner(tools).run(selection, {}, h.host);
     assert.strictEqual(result.completed.length, 2);
     assert.deepStrictEqual(h.calls.filter(call => call.startsWith('commit:')), ['commit:37', 'commit:81']);
-    assert(h.calls.indexOf('confirm') < h.calls.indexOf('commit:37'));
-    assert.strictEqual(h.calls.filter(call => call.startsWith('new:')).length, 2);
+    assert.deepStrictEqual(h.calls.filter(call => /^(new:|confirm$|resume:)/.test(call)),
+        ['new:A', 'new:B', 'confirm', 'resume:A-new', 'resume:B-new']);
 });
 test('聊天迁移：取消预览不提交；停止后续任务不撤销已完成聊天', async () => {
     let h = batchHost({ confirm: false });
     let result = await makeRunner(tools).run(selection, {}, h.host);
     assert(result.cancelled); assert(!h.calls.some(call => call.startsWith('commit:')));
-    assert(h.calls.some(call => call.startsWith('discard:')));
+    assert.deepStrictEqual(h.calls.filter(call => call.startsWith('discard:')), ['discard:A-new', 'discard:B-new']);
     h = batchHost({ cancelAfterFirst: true }); result = await makeRunner(tools).run(selection, {}, h.host);
     assert.strictEqual(result.completed.length, 1); assert(result.cancelled);
     assert.deepStrictEqual(h.calls.filter(call => call.startsWith('commit:')), ['commit:37']);
+    assert.deepStrictEqual(h.calls.filter(call => call.startsWith('discard:')), ['discard:B-new']);
 });
 test('聊天迁移：确认后兼容结果改变的聊天不写入', async () => {
     const h = batchHost(); let calls = 0;

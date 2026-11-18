@@ -1567,7 +1567,24 @@ function installExtensionRuntime(window) {
                         event === (et.CHAT_LOADED || 'chatLoaded') ? () => {
                             // Native reload replaces message objects even when chat identity stays the same.
                             // Stored update blocks are history, not newly received model instructions.
-                            if (mvu2shujukuChatHasFullCheckpoint()) baselineMessageUpdateBlocks(true);
+                            if (mvu2shujukuChatHasFullCheckpoint()) {
+                                baselineMessageUpdateBlocks(true);
+                                const context = getContextSafe();
+                                const restored = (context.chatMetadata || context.chat_metadata)?.mvu2shujuku_chat_transfer;
+                                if (restored?.status === 'complete' && Number.isInteger(restored.stateMessage) && restored.stateMessage >= 0 && restored.stateMessage < context.chat.length) {
+                                    // Restored first-message text is historical too. Its InitVar must not
+                                    // overwrite the imported state after placeholder text is replaced.
+                                    const source = activeGreetingSourceSnapshot();
+                                    if (source) {
+                                        const state = greetingInitState(autoInitChatId());
+                                        state.appliedSourceFp = source.sourceFp;
+                                        state.appliedFp = 'stored|' + source.sourceFp;
+                                        state.baselineNext = false;
+                                        state.pendingFp = ''; state.pendingSourceFp = ''; state.pendingAt = 0;
+                                        startGreetingInitvarPoll();
+                                    }
+                                }
+                            }
                             return prepareFrontendChatVariables(undefined, true);
                         }
                             : event === et.MORE_MESSAGES_LOADED ? () => prepareFrontendChatVariables()
@@ -5577,19 +5594,26 @@ function installExtensionRuntime(window) {
     const resultView = window.__MVU2SHUJUKU_RESULT_VIEW_FACTORY__({
         document: hostDocument, paramState: updateParamState, createColumnsToggle,
         onChange: () => { updateParamsDirty = true; markResultChanged(); }, notify: toast,
+        onRemoveExtra(uid) {
+            try {
+                const removed = conversionProfileTools.removeExtra({ result: lastResult, uid, priorRefs: mergeState.appliedRefs });
+                refreshConvertedResult(removed.template); mergeState.appliedRefs = removed.refs;
+                delete updateParamState[uid]; markResultChanged(); renderResult(lastResult, { changed: true });
+            } catch (error) { toast(error.message, 'warning'); }
+        },
     });
     const conversionProfileTools = window.__MVU2SHUJUKU_CONVERSION_PROFILES_FACTORY__({
         core: window.MVU2SHUJUKU_CORE, resultView, readTemplateSource, listSheets: updateParamSheetRows,
     });
 
-    function refreshConvertedResult() {
+    function refreshConvertedResult(template) {
         // 模板参数和输出格式可实时刷新；转换规则沿用核心会话快照，重新转换才应用上方新设置。
         if (!lastInput || !lastResult) return null;
         const settings = getSettings();
         const core = window.MVU2SHUJUKU_CORE;
         if (!core || typeof core.refreshConversion !== 'function') throw new Error('转换核心不可用');
         const opts = {
-            template: lastResult.template,
+            template: template || lastResult.template,
             asPng: settings.asPng === 'auto' ? !!lastResult.meta.isPngInput : settings.asPng === 'png',
         };
         const result = core.refreshConversion(lastResult, opts);
@@ -5604,9 +5628,11 @@ function installExtensionRuntime(window) {
     }
 
     function updateParamSheetRows(result) {
+        const layout = JSON.parse((result.card?.data || result.card)?.extensions?.mvu2shujuku?.layout || '[]');
+        const mapped = new Set(layout.map(entry => entry.table));
         return Object.keys(result.template || {})
             .filter(k => k.startsWith('sheet_'))
-            .map(k => ({ uid: k, sheet: result.template[k] }))
+            .map(k => ({ uid: k, sheet: result.template[k], removable: !mapped.has(result.template[k]?.name) }))
             .filter(x => x.sheet && typeof x.sheet === 'object' && !Array.isArray(x.sheet))
             .sort((a, b) => {
                 const ao = Number.isFinite(a.sheet.orderNo) ? a.sheet.orderNo : 999999;
@@ -5726,6 +5752,9 @@ function installExtensionRuntime(window) {
     const MERGE_TABLES_HINT = '选择来源后点「加载表列表」，勾选要并入转换结果（角色卡模板）的表；重名表会自动跳过。';
 
     function updateSaveStatus(panel) {
+        const saveButton = panel?.querySelector('#mvu2shujuku-save-card');
+        if (saveButton) saveButton.textContent = chatTransferView.enabled()
+            ? '保存新卡并迁移所选聊天' : '保存角色卡和模板到 SillyTavern';
         const status = panel && panel.querySelector('#mvu2shujuku-save-status');
         if (!status) return;
         const text = {
@@ -5827,8 +5856,59 @@ function installExtensionRuntime(window) {
     const chatTransferHost = window.MVU2SHUJUKU_CORE.getChatTransferHostFactory()({
         window: hostWindow, readContext: getContextSafe, readCharacter: currentCharacter, stateTransfer,
         tools: chatTransferTools, runner: window.MVU2SHUJUKU_CORE.getChatTransferRunnerFactory()(chatTransferTools),
+        equalStat: (a, b) => window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash.isEqual(a, b),
         readFullCharacter: character => fetchFullCharacter(character, true), assertIdle: assertStateTransferIdle,
-        async prepareTarget() {
+        readTargetTemplate(card) {
+            const entry = (card.character_book?.entries || []).find(e => Array.isArray(e.keys) && e.keys.includes(DB_TEMPLATE_KEY));
+            return entry?.content ? JSON.parse(mvu2shujukuDecodeB64(entry.content)) : null;
+        },
+        async closeChat() {
+            const host = await import('/script.js');
+            return host.closeCurrentChat();
+        },
+        async readSourceCopy(card, sourceChat, source, chat) {
+            const api = getAcuApi(), session = captureRuntimeSession();
+            if (typeof api?.exportTableSnapshotsAtMessages !== 'function') throw new Error('数据库缺少公开只读回放接口；原聊天未打开，请更新数据库');
+            let index = sourceChat.messages.length - 1;
+            while (index >= 0 && (sourceChat.messages[index].is_user || sourceChat.messages[index].is_system)) index--;
+            if (index < 0) throw new Error('来源没有 AI 状态楼层');
+            const replay = await api.exportTableSnapshotsAtMessages([index]); assertRuntimeSession(session);
+            if (!replay?.success || replay.snapshots?.length !== 1) throw new Error(replay?.error || '来源副本只读回放失败');
+            const tables = replay.snapshots[0].data, marker = charExtensions(card)?.mvu2shujuku;
+            let layout = [], mvu;
+            if (marker) {
+                layout = window.MVU2SHUJUKU_CORE.resolveLayoutMacros(JSON.parse(marker.layout), getContextSafe().substituteParams.bind(getContextSafe()));
+                const names = new Set(stateTransferTableNames(tables));
+                if (layout.some(entry => !names.has(entry.table))) throw new Error('来源副本缺少映射表，未猜测状态');
+                const storage = window.__MVU2SHUJUKU_STAT_STORAGE_FACTORY__({ readPolicy: () => marker.statStorage || {}, readLayout: () => layout, readChat: () => sourceChat.messages });
+                const raw = sourceChat.messages[index].variables?.[Number(sourceChat.messages[index].swipe_id || 0)] || {};
+                const projected = window.MVU2SHUJUKU_CORE.statDataFromTables(layout, tables);
+                mvu = { ...stateTransfer.clone(raw), ...projected, stat_data: storage.combine(projected.stat_data, storage.read(index)),
+                    ...(raw.schema !== undefined ? { schema: stateTransfer.clone(raw.schema) } : {}), initialized_lorebooks: raw.initialized_lorebooks || {} };
+            } else mvu = chatTransferTools.nativeMvu(sourceChat).mvu;
+            assertRuntimeSession(session);
+            const sourceContext = api.getTableHistoryContext?.();
+            return { mvu, tables, layout, isolationKey: sourceContext?.version === 1 ? sourceContext.isolationKey : null,
+                source: { character: source.name, chat: chat.file_name.replace(/\.jsonl$/i, ''),
+                message: index, swipe: Number(sourceChat.messages[index].swipe_id || 0), backend: marker ? 'converted' : 'mvu', scope: 'message' } };
+        },
+        async prepareTarget(database) {
+            if (database?.preserve && !database.prepared) {
+                const session = captureRuntimeSession(), api = runtimeApiForSession(getAcuApi(), session);
+                const context = api.getTableHistoryContext?.();
+                if (context?.version !== 1 || context.isolationKey !== database.isolationKey) throw new Error('目标隔离来源已改变，未改写副本数据库');
+                if (typeof api.importTemplateFromData !== 'function') throw new Error('数据库缺少聊天模板协调接口，未重置原历史');
+                const result = await api.importTemplateFromData(stateTransfer.clone(database.template), { scope: 'chat', dataMode: 'seed' });
+                assertRuntimeSession(session);
+                if (result?.success !== true) throw new Error(result?.error || result?.message || '目标模板协调失败，未重置原历史');
+                const tables = stateTransfer.clone(database.template);
+                for (const key of Object.keys(database.tables).filter(key => key.startsWith('sheet_')))
+                    tables[key].content = stateTransfer.clone(database.tables[key].content);
+                const imported = await api.importTableAsJson(JSON.stringify(tables), { persist: true });
+                assertRuntimeSession(session);
+                if (imported !== true && imported?.success !== true) throw new Error('副本表格准备失败，未重置原历史');
+                database.prepared = true;
+            }
             await autoInitDatabase();
             const session = captureRuntimeSession();
             if (!ensureActiveLayoutLazy()) throw new Error('目标布局尚未就绪');
@@ -5836,7 +5916,21 @@ function installExtensionRuntime(window) {
             if (!api || !await waitRuntimeTablesReady(api, activeLayout, 15000)) throw new Error('目标数据库运行时尚未就绪');
             assertRuntimeSession(session);
         },
-        captureSnapshot: captureStateTransferSnapshot, prepareImport: prepareStateTransferImportOnce, commitImport: commitStateTransferImport,
+        captureSnapshot: captureStateTransferSnapshot,
+        async prepareImport(input) {
+            const plan = await prepareStateTransferImportOnce(input);
+            plan.chatCopy = true;
+            if (plan.coverage.enabled) {
+                plan.chatCoverage = plan.coverage;
+                plan.coverage.warnings = [];
+            }
+            return plan;
+        },
+        coverImportedTables(chat, plan) {
+            return plan.chatCoverage ? chatTransferTools.coverImportedTables(chat, plan.snapshot.index, plan.tables,
+                plan.snapshot.layout.map(entry => entry.table), plan.chatCoverage.isolationKey) : chat;
+        },
+        commitImport: commitStateTransferImport,
         async confirm(title, text, okButton) {
             const context = getContextSafe();
             if (typeof context.callGenericPopup !== 'function' || !context.POPUP_TYPE) throw new Error('宿主未提供迁移预检确认界面');
@@ -5847,22 +5941,37 @@ function installExtensionRuntime(window) {
     const chatTransferView = window.MVU2SHUJUKU_CORE.getChatTransferViewFactory()({
         document: hostDocument, listCharacters: () => getContextSafe().characters || [],
         listChats: chatTransferHost.listChats, onRun: migrateConvertedChats, notify: text => toast(text, 'warning'),
+        onSelectionChange: () => updateSaveStatus(hostDocument.getElementById(PANEL_ID)),
     });
-    async function migrateConvertedChats(result, selection) {
+    const chatManagerView = window.MVU2SHUJUKU_CORE.getChatTransferViewFactory()({
+        document: hostDocument, standalone: true, listCharacters: () => getContextSafe().characters || [],
+        currentAvatar: () => currentCharacter()?.avatar || '', listChats: chatTransferHost.listChats,
+        onRun: (result, selection) => migrateConvertedChats(result, selection, true), notify: text => toast(text, 'warning'),
+    });
+    async function migrateConvertedChats(result, selection, standalone = false) {
         if (conversionOperation || stateTransferBusy) throw new Error('已有转换、保存或迁移正在进行');
-        if (result !== lastResult || resultSaveState !== 'saved') throw new Error('请先保存当前角色卡和模板，再迁移聊天');
+        if (!standalone && (result !== lastResult || resultSaveState !== 'saved')) throw new Error('请先保存当前角色卡和模板，再迁移聊天');
         assertStateTransferIdle();
         const operation = beginConversionOperation('migrate');
-        stateTransferBusy = true; stateTransferProgress('正在迁移聊天…'); chatTransferView.setBusy(true);
+        stateTransferBusy = true; stateTransferProgress('正在迁移聊天…'); chatTransferView.setBusy(true); chatManagerView.setBusy(true);
         try {
             await operation.paint();
+            if (standalone) {
+                const avatar = selection.target?.avatar;
+                const card = await fetchFullCharacter({ avatar }, true);
+                if (!card || !isConvertedMvuCard(card)) throw new Error('目标必须是已保存的 MVU 转换卡');
+                result = { card, meta: { savedAvatar: avatar } };
+            }
             const outcome = await chatTransferHost.run(result, selection, operation);
+            console.debug('[M2SJK]聊天迁移耗时', outcome.timings);
+            (standalone ? chatManagerView : chatTransferView).complete(outcome.rows.filter(row => row.completed).map(row => row.name));
             const text = ['已迁移 ' + outcome.completed.length + ' / ' + selection.chats.length + ' 条聊天。'];
+            if (outcome.warnings?.length) text.push(...outcome.warnings);
             if (outcome.cancelled) text.push('已停止后续迁移。');
             for (const row of outcome.rows) text.push(row.completed ? '✓ ' + row.name + ' → ' + row.target : '跳过 ' + row.name + '：' + (row.error || '未确认迁移') + (row.retained ? '（新副本已保留供检查）' : ''));
             operation.close(); showInfoPopup('聊天迁移结果', text.join('\n'));
         } catch (error) { operation.close(); showInfoPopup('聊天迁移未完成', error.message); }
-        finally { stateTransferBusy = false; stateTransferProgress('聊天迁移处理已结束'); operation.close(); chatTransferView.setBusy(false); chatTransferView.setResult(lastResult); }
+        finally { stateTransferBusy = false; stateTransferProgress('聊天迁移处理已结束'); operation.close(); chatTransferView.setBusy(false); chatManagerView.setBusy(false); chatTransferView.setResult(lastResult); }
     }
     let stateTransferBusy = false;
     function stateTransferProgress(text) {
@@ -5890,12 +5999,13 @@ function installExtensionRuntime(window) {
     function stateTransferTableNames(tables) {
         return Object.keys(tables || {}).filter(key => key.startsWith('sheet_') && tables[key]?.name).map(key => String(tables[key].name)).sort();
     }
-    async function waitStateTransferTableRead(api, session, expected) {
+    async function waitStateTransferTableRead(api, session, expected, layout = null) {
         const deadline = Date.now() + 15000;
         while (true) {
             assertRuntimeSession(session);
             const tables = api?.exportTableAsJson?.() || {};
-            if (!expected.length || stateTransfer.equal(stateTransferTableNames(tables), expected)) return tables;
+            if ((!expected.length || stateTransfer.equal(stateTransferTableNames(tables), expected))
+                && (!layout || tableSnapshotCoversLayout(tables, layout, true))) return tables;
             if (Date.now() >= deadline) throw new Error('数据库尚未发布目标聊天的完整状态，请稍后重试');
             await new Promise(resolve => hostWindow.setTimeout(resolve, 100));
         }
@@ -5910,9 +6020,11 @@ function installExtensionRuntime(window) {
         const helper = stateTransferHelper(), index = session.writeTarget.index;
         let variableOption = { type: 'message', message_id: index };
         const converted = isConvertedMvuCard(ch), api = getAcuApi();
+        if (converted && (!activeLayout || activeLayoutCardKey !== cardCacheKey(ch))) throw new Error('转换卡布局尚未就绪，请稍后重试');
+        const expectedLayout = converted ? stateTransfer.clone(activeLayout) : null;
         const hasDatabase = converted || context.chatMetadata?.TavernDB_ACU_ScopedConfig || context.chat.some(row => row?.TavernDB_ACU_IsolatedData);
         const template = hasDatabase && api?.getTableTemplate ? await api.getTableTemplate({ scope: 'chat' }) : null;
-        const tables = stateTransfer.clone(await waitStateTransferTableRead(api, session, stateTransferTableNames(template)));
+        const tables = stateTransfer.clone(await waitStateTransferTableRead(api, session, stateTransferTableNames(template), expectedLayout));
         assertStateTransferIdle();
         let raw = stateTransfer.clone(helper.getVariables(variableOption));
         let mvu, layout = [];
@@ -5941,6 +6053,7 @@ function installExtensionRuntime(window) {
         const latestContext = getContextSafe();
         const metadata = latestContext.chatMetadata || latestContext.chat_metadata || {};
         const originalName = charExtensions(ch)?.mvu2shujuku?.originalName || characterDisplayName(ch) || context.name2 || '';
+        assertRuntimeSession(session);
         return { session, helper, index, variableOption, api, converted, layout, raw, mvu, tables, template: stateTransfer.clone(template || null),
             chat: stateTransfer.clone(latestContext.chat), metadata: stateTransfer.clone(metadata),
             source: { character: originalName, chat: String(context.chatId), message: index, swipe: Number(context.chat[index].swipe_id || 0),
@@ -5999,11 +6112,43 @@ function installExtensionRuntime(window) {
             }
         }
     }
+    async function stateTransferDefaultSource(snapshot, schema) {
+        if (snapshot.converted) {
+            const readSql = snapshot.api?.querySql || snapshot.api?.executeSqlQuery;
+            if (typeof readSql !== 'function') return null;
+            return stateTransfer.tableDefaultSource(snapshot.layout, snapshot.tables, async name => {
+                assertRuntimeSession(snapshot.session);
+                const info = await readSql.call(snapshot.api, {
+                    sql: 'SELECT cid, name, type, "notnull" AS required, dflt_value FROM pragma_table_info(?) ORDER BY cid',
+                    params: [name],
+                });
+                assertRuntimeSession(snapshot.session);
+                return info?.rows;
+            });
+        }
+        if (!schema) return null;
+        const character = currentCharacter();
+        const card = character?.shallow ? await fetchFullCharacter(character) : character?.data || character;
+        assertRuntimeSession(snapshot.session);
+        if (!card) return null;
+        const core = window.MVU2SHUJUKU_CORE;
+        let analysis;
+        try { analysis = await core.analyzeStateTarget(card, { requireRegistered: schema.type === 'any' }); }
+        catch (error) { dbg('状态迁移：目标卡结构分析不可用，沿用现有兼容规则', error.message); }
+        assertRuntimeSession(snapshot.session);
+        if (!analysis) return null;
+        const context = getContextSafe();
+        const layout = core.resolveLayoutMacros(analysis.layout, context.substituteParams?.bind(context));
+        return stateTransfer.analyzedDefaultSource(layout, analysis.columns);
+    }
     async function prepareStateTransferImportOnce(input) {
         const archive = stateTransfer.parse(input), snapshot = await captureStateTransferSnapshot();
+        if (snapshot.metadata?._acu_zero_layer_v1 || snapshot.chat.some(row => row._acu_zero_layer_v1))
+            throw new Error('当前状态迁移尚未适配数据库零层逻辑存档，未写入数据');
         const extras = stateTransfer.matchExtras(archive.extraTables, snapshot.tables, snapshot.layout);
         if (snapshot.converted || extras.matches.length) {
-            stateTransfer.assertPersistentDbVersion(await readTargetSpVersion());
+            snapshot.databaseVersion = await readTargetSpVersion();
+            stateTransfer.assertPersistentDbVersion(snapshot.databaseVersion);
             assertStateTransferUnchanged(snapshot);
         }
         const rules = snapshot.converted && (readCardApiMetadata().schemaKeys || []).length
@@ -6013,8 +6158,8 @@ function installExtensionRuntime(window) {
         const schemaReconciler = window.MVU2SHUJUKU_CORE.getMvuSchemaFactory()(window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash);
         const schema = rules?.schema || stateTransfer.resolveImportSchema(snapshot.mvu.schema, schemaReconciler.generateSchema);
         const target = stateTransfer.stat(snapshot.mvu.stat_data);
-        const accept = async (path, value) => {
-            if (rules) return rules.accept(path, value);
+        const accept = async (path, value, validation) => {
+            if (rules) return rules.accept(path, value, validation);
             if (!schema && !snapshot.converted) return '目标没有公开可独立校验的字段规则，保留目标值';
             return '';
         };
@@ -6025,11 +6170,13 @@ function installExtensionRuntime(window) {
             if (!candidate) throw new Error('无法将状态映射到目标表格');
             const readback = window.MVU2SHUJUKU_CORE.statDataFromTables(snapshot.layout, candidate);
             const merged = nativeStatStorage.combine(readback?.stat_data || {}, nativeStatStorage.split(value).native);
-            if (!stateTransfer.equal(stateTransfer.stat(merged), value)) throw new Error('目标布局无法无损保存这份 stat_data');
+            if (!window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash.isEqual(stateTransfer.stat(merged), value)) throw new Error('目标布局无法无损保存这份 stat_data');
             return candidate;
         }
+        const targetDefaults = await stateTransferDefaultSource(snapshot, schema);
         const candidate = await stateTransfer.prepareImport(archive.stat_data, target, {
-            schema, accept, project, layoutOnly: snapshot.converted && !schema && !rules,
+            schema, accept, project, targetDefaults, layoutOnly: snapshot.converted && !schema && !rules,
+            layoutRoots: snapshot.converted ? nativeStatStorage.mappedRoots(snapshot.layout.filter(entry => !entry.publicFallback && !entry.rootContainer)) : [],
             validateComplete: rules ? value => rules.validateComplete(value) : null,
         });
         const fields = candidate.fields, importedStat = candidate.stat_data;
@@ -6043,12 +6190,22 @@ function installExtensionRuntime(window) {
         const variables = { ...snapshot.raw, stat_data: stateTransfer.clone(nativeStat),
             ...(targetMvu.schema !== undefined ? { schema: targetMvu.schema } : {}),
             initialized_lorebooks: stateTransfer.clone(snapshot.mvu.initialized_lorebooks || {}), display_data: stateTransfer.clone(nativeStat), delta_data: {} };
-        return { archive, snapshot, tables, variables, extras, fields, importedStat, backup: true, writeTables: snapshot.converted || extras.matches.length > 0 };
+        const coverage = { warnings: [] };
+        const historyContext = snapshot.api?.getTableHistoryContext?.();
+        if (snapshot.converted && historyContext?.version === 1 && chatTransferTools.supportsCoverage(snapshot.chat, historyContext.isolationKey)) {
+            coverage.enabled = true; coverage.isolationKey = historyContext.isolationKey;
+            if (extras.matches.length) coverage.warnings.push('MVU表将以本次导入楼建立覆盖基线；额外表只导入内容，沿用目标聊天的填表进度。');
+        } else if (Object.keys(tables || {}).some(key => key.startsWith('sheet_')))
+            coverage.warnings.push('未识别到兼容的数据库存档格式／来源接口；本次仅迁移数据，未自动推进填表覆盖进度。');
+        return { archive, snapshot, tables, variables, extras, fields, importedStat, defaults: candidate.defaults, coverage, backup: true, writeTables: snapshot.converted || extras.matches.length > 0 };
     }
     async function commitStateTransferImport(plan) {
         const { snapshot } = plan;
         let broadcastSuppressed = false;
+        let undoCoverage = null;
+        let coverageTouched = false;
         const rollbackStage = async () => {
+            if (undoCoverage) { undoCoverage(); undoCoverage = null; }
             const current = snapshot.helper.getVariables(snapshot.variableOption);
             if (stateTransfer.equal(current, snapshot.raw)) return;
             if (!stateTransfer.equal(current, plan.variables)) throw new Error('消息变量已被其他操作修改，未强制覆盖');
@@ -6077,31 +6234,98 @@ function installExtensionRuntime(window) {
             },
             importTables: tables => runtimeApiForSession(snapshot.api, snapshot.session).importTableAsJson(JSON.stringify(tables), { persist: true }),
             restoreTables: async () => {
-                const current = await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(snapshot.tables));
-                if (stateTransfer.equalRuntimeTables(current, snapshot.tables)) return;
-                if (!stateTransfer.equalRuntimeTables(current, plan.tables)) throw new Error('表格状态与本次候选不一致，未强制覆盖；请检查并手动恢复');
+                if (undoCoverage) throw new Error('覆盖基线已被其他操作修改，未强制回退表格');
+                let current = await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(snapshot.tables));
+                if (typeof snapshot.api.exportTableSnapshotsAtMessages === 'function') {
+                    const replay = await snapshot.api.exportTableSnapshotsAtMessages([snapshot.index]);
+                    assertRuntimeSession(snapshot.session);
+                    if (!replay?.success || replay.snapshots?.length !== 1) throw new Error('无法通过原生回放核对回退范围，未强制覆盖');
+                    current = replay.snapshots[0].data;
+                }
+                const compare = window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash.isEqual;
+                if (stateTransfer.equalRuntimeTables(current, snapshot.tables, compare) && !coverageTouched) return;
+                if (!stateTransfer.equalRuntimeTables(current, snapshot.tables, compare) && !stateTransfer.equalRuntimeTables(current, plan.tables, compare)) throw new Error('表格状态与本次候选不一致，未强制覆盖；请检查并手动恢复');
                 const result = await runtimeApiForSession(snapshot.api, snapshot.session).importTableAsJson(JSON.stringify(snapshot.tables), { persist: true });
                 if (result !== true && result?.success !== true) throw new Error('数据库拒绝回退');
             },
             // importTableAsJson 的持久提交已保存同一份暂存变量；沿用现有批量写入
             // 契约，成功时不再次保存并触发宿主重新加载。失败回退仍明确保存。
-            save: recovering => !plan.writeTables || recovering ? saveStateTransferChat(snapshot) : Promise.resolve(),
+            save: async recovering => {
+                if (!recovering && plan.coverage.enabled && !plan.chatCopy) {
+                    assertRuntimeSession(snapshot.session);
+                    const context = getContextSafe(), row = context.chat[snapshot.index], isolation = plan.coverage.isolationKey;
+                    const owner = row.TavernDB_ACU_IsolatedData?.[isolation];
+                    const before = stateTransfer.clone(owner?.storageFrame);
+                    const updated = chatTransferTools.coverImportedTables({ header: { chat_metadata: context.chatMetadata || context.chat_metadata || {} }, messages: context.chat },
+                        snapshot.index, plan.tables, snapshot.layout.map(entry => entry.table), isolation);
+                    const after = updated.messages[snapshot.index].TavernDB_ACU_IsolatedData[isolation].storageFrame;
+                    owner.storageFrame = after;
+                    coverageTouched = true;
+                    undoCoverage = () => {
+                        const active = getContextSafe().chat[snapshot.index]?.TavernDB_ACU_IsolatedData?.[isolation];
+                        if (!active || !stateTransfer.equal(active.storageFrame, after)) throw new Error('覆盖基线已被其他操作修改，未强制回退');
+                        active.storageFrame = stateTransfer.clone(before);
+                    };
+                    await saveStateTransferChat(snapshot);
+                } else if (!plan.writeTables || recovering) await saveStateTransferChat(snapshot);
+            },
             verify: async () => {
                 const variables = snapshot.helper.getVariables(snapshot.variableOption);
                 if (!stateTransfer.equal(variables, plan.variables)) throw new Error('消息变量读回不一致');
                 if (plan.writeTables) {
-                    const current = await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(plan.tables));
+                    let current, wrap, attemptedRuntimeRestore = false;
+                    const deadline = Date.now() + 15000;
+                    while (true) {
+                        current = await waitStateTransferTableRead(snapshot.api, snapshot.session, stateTransferTableNames(plan.tables));
+                        wrap = snapshot.converted ? mvuDataFromCompleteTableSnapshot(current, snapshot.index, true) : null;
+                        const dataReady = !snapshot.converted || wrap && window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash.isEqual(stateTransfer.stat(wrap.stat_data), plan.importedStat);
+                        const extrasReady = plan.extras.matches.every(match => stateTransfer.equal(current[match.key]?.content, match.content));
+                        if (dataReady && extrasReady || Date.now() >= deadline) break;
+                        if (!attemptedRuntimeRestore && typeof snapshot.api.exportTableSnapshotsAtMessages === 'function'
+                            && typeof snapshot.api.restoreTableAsJson === 'function') {
+                            attemptedRuntimeRestore = true;
+                            const replay = await snapshot.api.exportTableSnapshotsAtMessages([snapshot.index]);
+                            assertRuntimeSession(snapshot.session);
+                            if (replay?.success && replay.snapshots?.length === 1) {
+                                const saved = replay.snapshots[0].data;
+                                const savedWrap = snapshot.converted ? mvuDataFromCompleteTableSnapshot(saved, snapshot.index, true) : null;
+                                const savedReady = (!snapshot.converted || savedWrap && window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash.isEqual(stateTransfer.stat(savedWrap.stat_data), plan.importedStat))
+                                    && plan.extras.matches.every(match => stateTransfer.equal(saved[match.key]?.content, match.content));
+                                if (savedReady) {
+                                    // The import is durable, but a cold runtime can still publish
+                                    // its previous cache. Reuse the host's explicit restore API;
+                                    // never substitute an assumed candidate or write another log.
+                                    const restored = await runtimeApiForSession(snapshot.api, snapshot.session).restoreTableAsJson(JSON.stringify(saved));
+                                    assertRuntimeSession(snapshot.session);
+                                    if (restored !== true && restored?.success !== true) throw new Error('数据库已保存数据，但运行时恢复失败');
+                                }
+                            }
+                        }
+                        await new Promise(resolve => hostWindow.setTimeout(resolve, 100));
+                    }
                     if (snapshot.converted) {
-                        const wrap = mvuDataFromCompleteTableSnapshot(current, snapshot.index, true);
-                        if (!wrap || !stateTransfer.equal(stateTransfer.stat(wrap.stat_data), plan.importedStat)) throw new Error('数据库状态读回不一致');
+                        if (!wrap || !window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash.isEqual(stateTransfer.stat(wrap.stat_data), plan.importedStat)) {
+                            const diagnostic = { actual: wrap?.stat_data, expected: plan.importedStat };
+                            if (mvu2shujukuDebugOn() && typeof snapshot.api.exportTableSnapshotsAtMessages === 'function') {
+                                try {
+                                    const replay = await snapshot.api.exportTableSnapshotsAtMessages([snapshot.index]);
+                                    diagnostic.replayed = replay?.success ? window.MVU2SHUJUKU_CORE.statDataFromTables(snapshot.layout, replay.snapshots[0].data).stat_data : replay?.error;
+                                } catch (error) { diagnostic.replayError = error.message; }
+                            }
+                            dbg('状态存档读回不一致', diagnostic);
+                            throw new Error('数据库状态读回不一致');
+                        }
                     }
                     for (const match of plan.extras.matches) if (!stateTransfer.equal(current[match.key]?.content, match.content)) throw new Error('额外表格读回不一致：' + match.name);
+
                 }
                 const context = getContextSafe(), chat = stateTransfer.clone(context.chat), metadata = stateTransfer.clone(context.chatMetadata || context.chat_metadata || {});
                 stateTransferProgress('正在确认聊天已保存…');
                 const jsonl = await exportStateTransferChat(snapshot);
                 stateTransfer.verifyBackup(jsonl, chat, metadata);
                 if (!stateTransfer.equal(chat, getContextSafe().chat)) throw new Error('保存核对期间聊天又发生更新');
+                // The chat-copy flow can reuse this verified read when no callback changed it.
+                plan.persistedReadback = { jsonl, chat, metadata };
             },
         }).finally(() => {
             if (broadcastSuppressed) sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded = Math.max(0, (Number(sharedStateWindow.__mvu2shujukuSuppressTableMvuEnded) || 0) - 1);
@@ -6120,7 +6344,9 @@ function installExtensionRuntime(window) {
             (plan.snapshot.converted ? 'stat_data 已通过目标布局的无损读回预检。' : '已检查 stat_data JSON 结构。') + '沿用目标 Schema 规则和初始化标记，不重跑作者初始化或变换。');
         if (plan.archive.source?.character && plan.archive.source.character !== plan.snapshot.source.character) text.push('源角色与目标角色名称不同，请确认变量含义相容。');
         text.push('额外表格匹配：' + (plan.extras.matches.map(t => t.name).join('、') || '无'));
+        for (const warning of plan.coverage?.warnings || []) text.push('进度提醒：' + warning);
         for (const skip of plan.extras.skipped) text.push('跳过 ' + skip.name + '：' + skip.reason);
+        for (const entry of plan.defaults || []) text.push('按目标默认值补齐　' + entry);
         if (plan.fields?.partial) {
             text.push('无法完整导入，将仅导入兼容字段。未匹配或不相容的字段保留目标值；不会猜测字段改名或拼接数组。',
                 '可导入字段：' + (plan.fields.imported.join('、') || '无'),
@@ -6147,6 +6373,7 @@ function installExtensionRuntime(window) {
 
     function bindSettingsPanel(panel, context) {
         chatTransferView.mount(panel.querySelector('#mvu2shujuku-chat-transfer'));
+        chatManagerView.mount(panel.querySelector('#mvu2shujuku-chat-manager'));
         const bind = (id, fn) => {
             const el = panel.querySelector(id);
             if (el && el.dataset.bound !== 'true') {

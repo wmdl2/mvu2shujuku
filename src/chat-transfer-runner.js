@@ -10,48 +10,64 @@ function createChatTransferRunner(tools) {
             try { rows.push({ name: chat.file_name, item: await host.collect(selection.source, chat) }); }
             catch (error) { if (error.chatTransferAbort) throw error; rows.push({ name: chat.file_name, error: error.message }); }
         }
-        const first = rows.find(row => row.item);
-        if (!first || host.cancelled()) return { rows, completed, cancelled: host.cancelled() };
-        let prepared = await host.prepareChat(first.item, target);
-        let used = false;
+        if (!rows.some(row => row.item) || host.cancelled()) return { rows, completed, cancelled: host.cancelled() };
+        const pending = new Map(), warnings = [], outcome = { rows, completed, warnings, cancelled: false };
+        let failure;
         try {
             for (const row of rows) {
                 if (host.cancelled()) break;
                 if (!row.item) continue;
-                try { row.preview = tools.summary(await host.prepareImport(row.item.archive)); }
+                try {
+                    const prepared = await host.prepareChat(row.item, target);
+                    pending.set(row, prepared);
+                    row.preview = tools.summary(await host.prepareImport(row.item.archive));
+                }
                 catch (error) { if (error.chatTransferAbort) throw error; row.error = error.message; }
             }
-            if (host.cancelled() || !await host.confirm(rows)) return { rows, completed, cancelled: true };
+            if (host.cancelled() || !await host.confirm(rows)) {
+                outcome.cancelled = true;
+                return outcome;
+            }
             for (const row of rows) {
                 if (host.cancelled()) break;
                 if (row.error || !row.preview) continue;
                 host.progress('迁移聊天：' + row.name);
-                let current = null;
+                const current = pending.get(row);
                 try {
-                    if (!used && row === first) { current = prepared; used = true; }
-                    else current = await host.prepareChat(row.item, target);
+                    await host.openPrepared(current);
                     const plan = await host.prepareImport(row.item.archive);
                     if (JSON.stringify(tools.summary(plan)) !== JSON.stringify(row.preview)) throw new Error('兼容检查结果在确认后发生变化，未覆盖');
                     plan.backup = false; // Only a newly-created, empty preparation chat is modified.
                     await host.commit(plan);
-                    const saved = await host.exportPrepared(current);
-                    const final = tools.finish(row.item.source, saved, plan.snapshot.index, current.token);
+                    const saved = await host.exportPrepared(current, plan);
+                    let final = tools.finish(row.item.source, saved, plan.snapshot.index, current.token);
+                    if (host.coverImportedTables) final = await host.coverImportedTables(final, plan);
                     await host.replaceChat(current, final);
                     await host.verify(current, plan.importedStat, final);
-                    row.completed = true; row.target = current.name; completed.push(current);
+                    row.completed = true; row.target = current.name; completed.push(current); pending.delete(row);
                 } catch (error) {
                     row.error = error.message;
-                    if (current) {
-                        row.target = current.name;
-                        try { await host.discard(current); } catch (_) { row.retained = true; }
-                    }
                     if (error.chatTransferAbort) throw error;
                 }
             }
-            return { rows, completed, cancelled: host.cancelled() };
+            outcome.cancelled = host.cancelled();
+            return outcome;
+        } catch (error) {
+            failure = error;
+            throw error;
         } finally {
-            if (!used) await host.discard(prepared);
-            if (completed.length) await host.openCompleted(completed[completed.length - 1]);
+            for (const [row, prepared] of pending) {
+                try { await host.discard(prepared); }
+                catch (error) {
+                    row.target = prepared.name; row.retained = true;
+                    warnings.push('新准备聊天已保留：' + prepared.name + '；' + error.message);
+                }
+            }
+            if (failure && warnings.length) failure.message += '；' + warnings.join('；');
+            if (!failure && completed.length) {
+                try { await host.openCompleted(completed.at(-1)); }
+                catch (error) { warnings.push(error.message); }
+            }
         }
     }
     return { run };

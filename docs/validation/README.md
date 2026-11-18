@@ -1,5 +1,7 @@
 # 历史验证索引
 
+- [v0.8.7 聊天迁移、覆盖进度与发布验收](2026-11-17-chat-transfer-isolation.md)
+
 最新固定输入实机：[配置复制与兼容层归因](2026-11-02-fixed-host-performance.md)。
 
 最新独立诊断：[数据库配置复制与写入对照](2026-11-02-database-performance-diagnostics.md)。

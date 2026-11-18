@@ -1,7 +1,7 @@
 'use strict';
 
 // 转换结果视图：只编辑本次模板，不调用宿主写库接口。工厂可直接内联到浏览器。
-function createResultView({ document: doc, onChange = () => {}, notify = () => {}, createColumnsToggle = () => null, paramState = {} } = {}) {
+function createResultView({ document: doc, onChange = () => {}, notify = () => {}, createColumnsToggle = () => null, paramState = {}, onRemoveExtra } = {}) {
     const options = [
         { key: 'updateFrequency', label: '更新频率', hint: '-1=沿用全局；0=停用该表自动更新' },
         { key: 'groupId', label: '分组编号', hint: '-1=沿用全局' },
@@ -224,7 +224,7 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
             for (const row of rowEls) row.node.hidden = !row.name.toLocaleLowerCase().includes(query);
             syncSelection();
         });
-        for (const { uid, sheet } of rows) {
+        for (const { uid, sheet, removable } of rows) {
             const name = String(sheet.name || uid);
             const node = el('div', 'mvu2shujuku-table-row');
             node.dataset.sheetUid = uid;
@@ -267,6 +267,11 @@ function createResultView({ document: doc, onChange = () => {}, notify = () => {
             }
             const columns = createColumnsToggle(sheet);
             if (columns) { columns.classList.add('mvu2shujuku-table-columns'); node.appendChild(columns); }
+            if (removable && onRemoveExtra) {
+                const remove = el('button', 'menu_button mvu2shujuku-remove-extra', '移除额外表');
+                remove.type = 'button'; remove.style.gridColumn = '1 / -1';
+                remove.addEventListener('click', () => onRemoveExtra(uid)); node.appendChild(remove);
+            }
             grid.appendChild(node);
             rowEls.push({ uid, sheet, node, name, check, param, injection, syncParam, syncSummary });
         }

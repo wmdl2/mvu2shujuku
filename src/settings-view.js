@@ -21,6 +21,7 @@ function settingsView(settings, version) {
             '        <input id="mvu2shujuku-state-file" type="file" accept=".json,application/json" hidden />',
             '      </div>',
             '      <div id="mvu2shujuku-state-progress" class="mvu2shujuku-hint" role="status" aria-live="polite"></div>',
+            '      <div id="mvu2shujuku-chat-manager"></div>',
             '      <details class="mvu2shujuku-more"><summary>更多说明</summary>',
             '        <p class="mvu2shujuku-help">额外表格只导入相容的已有模板；完整聊天 JSONL 备份可选，默认勾选；部分兼容时先显示迁移结果。</p>',
             '      </details>',

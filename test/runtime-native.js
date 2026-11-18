@@ -306,6 +306,34 @@ test('聊天重新加载：同身份的新消息对象不重跑旧更新块，�
     assert.equal(h.win.Mvu.getMvuData().stat_data.状态.金币, 52, '后续新消息仍按原更新路径处理');
 });
 
+test('聊天迁移重开：恢复的首楼InitVar只作历史基线，不覆盖导入状态或额外写库', async () => {
+    let writes = 0;
+    const h = await nativeRuntime(undefined, ({ win, context, api, tables }) => {
+        win.__MVU2SHUJUKU_YAML_LIBS__ = require('../src/vendor/mvu-yaml-libs');
+        context.event_types = { CHAT_LOADED: 'loaded', GENERATION_ENDED: 'ended', MESSAGE_UPDATED: 'updated' };
+        context.eventSource.makeFirst = (name, callback) => context.eventSource.on(name, callback);
+        const sheet = Object.values(tables).find(item => item.name === '状态表');
+        sheet.content[1][sheet.content[0].indexOf('金币')] = 37;
+        context.chat[0].TavernDB_ACU_IsolatedData.test.storageFrame.checkpoint.data = clone(tables);
+        context.chat.push({ is_user: true, mes: '用户正文' }, { is_user: false, mes: '角色正文' });
+        context.chatMetadata = { mvu2shujuku_chat_transfer: { status: 'complete', stateMessage: 2 } };
+        for (const name of ['updateCell', 'updateRow', 'insertRow', 'deleteRow', 'importTableAsJson']) {
+            const original = api[name];
+            if (original) api[name] = function (...args) { writes++; return original.apply(this, args); };
+        }
+    });
+    await h.advance(2000); writes = 0;
+    h.context.chat[0].mes = '<initvar>{"状态":{"生命":100,"金币":10},"背包":["钥匙",0,false,null]}</initvar>';
+    h.context.chat.splice(0, h.context.chat.length, ...clone(h.context.chat));
+    await h.context.eventSource.emit('loaded'); await h.context.eventSource.emit('updated', 0); await h.context.eventSource.emit('ended'); await h.advance(10000);
+    assert.equal(h.win.Mvu.getMvuData().stat_data.状态.金币, 37);
+    assert.equal(writes, 0, '核对必须没有旧初值写入，不能等恢复任务补救后仅看最终值');
+    h.context.chat[0].mes = h.context.chat[0].mes.replace('金币":10', '金币":45');
+    assert.match(h.context.chat[0].mes, /金币":45/);
+    await h.context.eventSource.emit('ended'); await h.advance(4000);
+    assert.equal(h.win.Mvu.getMvuData().stat_data.状态.金币, 45, '后续真实首楼编辑仍可按原逻辑处理');
+});
+
 async function nativeRuntime(source = require('./synthetic-card')(), configure, converter = publishedLayoutFixture) {
     const result = converter(source, { installMvuShim: true });
     result.card.data.avatar = 'public-native.png';

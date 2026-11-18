@@ -14,6 +14,7 @@ function createStatStorage(options = {}) {
         { value, enumerable: true, writable: true, configurable: true });
     const matches = (pattern, path) => pattern.length <= path.length && pattern.every((part, i) => part === '*' || part === path[i]);
     const prefixes = entry => entry.writePaths?.length ? entry.writePaths : [entry.path?.length ? entry.path : [entry.group]];
+    const mappedRoots = layout => [...new Set(layout.flatMap(entry => prefixes(entry).map(path => path[0]).filter(Boolean)))];
     const columnPaths = (entry, column) => {
         const path = Array.isArray(column) ? column[3] : column.path;
         const name = Array.isArray(column) ? column[0] : column.zh;
@@ -61,7 +62,7 @@ function createStatStorage(options = {}) {
             // misclassify e.g. {{user}} as an unmapped native root.
             const layout = options.readLayout?.();
             const hasLayout = Array.isArray(layout) && layout.length > 0;
-            const declaredRoots = hasLayout ? layout.flatMap(entry => prefixes(entry).map(path => path[0]).filter(Boolean)) : policy.roots;
+            const declaredRoots = hasLayout ? mappedRoots(layout) : policy.roots;
             const roots = new Set(declaredRoots || []);
             const rootContainer = hasLayout ? layout.some(entry => entry.rootContainer) : policy.rootContainer;
             // Root entries have independent ownership. Hidden descendants stay
@@ -384,6 +385,6 @@ function createStatStorage(options = {}) {
             if (sameKeys && unchangedOtherSwipes) { if (previous === undefined) delete message.variables; else message.variables = previous; }
         } };
     }
-    return { split, plan, rules, project, read, merge, stage, combine, sendRowsSql, displaySchemaNode };
+    return { split, plan, rules, mappedRoots, project, read, merge, stage, combine, sendRowsSql, displaySchemaNode };
 }
 module.exports = createStatStorage;

@@ -6,6 +6,9 @@ function createStateTransfer() {
     const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
     const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
     const clone = value => JSON.parse(JSON.stringify(value));
+    const pathText = path => '/' + path.map(k => String(k).replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
+    const put = (o, k, v) => Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
+    const at = (value, path) => path.reduce((node, key) => record(node) && own(node, key) ? node[key] : undefined, value);
     function canonical(value) {
         if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
         if (record(value)) return '{' + Object.keys(value).sort().filter(k => value[k] !== undefined)
@@ -13,7 +16,7 @@ function createStateTransfer() {
         return JSON.stringify(value);
     }
     const equal = (a, b) => canonical(a) === canonical(b);
-    function equalRuntimeTables(a, b) {
+    function equalRuntimeTables(a, b, compare = equal) {
         const runtime = value => {
             const copy = clone(value || {});
             // 数据库 hydrate 会把 guide 的初始化种子附到运行时表上。种子规则
@@ -21,7 +24,7 @@ function createStateTransfer() {
             for (const key of Object.keys(copy)) if (key.startsWith('sheet_') && record(copy[key])) delete copy[key].seedRows;
             return copy;
         };
-        return equal(runtime(a), runtime(b));
+        return compare(runtime(a), runtime(b));
     }
     function stat(value) {
         if (!record(value)) throw new Error('stat_data 必须是 JSON 对象');
@@ -51,8 +54,6 @@ function createStateTransfer() {
     async function compatibleFields(source, target, options = {}) {
         source = stat(source); target = stat(target);
         const imported = [], skipped = [], retained = [];
-        const pathText = path => '/' + path.map(k => String(k).replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
-        const put = (o, k, v) => Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
         let visits = 0;
         function fits(value, node, previous) {
             if (node?.type === 'any') return true;
@@ -93,20 +94,103 @@ function createStateTransfer() {
         const result = await walk(source, target, options.schema, []);
         return { stat_data: result, imported, skipped, retained, partial: skipped.length > 0 || retained.length > 0 };
     }
+    function scalarDefault(column, type) {
+        if (Number(column?.required) !== 1 || typeof column.dflt_value !== 'string') return undefined;
+        const literal = column.dflt_value.trim();
+        const storage = String(column.type || '').toUpperCase();
+        // SQLite supplies the literal through PRAGMA. Expressions and containers are out of scope.
+        if (type === 'boolean' && storage === 'INTEGER' && /^[01]$/.test(literal)) return literal === '1';
+        if (type === 'number' && ['INTEGER', 'REAL'].includes(storage) && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(literal)) {
+            const number = Number(literal);
+            if (Number.isFinite(number) && (storage !== 'INTEGER' || Number.isSafeInteger(number))) return number;
+        }
+        if (['text', 'textExact'].includes(type) && storage === 'TEXT' && /^'(?:[^']|'')*'$/.test(literal)) return literal.slice(1, -1).replace(/''/g, "'");
+        return undefined;
+    }
+    function tableDefaultSource(layout, tables, readColumns) {
+        const sheets = Object.entries(tables || {}).filter(([key, value]) => key.startsWith('sheet_') && value?.sourceData?.ddl).map(([, value]) => value);
+        return { layout, tableFor(entry) {
+            const matches = sheets.filter(sheet => sheet.name === entry.table);
+            if (matches.length !== 1) return null;
+            const sheet = matches[0];
+            const name = /^\s*CREATE TABLE\s+([a-z_][a-z_0-9]*)\s*\(/i.exec(sheet.sourceData.ddl)?.[1];
+            return name ? { label: entry.table, header: sheet.content?.[0], columns: () => readColumns(name) } : null;
+        } };
+    }
+    function analyzedDefaultSource(layout, columns) {
+        const byTable = new Map(columns.map(info => [info.name, info]));
+        return { layout, tableFor(entry) {
+            const info = byTable.get(entry.table);
+            return info ? { label: entry.group, header: info.header, columns: () => info.columns } : null;
+        } };
+    }
+    async function fillTargetDefaults(source, target, { layout, tableFor }) {
+        const added = [];
+        for (const entry of layout) {
+            if (!['singleton', 'rows', 'nestedRows'].includes(entry.kind) || entry.scalarValueCol || entry.vwd || entry.writePaths?.length > 1) continue;
+            const table = tableFor(entry), header = table?.header;
+            if (!Array.isArray(header) || new Set(header).size !== header.length) continue;
+            const container = entry.kind === 'nestedRows' ? entry.writePaths?.[0] || [...(entry.parentPath || [entry.group]), '*', entry.childKey]
+                : entry.kind === 'rows' ? entry.writePaths?.[0] || [entry.group] : [];
+            const candidates = [];
+            function collect(node, pattern, path, col, index, traverseKeys) {
+                if (!record(node)) return;
+                const key = pattern[path.length];
+                if (path.length === pattern.length - 1) {
+                    if (!own(node, key) && at(target, [...path, key]) === undefined) candidates.push({ node, key, path: [...path, key], col, index });
+                    return;
+                }
+                if (key === '*' && path.length < traverseKeys) {
+                    for (const rowKey of Object.keys(node)) collect(node[rowKey], pattern, [...path, rowKey], col, index, traverseKeys);
+                } else if (own(node, key)) collect(node[key], pattern, [...path, key], col, index, traverseKeys);
+            }
+            for (const col of entry.cols || []) {
+                const [label, type, , path, pair] = col, index = header.indexOf(label);
+                if (index <= 0 || pair || !['boolean', 'number', 'text', 'textExact'].includes(type) || label === entry.keyCol
+                    || (entry.ancestorKeyCols || [entry.parentKeyCol]).includes(label) || label === (entry.overflowCol || '_扩展数据')) continue;
+                const prefix = entry.kind === 'singleton' ? [] : [...container, '*'];
+                const pattern = [...prefix, ...(path?.length ? path : entry.kind === 'singleton' ? [entry.group, label] : [label])];
+                collect(source, pattern, [], col, index, prefix.length);
+            }
+            if (!candidates.length) continue;
+            const columns = await table.columns();
+            if (!Array.isArray(columns) || columns.length !== header.length || columns.some((column, index) => Number(column.cid) !== index) || columns[0]?.name !== 'row_id') continue;
+            for (const item of candidates) {
+                const value = scalarDefault(columns[item.index], item.col[1]);
+                if (value === undefined || own(item.node, item.key)) continue;
+                put(item.node, item.key, value);
+                added.push({ path: item.path, table: table.label, column: item.col[0], value });
+            }
+        }
+        return added;
+    }
+    function summarizeDefaults(additions, candidate) {
+        const counts = new Map();
+        for (const { path, table, column, value } of additions) {
+            if (at(candidate, path) !== value) continue;
+            const key = JSON.stringify([table, column, value]);
+            counts.set(key, (counts.get(key) || 0) + 1);
+        }
+        return [...counts].map(([key, count]) => {
+            const [table, column, value] = JSON.parse(key);
+            return `${table} · ${column} = ${JSON.stringify(value)}（${count} 条记录）`;
+        });
+    }
     // 当前转换布局本身也是字段映射契约。旧产物没有公开 Schema 时，先用
     // 产品实际 writer/codec 验证完整快照，不把旧聊天的现有动态键当成声明。
     async function prepareImport(source, target, options) {
         source = stat(source); target = stat(target);
+        const added = options.targetDefaults ? await fillTargetDefaults(source, target, options.targetDefaults) : [];
         const layoutOnly = options.layoutOnly === true && !options.schema;
         if (layoutOnly) {
-            try { return { stat_data: source, fields: null, tables: await options.project(source) }; }
+            try { return { stat_data: source, fields: null, tables: await options.project(source), defaults: summarizeDefaults(added, source) }; }
             catch (_) { /* 无损投影失败才按路径降级；不执行作者函数。 */ }
         }
         const probe = await compatibleFields(source, target, { schema: options.schema });
         const completeValid = options.validateComplete ? await options.validateComplete(source) : 'opaque';
         let fields = null, imported = source;
-        const fieldProject = async (path, value) => {
-            const reason = options.accept ? await options.accept(path, value) : '';
+        const fieldProject = async (path, value, allowOpaque = false) => {
+            const reason = options.accept ? await options.accept(path, value, { allowOpaque }) : '';
             if (reason) return reason;
             let candidate = clone(target);
             if (!path.length) candidate = clone(value);
@@ -130,12 +214,24 @@ function createStateTransfer() {
         let tables;
         try { tables = await options.project(imported); }
         catch (_) {
-            fields = await compatibleFields(source, target, { schema: options.schema,
-                allowUndeclared: layoutOnly, accept: fieldProject });
+            const roots = new Set(options.layoutRoots);
+            if (roots.size && options.schema?.type === 'any' && completeValid === 'opaque') {
+                // The complete opaque snapshot already uses the target codec as its
+                // storage contract. On failure, retry only explicitly mapped roots.
+                const properties = Object.fromEntries([...new Set([...roots, ...Object.keys(target)])].map(key => [key, { type: 'any' }]));
+                fields = await compatibleFields(source, target, { schema: { type: 'object', properties },
+                    accept: (path, value) => roots.has(path[0])
+                        ? fieldProject(path, value, true) : '目标没有可核对的表格映射，保留目标值' });
+            } else {
+                fields = await compatibleFields(source, target, { schema: options.schema,
+                    allowUndeclared: layoutOnly, accept: fieldProject });
+            }
             imported = fields.stat_data;
+            if (fields.imported.length && options.validateComplete && await options.validateComplete(imported) === 'invalid')
+                throw new Error('部分导入候选未通过目标 Schema 检查，未写入数据');
             tables = await options.project(imported);
         }
-        return { stat_data: imported, fields, tables };
+        return { stat_data: imported, fields, tables, defaults: summarizeDefaults(added, imported) };
     }
     function sheetRows(sheet) {
         const content = sheet?.content;
@@ -255,7 +351,8 @@ function createStateTransfer() {
             throw error;
         }
     }
-    return { format, archive, parse, resolveImportSchema, compatibleFields, prepareImport, matchExtras, applyExtras, assertPersistentDbVersion, verifyBackup, execute, stat, equal, equalRuntimeTables, clone };
+    return { format, archive, parse, resolveImportSchema, compatibleFields, prepareImport, tableDefaultSource, analyzedDefaultSource,
+        matchExtras, applyExtras, assertPersistentDbVersion, verifyBackup, execute, stat, equal, equalRuntimeTables, clone };
 }
 
 module.exports = createStateTransfer;

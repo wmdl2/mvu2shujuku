@@ -189,6 +189,60 @@ test('状态存档：完整候选失败后的根对象校验不构造 undefined 
     assert.deepStrictEqual(result.tables.saved, incoming);
 });
 
+test('状态存档：根 Schema 有变换时，新增固定列只拦截无法无损保存的变量组', async () => {
+    const { zod: z } = require('../src/vendor/schema-engine-libs');
+    const card = require('./synthetic-card')();
+    const initial = { 地点: '清晨', 人物: {}, 设置: { 等级: 1 } };
+    const declaration = "z.object({地点:z.string(),人物:z.record(z.string(),z.object({姓名:z.string(),联系:z.boolean()})),设置:z.object({等级:z.number()})})";
+    card.data.character_book.entries[0].content = JSON.stringify(initial);
+    card.data.first_mes = ''; card.data.alternate_greetings = [];
+    card.data.extensions.tavern_helper.scripts = [{ name: '结构', enabled: true,
+        content: `import {registerMvuSchema} from 'https://example.test/mvu_zod.js';\nregisterMvuSchema(${declaration}.transform(value => value));` }];
+    const converted = core.convert(card);
+    const layout = JSON.parse(converted.card.data.extensions.mvu2shujuku.layout);
+    const storage = require('../src/stat-storage')();
+    const writer = require('../src/extension-runtime').createCandidateBuilder({ core });
+    const before = core.statDataFromTables(layout, converted.template).stat_data;
+    const project = async value => {
+        const tables = await writer.buildUpdatedTemplateFromStat(layout, before, value, converted.template);
+        if (!transfer.equal(core.statDataFromTables(layout, tables).stat_data, value)) throw new Error('无法无损读回');
+        return tables;
+    };
+    let transforms = 0;
+    const api = require('../src/card-api')({ readMetadata: () => ({ schemaKeys: ['test'] }), isCurrent: () => true });
+    api.registerSchema(z.object({ 地点: z.string(), 人物: z.record(z.string(), z.object({ 姓名: z.string(), 联系: z.boolean() })),
+        设置: z.object({ 等级: z.number() }) }).transform(value => { transforms++; return value; }), 'test');
+    const rules = await api.stateImportRules();
+    const nativeAnalysis = await core.analyzeStateTarget(card, { requireRegistered: true });
+    const incoming = { 地点: '夜晚', 人物: { 甲: { 姓名: '甲' } }, 设置: { 等级: 4 }, 旧根: '无映射' };
+    const people = Object.values(converted.template).find(sheet => sheet.name === '人物表');
+    const columns = people.content[0].map((label, cid) => label === '联系'
+        ? { cid, name: 'lianxi', type: 'INTEGER', required: 1, dflt_value: '0' }
+        : { cid, name: cid ? label : 'row_id' });
+    for (const planner of [transfer, vm.runInNewContext('(' + factory.toString() + ')()')]) {
+        const result = await planner.prepareImport(incoming, before, { ...rules, layoutRoots: storage.mappedRoots(layout), project });
+        assert.deepStrictEqual(clone(result.stat_data), { 地点: '夜晚', 人物: {}, 设置: { 等级: 4 } });
+        assert.deepStrictEqual(clone(result.fields.imported).sort(), ['/地点', '/设置'].sort());
+        assert.deepStrictEqual(clone(result.fields.skipped).map(s => s.path), ['/人物', '/旧根']);
+        assert.deepStrictEqual(core.statDataFromTables(layout, result.tables).stat_data, clone(result.stat_data));
+        const modernInput = { 地点: '夜晚', 设置: { 等级: 4 }, 人物: { 甲: { 姓名: '甲' }, 乙: { 姓名: '乙', 联系: true } } };
+        const upgraded = await planner.prepareImport(modernInput, before, { ...rules, project,
+            targetDefaults: planner.tableDefaultSource(layout, converted.template, async () => columns) });
+        assert.equal(upgraded.fields, null);
+        assert.deepStrictEqual(clone(upgraded.stat_data.人物), { 甲: { 姓名: '甲', 联系: false }, 乙: { 姓名: '乙', 联系: true } });
+        assert(!Object.hasOwn(modernInput.人物.甲, '联系'));
+        assert.deepStrictEqual(clone(upgraded.defaults), ['人物表 · 联系 = false（1 条记录）']);
+        assert.deepStrictEqual(core.statDataFromTables(layout, upgraded.tables).stat_data, clone(upgraded.stat_data));
+        const native = await planner.prepareImport(modernInput, before, { schema: { type: 'any' }, project: () => ({}),
+            targetDefaults: planner.analyzedDefaultSource(nativeAnalysis.layout, nativeAnalysis.columns) });
+        assert.equal(native.fields, null);
+        assert.deepStrictEqual(clone(native.stat_data), clone(upgraded.stat_data));
+        assert.deepStrictEqual(clone(native.defaults), ['人物 · 联系 = false（1 条记录）']);
+    }
+    assert.strictEqual(transforms, 0);
+    assert.deepStrictEqual(before, initial);
+});
+
 
 test('状态存档：部分匹配保留新增字段，跳过改名与改类型，数组整体处理', async () => {
     const target = { 主角: { 生命: 100, 魔力: 30, 金钱: 20, 备注: '新说明' }, 队伍: [{ 姓名: '乙', 数量: 1 }] };

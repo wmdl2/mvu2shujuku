@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.8.6';
+    const VERSION = '0.8.7';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -968,6 +968,22 @@
         return checks.join('');
     }
 
+    function scalarColumnDefaultLiteral(column) {
+        const value = column.value;
+        if (column.type === 'INTEGER' || column.type === 'REAL') {
+            if (typeof value === 'boolean') return value ? '1' : '0';
+            if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+            if (typeof value === 'string' && value.trim() !== '') {
+                return Number.isFinite(Number(value)) ? String(Number(value)) : sqlTextLiteral(value);
+            }
+            // CHECK bounds can be stricter than the generic numeric fallback.
+            return String(column.range ? column.range[0] : 0);
+        }
+        let raw = value === undefined || value === null ? '' : String(value);
+        if (column.isObject && raw === '') raw = column.jsonKind === 'array' ? '[]' : '{}';
+        return sqlTextLiteral(raw);
+    }
+
     function buildDdl(group, opts = {}) {
         // 用户可关掉 DDL 里的 CHECK（数值范围/枚举/json_valid），只保留列类型与默认值。
         const includeCheck = opts.includeCheck !== false;
@@ -1022,20 +1038,7 @@
                     def += jsonPathChecksSql(c);
                 }
             } else if (c.type === 'INTEGER' || c.type === 'REAL') {
-                let defaultExpr = 0;
-                if (typeof dv === 'boolean') {
-                    defaultExpr = dv ? 1 : 0;
-                } else if (typeof dv === 'number' && Number.isFinite(dv)) {
-                    defaultExpr = dv;
-                } else if (typeof dv === 'string' && dv.trim() !== '') {
-                    const nv = Number(dv);
-                    defaultExpr = Number.isFinite(nv) ? nv : sqlTextLiteral(dv);
-                } else if (range) {
-                    // 空/缺省值不能用 0 做默认，否则 CHECK(1~100) 会在 INSERT 省略该列时失败；
-                    // 改为合法区间下限作为安全默认。
-                    defaultExpr = range[0];
-                }
-                def += ` NOT NULL DEFAULT ${defaultExpr}`;
+                def += ` NOT NULL DEFAULT ${scalarColumnDefaultLiteral(c)}`;
                 if (includeCheck && group.scalarType === 'number') def += ` CHECK(typeof(${c.ident}) IN ('integer', 'real'))`;
                 if (isKey) def += ' UNIQUE';
                 if (range && includeCheck) {
@@ -1049,7 +1052,7 @@
             } else {
                 let dvs = dv === undefined || dv === null ? '' : String(dv);
                 if (c.isObject && dvs === '') dvs = c.jsonKind === 'array' ? '[]' : '{}';
-                def += ` NOT NULL DEFAULT ${sqlTextLiteral(dvs)}`;
+                def += ` NOT NULL DEFAULT ${scalarColumnDefaultLiteral(c)}`;
                 if (isKey) def += ' UNIQUE';
                 // 整组 JSON 表的内容列：SQLite 模式下用 json_valid CHECK 保证整列 JSON 合法
                 // （updateCell/insertRow 的 SQL 由 SQLite 执行时会真正校验；native 模式不生效，见报告）
@@ -2496,7 +2499,7 @@
         for (const replacement of replacements.sort((a, b) => b.start - a.start)) text = text.slice(0, replacement.start) + replacement.value + text.slice(replacement.end);
         return { text, key, count: calls.length };
     }
-    function transformCard(card, opts = {}) {
+    function transformCard(card, opts = {}, analyzeOnly = false) {
         const report = opts.report || createReport();
         const mode = sqliteConversionMode(opts, report);
         const nameSuffix = opts.nameSuffix !== undefined ? opts.nameSuffix : '_数据库';
@@ -2773,6 +2776,17 @@
         storagePolicy = statStorage;
         const storageLayout = JSON.parse(buildLayoutJson(buildLayout(schema)));
         statStorage.initial = statStorageService.split(initvar, storageLayout, statStorage).native;
+        if (analyzeOnly) {
+            const columns = schema.filter(group => !group.vwdMetaZh).map(group => ({
+                name: group.tableName,
+                header: ['row_id', ...group.columns.map(column => column.zh)],
+                columns: [{ cid: 0, name: 'row_id' }, ...group.columns.map((column, index) => ({
+                    cid: index + 1, name: column.ident, type: column.type, required: 1,
+                    dflt_value: scalarColumnDefaultLiteral(column),
+                }))],
+            }));
+            return { layout: storageLayout, columns };
+        }
         report.note('已声明的 $ 字段保留数据库写入位置，发送当前状态时仍隐藏其值；对象内部隐藏字段随所属记录保存在完整 JSON 或扩展数据中。未映射的脚本根数据沿用原消息存储，不新增模型兜底表。');
         if ([data.first_mes, ...(data.alternate_greetings || [])].some(text => /<initvar\b/i.test(String(text || '')))) {
             report.warn('开场消息含 <initvar>：SP 独立填表会读取原始聊天正文，可能重复发送初始变量（包括已从表格隐藏的字段）。请在 SP 填表设置的标签排除规则中配置起始 <initvar、结束 </initvar>，并检查最终请求；酒馆显示正则不替代此设置。', 'template');
@@ -3218,15 +3232,25 @@
             bridgeOptions: transformed.bridgeOptions, sourceRegexScripts: transformed.sourceRegexScripts });
         return result;
     }
+    async function inspectSchemaInputs(inputs) {
+        const schemaSnapshots = [];
+        for (const item of inputs) {
+            try { schemaSnapshots.push(schemaExecutionSnapshot(item, await getSchemaExecutionService().inspect(item.source))); }
+            catch (error) { throw new Error(`Schema 隔离执行失败（脚本 ${item.index + 1}）：${error.message}`); }
+        }
+        return schemaSnapshots;
+    }
+    async function analyzeStateTarget(input, { requireRegistered = false } = {}) {
+        const card = parseCard(input);
+        const inputs = schemaExecutionInputs(card);
+        if (requireRegistered && !inputs.length) return null;
+        return transformCard(card, { schemaSnapshots: await inspectSchemaInputs(inputs) }, true);
+    }
     async function convertWithRemoteSchemas(input, opts = {}) {
         sqliteConversionMode(opts);
         const sourceCard = parseCard(input);
         const remoteSchemaSources = await getRemoteSchemaService().resolve(sourceCard, opts);
-        const schemaSnapshots = [];
-        for (const item of schemaExecutionInputs(sourceCard, remoteSchemaSources)) {
-            try { schemaSnapshots.push(schemaExecutionSnapshot(item, await getSchemaExecutionService().inspect(item.source))); }
-            catch (error) { throw new Error(`Schema 隔离执行失败（脚本 ${item.index + 1}）：${error.message}`); }
-        }
+        const schemaSnapshots = await inspectSchemaInputs(schemaExecutionInputs(sourceCard, remoteSchemaSources));
         return convert(input, { ...opts, remoteSchemaSources, schemaSnapshots }, sourceCard);
     }
 
@@ -3385,7 +3409,7 @@
             '.mvu2shujuku-chat-list { max-height: 220px; overflow: auto; margin: .5em 0; }',
             '.mvu2shujuku-chat-row { display: flex; align-items: flex-start; gap: .5em; text-align: left; margin: .4em 0; overflow-wrap: anywhere; }',
             '.mvu2shujuku-chat-row input { flex: 0 0 auto; width: auto; margin-top: .25em; }',
-            '#mvu2shujuku-chat-transfer select { width: 100%; max-width: 100%; }',
+            '#mvu2shujuku-chat-transfer select, #mvu2shujuku-chat-manager select { width: 100%; max-width: 100%; min-width: 0; }',
             '.mvu2shujuku-operation-overlay { position: fixed; inset: 0; z-index: 2147483647; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }',
             '.mvu2shujuku-operation-overlay.mvu2shujuku-migration-progress { inset: auto 12px 12px auto; width: min(90vw,420px); background: none; pointer-events: none; z-index: 1000; }',
             '.mvu2shujuku-migration-progress .mvu2shujuku-operation-box { pointer-events: auto; width: 100%; }',
@@ -3714,6 +3738,7 @@
         transformCard,
         convert,
         convertWithRemoteSchemas,
+        analyzeStateTarget,
         refreshConversion,
         assembleExtension,
         extensionManifest,

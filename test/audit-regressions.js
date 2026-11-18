@@ -296,7 +296,7 @@ test('审查：点击数据桥下载按钮得到可执行 JS 而非报告', asyn
     const box = node(), downloadBox = { appendChild(button) { buttons.push(button); } };
     const panel = { querySelector: selector => selector === '.mvu2shujuku-result' ? box : selector === '#mvu2shujuku-downloads' ? downloadBox : node() };
     const context = { hostDocument: { getElementById: () => panel, createElement: node }, PANEL_ID: 'test',
-        renderUpdateConfigEditor() {}, renderMergeSection() {}, resultView: { renderReport() {} }, chatTransferView: { setResult() {} }, toast() {}, lastResult: result, lastConversionSettings: null,
+        renderUpdateConfigEditor() {}, renderMergeSection() {}, resultView: { renderReport() {} }, chatTransferView: { setResult() {}, enabled: () => false }, toast() {}, lastResult: result, lastConversionSettings: null,
         download: (...args) => downloads.push(args) };
     vm.createContext(context);
     vm.runInContext(extract('    function renderResult(', '    function findSettingsMount('), context);
@@ -380,7 +380,7 @@ test('审查：JSON 文件刷新保留自动格式与源角色', () => {
     original.meta.sourceCharacter = { avatar: 'source.png' };
     const context = { lastInput: input, lastResult: original, getSettings: () => ({ asPng: 'auto', installMvuShim: 'auto' }), window: { MVU2SHUJUKU_CORE: core } };
     vm.createContext(context);
-    vm.runInContext(extract('    function refreshConvertedResult()', '    function updateParamSheetRows('), context);
+    vm.runInContext(extract('    function refreshConvertedResult(', '    function updateParamSheetRows('), context);
     const result = context.refreshConvertedResult();
     assert.ok(result.files.find(f => f.kind === 'card').name.endsWith('.json'));
     assert.strictEqual(result.meta.avatarBytes, undefined);

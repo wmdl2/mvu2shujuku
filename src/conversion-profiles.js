@@ -126,7 +126,17 @@ function createConversionProfiles(deps) {
         return { merged, refs };
     }
 
-    return { sheetFingerprint, captureProfile, planProfile, planManualMerge };
+    function removeExtra({ result, uid, priorRefs }) {
+        const sheet = result.template?.[uid];
+        if (!uid.startsWith('sheet_') || !sheet) throw new Error('找不到要移除的额外表');
+        const marker = (result.card.data || result.card).extensions.mvu2shujuku;
+        const mapped = new Set(JSON.parse(marker.layout || '[]').map(entry => entry.table));
+        if (mapped.has(sheet.name)) throw new Error('MVU 映射表不能作为额外表移除');
+        const template = JSON.parse(JSON.stringify(result.template));
+        delete template[uid];
+        return { template, refs: (priorRefs || []).filter(ref => ref.name !== sheet.name) };
+    }
+    return { sheetFingerprint, captureProfile, planProfile, planManualMerge, removeExtra };
 }
 
 module.exports = createConversionProfiles;

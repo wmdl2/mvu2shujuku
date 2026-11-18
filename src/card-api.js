@@ -120,6 +120,7 @@ function createCardApi(options) {
                 if (def.type === 'object') schema = Object.hasOwn(def.shape, key) ? def.shape[key] : def.catchall;
                 else if (def.type === 'record') schema = def.valueType;
                 else return null;
+                if (!schema) return undefined;
             }
             return schema;
         }
@@ -129,19 +130,24 @@ function createCardApi(options) {
             schema: registered.map(s => shape(s)).find(Boolean),
             async validateComplete(value) {
                 assertCurrent();
+                let opaque = false;
                 for (const root of registered) {
-                    if (typeof root === 'function' || !pure(root, value)) return 'opaque';
+                    if (typeof root === 'function' || !pure(root, value)) { opaque = true; continue; }
                     const parsed = typeof root.safeParseAsync === 'function' ? await root.safeParseAsync(clone(value)) : root.safeParse(clone(value));
                     assertCurrent();
                     if (!parsed.success) return 'invalid';
                 }
-                return 'valid';
+                return opaque ? 'opaque' : 'valid';
             },
-            async accept(path, value) {
+            async accept(path, value, { allowOpaque = false } = {}) {
                 assertCurrent();
                 for (const root of registered) {
                     const node = typeof root === 'function' ? null : locate(root, path);
-                    if (!node || !pure(node, value)) return '目标 Schema 含无法安全独立校验的规则，保留目标值';
+                    if (node === undefined) return '目标 Schema 没有同路径字段声明，保留目标值';
+                    if (!node || !pure(node, value)) {
+                        if (allowOpaque) continue;
+                        return '目标 Schema 含无法安全独立校验的规则，保留目标值';
+                    }
                     const parsed = typeof node.safeParseAsync === 'function' ? await node.safeParseAsync(clone(value)) : node.safeParse(clone(value));
                     assertCurrent();
                     if (!parsed.success || canonical(parsed.data) !== canonical(value)) return '值不符合目标 Schema 或需要变换，保留目标值';

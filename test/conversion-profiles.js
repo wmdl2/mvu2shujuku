@@ -14,6 +14,18 @@ const baseTemplate = () => ({
 });
 const ref = (source, uid, name, fingerprint = '') => ({ source: { value: source }, uid, name, fingerprint });
 const tools = readTemplateSource => factory({ core, resultView: createResultView(), readTemplateSource, listSheets: sheets });
+test('转换配置：移除额外表同步来源引用，拒绝移除MVU映射表', () => {
+    const result = core.convert(require('./synthetic-card')());
+    const mapped = Object.keys(result.template).find(key => key.startsWith('sheet_'));
+    result.template.sheet_extra = { uid: 'sheet_extra', name: '额外纪要', content: [['内容']] };
+    const refs = [ref('global', 'sheet_same', '额外纪要'), ref('other', 'sheet_same', '另一个额外表')];
+    const removed = tools().removeExtra({ result, uid: 'sheet_extra', priorRefs: refs });
+    assert(!removed.template.sheet_extra); assert(result.template.sheet_extra, '计划不直接改原结果');
+    assert.equal(removed.refs.length, 1); assert.equal(removed.refs[0].name, '另一个额外表');
+    const refreshed = core.refreshConversion(result, { template: removed.template });
+    assert(!refreshed.meta.tableNames.includes('额外纪要'));
+    assert.throws(() => tools().removeExtra({ result, uid: mapped, priorRefs: refs }), /MVU 映射表/);
+});
 
 test('配置预设：用户指定频率优先于新生成只读表的默认零频率', async () => {
     const result = core.convert({ name: '只读配置', character_book: { entries: [

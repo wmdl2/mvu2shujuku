@@ -38,6 +38,13 @@ function fixture() {
     return { source, initial, extra, extraKey, convert };
 }
 module.exports = async function stateTransferHost({ page, runtimeTest, setStorageMode, assertStorageMode, openState, waitCommittedGold, record, work }) {
+    if (process.env.MVU_TRANSFER_DIAG === '1') {
+        await page.evaluate(() => { window.__mvu2shujukuDebug = true; });
+        page.on('console', message => {
+            if (message.text().includes('状态存档读回不一致')) message.args().at(-1).jsonValue()
+                .then(value => fs.writeFileSync(path.join(work, 'migration-readback-diff.json'), JSON.stringify(value))).catch(() => {});
+        });
+    }
     const f = fixture();
     await setStorageMode(page, 'sqlite');
     const closeDatabase = page.locator('#acu-app-v2 .acu-v2-app__close');
@@ -70,6 +77,10 @@ module.exports = async function stateTransferHost({ page, runtimeTest, setStorag
         return JSON.parse(file);
     }
     async function importState(archive, label, accept = true) {
+        if (process.env.MVU_TRANSFER_DIAG === '1') await page.evaluate(() => {
+            SillyTavern.getContext().extensionSettings.mvu2shujuku.debug = true;
+            window.__mvu2shujukuDebug = true;
+        });
         if (!await page.locator('#mvu2shujuku-export-state').isVisible()) await panel();
         const before = await page.evaluate(() => JSON.parse(JSON.stringify(SillyTavern.getContext().chat)));
         fs.writeFileSync(path.join(work, 'migration-' + label + '-before.json'), JSON.stringify(await page.evaluate(() => ({
@@ -106,7 +117,7 @@ module.exports = async function stateTransferHost({ page, runtimeTest, setStorag
         const card = require('./synthetic-card')();
         card.data.name = f.source.data.name + '-普通-' + label;
         card.data.first_mes = '普通 MVU 存储 API 验收。';
-        card.data.alternate_greetings = []; card.data.character_book.entries = [];
+        card.data.alternate_greetings = []; delete card.data.character_book;
         const avatar = await page.evaluate(async card => {
             const ctx = SillyTavern.getContext(), form = new FormData();
             form.append('avatar', new File([JSON.stringify(card)], 'native.json', { type: 'application/json' })); form.append('file_type', 'json');

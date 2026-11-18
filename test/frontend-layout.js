@@ -53,6 +53,19 @@ async function main() {
                 await new Promise(resolve => setTimeout(resolve, 0));
                 panel.querySelector('[data-chat-all]').click();
                 if (migration.selection().chats.length !== 2) throw Error('多选聊天结果不完整');
+                const manager = (0, eval)('(' + chatViewSource + ')')({ document, standalone: true, currentAvatar: () => 'old.png',
+                    listCharacters: () => [{ avatar: 'old.png', name: '原始角色卡' }, { avatar: 'new.png', name: '很长很长的新版本目标角色卡用于窄屏选择' }],
+                    listChats: async () => [{ file_name: 'A-很长很长的历史聊天名称用于检查窄屏排版.jsonl' }, { file_name: 'B.jsonl' }],
+                    onRun: async () => {}, notify: text => { throw Error(text); } });
+                const managerRoot = panel.querySelector('#mvu2shujuku-chat-manager');
+                manager.mount(managerRoot); managerRoot.querySelector('details').open = true;
+                managerRoot.querySelector('details').dispatchEvent(new Event('toggle'));
+                await new Promise(resolve => setTimeout(resolve, 0));
+                managerRoot.querySelector('[data-chat-target]').value = 'new.png';
+                managerRoot.querySelector('[data-chat-all]').click();
+                if (manager.selection().target.avatar !== 'new.png' || manager.selection().chats.length !== 2) throw Error('常驻入口需独立于转换结果');
+                manager.complete(['B.jsonl']);
+                if (manager.selection().chats.length !== 1) throw Error('成功项取消选择，未完成项保留');
                 panel.querySelector('#mvu2shujuku-file-area').style.display = '';
                 panel.querySelector('#mvu2shujuku-char-area').style.display = 'none';
             }, { viewSource: resultView.toString(), settingsSource: settingsView.toString(), chatViewSource: chatTransferView.toString(),
@@ -61,12 +74,14 @@ async function main() {
             const dimensions = await page.locator('.mvu2shujuku-param-editor').evaluate(node => {
                 const grid = node.querySelector('.mvu2shujuku-param-grid');
                 const migration = document.querySelector('#mvu2shujuku-chat-transfer');
+                const manager = document.querySelector('#mvu2shujuku-chat-manager');
                 const numberStyles = [...node.querySelectorAll('input[type="number"]')].map(input => {
                     const style = getComputedStyle(input);
                     return JSON.stringify(['backgroundColor', 'color', 'borderTopColor', 'borderRadius', 'paddingTop', 'fontSize', 'height'].map(key => style[key]));
                 });
                 return { width: node.clientWidth, scrollWidth: node.scrollWidth, gridWidth: grid.clientWidth, gridScrollWidth: grid.scrollWidth,
                     migrationWidth: migration.clientWidth, migrationScrollWidth: migration.scrollWidth,
+                    managerWidth: manager.clientWidth, managerScrollWidth: manager.scrollWidth,
                     numberStyleCount: new Set(numberStyles).size, explanationRemoved: !node.textContent.includes('世界书注入与自动更新有什么区别') };
             });
             assert.strictEqual(await page.locator('#mvu2shujuku-settings').evaluate(node =>
@@ -128,6 +143,7 @@ async function main() {
             const filename = 'frontend-' + theme.name + '-' + width + '.png';
             await page.locator('.mvu2shujuku-result').screenshot({ path: path.join(work, filename) });
             await page.locator('#mvu2shujuku-chat-transfer').screenshot({ path: path.join(work, 'chat-transfer-' + theme.name + '-' + width + '.png') });
+            await page.locator('#mvu2shujuku-chat-manager').screenshot({ path: path.join(work, 'chat-manager-' + theme.name + '-' + width + '.png') });
             results.push({ theme: theme.name, viewport, container: width, ...dimensions, filename });
         }
         fs.writeFileSync(path.join(work, 'results.json'), JSON.stringify({ results, errors }, null, 2));
@@ -136,6 +152,7 @@ async function main() {
         for (const result of results) {
             assert.ok(result.scrollWidth <= result.width + 1 && result.gridScrollWidth <= result.gridWidth + 1, JSON.stringify(result));
             assert.ok(result.migrationScrollWidth <= result.migrationWidth + 1, JSON.stringify(result));
+            assert.ok(result.managerWidth > 0 && result.managerScrollWidth <= result.managerWidth + 1, JSON.stringify(result));
             assert.strictEqual(result.numberStyleCount, 1, '批量与逐表数值框必须一致');
             assert.strictEqual(result.explanationRemoved, true);
         }
