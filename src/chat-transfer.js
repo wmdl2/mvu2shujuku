@@ -15,7 +15,7 @@ function createChatTransfer() {
         }
         return result;
     }
-    function parse(jsonl) {
+    function parse(jsonl, allowEmpty = false) {
         const lines = String(jsonl || '').replace(/^\uFEFF/, '').split(/\r?\n/).filter(line => line.trim());
         const data = lines.map((line, i) => {
             try { return JSON.parse(line); }
@@ -25,7 +25,7 @@ function createChatTransfer() {
         if (!object(header) || !['user_name', 'name', 'chat_metadata'].some(key => Object.prototype.hasOwnProperty.call(header, key))) throw new Error('聊天缺少有效的文件头');
         if (header.chat_metadata == null) header.chat_metadata = {};
         if (!object(header.chat_metadata)) throw new Error('聊天的 chat_metadata 不是对象');
-        if (!data.length || data.some(message => !object(message) || typeof message.mes !== 'string' || typeof message.is_user !== 'boolean'))
+        if ((!allowEmpty && !data.length) || data.some(message => !object(message) || typeof message.mes !== 'string' || typeof message.is_user !== 'boolean'))
             throw new Error('聊天没有可复制的完整消息');
         return { header, messages: data };
     }
@@ -70,7 +70,7 @@ function createChatTransfer() {
         });
         const reboundKeys = targetKeys.map(key => bindings.get(key) || key);
         if (incompatible.length || new Set(reboundKeys).size !== reboundKeys.length || typeof isolationKey !== 'string') return { preserve: false,
-            reason: '来源与目标的表身份、列结构或隔离来源无法对应；仅迁移兼容数据，不继承原数据库历史及填表进度。' };
+            reason: '整套数据库历史无法直接继承，将分别检查各表的内容和填表进度。' };
         // The host normalizes converter template keys on import. Rebind the new
         // template to unambiguous saved identities; never rewrite opaque frames.
         const rebound = {};
@@ -120,15 +120,36 @@ function createChatTransfer() {
         });
         return copy;
     }
-    function finish(source, saved, index, token) {
+    function seedNative(seed, snapshot) {
+        const source = snapshot.chat[0];
+        for (const key of Object.keys(snapshot.metadata).filter(databaseKey)) seed.header.chat_metadata[key] = clone(snapshot.metadata[key]);
+        const databaseKeys = Object.keys(source).filter(databaseKey);
+        if (databaseKeys.length && seed.messages[0].is_user) throw new Error('原聊天首楼位置与目标数据库初始化位置不相容');
+        for (const key of databaseKeys) seed.messages[0][key] = clone(source[key]);
+        const vars = {};
+        for (const key of mvuKeys) if (snapshot.mvu[key] !== undefined) vars[key] = clone(snapshot.mvu[key]);
+        if (snapshot.variableOption.type === 'chat') Object.assign(seed.header.chat_metadata.variables ||= {}, vars);
+        else {
+            const row = seed.messages.findLast(message => !message.is_user && !message.is_system);
+            if (!row) throw new Error('来源没有可写的 AI 消息');
+            row.variables[Number(row.swipe_id || 0)] = vars;
+        }
+    }
+    function finish(source, saved, index, token, snapshot) {
         if (source.messages.length !== saved.messages.length || !Number.isInteger(index) || index < 0 || index >= source.messages.length)
             throw new Error('准备聊天的楼层与原聊天不一致，未恢复正文');
         const original = source.messages[index], persisted = saved.messages[index];
         const swipe = Number(original.swipe_id || 0);
         if (original.is_user || original.is_system || Number(persisted.swipe_id || 0) !== swipe)
             throw new Error('状态来源楼层或分支已改变，未恢复正文');
-        const carrierKeys = Object.keys(persisted).filter(databaseKey);
-        if (!carrierKeys.length || !object(persisted.variables?.[swipe])) throw new Error('数据库未生成可核对的状态载体，未恢复正文');
+        const native = snapshot?.converted === false;
+        const scope = snapshot?.variableOption?.type;
+        if (native) {
+            const data = nativeMvu(saved);
+            if (data.scope !== scope || data.index !== index) throw new Error('普通 MVU 状态未保存到目标位置，未恢复正文');
+        } else if (!Object.keys(persisted).some(databaseKey) || !object(persisted.variables?.[swipe])) {
+            throw new Error('数据库未生成可核对的状态载体，未恢复正文');
+        }
         const header = clone(saved.header);
         const marker = header.chat_metadata?.mvu2shujuku_chat_transfer;
         if (marker?.token !== token || marker.status !== 'preparing') throw new Error('目标聊天不属于本次迁移');
@@ -137,10 +158,12 @@ function createChatTransfer() {
         // Keep every target carrier at its original index, without interpreting frames.
         const messages = source.messages.map((row, messageIndex) => {
             const restored = cleanObject(row);
+            if (native && Array.isArray(restored.variables)) restored.variables = restored.variables.map(data => cleanObject(data, true));
             for (const key of Object.keys(saved.messages[messageIndex]).filter(databaseKey))
                 restored[key] = clone(saved.messages[messageIndex][key]);
             return restored;
         });
+        if (native && scope === 'chat') return { header, messages };
         const target = messages[index];
         const variables = clone(target.variables || []);
         const data = cleanObject(variables[swipe], true);
@@ -170,9 +193,62 @@ function createChatTransfer() {
         }
         return false;
     }
+    // Read the scheduler's persisted progress evidence. A data edit by itself never counts as filling a floor.
+    function tableCoverage(messages, index, tables, isolationKey) {
+        const boundary = messages.slice(0, index + 1);
+        if (!supportsCoverage(boundary, isolationKey)) return null;
+        const keys = Object.keys(tables || {}).filter(key => key.startsWith('sheet_'));
+        const floors = Object.fromEntries(keys.map(key => [key, 0]));
+        const tracked = new Map();
+        const maxFloor = boundary.filter(message => !message.is_user).length;
+        const hasKey = (list, key) => Array.isArray(list) && list.includes(key);
+        const tracks = (entry, key) => hasKey(entry?.filledSheetKeys, key) || hasKey(entry?.groupKeys, key);
+        const trackedFloor = value => Number.isSafeInteger(value) && value > 0 && value <= maxFloor ? value : 0;
+        let aiFloor = 0;
+        for (const message of boundary) {
+            if (message.is_user) continue;
+            aiFloor++;
+            const tag = message.TavernDB_ACU_IsolatedData?.[isolationKey];
+            if (tag == null) {
+                if (message.TavernDB_ACU_StorageVersion || message.TavernDB_ACU_ModifiedKeys?.length || message.TavernDB_ACU_UpdateGroupKeys?.length) return null;
+                continue;
+            }
+            if (!supportsCoverage([message], isolationKey)) return null;
+            const frame = tag.storageFrame, full = frame.checkpoint;
+            const validFloor = value => Number.isSafeInteger(value) && value > 0 && value <= aiFloor ? value : 0;
+            for (const key of keys) {
+                const sheet = frame.perSheetCheckpoints?.[key];
+                const summaries = [full?.scheduleSummary?.[key], sheet?.scheduleSummary];
+                const restore = full?.reason === 'import' && full.data[key] && frame.logEntries.some(entry => entry.source === 'import'
+                    && entry.operations?.some(op => op.kind === 'data_replace' && op.reason === 'checkpoint_fallback' && op.data?.[key]));
+                floors[key] = Math.max(floors[key], restore ? aiFloor : 0, ...summaries.map(summary => validFloor(summary?.lastImportBaselineAiFloor)));
+                let updated = Math.max(...summaries.map(summary => trackedFloor(summary?.lastFilledAiFloor)));
+                if (tracks(full?.event, key) || tracks(sheet?.event, key)) updated = Math.max(updated, aiFloor);
+                for (const entry of frame.logEntries) {
+                    if (tracks(entry, key)) updated = Math.max(updated, trackedFloor(Number(entry.aiFloor)) || aiFloor);
+                }
+                if (!updated && (hasKey(tag.modifiedKeys, key) || hasKey(tag.updateGroupKeys, key))) updated = aiFloor;
+                if (updated) tracked.set(key, updated);
+            }
+        }
+        for (const key of keys) floors[key] = Math.max(floors[key], tracked.get(key) || 0);
+        return floors;
+    }
+    function extraCoverage(extras, tables, layout, floors) {
+        const mapped = new Set(layout.map(entry => entry.table));
+        const candidates = Object.entries(tables || {}).filter(([key, table]) => key.startsWith('sheet_') && !mapped.has(table?.name));
+        const proposed = extras.map(source => {
+            const sameId = candidates.filter(([key, table]) => key === source.key || table?.uid === source.uid);
+            const matches = sameId.length ? sameId : candidates.filter(([, table]) => table?.name === source.name);
+            return { name: source.name, key: matches.length === 1 ? matches[0][0] : null, floor: floors?.[source.key] };
+        });
+        const counts = new Map();
+        for (const { key } of proposed) if (key) counts.set(key, (counts.get(key) || 0) + 1);
+        return proposed.map(entry => ({ ...entry, key: counts.get(entry.key) === 1 ? entry.key : null }));
+    }
     // Offline adapter for the V2 wire format. Only a new copy is
     // changed; replay, scheduling and subsequent writes remain host-owned.
-    function coverImportedTables(chat, index, tables, names, isolationKey) {
+    function coverImportedTables(chat, index, tables, names, isolationKey, extras = []) {
         if (!supportsCoverage([chat.messages[index]], isolationKey)) throw new Error('迁移楼缺少兼容的 V2 数据载体或检查点格式');
         const copy = clone(chat), row = copy.messages[index];
         const frame = row?.TavernDB_ACU_IsolatedData?.[isolationKey]?.storageFrame;
@@ -185,10 +261,12 @@ function createChatTransfer() {
             return matches[0];
         });
         const aiFloor = copy.messages.slice(0, index + 1).filter(message => !message.is_user).length;
-        for (const key of keys) {
+        const coverage = [...keys.map(key => ({ key, floor: aiFloor })), ...extras.filter(entry => entry.floor > 0)];
+        for (const { key, floor } of coverage) {
+            if (!tables[key] || !Number.isSafeInteger(floor) || floor > aiFloor) throw new Error('无法核对导入覆盖楼层：' + key);
             if (frame.checkpoint?.kind === 'full' && frame.checkpoint.data?.[key]) {
                 frame.checkpoint.scheduleSummary ||= {};
-                frame.checkpoint.scheduleSummary[key] = { ...frame.checkpoint.scheduleSummary[key], lastImportBaselineAiFloor: aiFloor };
+                frame.checkpoint.scheduleSummary[key] = { ...frame.checkpoint.scheduleSummary[key], lastImportBaselineAiFloor: floor };
             } else {
                 frame.perSheetCheckpoints ||= {};
                 const current = frame.perSheetCheckpoints[key];
@@ -196,7 +274,7 @@ function createChatTransfer() {
                 const checkpoint = current || { kind: 'sheet_full', createdAt: Date.now(), reason: 'import', sheetKey: key,
                     data: clone(tables[key]), baseRevision: frame.headRevision ?? null,
                     timeline: { kind: 'sheet_rebase', activateAtMessageIndex: index, afterSeq: sequences.at(-1) || 0 } };
-                checkpoint.scheduleSummary = { ...checkpoint.scheduleSummary, lastImportBaselineAiFloor: aiFloor };
+                checkpoint.scheduleSummary = { ...checkpoint.scheduleSummary, lastImportBaselineAiFloor: floor };
                 frame.perSheetCheckpoints[key] = checkpoint;
             }
         }
@@ -208,10 +286,10 @@ function createChatTransfer() {
         return { partial: !!plan.fields?.partial,
             imported: plan.fields?.imported || null, skipped: plan.fields?.skipped || [], retained: plan.fields?.retained || [],
             defaults: plan.defaults || [],
-            coverageWarnings: plan.coverage?.warnings || [],
+            coverageWarnings: plan.coverage?.warnings || [], extraProgress: plan.extraProgress || [],
             extras: (plan.extras?.matches || []).map(item => item.name), extraSkipped: plan.extras?.skipped || [] };
     }
     function sameSummary(a, b) { return JSON.stringify(summary(a)) === JSON.stringify(summary(b)); }
-    return { parse, stringify, nativeMvu, selected, databasePlan, seed, readerCopy, finish, supportsCoverage, coverImportedTables, summary, sameSummary };
+    return { parse, stringify, nativeMvu, selected, databasePlan, seed, seedNative, readerCopy, finish, supportsCoverage, tableCoverage, extraCoverage, coverImportedTables, summary, sameSummary };
 }
 module.exports = createChatTransfer;

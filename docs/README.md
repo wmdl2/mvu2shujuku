@@ -43,7 +43,7 @@
 - 本版实施界面：[设置面板与转换结果工作流](validation/2026-11-01-frontend-workflow.md)。包括重转保护、选项生效一致性和真实浏览器组件验证。
 
 - 本版实施修复：[Schema 默认值与延后初始化](validation/2026-10-31-schema-defaults-and-initialization.md)。记录默认值重复编码、初始化并发修复及受测范围，不代表已经发布。
-- 最近发布：[v0.8.7 聊天迁移验收](validation/2026-11-17-chat-transfer-isolation.md)；前版：[v0.8.6 收尾](validation/2026-11-15-release-v0.8.6.md)、[v0.8.5 收尾](validation/2026-11-02-release-v0.8.5.md)。
+- 最近发布：[v0.8.8 四向聊天迁移](validation/2026-11-19-release-v0.8.8.md)；前版：[v0.8.7 聊天迁移验收](validation/2026-11-17-chat-transfer-isolation.md)、[v0.8.6 收尾](validation/2026-11-15-release-v0.8.6.md)。
 - 更早证据按需检索[历史验证索引](validation/README.md)及[性能测量](benchmarks/)。日期记录描述当时受测版本，不能直接当作当前待办或当前规范。
 
 ## 更新与读取

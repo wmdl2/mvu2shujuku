@@ -20,7 +20,7 @@ function createChatTransferRunner(tools) {
                 try {
                     const prepared = await host.prepareChat(row.item, target);
                     pending.set(row, prepared);
-                    row.preview = tools.summary(await host.prepareImport(row.item.archive));
+                    row.preview = tools.summary(await host.prepareImport(row.item.archive, row.item.database));
                 }
                 catch (error) { if (error.chatTransferAbort) throw error; row.error = error.message; }
             }
@@ -35,12 +35,12 @@ function createChatTransferRunner(tools) {
                 const current = pending.get(row);
                 try {
                     await host.openPrepared(current);
-                    const plan = await host.prepareImport(row.item.archive);
+                    const plan = await host.prepareImport(row.item.archive, row.item.database);
                     if (JSON.stringify(tools.summary(plan)) !== JSON.stringify(row.preview)) throw new Error('兼容检查结果在确认后发生变化，未覆盖');
                     plan.backup = false; // Only a newly-created, empty preparation chat is modified.
                     await host.commit(plan);
                     const saved = await host.exportPrepared(current, plan);
-                    let final = tools.finish(row.item.source, saved, plan.snapshot.index, current.token);
+                    let final = tools.finish(row.item.source, saved, plan.snapshot.index, current.token, plan.snapshot);
                     if (host.coverImportedTables) final = await host.coverImportedTables(final, plan);
                     await host.replaceChat(current, final);
                     await host.verify(current, plan.importedStat, final);

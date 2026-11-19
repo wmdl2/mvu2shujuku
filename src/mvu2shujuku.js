@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.8.7';
+    const VERSION = '0.8.8';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -3411,8 +3411,9 @@
             '.mvu2shujuku-chat-row input { flex: 0 0 auto; width: auto; margin-top: .25em; }',
             '#mvu2shujuku-chat-transfer select, #mvu2shujuku-chat-manager select { width: 100%; max-width: 100%; min-width: 0; }',
             '.mvu2shujuku-operation-overlay { position: fixed; inset: 0; z-index: 2147483647; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }',
-            '.mvu2shujuku-operation-overlay.mvu2shujuku-migration-progress { inset: auto 12px 12px auto; width: min(90vw,420px); background: none; pointer-events: none; z-index: 1000; }',
-            '.mvu2shujuku-migration-progress .mvu2shujuku-operation-box { pointer-events: auto; width: 100%; }',
+            '.mvu2shujuku-operation-overlay.mvu2shujuku-migration-progress { inset: auto 12px 12px auto; width: min(420px, calc(100% - 24px)); background: none; pointer-events: none; z-index: 1000; }',
+            '.mvu2shujuku-migration-progress .mvu2shujuku-operation-box { pointer-events: auto; width: 100%; max-width: none; box-sizing: border-box; padding: clamp(12px, 4vw, 20px); max-height: calc(100dvh - 24px); overflow-y: auto; overflow-wrap: anywhere; }',
+            '.mvu2shujuku-migration-progress .menu_button { width: fit-content; max-width: 100%; min-height: 44px; margin: 12px auto 0; padding: 6px 14px; font: inherit; }',
             '.mvu2shujuku-operation-box { max-width: min(420px, 90vw); padding: 24px; border-radius: 12px; background: var(--SmartThemeBlurTintColor, #222); color: var(--SmartThemeBodyColor, #eee); border: 1px solid var(--SmartThemeBorderColor, #555); text-align: center; }',
             '.mvu2shujuku-operation-box strong { display: block; margin: 12px 0; }',
             '.mvu2shujuku-operation-box p { margin: 0; }',

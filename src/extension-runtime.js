@@ -5858,6 +5858,7 @@ function installExtensionRuntime(window) {
         tools: chatTransferTools, runner: window.MVU2SHUJUKU_CORE.getChatTransferRunnerFactory()(chatTransferTools),
         equalStat: (a, b) => window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash.isEqual(a, b),
         readFullCharacter: character => fetchFullCharacter(character, true), assertIdle: assertStateTransferIdle,
+        readTargetHistoryContext: snapshot => snapshot.api?.getTableHistoryContext?.(),
         readTargetTemplate(card) {
             const entry = (card.character_book?.entries || []).find(e => Array.isArray(e.keys) && e.keys.includes(DB_TEMPLATE_KEY));
             return entry?.content ? JSON.parse(mvu2shujukuDecodeB64(entry.content)) : null;
@@ -5917,18 +5918,35 @@ function installExtensionRuntime(window) {
             assertRuntimeSession(session);
         },
         captureSnapshot: captureStateTransferSnapshot,
-        async prepareImport(input) {
+        async prepareImport(input, database) {
             const plan = await prepareStateTransferImportOnce(input);
             plan.chatCopy = true;
-            if (plan.coverage.enabled) {
-                plan.chatCoverage = plan.coverage;
+            const { snapshot } = plan;
+            const history = snapshot.api?.getTableHistoryContext?.();
+            const isolationKey = history?.version === 1 ? history.isolationKey : null;
+            const canCarry = chatTransferTools.supportsCoverage(snapshot.chat, isolationKey);
+            const extraFloors = [];
+            plan.extraProgress = chatTransferTools.extraCoverage(plan.archive.extraTables, snapshot.tables, snapshot.layout, database?.coverage)
+                .map(({ name, key, floor }) => {
+                    if (!key) return { name, message: '未找到可唯一对应的目标表，无法迁入进度。' };
+                    if (database?.preserve && floor === undefined) return { name, message: '沿用副本中的原填表进度。' };
+                    if (floor === undefined) return { name, message: '无法核对来源的填表进度。' };
+                    if (!floor) return { name, message: '来源尚未填表，保留这一进度。' };
+                    if (!database?.preserve && !canCarry)
+                        throw new Error(name + '：目标存档无法保留来源第 ' + floor + ' 个 AI 楼的填表进度，已跳过此聊天。');
+                    if (!database?.preserve) extraFloors.push({ key, floor });
+                    return { name, message: '沿用到第 ' + floor + ' 个 AI 楼的填表进度。' };
+                });
+            if (plan.coverage.enabled || extraFloors.length) {
+                plan.chatCoverage = { isolationKey, extras: extraFloors };
                 plan.coverage.warnings = [];
+                if (extraFloors.length) plan.writeTables = true;
             }
             return plan;
         },
         coverImportedTables(chat, plan) {
             return plan.chatCoverage ? chatTransferTools.coverImportedTables(chat, plan.snapshot.index, plan.tables,
-                plan.snapshot.layout.map(entry => entry.table), plan.chatCoverage.isolationKey) : chat;
+                plan.snapshot.layout.map(entry => entry.table), plan.chatCoverage.isolationKey, plan.chatCoverage.extras) : chat;
         },
         commitImport: commitStateTransferImport,
         async confirm(title, text, okButton) {
@@ -5959,8 +5977,8 @@ function installExtensionRuntime(window) {
             if (standalone) {
                 const avatar = selection.target?.avatar;
                 const card = await fetchFullCharacter({ avatar }, true);
-                if (!card || !isConvertedMvuCard(card)) throw new Error('目标必须是已保存的 MVU 转换卡');
-                result = { card, meta: { savedAvatar: avatar } };
+                if (!card) throw new Error('找不到已保存的目标角色卡');
+                result = { card, meta: { savedAvatar: avatar, nativeTarget: !isConvertedMvuCard(card) } };
             }
             const outcome = await chatTransferHost.run(result, selection, operation);
             console.debug('[M2SJK]聊天迁移耗时', outcome.timings);
@@ -6022,9 +6040,10 @@ function installExtensionRuntime(window) {
         const converted = isConvertedMvuCard(ch), api = getAcuApi();
         if (converted && (!activeLayout || activeLayoutCardKey !== cardCacheKey(ch))) throw new Error('转换卡布局尚未就绪，请稍后重试');
         const expectedLayout = converted ? stateTransfer.clone(activeLayout) : null;
-        const hasDatabase = converted || context.chatMetadata?.TavernDB_ACU_ScopedConfig || context.chat.some(row => row?.TavernDB_ACU_IsolatedData);
+        const hasDatabase = converted || Object.keys(context.chatMetadata || context.chat_metadata || {}).some(key => key.startsWith('TavernDB_ACU_'))
+            || context.chat.some(row => Object.keys(row || {}).some(key => key.startsWith('TavernDB_ACU_')));
         const template = hasDatabase && api?.getTableTemplate ? await api.getTableTemplate({ scope: 'chat' }) : null;
-        const tables = stateTransfer.clone(await waitStateTransferTableRead(api, session, stateTransferTableNames(template), expectedLayout));
+        const tables = hasDatabase ? stateTransfer.clone(await waitStateTransferTableRead(api, session, stateTransferTableNames(template), expectedLayout)) : {};
         assertStateTransferIdle();
         let raw = stateTransfer.clone(helper.getVariables(variableOption));
         let mvu, layout = [];
@@ -6054,7 +6073,7 @@ function installExtensionRuntime(window) {
         const metadata = latestContext.chatMetadata || latestContext.chat_metadata || {};
         const originalName = charExtensions(ch)?.mvu2shujuku?.originalName || characterDisplayName(ch) || context.name2 || '';
         assertRuntimeSession(session);
-        return { session, helper, index, variableOption, api, converted, layout, raw, mvu, tables, template: stateTransfer.clone(template || null),
+        return { session, helper, index, variableOption, api: hasDatabase ? api : null, converted, layout, raw, mvu, tables, template: stateTransfer.clone(template || null),
             chat: stateTransfer.clone(latestContext.chat), metadata: stateTransfer.clone(metadata),
             source: { character: originalName, chat: String(context.chatId), message: index, swipe: Number(context.chat[index].swipe_id || 0),
                 backend: converted ? 'converted' : 'mvu', scope: variableOption.type, converterVersion: window.MVU2SHUJUKU_CORE.VERSION },

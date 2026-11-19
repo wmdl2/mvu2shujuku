@@ -295,6 +295,65 @@ module.exports = async function ({ page, runtimeTest, setStorageMode, assertStor
     }, { avatar: state.avatar, names: sourceNames });
     assert.deepEqual(cancelledSource, before);
     record('chat-transfer-cancel-source-intact', { sourceOpens, originalFilesUnchanged: true });
+    if (process.env.MVU_CHAT_TRANSFER_NATIVE_TARGET === '1') {
+        await cancelled.locator('.popup-button-ok').click();
+        const native = require('./synthetic-card')();
+        native.data.name = '普通MVU迁移目标-' + Date.now();
+        native.data.alternate_greetings = [];
+        delete native.data.character_book;
+        const avatars = await page.evaluate(async card => {
+            const ctx = SillyTavern.getContext(), versions = [];
+            for (const suffix of ['旧版', '新版']) {
+                const next = structuredClone(card); next.data.name += suffix;
+                const stat_data = { 状态: { 生命: 100, 金币: 3, ...(suffix === '新版' ? { 目标默认: 19 } : {}) }, 背包: ['目标初始值'] };
+                next.data.first_mes = '<initvar>' + JSON.stringify(stat_data) + '</initvar>\n目标开场，初始化由夹具模拟。';
+                const form = new FormData();
+                form.append('avatar', new File([JSON.stringify(next)], 'native.json', { type: 'application/json' }));
+                form.append('file_type', 'json');
+                const response = await fetch('/api/characters/import', { method: 'POST', headers: ctx.getRequestHeaders({ omitContentType: true }), body: form });
+                const saved = await response.json();
+                if (!saved.file_name) throw new Error('普通 MVU 目标夹具导入失败');
+                versions.push({ avatar: saved.file_name + '.png', first: next.data.first_mes, stat_data });
+            }
+            await ctx.getCharacters();
+            ctx.eventSource.on(ctx.eventTypes.CHAT_CHANGED, () => {
+                const active = SillyTavern.getContext();
+                const version = versions.find(entry => entry.avatar === active.characters[active.characterId]?.avatar);
+                if (!version || active.chat[0]?.mes !== version.first || active.chat.length !== 1) return;
+                const stat_data = structuredClone(version.stat_data);
+                const schema = window.MVU2SHUJUKU_CORE.getMvuSchemaFactory()(window.__MVU2SHUJUKU_SCHEMA_ENGINE_LIBS__.lodash).generateSchema(structuredClone(stat_data));
+                TavernHelper.replaceVariables({ stat_data, schema, initialized_lorebooks: {} }, { type: 'message', message_id: 0 });
+            });
+            return versions.map(version => version.avatar);
+        }, native);
+        await manager.locator('[data-chat-refresh]').evaluate(button => button.click());
+        let sourceAvatar = state.avatar, filename = sourceNames[0];
+        for (const [index, avatar] of avatars.entries()) {
+            await manager.locator('[data-chat-target]').selectOption(avatar, { force: true });
+            await manager.locator('[data-chat-source]').selectOption(sourceAvatar, { force: true });
+            await page.waitForFunction(filename => [...document.querySelectorAll('#mvu2shujuku-chat-manager [data-chat-list] input')].some(node => node.getAttribute('aria-label') === filename), filename);
+            await manager.locator('[data-chat-list] input').evaluateAll((nodes, filename) => {
+                for (const node of nodes) if (node.checked !== (node.getAttribute('aria-label') === filename)) node.click();
+            }, filename);
+            await manager.locator('[data-chat-run]').evaluate(button => button.click());
+            await page.getByRole('button', { name: '迁移兼容聊天', exact: true }).click({ timeout: 60000 });
+            const outcome = page.locator('.popup:visible').filter({ hasText: /聊天迁移结果|聊天迁移未完成/ }).last();
+            await outcome.waitFor({ timeout: 60000 });
+            assert((await outcome.innerText()).includes('已迁移 1 / 1'), await outcome.innerText());
+            await outcome.locator('.popup-button-ok').click();
+            const current = await page.evaluate(() => {
+                const ctx = SillyTavern.getContext();
+                return { avatar: ctx.characters[ctx.characterId].avatar, chat: ctx.chatId, text: ctx.chat.at(-1).mes,
+                    state: TavernHelper.getVariables({ type: 'message', message_id: ctx.chat.length - 1 }).stat_data };
+            });
+            assert.equal(current.avatar, avatar);
+            assert.equal(current.state.状态.金币, 37);
+            assert.equal(current.state.状态.目标默认, index === 1 ? 19 : undefined);
+            assert(current.text.includes('角色正文-A'));
+            record('chat-transfer-native-target', { sourceAvatar, targetAvatar: avatar, chat: current.chat, targetDefault: current.state.状态.目标默认 });
+            sourceAvatar = avatar; filename = current.chat + '.jsonl';
+        }
+    }
     if (delayedList) {
         assert(listEvidence.empty > 0 && listEvidence.staleMissing > 0 && listEvidence.staleDeleted > 0);
         record('chat-transfer-async-list-readiness', listEvidence);

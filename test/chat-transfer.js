@@ -83,6 +83,38 @@ test('聊天迁移：按实际载体识别覆盖能力，不依赖软件版本�
         assert.equal(tools.supportsCoverage(modified, 'slot'), false, '不回退到更旧的格式假定兼容');
     }
 });
+test('聊天迁移：跨布局按表迁移覆盖前沿，进度与纪要内容兼容性独立', () => {
+    const tables = { sheet_notes: { uid: 'sheet_notes', name: '纪要', content: [['row_id', '纪要']] },
+        sheet_other: { uid: 'sheet_other', name: '另一张表', content: [['row_id']] } };
+    const chat = { header: { chat_metadata: { mvu2shujuku_chat_transfer: {} } }, messages: Array.from({ length: 20 }, () => ({ is_user: false })) };
+    const attach = (index, frame) => { chat.messages[index].TavernDB_ACU_IsolatedData = { slot: { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [], ...frame } } }; };
+    attach(0, { checkpoint: { kind: 'full', data: clone(tables) } });
+    attach(15, { logEntries: [{ filledSheetKeys: ['sheet_notes'], aiFloor: 12 }] });
+    attach(19, { logEntries: [{ seq: 2, changedSheetKeys: ['sheet_notes'], aiFloor: 20 }] });
+    const progress = tools.tableCoverage(chat.messages, 19, tables, 'slot');
+    assert.deepStrictEqual(progress, { sheet_notes: 12, sheet_other: 0 });
+    const next = { sheet_new: { uid: 'sheet_new', name: '纪要', content: [['row_id', '新增列']] }, sheet_other: tables.sheet_other };
+    const compatibility = tools.extraCoverage(Object.entries(tables).map(([key, data]) => ({ key, uid: data.uid, name: data.name })), next, [], progress);
+    assert.deepStrictEqual(compatibility.map(({ key, floor }) => ({ key, floor })), [{ key: 'sheet_new', floor: 12 }, { key: 'sheet_other', floor: 0 }]);
+    assert.equal(tools.databasePlan(tables, next, 'slot').preserve, false);
+    const imported = tools.coverImportedTables(chat, 19, next, [], 'slot', compatibility);
+    assert.equal(imported.messages[19].TavernDB_ACU_IsolatedData.slot.storageFrame.perSheetCheckpoints.sheet_new.scheduleSummary.lastImportBaselineAiFloor, 12);
+    assert.equal(imported.messages[19].TavernDB_ACU_IsolatedData.slot.storageFrame.perSheetCheckpoints.sheet_other, undefined);
+});
+test('聊天迁移：普通目标只写目标初始化的 MVU scope，携带辅助变量和正文', () => {
+    const selected = tools.selected(source());
+    for (const type of ['message', 'chat']) {
+        const draft = tools.seed(selected, { character: '原 MVU 卡', token: 'native' });
+        const snapshot = { converted: false, variableOption: { type }, chat: [{ mes: '开场白' }], metadata: {}, mvu: { stat_data: { 生命: 81 }, schema: { type: 'object' } } };
+        tools.seedNative(draft, snapshot);
+        const final = tools.finish(selected, draft, 1, 'native', snapshot);
+        assert.equal(final.header.chat_metadata.mvu2shujuku_chat_transfer.status, 'complete');
+        assert.equal(final.messages[1].mes, selected.messages[1].mes);
+        assert.equal(final.messages[1].variables[0].custom, '作者辅助数据');
+        assert.equal(tools.nativeMvu(final).scope, type);
+        assert.deepStrictEqual(tools.nativeMvu(final).mvu.stat_data, { 生命: 81 });
+    }
+});
 test('聊天迁移：只为导入MVU表增加覆盖基线，不伪造填表事件或更改原副本', () => {
     const tables = { sheet_m: { uid: 'sheet_m', name: 'MVU', content: [['row_id', '内容'], [1, '{}']] } };
     const chat = { header: { chat_metadata: { mvu2shujuku_chat_transfer: {} } }, messages: Array.from({ length: 20 }, () => ({ is_user: false, mes: 'AI' })) };

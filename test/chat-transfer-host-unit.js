@@ -24,7 +24,9 @@ function harness(options = {}) {
     let characterId = 0, name = 'A', serial = 0;
     const key = () => characters[characterId]?.avatar + '/' + name + '.jsonl';
     const current = () => files[characters[characterId]?.avatar]?.[name + '.jsonl'] || { header: { chat_metadata: {} }, messages: [] };
-    const result = { meta: { savedAvatar: 'new.png' }, card: { data: { extensions: { mvu2shujuku: { convertedAt: 'new' } } } } };
+    const targetData = { get name() { return characters.find(card => card.avatar === 'new.png').name; },
+        extensions: options.nativeTarget ? {} : { mvu2shujuku: { convertedAt: 'new', worldbookAliases: {} } } };
+    const result = { meta: { savedAvatar: 'new.png', nativeTarget: !!options.nativeTarget }, card: { data: targetData } };
     const readContext = () => ({ characters, characterId, chatId: name, chat: current().messages, chatMetadata: current().header.chat_metadata,
         name1: '用户', getRequestHeaders: () => ({}),
         async getCharacters() {
@@ -48,7 +50,14 @@ function harness(options = {}) {
             characters.splice(index, 1); characters.splice(1, 0, full);
         },
         async selectCharacterById(index) { characterId = index; name = (characters[index].chat || Object.keys(files[characters[index].avatar])[0] || '').replace(/\.jsonl$/, ''); },
-        async openCharacterChat(next) { assert.notEqual(characters[characterId].avatar, 'old.png', '不能打开原聊天'); name = next; },
+        async openCharacterChat(next) {
+            const avatar = characters[characterId].avatar;
+            assert.notEqual(avatar, 'old.png', '不能打开原聊天'); name = next;
+            if (options.nativeTarget && avatar === 'new.png' && current().messages.length === 0) {
+                current().messages.push({ name: targetData.name, mes: '目标实际开场', is_user: false,
+                    variables: [{ stat_data: { 生命: 100, 魔力: 30 }, schema: { type: 'any' } }] });
+            }
+        },
     });
     const response = data => ({ ok: true, status: 200, json: async () => data });
     const win = { FormData, Blob, setTimeout, crypto: { randomUUID: () => 'token-' + ++serial },
@@ -110,14 +119,17 @@ function harness(options = {}) {
         } };
     async function captureSnapshot() {
         const chat = current(), row = chat.messages.at(-1), swipe = Number(row.swipe_id || 0);
-        const stat = characterId === 0 ? row.variables[swipe].stat_data : runtime.get(key());
+        const native = options.nativeTarget && characters[characterId].avatar === 'new.png';
+        const stat = characterId === 0 || native ? row.variables[swipe].stat_data : runtime.get(key());
         return { source: { character: characters[characterId].name, chat: name }, mvu: { stat_data: clone(stat), schema: { type: 'any' } },
-            chat: clone(chat.messages), index: chat.messages.length - 1, tables: {}, layout: [] };
+            chat: clone(chat.messages), metadata: clone(chat.header.chat_metadata), index: chat.messages.length - 1, tables: {}, layout: [],
+            template: options.runtimeTemplateOnly ? sourceTables : null, converted: !native, variableOption: { type: 'message' } };
     }
     const host = createHost({ window: win, readContext, readCharacter: () => characters[characterId], tools, runner, stateTransfer: state,
         characterListWaitMs: options.readerNeverListed ? 0 : undefined,
-        readTargetTemplate: () => options.preserveHistory ? sourceTables : null,
-        readFullCharacter: async ({ avatar }) => avatar === readerAvatar ? { data: readerData } : { data: { name: characters.find(card => card.avatar === 'new.png').name, extensions: { mvu2shujuku: { convertedAt: 'new', worldbookAliases: {} } } } },
+        readTargetTemplate: () => options.preserveHistory && !options.runtimeTemplateOnly ? sourceTables : null,
+        readTargetHistoryContext: options.runtimeTemplateOnly ? () => ({ version: 1, isolationKey: '' }) : undefined,
+        readFullCharacter: async ({ avatar }) => ({ data: avatar === readerAvatar ? readerData : targetData }),
         async closeChat() { characterId = -1; name = ''; return true; },
         async readSourceCopy(_card, saved) {
             assert.equal(characters[characterId].avatar, readerAvatar);
@@ -125,8 +137,7 @@ function harness(options = {}) {
             return { mvu: tools.nativeMvu(saved).mvu, tables: options.preserveHistory ? sourceTables : {}, layout: [], isolationKey: '' };
         },
         async prepareTarget(database) {
-            if (options.preserveHistory) {
-                assert.equal(database.preserve, true);
+            if (database?.preserve) {
                 assert.deepStrictEqual(current().messages[1].TavernDB_ACU_IsolatedData, { opaque: '原数据库载体' });
                 calls.push({ url: 'preserved-history' });
             }
@@ -134,12 +145,12 @@ function harness(options = {}) {
         assertIdle() {}, captureSnapshot,
         async prepareImport(archive) {
             const fields = await state.compatibleFields(archive.stat_data, clone(runtime.get(key())), { schema: { type: 'object', properties: { 生命: { type: 'number' }, 魔力: { type: 'number' } } } });
-            return { snapshot: { index: current().messages.length - 1 }, fields, importedStat: fields.stat_data, extras: { matches: [], skipped: [] } };
+            return { snapshot: { index: current().messages.length - 1, converted: !options.nativeTarget, variableOption: { type: 'message' } }, fields, importedStat: fields.stat_data, extras: { matches: [], skipped: [] } };
         },
         async commitImport(plan) {
             const row = current().messages.at(-1); runtime.set(key(), clone(plan.importedStat));
-            row.TavernDB_ACU_IsolatedData = { opaque: clone(plan.importedStat) };
-            row.variables[0] = { stat_data: {}, schema: { type: 'any' } };
+            if (!options.nativeTarget) row.TavernDB_ACU_IsolatedData = { opaque: clone(plan.importedStat) };
+            row.variables[0] = { stat_data: options.nativeTarget ? clone(plan.importedStat) : {}, schema: { type: 'any' } };
             if (options.persistedReadback) plan.persistedReadback = { jsonl: tools.stringify(current()), chat: clone(current().messages), metadata: clone(current().header.chat_metadata) };
             if (options.callbackAfterReadback) current().header.chat_metadata.after_notify = true;
         },
@@ -166,6 +177,17 @@ test('聊天迁移宿主：保存假成功必须由文件读回拦下，不计�
     assert.strictEqual(outcome.completed.length, 0);
     assert(outcome.rows.every(row => /读回不一致/.test(row.error)));
     assert.deepStrictEqual(h.files['old.png'], h.original);
+});
+test('聊天迁移宿主：普通 MVU 目标用自己的开场初始化后写回原存储', async () => {
+    for (const databaseSource of [false, true]) {
+        const h = harness({ nativeTarget: true, databaseSource });
+        const outcome = await h.run();
+        assert.equal(outcome.completed.length, 2, JSON.stringify(outcome.rows.map(row => row.error)));
+        assert.deepStrictEqual(Object.values(h.files['new.png']).map(chat => tools.nativeMvu(chat).mvu.stat_data), [
+            { 生命: 37, 魔力: 30 }, { 生命: 81, 魔力: 30 },
+        ]);
+        assert.deepStrictEqual(h.files['old.png'], h.original);
+    }
 });
 test('聊天迁移宿主：各目标副本初始字段不同时分别预检与导入', async () => {
     const h = harness({ distinctBaselines: true }); const outcome = await h.run();
@@ -275,6 +297,14 @@ test('聊天迁移宿主：相容来源在准备目标前已复制原载体，�
     const outcome = await h.run();
     assert.equal(outcome.completed.length, 2);
     assert.equal(h.calls.filter(call => call.url === 'preserved-history').length, 2);
+    assert.deepStrictEqual(h.files['old.png'], h.original);
+});
+test('聊天迁移宿主：相同的实际聊天模板可继承历史，即使额外表未嵌入卡片', async () => {
+    const h = harness({ databaseSource: true, preserveHistory: true, runtimeTemplateOnly: true });
+    const outcome = await h.run();
+    assert.equal(outcome.completed.length, 2);
+    assert.equal(h.calls.filter(call => call.url === 'preserved-history').length, 2);
+    assert(Object.values(h.files['new.png']).every(chat => chat.header.chat_metadata.mvu2shujuku_chat_transfer.databaseHistory === 'preserved'));
     assert.deepStrictEqual(h.files['old.png'], h.original);
 });
 test('聊天迁移宿主：未适配的逻辑楼层存档在创建副本前拒绝，不猜物理楼号', async () => {

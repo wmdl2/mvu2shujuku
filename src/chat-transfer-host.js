@@ -16,11 +16,11 @@ function createChatTransferHost(deps) {
         return rows.filter(row => typeof row?.file_name === 'string' && row.file_name.endsWith('.jsonl'))
             .map(row => ({ file_name: row.file_name })).sort((a, b) => b.file_name.localeCompare(a.file_name));
     }
-    async function exportChat(avatar, name) {
+    async function exportChat(avatar, name, allowEmpty = false) {
         const data = await jsonPost('/api/chats/export', { avatar_url: avatar, is_group: false,
             file: stem(name) + '.jsonl', exportfilename: stem(name) + '.jsonl', format: 'jsonl' });
         if (typeof data.result !== 'string') throw new Error('酒馆未返回聊天 JSONL');
-        return tools.parse(data.result);
+        return tools.parse(data.result, allowEmpty);
     }
     function sameTranscript(a, b) {
         const signature = rows => rows.map(row => [row.mes, row.is_user, !!row.is_system,
@@ -32,9 +32,10 @@ function createChatTransferHost(deps) {
         if (!avatar) throw new Error('请先保存并核对目标角色卡');
         const persisted = await deps.readFullCharacter({ avatar });
         const data = persisted?.data || persisted;
-        if (data?.extensions?.mvu2shujuku?.convertedAt !== (result.card.data || result.card).extensions?.mvu2shujuku?.convertedAt)
+        const actual = data?.extensions?.mvu2shujuku, expected = (result.card.data || result.card).extensions?.mvu2shujuku;
+        if (!data || !!actual !== !!expected || actual?.convertedAt !== expected?.convertedAt || !actual && !result.meta?.nativeTarget)
             throw new Error('目标角色卡与本次转换不一致，请重新保存');
-        const target = { avatar, name: data.name, aliases: data.extensions.mvu2shujuku.worldbookAliases || {},
+        const target = { avatar, name: data.name, converted: !!actual, aliases: actual?.worldbookAliases || {},
             template: deps.readTargetTemplate ? await deps.readTargetTemplate(data) : null };
         let owned = location(), cancelled = false, reader = null;
         const created = new Set();
@@ -56,7 +57,9 @@ function createChatTransferHost(deps) {
         }
         function assertPrepared(prepared, metadata, messages) {
             const marker = metadata?.mvu2shujuku_chat_transfer;
-            if (marker?.token !== prepared.token || marker.status !== 'preparing' || messages.length !== prepared.length || !onlyPlaceholders(messages, '[迁移准备中]'))
+            const placeholders = messages.length === prepared.length && onlyPlaceholders(messages, '[迁移准备中]');
+            const starter = prepared.bootstrapping && (!messages.length || prepared.starter && sameTranscript(prepared.starter, messages));
+            if (marker?.token !== prepared.token || marker.status !== 'preparing' || !placeholders && !starter)
                 throw new Error('新聊天已包含正文或其他修改，保留供检查');
         }
         async function refreshCharacters(avatars = [], cleaning = false) {
@@ -197,7 +200,7 @@ function createChatTransferHost(deps) {
                 catch (error) {
                     assertOwned();
                     if (dialogOpen()) continue;
-                    if (Date.now() >= deadline || !/尚未|仍在更新|未就绪/.test(error.message)) throw error;
+                    if (Date.now() >= deadline || !/尚未|仍在更新|未就绪|当前聊天没有已初始化的 MVU/.test(error.message)) throw error;
                     await new Promise(resolve => win.setTimeout(resolve, 100));
                 }
             }
@@ -236,20 +239,54 @@ function createChatTransferHost(deps) {
                 const snapshot = await ready(() => deps.readSourceCopy(sourceCard, before, source, chat)); assertOwned();
                 const after = await exportChat(source.avatar, chat.file_name); assertOwned();
                 if (!state.equal(before, after)) throw new Error('来源聊天在读取期间发生变化，请保存后重新迁移');
-                return { source: tools.selected(after), archive: state.archive(snapshot), name: chat.file_name,
-                    database: tools.databasePlan(snapshot.tables, target.template, snapshot.isolationKey) };
+                const database = tools.databasePlan(snapshot.tables, target.converted ? target.template : null, snapshot.isolationKey);
+                database.coverage = tools.tableCoverage(after.messages, snapshot.source?.message ?? after.messages.length - 1, snapshot.tables, snapshot.isolationKey);
+                if (!database.preserve) {
+                    database.sourceTables = snapshot.tables;
+                    database.isolationKey = snapshot.isolationKey;
+                }
+                return { source: tools.selected(after), archive: state.archive(snapshot), name: chat.file_name, database };
             },
             async prepareChat(item) {
                 assertOwned(); deps.assertIdle();
                 const token = newToken();
                 const seed = tools.seed(item.source, { character: target.name, aliases: target.aliases, token, database: item.database });
                 operation.update('正在创建目标聊天：' + item.name);
-                const name = await createChat(target.avatar, seed, token, stem(item.name));
-                const prepared = { avatar: target.avatar, name, token, length: seed.messages.length };
+                const staged = target.converted ? seed : { header: seed.header, messages: [] };
+                const name = await createChat(target.avatar, staged, token, stem(item.name));
+                const prepared = { avatar: target.avatar, name, token, length: seed.messages.length, bootstrapping: !target.converted };
                 created.add(prepared);
                 try {
                     await open(prepared.avatar, name);
-                    if (deps.prepareTarget) await ready(() => deps.prepareTarget(item.database));
+                    if (target.converted) {
+                        if (deps.prepareTarget) await ready(() => deps.prepareTarget(item.database));
+                        if (item.database?.sourceTables && deps.readTargetHistoryContext) {
+                            const snapshot = await ready(deps.captureSnapshot);
+                            const context = deps.readTargetHistoryContext(snapshot);
+                            if (context?.version === 1 && context.isolationKey === item.database.isolationKey) {
+                                const resolved = tools.databasePlan(item.database.sourceTables, snapshot.template, context.isolationKey);
+                                if (resolved.preserve) {
+                                    assertPrepared(prepared, snapshot.metadata, snapshot.chat);
+                                    Object.assign(item.database, resolved);
+                                    const rebound = tools.seed(item.source, { character: target.name, aliases: target.aliases, token, database: item.database });
+                                    await closeOwnedChat();
+                                    await host.replaceChat(prepared, rebound);
+                                    await open(prepared.avatar, name);
+                                    await ready(() => deps.prepareTarget(item.database));
+                                }
+                            }
+                        }
+                    } else {
+                        prepared.starter = state.clone(readContext().chat);
+                        if (prepared.starter.length !== 1 || prepared.starter[0].is_user) throw new Error('目标卡没有可初始化的开场白');
+                        const native = await ready(deps.captureSnapshot);
+                        assertPrepared(prepared, native.metadata, native.chat);
+                        tools.seedNative(seed, native);
+                        await closeOwnedChat();
+                        await host.replaceChat(prepared, seed);
+                        prepared.bootstrapping = false;
+                        await open(prepared.avatar, name);
+                    }
                     const snapshot = await ready(deps.captureSnapshot);
                     const metadata = readContext().chatMetadata || readContext().chat_metadata || {};
                     assertPrepared(prepared, metadata, snapshot.chat);
@@ -267,7 +304,7 @@ function createChatTransferHost(deps) {
                 const context = readContext();
                 assertPrepared(prepared, context.chatMetadata || context.chat_metadata, context.chat);
             },
-            prepareImport: archive => ready(() => deps.prepareImport(archive)),
+            prepareImport: (archive, database) => ready(() => deps.prepareImport(archive, database)),
             async confirm(rows) {
                 assertOwned();
                 const sameName = selection.source.name === target.name;
@@ -287,8 +324,9 @@ function createChatTransferHost(deps) {
                         for (const skip of summary.skipped) text.push('跳过 ' + skip.path + '：' + skip.reason);
                         if (summary.retained.length) text.push('沿用目标初始值：' + summary.retained.join('、'));
                     }
-                    text.push('额外表格：' + (summary.extras.join('、') || '无'));
-                    for (const skip of summary.extraSkipped) text.push('跳过额外表 ' + skip.name + '：' + skip.reason);
+                    text.push('额外表格内容：' + (summary.extras.join('、') || '无'));
+                    for (const skip of summary.extraSkipped) text.push('跳过额外表内容 ' + skip.name + '：' + skip.reason);
+                    for (const entry of summary.extraProgress || []) text.push(entry.name + '：' + entry.message);
                 }
                 return operation.review(() => deps.confirm('批量聊天迁移预检', text.join('\n'), '迁移兼容聊天'));
             },
@@ -323,7 +361,7 @@ function createChatTransferHost(deps) {
             },
             async discard(prepared) {
                 if (!created.has(prepared)) throw new Error('没有权限删除非本次创建的聊天');
-                const actual = await exportChat(prepared.avatar, prepared.name);
+                const actual = await exportChat(prepared.avatar, prepared.name, prepared.bootstrapping);
                 assertPrepared(prepared, actual.header.chat_metadata, actual.messages);
                 if (isOpen(prepared)) {
                     if (!sameTranscript(readContext().chat, actual.messages)) throw new Error('准备聊天已有未保存的修改，保留供检查');

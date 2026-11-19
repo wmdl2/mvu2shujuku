@@ -156,6 +156,44 @@ async function main() {
             assert.strictEqual(result.numberStyleCount, 1, '批量与逐表数值框必须一致');
             assert.strictEqual(result.explanationRemoved, true);
         }
+        const hostCss = fs.readFileSync(path.join(refs, 'SillyTavern/public/style.css'), 'utf8');
+        const runtime = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+        const start = runtime.indexOf('    let conversionOperation = null;');
+        const end = runtime.indexOf('    let worldbookSaver = null;', start);
+        assert(start >= 0 && end > start);
+        const progressSource = runtime.slice(start, end);
+        for (const [width, fontSize] of [[320, 24], [390, 18], [1280, 16]]) {
+            await page.setViewportSize({ width, height: 680 });
+            await page.setContent('<style>' + hostCss + core.extensionStyle() + fontCss +
+                'body{margin:0;font:' + fontSize + 'px TestChinese,sans-serif}</style>');
+            await page.evaluate(source => {
+                const startOperation = new Function('hostDocument', 'hostWindow', 'PANEL_ID', 'dbg', source + '\nreturn beginConversionOperation;');
+                const operation = startOperation(document, window, 'mvu2shujuku-settings', () => {})('migrate');
+                window.migrationCancelled = false;
+                operation.update('读取来源聊天：斗罗宇宙_数据库-' + 'a'.repeat(96) + '.jsonl');
+                operation.setCancel(() => { window.migrationCancelled = true; });
+            }, progressSource);
+            const progress = page.locator('.mvu2shujuku-migration-progress');
+            const button = progress.getByRole('button', { name: '停止后续迁移' });
+            assert.strictEqual(await button.evaluate(node => {
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                return range.getClientRects().length;
+            }), 1, '停止按钮保持单行');
+            const box = await progress.locator('.mvu2shujuku-operation-box').boundingBox();
+            const detail = await progress.locator('p').boundingBox();
+            const action = await button.boundingBox();
+            assert.ok(box.x >= 0 && box.x + box.width <= width && box.y >= 0);
+            assert.ok(action.y > detail.y + detail.height && Math.abs(action.x + action.width / 2 - box.x - box.width / 2) < 2);
+            assert.ok(action.height >= 44);
+            assert.ok(await progress.locator('.mvu2shujuku-operation-box').evaluate(node => node.scrollWidth <= node.clientWidth + 1));
+            if (width === 320) await progress.screenshot({ path: path.join(work, 'migration-progress-320.png') });
+            await button.click();
+            assert.ok(await page.evaluate(() => window.migrationCancelled));
+            assert.ok(await progress.getByRole('button', { name: '将在当前聊天处理完成后停止' }).isDisabled());
+        }
+        assert.deepStrictEqual(errors, []);
+        console.log('迁移进度布局：320px / 390px / 1280px 通过');
     } finally { await browser.close(); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
