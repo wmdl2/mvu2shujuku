@@ -700,7 +700,7 @@ function createSchemaLayout(dependencies) {
             }
         }
     
-    function parseMvuShapes(card, report) {
+    function parseMvuShapes(card, report, schemaScripts) {
             const d = card.data || card;
             const entries = (d.character_book && d.character_book.entries) || [];
             const shapes = {};
@@ -1164,8 +1164,8 @@ function createSchemaLayout(dependencies) {
                     (globalFieldKindSets[tm[1]] || (globalFieldKindSets[tm[1]] = new Set())).add(kind);
                 }
             }
-            const thScripts = d.extensions && d.extensions.tavern_helper && Array.isArray(d.extensions.tavern_helper.scripts)
-                ? d.extensions.tavern_helper.scripts : [];
+            const scripts = schemaScripts ?? d.extensions?.tavern_helper?.scripts;
+            const thScripts = Array.isArray(scripts) ? scripts : [];
             for (const script of thScripts) {
                 const source = String(script && (script.content || script.code || script.script) || '');
                 if (!/registerMvuSchema|\.z\.(?:object|record|array)\s*\(/.test(source)) continue;

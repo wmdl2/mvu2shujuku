@@ -13,15 +13,20 @@ function continuity() {
     const context = vm.createContext({
         runtimeScopedChatKey: key => key,
         getContextSafe: () => ({ chat: [{}] }),
+        captureRuntimeSession: () => 'fixture',
+        isRuntimeSessionCurrent: () => true,
+        hasConvertedRuntime: () => true,
         Date: { now: () => now }, dbg() {}, activeLayout: null,
         applyActiveGreetingInitvar() { throw new Error('非转换卡不应重跑开场'); },
         hostWindow: {
             setInterval(fn) { ticks.push(fn); return ticks.length; },
+            clearInterval() {},
             setTimeout(fn) { timeouts.push(fn); },
         },
     });
     // 直接运行产品调用的连续性函数和现有轮询，不复制清理算法。
-    vm.runInContext(section('    const openingContinuityByChat =', '    // 对应 MVU 的 init 时机')
+    vm.runInContext(section('    function scheduleConvertedWork(', '    // 空窗期内')
+        + section('    const openingContinuityByChat =', '    // 对应 MVU 的 init 时机')
         + section('    let greetingPollTimer =', '    function bindAutoInit('), context);
     return { context, ticks, timeouts, advance(ms) { now += ms; },
         state: key => context.openingContinuityState(key),

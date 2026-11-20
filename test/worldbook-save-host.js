@@ -49,7 +49,9 @@ module.exports = async function ({ page, record }) {
     }
     await page.locator('#extensions-settings-button').click();
     await page.locator('.inline-drawer-header').filter({ hasText: 'MVU转数据库' }).click();
-    await page.locator('input[name="mvu2shujuku-source"][value="file"]').check();
+    const fileMode = page.locator('input[name="mvu2shujuku-source"][value="file"]');
+    await page.locator('label').filter({ has: fileMode }).click();
+    assert.ok(await fileMode.isChecked());
     await page.locator('#mvu2shujuku-file').setInputFiles({ name: 'worldbook-save.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(source)) });
     await page.locator('#mvu2shujuku-convert-file').click();
     await page.locator('#mvu2shujuku-save-card').waitFor();

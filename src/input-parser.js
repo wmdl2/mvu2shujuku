@@ -30,7 +30,7 @@ function createInputParser({ clone } = {}) {
         if (typeof Buffer !== 'undefined' && Buffer.isBuffer(bytes)) return bytes.toString('utf8');
         return new TextDecoder('utf-8').decode(bytes);
     }
-    function readPngChunks(buffer) {
+    function readPngChunks(buffer, copyData = false) {
         if (!buffer || buffer.length < 8 || buffer[0] !== 0x89 || buffer[1] !== 0x50) throw new Error('不是有效的 PNG 文件');
         const chunks = [];
         let off = 8;
@@ -38,7 +38,7 @@ function createInputParser({ clone } = {}) {
         while (off + 12 <= buffer.length) {
             const len = dv.getUint32(off);
             const type = String.fromCharCode(buffer[off + 4], buffer[off + 5], buffer[off + 6], buffer[off + 7]);
-            const data = buffer.slice(off + 8, off + 8 + len);
+            const data = copyData ? buffer.slice(off + 8, off + 8 + len) : buffer.subarray(off + 8, off + 8 + len);
             const crc = dv.getUint32(off + 8 + len);
             chunks.push({ type, data, crc, offset: off });
             off += 12 + len;
@@ -56,6 +56,10 @@ function createInputParser({ clone } = {}) {
     }
     function atobSafe(b64) {
         if (typeof Buffer !== 'undefined') return Buffer.from(b64, 'base64').toString('utf8');
+        if (typeof Uint8Array.fromBase64 === 'function') {
+            try { return new TextDecoder('utf-8').decode(Uint8Array.fromBase64(b64)); }
+            catch (_) { /* 无效数据交给 atob，保留原错误。 */ }
+        }
         const bin = atob(b64);
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -64,41 +68,50 @@ function createInputParser({ clone } = {}) {
     function btoaSafe(str) {
         if (typeof Buffer !== 'undefined') return Buffer.from(str, 'utf8').toString('base64');
         const bytes = new TextEncoder().encode(str);
+        if (typeof bytes.toBase64 === 'function') return bytes.toBase64();
         return btoa(latin1ToString(bytes));
     }
     function toBase64(str) {
         return typeof Buffer !== 'undefined' ? Buffer.from(String(str), 'utf8').toString('base64') : btoaSafe(str);
     }
-    function parseCardPng(buffer) {
-        const chunks = readPngChunks(buffer);
-        const decodeTextChunk = (chunk) => {
-            const nul = chunk.data.indexOf(0);
-            if (nul === -1) return null;
-            const keyword = latin1ToString(chunk.data.slice(0, nul));
-            const payload = chunk.data.slice(nul + 1);
-            let text;
-            if (chunk.type === 'iTXt') {
-                if (payload[0] !== 0) throw new Error(keyword + ' iTXt 使用了压缩，暂不支持');
-                let p = 2;
-                while (p < payload.length && payload[p] !== 0) p++;
-                p++;
-                while (p < payload.length && payload[p] !== 0) p++;
-                p++;
-                text = utf8ToString(payload.slice(p));
-            } else text = latin1ToString(payload);
-            return { keyword: keyword.toLowerCase(), text };
-        };
-        let charaText = null, ccv3Text = null;
+    function textKeyword(chunk) {
+        if (chunk.type !== 'tEXt' && chunk.type !== 'iTXt') return '';
+        const nul = chunk.data.indexOf(0);
+        return nul < 0 ? '' : latin1ToString(chunk.data.subarray(0, nul));
+    }
+    function decodeCardChunks(chunks) {
+        let chara, ccv3;
         for (const chunk of chunks) {
             if (chunk.type !== 'tEXt' && chunk.type !== 'iTXt') continue;
-            const decoded = decodeTextChunk(chunk);
-            if (!decoded) continue;
-            if (decoded.keyword === 'ccv3' && ccv3Text === null) ccv3Text = decoded.text;
-            if (decoded.keyword === 'chara' && charaText === null) charaText = decoded.text;
+            const nul = chunk.data.indexOf(0);
+            if (nul === -1) continue;
+            const keyword = latin1ToString(chunk.data.subarray(0, nul));
+            if (chunk.type === 'iTXt' && chunk.data[nul + 1] !== 0) {
+                throw new Error(keyword + ' iTXt 使用了压缩，暂不支持');
+            }
+            const key = keyword.toLowerCase();
+            if (key === 'ccv3' && !ccv3) ccv3 = { chunk, start: nul + 1 };
+            if (key === 'chara' && !chara) chara = { chunk, start: nul + 1 };
         }
-        const text = ccv3Text !== null ? ccv3Text : charaText;
-        if (text === null) throw new Error('PNG 中未找到 chara/ccv3 文本块');
-        return { card: JSON.parse(atobSafe(text)), chunks, text };
+        const selected = ccv3 || chara;
+        if (!selected) throw new Error('PNG 中未找到 chara/ccv3 文本块');
+        const { chunk, start } = selected;
+        let payloadStart = start;
+        if (chunk.type === 'iTXt') {
+            payloadStart += 2; // 压缩标志与方法之后是语言标记和翻译后的关键字。
+            for (let field = 0; field < 2; field++) {
+                while (payloadStart < chunk.data.length && chunk.data[payloadStart] !== 0) payloadStart++;
+                payloadStart++;
+            }
+        }
+        const payload = chunk.data.subarray(payloadStart);
+        const text = chunk.type === 'iTXt' ? utf8ToString(payload) : latin1ToString(payload);
+        return { card: JSON.parse(atobSafe(text)), text };
+    }
+    function parseCardPng(buffer) {
+        const chunks = readPngChunks(buffer, true);
+        const { card, text } = decodeCardChunks(chunks);
+        return { card, chunks, text };
     }
     function concatBytes(...arrays) {
         const total = arrays.reduce((n, a) => n + a.length, 0);
@@ -107,74 +120,71 @@ function createInputParser({ clone } = {}) {
         for (const a of arrays) { out.set(a, off); off += a.length; }
         return out;
     }
-    function buildChunk(type, data) {
-        const header = new Uint8Array(8);
-        const dv = new DataView(header.buffer);
-        dv.setUint32(0, data.length);
-        for (let i = 0; i < 4; i++) header[4 + i] = type.charCodeAt(i);
-        const crc = new Uint8Array(4);
-        new DataView(crc.buffer).setUint32(0, crc32(concatBytes(header.slice(4), data)));
-        return concatBytes(header, data, crc);
+    function pngSource(bytes, chunks = readPngChunks(bytes)) {
+        const parts = [bytes.subarray(0, 8)];
+        let size = 8, insertAt;
+        for (const chunk of chunks) {
+            const key = textKeyword(chunk).toLowerCase();
+            if (insertAt === undefined && (key === 'chara' || chunk.type === 'IEND')) insertAt = size;
+            if (key === 'chara' || key === 'ccv3') continue;
+            const end = chunk.offset + 12 + chunk.data.length;
+            parts.push(bytes.subarray(chunk.offset, end));
+            size += end - chunk.offset;
+        }
+        return {
+            avatar: concatBytes(...parts),
+            insertAt: insertAt ?? size,
+            textType: chunks.some(c => c.type === 'tEXt') ? 'tEXt' : 'iTXt',
+        };
     }
     function extractPngAvatar(input) {
         const bytes = input instanceof ArrayBuffer ? new Uint8Array(input) : input;
-        const chunks = readPngChunks(bytes), out = [bytes.slice(0, 8)];
-        for (const chunk of chunks) {
-            if (chunk.type === 'tEXt' || chunk.type === 'iTXt') {
-                const nul = chunk.data.indexOf(0);
-                const keyword = nul < 0 ? '' : latin1ToString(chunk.data.subarray(0, nul)).toLowerCase();
-                if (keyword === 'chara' || keyword === 'ccv3') continue;
-            }
-            out.push(bytes.slice(chunk.offset, chunk.offset + 12 + chunk.data.length));
-        }
-        return concatBytes(...out);
+        return pngSource(bytes).avatar;
     }
 
     function writeCardPng(originalBuffer, card) {
-        const chunks = readPngChunks(originalBuffer);
-        const charaText = btoaSafe(JSON.stringify(card));
-        const type = chunks.some(c => c.type === 'tEXt') ? 'tEXt' : 'iTXt';
-        const hasBuffer = typeof Buffer !== 'undefined';
-        const keyword = hasBuffer ? Buffer.from('chara', 'latin1') : new TextEncoder().encode('chara');
-        const payload = type === 'tEXt'
-            ? concatBytes(keyword, new Uint8Array([0]), hasBuffer ? Buffer.from(charaText, 'latin1') : new TextEncoder().encode(charaText))
-            : concatBytes(keyword, new Uint8Array([0, 0, 0, 0, 0]), new TextEncoder().encode(charaText));
-        const chunkData = buildChunk(type, payload);
-        const textKeyword = (chunk) => {
-            if (chunk.type !== 'tEXt' && chunk.type !== 'iTXt') return '';
-            const nul = chunk.data.indexOf(0);
-            if (nul === -1) return '';
-            return latin1ToString(chunk.data.slice(0, nul)).toLowerCase();
-        };
-        const out = [originalBuffer.slice(0, 8)];
-        let replaced = false;
-        for (const chunk of chunks) {
-            const kw = textKeyword(chunk);
-            if (kw === 'ccv3' || (kw === 'chara' && replaced)) continue;
-            if (chunk.type === 'IEND' && !replaced) { out.push(chunkData); replaced = true; }
-            if (!replaced && kw === 'chara') { out.push(chunkData); replaced = true; continue; }
-            out.push(originalBuffer.slice(chunk.offset, chunk.offset + 12 + chunk.data.length));
-        }
-        if (!replaced) out.push(chunkData);
-        return concatBytes(...out);
+        return writeCardPngSource(pngSource(originalBuffer), card);
     }
-    function parseCard(input) {
+    function writeCardPngSource({ avatar, insertAt, textType }, card) {
+        const charaText = btoaSafe(JSON.stringify(card));
+        const prefixLength = textType === 'tEXt' ? 6 : 10;
+        const payloadLength = prefixLength + charaText.length;
+        const end = insertAt + 8 + payloadLength;
+        const result = new Uint8Array(avatar.length + 12 + payloadLength);
+        result.set(avatar.subarray(0, insertAt));
+        result.set(avatar.subarray(insertAt), end + 4);
+        const view = new DataView(result.buffer);
+        view.setUint32(insertAt, payloadLength);
+        const encoder = new TextEncoder();
+        result.set(encoder.encode(textType + 'chara'), insertAt + 4);
+        const textOffset = insertAt + 8 + prefixLength;
+        if (encoder.encodeInto) encoder.encodeInto(charaText, result.subarray(textOffset, end));
+        else result.set(encoder.encode(charaText), textOffset);
+        view.setUint32(end, crc32(result.subarray(insertAt + 4, end)));
+        return result;
+    }
+    function readCardInput(input, retainPng = false) {
         if (input && typeof input === 'object' && !ArrayBuffer.isView(input) && !(input instanceof ArrayBuffer)) {
-            if (input.spec || input.data || input.name) return deepClone(input);
+            if (input.spec || input.data || input.name) return { card: deepClone(input) };
             throw new Error('无法识别的角色卡对象');
         }
         if (typeof input === 'string') {
             const t = input.trim();
-            if (t.startsWith('{')) return JSON.parse(t);
+            if (t.startsWith('{')) return { card: JSON.parse(t) };
             throw new Error('JSON 字符串无法解析为角色卡');
         }
         const buf = input instanceof ArrayBuffer ? new Uint8Array(input) : new Uint8Array(input.buffer || input, input.byteOffset || 0, input.byteLength || input.length);
-        if (buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50) return parseCardPng(buf).card;
+        if (buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50) {
+            const chunks = readPngChunks(buf);
+            const { card } = decodeCardChunks(chunks);
+            return { card, png: retainPng ? pngSource(buf, chunks) : undefined };
+        }
         const json = utf8ToString(buf).replace(/^\uFEFF/, '').trim();
-        if (json.startsWith('{')) return parseCard(JSON.parse(json));
+        if (json.startsWith('{')) return readCardInput(JSON.parse(json));
         throw new Error('输入既不是 JSON 角色卡也不是 PNG 角色卡');
     }
-    return { miniPngBuffer, parseCardPng, writeCardPng, extractPngAvatar, parseCard, toBase64, btoaSafe, atobSafe };
+    const parseCard = input => readCardInput(input).card;
+    return { miniPngBuffer, parseCardPng, writeCardPng, writeCardPngSource, extractPngAvatar, parseCard, readCardInput, toBase64, btoaSafe, atobSafe };
 }
 
 if (typeof module !== 'undefined' && module.exports) module.exports = createInputParser;

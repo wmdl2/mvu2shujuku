@@ -102,6 +102,7 @@ function createRuntimeGlobals(options) {
             if (!w) return true;
             if (Object.prototype.hasOwnProperty.call(rec, 'document') && rec.document !== w.document) return true;
             for (const [key, saved] of rec.patches || []) {
+                if (key === 'eventOn' && saved.installed?.__mvu2shujukuFallback) saved.installed.__mvu2shujukuStopAll?.();
                 const descriptor = Object.getOwnPropertyDescriptor(w, key);
                 if (!descriptor || descriptor.value !== saved.installed) continue;
                 if (saved.descriptor) Object.defineProperty(w, key, saved.descriptor); else delete w[key];

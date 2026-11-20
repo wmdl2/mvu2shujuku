@@ -63,7 +63,7 @@ module.exports = async function messageHistoryHost(h) {
             ejsValues.push(await window.EjsTemplate.evalTemplate('<%= getvar("stat_data.状态.金币") %>', context));
         }
         const values = [0, 2].map(message_id => ({
-            th: window.getVariables({ type: 'message', message_id }).stat_data.状态.金币,
+            th: window.TavernHelper.getVariables({ type: 'message', message_id }).stat_data.状态.金币,
             mvu: window.Mvu.getMvuData({ type: 'message', message_id }).stat_data.状态.金币,
         }));
         const messageValues = window.getChatMessages('0-2').filter(item => [0, 2].includes(item.message_id))

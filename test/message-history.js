@@ -25,6 +25,32 @@ test('历史接口适配：指定楼层批量读取、缓存复用和副本隔�
     await h.reader.prepare([0, 1]);
     assert.equal(h.reader.read(0).stat_data.value, 10); assert.equal(h.calls.length, 1);
 });
+test('历史准备性能：启动回放前复用本次已经校验的来源', async () => {
+    let inspections = 0;
+    const h = harness();
+    h.api.getTableHistoryContext = () => {
+        inspections++;
+        return { version: 1, chatId: 'chat-A', isolationKey: '' };
+    };
+    await h.reader.prepare([0]);
+    assert.deepStrictEqual(h.calls, [[0]]);
+    assert.equal(inspections, 3, '启动、回放返回、发布前各核对一次，中间异步校验保留');
+});
+test('历史读取性能：命中旧楼只检查到目标楼，后楼改动仍按需失效', async () => {
+    const h = harness();
+    let laterReads = 0, revision = 1;
+    h.chat[1].TavernDB_ACU_IsolatedData = { get revision() { laterReads++; return revision; } };
+    await h.reader.prepare([0, 1]);
+    laterReads = 0;
+    revision++;
+    assert.equal(h.reader.read(0).stat_data.value, 10);
+    await h.reader.prepare([0]);
+    assert.equal(laterReads, 0);
+    assert.throws(() => h.reader.read(1), { code: 'MVU_HISTORY_NOT_READY' });
+    assert(laterReads > 0);
+    await h.reader.prepare([1]);
+    assert.deepStrictEqual(h.calls, [[0, 1], [1]]);
+});
 test('历史接口适配：同一修订的并发准备共享宿主回放', async () => {
     const h = harness(); let resolve;
     h.respond(indices => new Promise(done => { resolve = () => done({ success: true,
@@ -138,6 +164,43 @@ test('历史接口适配：失败保留宿主定位、不发布半批结果，�
 test('历史接口适配：新接口未准备时显式拒绝，不返回空对象或当前值', async () => {
     const h = harness(); assert.throws(() => h.reader.read(0), { code: 'MVU_HISTORY_NOT_READY' });
     await h.reader.prepare([0]); assert.equal(h.reader.read(0).stat_data.value, 10);
+});
+test('历史接口适配：同一轮125个按需读取合批，已有回放时等待后合批', async () => {
+    for (const busy of [false, true]) {
+        const h = harness();
+        for (let i = 2; i < 125; i++) h.chat.push({ swipe_id: 0 });
+        let release, first;
+        if (busy) {
+            h.respond(() => new Promise(resolve => { release = resolve; }));
+            first = h.reader.prepare([0]);
+            h.respond(undefined);
+        }
+        for (let i = 0; i < 125; i++) assert.throws(() => h.reader.read(i), { code: 'MVU_HISTORY_NOT_READY' });
+        assert.throws(() => h.reader.read(1), { code: 'MVU_HISTORY_NOT_READY' });
+        if (busy) {
+            await Promise.resolve();
+            assert.deepStrictEqual(h.calls, [[0]]);
+            release({ success: true, snapshots: [{ messageIndex: 0, data: { value: 10 } }] });
+            await first;
+        }
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepStrictEqual(h.calls, [...(busy ? [[0]] : []), Array.from({ length: busy ? 124 : 125 }, (_, i) => i + Number(busy))]);
+        for (let i = 0; i < 125; i++) assert.equal(h.reader.read(i).stat_data.value, i + 10);
+    }
+});
+test('历史接口适配：排队读取切卡不发回放；后楼回放失败仍准备有效前缀', async () => {
+    const h = harness();
+    assert.throws(() => h.reader.read(0), { code: 'MVU_HISTORY_NOT_READY' });
+    h.session('chat-B');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepStrictEqual(h.calls, []);
+    h.respond(indices => indices.includes(1)
+        ? { success: false, code: 'replay_failed', error: 'bad SQL', failurePoint: { messageIndex: 1 } }
+        : { success: true, snapshots: [{ messageIndex: 0, data: { value: 11 } }] });
+    for (const index of [0, 1]) assert.throws(() => h.reader.read(index), { code: 'MVU_HISTORY_NOT_READY' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepStrictEqual(h.calls, [[0, 1], [0]]);
+    assert.equal(h.reader.read(0).stat_data.value, 11);
 });
 test('历史接口适配：旧宿主只使用原快照备用读取，按接口能力判断', async () => {
     const h = harness(); delete h.api.exportTableSnapshotsAtMessages;
@@ -338,10 +401,11 @@ test('历史缓存性能：追加消息期间的在途结果仍拒绝发布，�
 
 test('历史缓存性能：相同有效布局复用引用，宏变化与原位修改仍更新布局', () => {
     const fs = require('fs'), source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
-    const start = source.indexOf('    function resolveRuntimeLayout(');
+    const start = source.indexOf('    let staticRuntimeLayout =');
     const end = source.indexOf('    // 查找 SP', start);
     let user = '甲';
     const context = { activeLayout: null, window: { MVU2SHUJUKU_CORE: core },
+        mvu2shujukuMacroMark: require('../src/sp-adapter')(globalThis).mvu2shujukuMacroMark,
         getContextSafe: () => ({ substituteParams: text => String(text).replace(/\{\{user\}\}/g, user) }), dbgWarn() {} };
     vm.createContext(context); vm.runInContext(source.slice(start, end), context);
     const raw = [{ table: '角色表', group: '{{user}}', path: ['{{user}}'], cols: [] }];
@@ -351,6 +415,31 @@ test('历史缓存性能：相同有效布局复用引用，宏变化与原位�
     assert.notStrictEqual(second, first); assert.equal(first[0].group, '甲'); assert.equal(second[0].group, '乙');
     context.activeLayout = second; second[0].group = '原位改动';
     assert.notStrictEqual(context.resolveRuntimeLayout(raw), second);
+});
+
+test('运行时布局性能：静态布局免重复解析，转义宏和原位变化继续核对', () => {
+    const fs = require('fs'), source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const start = source.indexOf('    let staticRuntimeLayout =');
+    const end = source.indexOf('    // 查找 SP', start);
+    let user = '甲', resolutions = 0;
+    const context = vm.createContext({ activeLayout: null, window: { MVU2SHUJUKU_CORE: {
+        resolveLayoutMacros(...args) { resolutions++; return core.resolveLayoutMacros(...args); },
+    } }, mvu2shujukuMacroMark: require('../src/sp-adapter')(globalThis).mvu2shujukuMacroMark,
+    getContextSafe: () => ({ substituteParams: text => text.replace(/\{\{user\}\}/g, user) }), dbgWarn() {} });
+    vm.runInContext(source.slice(start, end), context);
+    const plain = '[{"table":"角色表","group":"角色"}]';
+    context.activeLayout = context.resolveRuntimeLayout(plain);
+    assert.strictEqual(context.resolveRuntimeLayout(plain), context.activeLayout);
+    assert.equal(resolutions, 1);
+    context.activeLayout[0].group = '已改变';
+    assert.equal(context.resolveRuntimeLayout(plain)[0].group, '角色');
+    assert.equal(resolutions, 2);
+    const macro = '[{"table":"角色表","group":"\\u007b\\u007buser}}"}]';
+    context.activeLayout = context.resolveRuntimeLayout(macro);
+    assert.equal(context.activeLayout[0].group, '甲');
+    user = '乙';
+    assert.equal(context.resolveRuntimeLayout(macro)[0].group, '乙');
+    assert.equal(resolutions, 4);
 });
 
 
@@ -373,6 +462,49 @@ test('历史准备范围：单层渲染只读该层，分页只读挂载范围�
     assert.deepStrictEqual(calls, [[8, 10]]);
     changed(); await first.get('load')({ detail: { id: 'chat-name-is-not-a-floor' } });
     assert.deepStrictEqual(calls, [h.context.chat.map((_, index) => index)]);
+});
+
+test('历史准备调度：同轮窗口更新合并，读取挂载楼层时复核会话', () => {
+    const { fs } = require('./helpers');
+    const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const start = source.indexOf('    function scheduleDatabaseHistoryPreparation(');
+    const end = source.indexOf('    function databaseVariableTarget(', start);
+    const timers = new Map(), preparations = [];
+    let nextTimer = 0, owner = {}, mounted = [1];
+    const context = vm.createContext({
+        databaseHistoryPrepareTask: null,
+        captureRuntimeSession: () => owner,
+        isRuntimeSessionCurrent: session => session === owner,
+        mountedHistoryMessageIndices: () => mounted,
+        prepareDatabaseHistory: async (_context, _includeCurrent, indices) => preparations.push(indices),
+        dbgWarn() {},
+        hostWindow: {
+            setTimeout(fn, delay) { timers.set(++nextTimer, { fn, delay }); return nextTimer; },
+            clearTimeout(id) { timers.delete(id); },
+        },
+    });
+    vm.runInContext(source.slice(start, end), context);
+    const flush = () => {
+        const [id, { fn }] = timers.entries().next().value;
+        timers.delete(id);
+        fn();
+    };
+    for (let i = 0; i < 5; i++) context.scheduleDatabaseHistoryPreparation(0);
+    assert.equal(timers.size, 1);
+    mounted = [4, 8];
+    flush();
+    assert.deepStrictEqual(preparations, [[4, 8]]);
+    context.scheduleDatabaseHistoryPreparation(0);
+    context.scheduleDatabaseHistoryPreparation();
+    context.scheduleDatabaseHistoryPreparation(0);
+    assert.equal(timers.size, 1);
+    assert.equal(timers.values().next().value.delay, 120, '窗口更新不抢跑提交后的防抖');
+    owner = {};
+    flush();
+    assert.deepStrictEqual(preparations, [[4, 8]], '旧会话的任务不能读取新会话');
+    context.scheduleDatabaseHistoryPreparation(0);
+    context.cancelDatabaseHistoryPreparation();
+    assert.equal(timers.size, 0);
 });
 
 // A small optional host contract supplies source identity without replaying

@@ -316,11 +316,12 @@ test('审查：桥注册拒绝名称前缀、过期转换标识和篡改布局',
     const layout = [{ kind: 'array', group: '列表', table: '列表表', cols: [] }];
     const marker = { originalName: '卡', convertedAt: 'new', layout: JSON.stringify(layout) };
     const ch = { name: '卡_数据库', avatar: 'current.png', extensions: { mvu2shujuku: marker } };
+    const scheduled = [];
     const context = { currentCharacter: () => ch, isConvertedMvuCard: () => true, charExtensions: x => x.extensions,
         charWorldBook: () => ({ entries: [] }), resolveRuntimeLayout: x => x, cardCacheKey: x => x.avatar,
         activeLayout: null, activeLayoutCardKey: '', activePlaceholderNeeded: false, DB_TEMPLATE_KEY: '__ACU_TEMPLATE_DATA__',
         installWindowGetAllVariables() {}, installWindowMvuShim() {}, ensureTemplateDefine() {}, autoInitDatabase() {},
-        hostWindow: { setTimeout() {} }, dbg() {}, dbgWarn() {} };
+        scheduleConvertedWork(callback, delay) { scheduled.push([callback, delay]); }, dbg() {}, dbgWarn() {} };
     vm.createContext(context);
     vm.runInContext(extract('    function acceptBridgeRegistration(', '    function activateRuntimeRegistry('), context);
     const payload = { cardName: '卡', convertedAt: 'new', layout };
@@ -329,8 +330,10 @@ test('审查：桥注册拒绝名称前缀、过期转换标识和篡改布局',
     assert.strictEqual(context.acceptBridgeRegistration({ ...payload, layout: [] }), false);
     assert.strictEqual(context.acceptBridgeRegistration({ ...payload, convertedAt: '' }), false);
     assert.strictEqual(context.activeLayout, null);
+    assert.strictEqual(scheduled.length, 0);
     assert.strictEqual(context.acceptBridgeRegistration(payload), true);
     assert.strictEqual(context.activeLayoutCardKey, 'current.png');
+    assert.deepStrictEqual(scheduled[0], [context.autoInitDatabase, 0]);
 });
 
 test('审查：保存 await 期间切换结果仍保存原卡、头像及模板', async () => {

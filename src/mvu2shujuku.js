@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.8.8';
+    const VERSION = '0.8.9';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -813,7 +813,7 @@
 
     // 解析 [value, desc] 叶子：返回 { value, desc }
     const inputParser = getInputParser();
-    const { miniPngBuffer, parseCardPng, writeCardPng, extractPngAvatar, parseCard, toBase64, btoaSafe, atobSafe } = inputParser;
+    const { miniPngBuffer, parseCardPng, writeCardPng, writeCardPngSource, extractPngAvatar, parseCard, readCardInput, toBase64, btoaSafe, atobSafe } = inputParser;
     function leafInfo(...args) { return getSchemaLayout().leafInfo(...args); }
     function maskYamlBlockScalarBodies(...args) { return getSchemaLayout().maskYamlBlockScalarBodies(...args); }
     function yamlStripQuotes(...args) { return getSchemaLayout().yamlStripQuotes(...args); }
@@ -2510,9 +2510,11 @@
         const rootTableCardName = nameSuffix && String(data.name || '').endsWith(nameSuffix)
             ? String(data.name || '').slice(0, -nameSuffix.length) : data.name;
         const remoteSchemas = opts.remoteSchemaSources || [];
-        const shapeCard = deepClone(card);
+        // 只有供 Schema 分析的脚本对象会附加隔离执行结果。
+        const helperScripts = data.extensions?.tavern_helper?.scripts;
+        const shapeScripts = Array.isArray(helperScripts) ? helperScripts.map(script => script && { ...script }) : [];
         for (const snapshot of remoteSchemas) {
-            const script = (shapeCard.data || shapeCard).extensions?.tavern_helper?.scripts?.[snapshot.index];
+            const script = shapeScripts[snapshot.index];
             if (!script || script.enabled === false) continue;
             if (!getRemoteSchemaService().supported(snapshot.source)) throw new Error('远程 Schema 登记接口尚不支持：' + snapshot.url);
             script.content = getRemoteSchemaService().analysisSource(snapshot.source);
@@ -2520,7 +2522,6 @@
             report.note(`已分析远程 Schema「${script.name}」；源码 SHA-256=${snapshot.sha256 || '本地提供'}。`);
             if (snapshot.pinWarning) report.warn(snapshot.pinWarning, 'schema');
         }
-        const shapeScripts = (shapeCard.data || shapeCard).extensions?.tavern_helper?.scripts || [];
         for (const input of schemaExecutionInputs(card, remoteSchemas)) {
             let snapshot = opts.schemaSnapshots?.find(item => item.index === input.index && item.source === input.source);
             if (!snapshot) {
@@ -2604,7 +2605,7 @@
                 `；以首个分支为基准（MVU 按分支替换、不合并），各分支初始化值在开局时按所选分支注入。`
             );
         }
-        const shapeInfo = parseMvuShapes(shapeCard, report);
+        const shapeInfo = parseMvuShapes(card, report, shapeScripts);
         if (Object.keys(initvar).length === 0 && shapeInfo.zodDefaultsRoot) {
             const defaults = {};
             applyRegisteredZodDefaults(defaults, shapeInfo.zodDefaultsRoot);
@@ -2760,7 +2761,6 @@
             .map(([path, sample]) => [path, displayStorageService.split(sample, true).database]));
         let schema = buildSchema(layoutInit, usage, report, layoutShape, { vwdDescriptions: opts.vwdDescriptions, jsonContainers: opts.jsonContainers, originalInitvar: initvar });
         const sourceRegexScripts = (data.extensions && Array.isArray(data.extensions.regex_scripts)) ? data.extensions.regex_scripts : [];
-        const helperScripts = data.extensions && data.extensions.tavern_helper && data.extensions.tavern_helper.scripts;
         const ruleScripts = [...(Array.isArray(helperScripts) ? helperScripts : []), ...sourceRegexScripts];
         // First apply declarations needed by layout planning (e.g. whole-group
         // readonly). Labels and table targets must then bind to the final layout.
@@ -3208,25 +3208,17 @@
         ).map(k => [k, normalized[k]]));
     }
 
-    function convert(input, opts = {}, parsedSourceCard) {
+    function convert(input, opts = {}) {
+        return convertSource(readCardInput(input, true), opts);
+    }
+    function convertSource(source, opts, metadata) {
         const report = createReport();
-        const sourceCard = parsedSourceCard || parseCard(input);
-        const isPngInput = (() => {
-            try {
-                if (input && typeof input === 'object' && !ArrayBuffer.isView(input) && !(input instanceof ArrayBuffer)) return false;
-                const buf = input instanceof ArrayBuffer ? new Uint8Array(input) : new Uint8Array((input && input.buffer) || input, (input && input.byteOffset) || 0, (input && input.byteLength) || input.length);
-                return buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50;
-            } catch (e) { return false; }
-        })();
         const mode = sqliteConversionMode(opts, report);
         report.note('模式：SQLite（仅支持 SQL 填表）。');
 
-        const sourceInput = isPngInput
-            ? new Uint8Array(input instanceof ArrayBuffer ? input.slice(0) : new Uint8Array(input.buffer, input.byteOffset, input.byteLength))
-            : deepClone(sourceCard);
-        const transformed = transformCard(sourceCard, { ...opts, mode, report });
-        const result = packageConversion(input, opts, transformed, isPngInput);
-        conversionSessions.set(result, { input: sourceInput, options: { ...opts }, key: conversionOptionKey(opts),
+        const transformed = transformCard(deepClone(source.card), { ...opts, mode, report });
+        const result = packageConversion(source.png, opts, transformed, metadata);
+        conversionSessions.set(result, { source, options: { ...opts }, key: conversionOptionKey(opts),
             templateKey: JSON.stringify(result.template),
             promptKeys: templatePromptKeys(result.template),
             bridgeOptions: transformed.bridgeOptions, sourceRegexScripts: transformed.sourceRegexScripts });
@@ -3248,14 +3240,14 @@
     }
     async function convertWithRemoteSchemas(input, opts = {}) {
         sqliteConversionMode(opts);
-        const sourceCard = parseCard(input);
-        const remoteSchemaSources = await getRemoteSchemaService().resolve(sourceCard, opts);
-        const schemaSnapshots = await inspectSchemaInputs(schemaExecutionInputs(sourceCard, remoteSchemaSources));
-        return convert(input, { ...opts, remoteSchemaSources, schemaSnapshots }, sourceCard);
+        const source = readCardInput(input, true);
+        const remoteSchemaSources = await getRemoteSchemaService().resolve(source.card, opts);
+        const schemaSnapshots = await inspectSchemaInputs(schemaExecutionInputs(source.card, remoteSchemaSources));
+        return convertSource(source, { ...opts, remoteSchemaSources, schemaSnapshots });
     }
 
     // 产物装配与卡片分析分开；模板编辑无需重复解析 initvar、Schema、业务脚本和 EJS。
-    function packageConversion(input, opts, transformed, isPngInput, metadata = {}) {
+    function packageConversion(pngSource, opts, transformed, metadata = {}) {
         const { card, schema, template, bridgeScript, report } = transformed;
         const mode = sqliteConversionMode(opts);
 
@@ -3267,16 +3259,21 @@
             ? { spec: 'chara_card_v3', spec_version: '3.0', data: card }
             : card;
         // 显式“总是 PNG”时，JSON 输入也用最小 PNG 基底生成 PNG 卡（不再只对 PNG 输入生效）
+        const isPngInput = !!pngSource;
         const asPng = opts.asPng === true || (opts.asPng !== false && isPngInput);
-        if (asPng) {
-            const base = isPngInput && input ? input : miniPngBuffer();
-            const png = writeCardPng(base, downloadCard);
-            files.push({ name: `${cardName}-DB.png`, mime: 'image/png', data: png, kind: 'card' });
-        } else {
-            files.push({ name: `${cardName}-DB.json`, mime: 'application/json', data: JSON.stringify(downloadCard, null, 2), kind: 'card' });
-        }
+        const serializeCardFile = asPng
+            ? () => pngSource ? writeCardPngSource(pngSource, downloadCard) : writeCardPng(miniPngBuffer(), downloadCard)
+            : () => JSON.stringify(downloadCard, null, 2);
+        const name = `${cardName}-DB.${asPng ? 'png' : 'json'}`;
+        const mime = asPng ? 'image/png' : 'application/json';
+        // 酒馆直接保存走角色对象和头像，无需预先生成一份完整下载文件。
+        if (opts.deferCardFile) {
+            let data;
+            files.push({ name, mime, get data() { return data ??= serializeCardFile(); }, kind: 'card' });
+        } else files.push({ name, mime, data: serializeCardFile(), kind: 'card' });
         files.push({ name: `${cardName}-表格模板.json`, mime: 'application/json', data: JSON.stringify(template, null, 2), kind: 'template' });
-        files.push({ name: `${cardName}-转换报告.md`, mime: 'text/markdown', data: report.toMarkdown(), kind: 'report' });
+        const reportText = report.toMarkdown();
+        files.push({ name: `${cardName}-转换报告.md`, mime: 'text/markdown', data: reportText, kind: 'report' });
         files.push({ name: `${cardName}-数据桥.js`, mime: 'text/javascript', data: bridgeScript, kind: 'bridge' });
 
         return {
@@ -3285,10 +3282,11 @@
             schema,
             bridgeScript,
             report,
-            reportText: report.toMarkdown(),
+            reportText,
             files,
             // 以最终模板为准统计（合并模板后 schema 仍来自卡内 initvar，不能用于展示）
             meta: {
+                ...(pngSource && !metadata.avatarBytes ? { avatarBytes: pngSource.avatar.slice(), avatarMime: 'image/png' } : {}),
                 ...metadata,
                 mode,
                 isPngInput,
@@ -3312,19 +3310,14 @@
             if (!opts.template && JSON.stringify(options.jsonContainers || false) !== JSON.stringify(session.options.jsonContainers || false)) {
                 delete options.template;
             }
-            const result = convert(session.input, options);
-            result.meta.sourceCharacter = previous.meta.sourceCharacter || null;
-            if (previous.meta.avatarBytes) {
-                result.meta.avatarBytes = previous.meta.avatarBytes;
-                result.meta.avatarMime = previous.meta.avatarMime;
-            }
-            return result;
+            const { avatarBytes, avatarMime, sourceCharacter = null } = previous.meta;
+            return convertSource(session.source, options, { sourceCharacter, ...(avatarBytes ? { avatarBytes, avatarMime } : {}) });
         }
         const asPng = options.asPng === true || (options.asPng !== false && previous.meta.isPngInput);
         if (JSON.stringify(options.template) === session.templateKey) {
             if (asPng === previous.meta.asPng && previous.files.find(f => f.kind === 'report').data === previous.reportText) return previous;
             // 格式或报告摘要变化不影响卡片、数据桥和模板。
-            const result = packageConversion(session.input, options, previous, previous.meta.isPngInput, previous.meta);
+            const result = packageConversion(session.source.png, options, previous, previous.meta);
             result.reportText = previous.reportText;
             result.files.find(f => f.kind === 'report').data = result.reportText;
             conversionSessions.set(result, { ...session, options });
@@ -3371,7 +3364,7 @@
         const bridgeScript = generateBridgeScript(refreshedSchema, template, session.bridgeOptions);
         bridge.content = bridgeScript;
         data.extensions.mvu2shujuku.templateUid = Object.keys(template).filter(k => k.startsWith('sheet_')).map(k => template[k].uid);
-        const result = packageConversion(session.input, options, { card, template, schema: refreshedSchema, bridgeScript, report }, previous.meta.isPngInput, previous.meta);
+        const result = packageConversion(session.source.png, options, { card, template, schema: refreshedSchema, bridgeScript, report }, previous.meta);
         // UI 配置应用摘要属于本次转换说明，刷新产物时保留，不叠加重复摘要。
         const oldReport = previous.report.toMarkdown();
         if (previous.reportText.startsWith(oldReport)) result.reportText += previous.reportText.slice(oldReport.length);

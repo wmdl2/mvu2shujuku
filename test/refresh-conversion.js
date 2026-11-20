@@ -111,3 +111,23 @@ test('产物刷新：规则变化使用首次输入快照，不读取被外部�
     const refreshed = core.refreshConversion(original, { nameSuffix: '_另存' });
     assert.strictEqual((refreshed.card.data || refreshed.card).name, '产物刷新测试_另存');
 });
+
+test('产物刷新：浏览器按需生成角色卡，PNG 快照保留原文本块格式', () => {
+    const card = input();
+    const parser = require('../src/input-parser')();
+    const avatar = new Uint8Array(parser.miniPngBuffer());
+    const bytes = parser.writeCardPngSource({ avatar, insertAt: avatar.length - 12, textType: 'tEXt' }, card);
+    const original = core.convert(bytes.buffer, { asPng: false, deferCardFile: true });
+    const eager = core.convert(bytes, { asPng: false });
+    assert.ok(Object.getOwnPropertyDescriptor(original.files[0], 'data').get);
+    assert.ok(!Object.getOwnPropertyDescriptor(eager.files[0], 'data').get);
+    assert.deepStrictEqual(original.meta.avatarBytes, avatar);
+    bytes.fill(0);
+    original.meta.avatarBytes.fill(0); // 对外头像副本不能影响内部下载。
+    const refreshed = core.refreshConversion(original, { nameSuffix: '_新后缀', asPng: true });
+    const output = refreshed.files[0].data;
+    assert.strictEqual(refreshed.files[0].data, output);
+    assert.ok(core.parseCardPng(output).chunks.some(chunk => chunk.type === 'tEXt'));
+    assert.deepStrictEqual(core.extractPngAvatar(output), avatar);
+    assert.strictEqual(core.parseCard(output).data.name, card.name + '_新后缀');
+});

@@ -28,7 +28,7 @@ function harness(initial = { A: { life: 100, gold: 10 } }) {
         runtimeApiForSession: value => value, isRuntimeSessionCurrent: () => state.session,
         assertRuntimeSession: () => { if (!state.session) throw new Error('session changed'); },
         canonicalJsonForSync: JSON.stringify,
-        publishCommittedTableSnapshot: () => { state.published++; },
+        publishProjectedTableSnapshot: () => { state.published++; },
         emitMvuEvent: async (name, after) => { state.emitted++; await state.listener(after); },
         buildUpdatedTemplateFromStat: async (layouts, before, next, data) => {
             const candidate = plain(data);
@@ -44,6 +44,64 @@ function harness(initial = { A: { life: 100, gold: 10 } }) {
     vm.runInContext(source.slice(batchStart, batchEnd) + source.slice(start, end), context);
     return { context, state, tables, layout, api };
 }
+test('SP 回调复查：已建立的业务基线不重复导出表格，换会话后重新建立', () => {
+    const { context, api } = harness();
+    const rawExport = api.exportTableAsJson;
+    let exports = 0, session = {};
+    const registered = [], callback = () => {};
+    api.exportTableAsJson = function () { exports++; return rawExport.call(this); };
+    api.registerTableUpdateCallback = value => { registered.push(value); };
+    context.tableUpdateHookCallback = callback;
+    context.captureRuntimeSession = () => session;
+    context.isRuntimeSessionCurrent = value => value === session;
+    const begin = source.indexOf('    function installTableUpdateHook()');
+    const finish = source.indexOf('    function uninstallTableUpdateHook()', begin);
+    vm.runInContext(source.slice(begin, finish), context);
+    for (let i = 0; i < 5; i++) assert.strictEqual(context.installTableUpdateHook(), true);
+    assert.strictEqual(exports, 1);
+    session = {};
+    assert.strictEqual(context.installTableUpdateHook(), true);
+    assert.strictEqual(exports, 2);
+    assert.deepStrictEqual(registered, Array(6).fill(callback));
+});
+
+test('聊天回放兜底：复用已投影的后态，实际回到旧状态仍广播', () => {
+    const { context, api, tables } = harness();
+    const events = [];
+    const timers = new Map();
+    let nextTimer = 0, projections = 0;
+    const project = context.mvuDataFromCompleteTableSnapshot;
+    const sheet = Object.values(tables).find(value => value?.name === 'A表');
+    const column = sheet.content[0].indexOf('life');
+    api.exportTableAsJson = () => tables;
+    Object.assign(context, {
+        autoInitChatId: () => 'fixture', currentCharacter: () => ({}), cardCacheKey: () => 'fixture-card',
+        hasConvertedRuntime: () => true, variableUpdateDispatchSeq: 0,
+        tableBusinessRunning: false, pendingStatWrite: null, reentryNotifyFingerprint: '',
+        dbg() {}, stageFrontendCommittedMvuRead() {},
+        refreshCurrentCardFrontends({ after }) {
+            events.push(after.stat_data.A.life);
+            return { direct: 0, event: 1, control: 0 };
+        },
+        hostWindow: {
+            setTimeout(fn) { timers.set(++nextTimer, fn); return nextTimer; },
+            clearTimeout(id) { timers.delete(id); },
+        },
+    });
+    context.mvuDataFromCompleteTableSnapshot = function (...args) { projections++; return project(...args); };
+    const begin = source.indexOf('    function publishCommittedTableSnapshot(');
+    const finish = source.indexOf('    // 有些旧式状态栏', begin);
+    vm.runInContext(source.slice(begin, finish), context);
+    for (const value of [73, 100]) {
+        context.scheduleChatMutationFrontendSync('swipe', true);
+        sheet.content[1][column] = value;
+        timers.values().next().value();
+        assert.strictEqual(timers.size, 0);
+    }
+    assert.deepStrictEqual(events, [73, 100]);
+    assert.strictEqual(projections, 4, '每轮只投影一次前态和一次后态');
+});
+
 test("旧布局：SP 业务来源：基线、历史回放、自身提交和非持久化回调不重算，按日志 ID 去重", () => {
     const { context } = harness(), tracker = context.createSpCommitTracker(), keys = new Set(['sheet_a']);
     tracker.seed(context.readSpCommitEntries([message('old')]));

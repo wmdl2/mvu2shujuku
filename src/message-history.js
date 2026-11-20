@@ -72,7 +72,7 @@ function createMessageHistory(deps) {
             return JSON.stringify([context.chatId, context.characterId ?? null, context.groupId ?? null, context.isolationKey]);
         } catch (_) { return null; }
     }
-    function capture() {
+    function capture(cachedIndex) {
         const api = deps.readApi(), chat = deps.readChat();
         if (!api || typeof api.exportTableSnapshotsAtMessages !== 'function') return null;
         const source = historySourceKey(api);
@@ -86,28 +86,36 @@ function createMessageHistory(deps) {
         // or changing a later floor must not throw away earlier committed reads.
         // Without the optional public source contract, runtime replacement
         // remains a full boundary: value equality is no proof of isolation.
-        let changed = contextChanged || old.slots.length !== chat.length;
+        let slots = contextChanged ? [] : null;
         let firstChanged = contextChanged ? 0 : Math.min(old.slots.length, chat.length);
-        const slots = chat.map((message, index) => {
+        const cachedPrefix = !contextChanged && Number.isInteger(cachedIndex)
+            && cachedIndex >= 0 && cachedIndex < chat.length && old.values.has(cachedIndex);
+        for (let index = 0; index < chat.length; index++) {
+            const message = chat[index];
             const previous = !contextChanged && old.slots[index];
             const swipe = message?.swipe_id, storage = message?.TavernDB_ACU_IsolatedData;
             if (previous && previous.swipe === swipe
-                && previous.storage === storage && propertiesMatch(previous.properties)) return previous;
-            changed = true;
+                && previous.storage === storage && propertiesMatch(previous.properties)) {
+                if (slots) slots.push(previous);
+                else if (cachedPrefix && index === cachedIndex) return old;
+                continue;
+            }
+            if (!slots) slots = old.slots.slice(0, index);
             firstChanged = Math.min(firstChanged, index);
-            return { swipe, storage, properties: captureProperties([storage]) };
-        });
-        if (!changed) return old;
+            slots.push({ swipe, storage, properties: captureProperties([storage]) });
+        }
+        if (!slots) {
+            if (old.slots.length === chat.length) return old;
+            slots = old.slots.slice(0, chat.length);
+        }
         generation = { api, chat, source, runtime, session, layout, slots,
             layoutProperties: contextChanged ? captureProperties([layout]) : old.layoutProperties,
             values: new Map(old && !contextChanged ? [...old.values].filter(([index]) => index < firstChanged) : []),
-            pending: new Set() };
+            pending: new Set(), requested: new Set(), priming: false };
         return generation;
     }
-    function current(owner) { return capture() === owner; }
-    async function prepare(indices) {
-        const owner = capture();
-        if (!owner) return false;
+    function current(owner) { return generation === owner && capture() === owner; }
+    async function prepareOwner(owner, indices) {
         const requested = [...new Set(indices)].filter(index => Number.isInteger(index)
             && index >= 0 && index < owner.chat.length);
         // Cached floors do not depend on an unrelated cold replay in flight.
@@ -121,7 +129,6 @@ function createMessageHistory(deps) {
             if (!current(owner)) throw failure('MVU_HISTORY_CONTEXT_CHANGED', '历史读取期间聊天或数据库状态已变化');
             if (requested.every(index => owner.values.has(index))) return true;
         }
-        if (!current(owner)) throw failure('MVU_HISTORY_CONTEXT_CHANGED', '历史读取期间聊天或数据库状态已变化');
         const missing = requested.filter(index => !owner.values.has(index));
         if (!missing.length) return true;
         const task = (async () => {
@@ -155,13 +162,55 @@ function createMessageHistory(deps) {
         try { await task; } finally { owner.pending.delete(task); }
         return true;
     }
+    function prepare(indices) {
+        try {
+            const owner = capture(indices?.length === 1 ? indices[0] : undefined);
+            return owner ? prepareOwner(owner, indices) : Promise.resolve(false);
+        } catch (error) {
+            return Promise.reject(error);
+        }
+    }
+    function prime(owner, index) {
+        if (!Number.isInteger(index) || index < 0 || index >= owner.chat.length) return;
+        owner.requested.add(index);
+        if (owner.priming) return;
+        owner.priming = true;
+        const onError = deps.onError || (() => {});
+        Promise.resolve().then(async () => {
+            try {
+                while (owner.requested.size && current(owner)) {
+                    if (owner.pending.size) {
+                        await Promise.allSettled(owner.pending);
+                        continue;
+                    }
+                    const indices = [...owner.requested];
+                    owner.requested.clear();
+                    try { await prepareOwner(owner, indices); }
+                    catch (error) {
+                        onError(error);
+                        // A failed later frame must not hide readable earlier floors.
+                        const boundary = error.failurePoint?.messageIndex;
+                        if (error.historyCode === 'replay_failed' && Number.isInteger(boundary) && current(owner)) {
+                            const prefix = indices.filter(index => index < boundary);
+                            if (prefix.length && prefix.length < indices.length) await prepareOwner(owner, prefix).catch(onError);
+                        }
+                    }
+                }
+            } finally {
+                owner.priming = false;
+                owner.requested.clear();
+            }
+        }).catch(onError);
+    }
     function read(index, options) {
-        const owner = capture();
+        // A ready historical read only depends on the prefix through this
+        // floor. Cold preparation and async publication still check all slots.
+        const owner = capture(index);
         if (!owner) return deps.readFallback(index);
         if (!owner.values.has(index)) {
             // Prime on demand, but never disguise a pending/failed SQL replay as
             // an empty variable object or current-floor data.
-            prepare([index]).catch(deps.onError || (() => {}));
+            prime(owner, index);
             throw failure('MVU_HISTORY_NOT_READY', '历史状态尚未准备完成，请等待状态栏就绪后读取');
         }
         // Only the internal TH adapter defers this copy: its mergeRead always

@@ -168,15 +168,19 @@ test('统一填表适配：未启用和不完整匹配的源内容不被请求�
 });
 function bridgeHarness(factory = createEjsEvalBridge) {
     const r = run(output('  hint: 冻结时禁止修改\n'), entry(output('  hint: 冻结时禁止修改\n'), '[mvu_update]变量输出格式'));
-    let current = r.card; const calls = [], preparations = [];
+    let current = r.card;
+    const calls = [], preparations = [], defineCalls = [];
     const ejs = { prepareContext: async (...args) => { preparations.push(args); return { original: true }; },
         evalTemplate: async function(code, context, options) {
             calls.push({ receiver: this, code, context, options });
             return String(code);
         } };
-    const bridge = factory({ readCharacter: () => current, readCore: () => core, makeDefines: () => ({ mvu2shujukuGetAllVariables: () => initial }) });
+    const bridge = factory({ readCharacter: () => current, readCore: () => core, makeDefines: context => {
+        defineCalls.push(context);
+        return { mvu2shujukuGetAllVariables: () => initial };
+    } });
     bridge.install(ejs);
-    return { r, ejs, calls, preparations, switchCard: card => { current = card; }, bridge };
+    return { r, ejs, calls, preparations, defineCalls, switchCard: card => { current = card; }, bridge };
 }
 test('统一填表适配：真实运行时桥先清理请求，再正确准备上下文，源卡不变', async () => {
     const h = bridgeHarness(), text = request(h.r), snapshot = JSON.stringify(h.r.card);
@@ -193,6 +197,7 @@ test('统一填表适配：正文/预览上下文不采用填表视图，普通�
     assert.strictEqual(h.calls[0].context, context); assert.strictEqual(h.calls[0].options, options);
     await h.ejs.evalTemplate('<%= mvu2shujukuGetAllVariables() %>', context, options);
     assert.strictEqual(h.calls[1].context, context);
+    assert.deepStrictEqual(h.defineCalls, [context], '调用方给出 EJS 上下文时只创建一次对应的变量入口');
     const count = h.preparations.length;
     assert.strictEqual(await h.ejs.evalTemplate('plain text'), 'plain text'); assert.strictEqual(h.preparations.length, count);
 });

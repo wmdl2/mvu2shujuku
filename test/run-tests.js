@@ -4563,7 +4563,7 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
     assert.ok(index.includes('return variables.getvar(null);'), 'EJS define 应委派运行时统一变量上下文');
     assert.ok(index.includes('sourceFp === greetingState.pendingSourceFp'),
         '大型 initvar 应在执行 MVU 脚本前按源指纹去重，避免在途重跑事件/保存链');
-    assert.ok(index.includes('hostWindow.setTimeout(ensureWindowStatusPlaceholder, 1200)'),
+    assert.ok(index.includes('scheduleConvertedWork(ensureWindowStatusPlaceholder, 1200)'),
         '状态栏占位符改写应让位于 MESSAGE_RECEIVED 动态正则注册，避免首次 Ticket/<ellia> 渲染竞态');
     assert.ok(index.includes('hadFullCheckpointBeforeInit'), '重进已有 checkpoint 的聊天不应重放开局 initvar');
     assert.ok(index.includes('await scheduleWindowStatOverlay(nextStat, null, false, false, writeChatKey, writeSession)'), 'Mvu.replaceMvuData 必须等待来源会话的合并写入真正落定');
@@ -4581,7 +4581,7 @@ test('桥的读写都处理 scalarValueCol（修仙秘闻读回 {键:标量}、�
     assert.ok(index.includes("if (mvu2shujukuChatHasFullCheckpoint()) return;"), '仍有 checkpoint 时不得误重建');
     assert.ok(index.includes("if (readPersistedTableData()) return;"), '仍有可回放数据时不得误重建');
     assert.ok(index.includes('const stableDeadline = Date.now() + 1200;'), '开局整表提交后应经过稳定期校验，不得只验证瞬时运行时');
-    assert.ok(index.includes('persistedReadCache = { key: \'\', data: null };'), '开局落定校验应强制重建当前 V2 持久化快照');
+    assert.ok(index.includes('persistedReadCache = null;'), '开局落定校验应强制重建当前 V2 持久化快照');
     assert.ok(index.includes('(nativeWrite?.changed || n > 0) && bulkInit !== true'), '数据库整表保存不重复调用；原消息隐藏数据变化仍需保存');
 });
 
@@ -5652,6 +5652,7 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     };
     let initialized = false;
     let initCalls = 0;
+    let exportCalls = 0;
     let lastInitTemplateData = null;
     let tableUpdateCallback = null;
     const emittedMvuEvents = [];
@@ -5667,7 +5668,7 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     const fakeApi = {
         querySql: applyingApi(tables).querySql, // readiness only; this is a CRUD substitute
         getTemplatePresetNames: () => [],
-        exportTableAsJson: () => (initialized ? tables : {}),
+        exportTableAsJson: () => { exportCalls++; return initialized ? tables : {}; },
         initGameSession: async (arg1, opts) => {
             initCalls += 1;
             initialized = true;
@@ -5811,7 +5812,33 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     vm2.createContext(win);
     provideHelperVariables(win);
     const nativeVariableGet = win.getVariables, nativeVariableReplace = win.replaceVariables;
+    const nativeSetter = context.setChatMessages;
+    const nativeWindowSetter = function () { return this === win; };
+    const nativeEval = function (_code, context) { return context; };
+    win.setChatMessage = nativeWindowSetter;
+    win.EjsTemplate = { evalTemplate: nativeEval, defines: { host: true } };
     vm2.runInContext(extIndex, win);
+
+    async function assertOrdinaryRuntime() {
+        const beforeReads = exportCalls;
+        const original = context.chat[0]?.mes;
+        assert.strictEqual(win.setChatMessage, nativeWindowSetter);
+        assert.strictEqual(context.setChatMessages, nativeSetter);
+        assert.strictEqual(win.eventOn, undefined);
+        assert.strictEqual(Object.hasOwn(win, 'eventOn'), false);
+        assert.strictEqual(win.EjsTemplate.evalTemplate, nativeEval);
+        assert.deepStrictEqual(win.EjsTemplate.defines, { host: true });
+        const prepared = { getvar: () => '原生函数' };
+        for (const fn of handlers.prompt_template_prepare || []) await fn(prepared);
+        assert.deepStrictEqual(Object.keys(prepared), ['getvar']);
+        for (const event of ['chatLoaded', 'message_received', 'swiped', 'updated', 'edited', 'sent', 'deleted', 'generation_ended']) {
+            for (const fn of handlers[event] || []) await fn(0);
+        }
+        assert.strictEqual(win.setChatMessage(), true);
+        await new Promise(res => setTimeout(res, 1700));
+        assert.strictEqual(exportCalls, beforeReads, '普通卡事件不应读取数据库');
+        assert.strictEqual(context.chat[0]?.mes, original, '普通卡消息不应被处理');
+    }
 
     // 阶段1：非转换卡——等待开局自动建表定时器执行，必须零接管、零建表
     await new Promise(res => setTimeout(res, 2200));
@@ -5821,6 +5848,7 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     assert.strictEqual(win.getVariables, nativeVariableGet, '非转换卡不应接管 getVariables');
     assert.strictEqual(win.updateVariablesWith, undefined, '非转换卡不应接管 updateVariablesWith');
     assert.strictEqual(win.replaceVariables, nativeVariableReplace, '非转换卡不应接管 replaceVariables');
+    await assertOrdinaryRuntime();
 
     // 阶段2：切到带独有标记的转换卡——触发 CHAT_CHANGED 后应接管并建表
     context.characters[0] = converted;
@@ -5832,6 +5860,8 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     assert.strictEqual(typeof win.getVariables, 'function', '转换卡应接管 getVariables');
     assert.strictEqual(win.updateVariablesWith, undefined, '宿主未提供裸 updateVariablesWith 时不发布无原生绑定的接口');
     assert.strictEqual(typeof win.replaceVariables, 'function', '转换卡应接管 replaceVariables');
+    assert.notStrictEqual(win.setChatMessage, nativeWindowSetter, '转换卡需保留开场修改兼容');
+    assert.notStrictEqual(win.EjsTemplate.evalTemplate, nativeEval, '转换卡仍需兼容提示词模板读取');
     // 模板缓存键：应使用“读取时会看到的角色对象”（带 avatar），并同时记录名称兜底
     assert.strictEqual(win.__mvu2shujukuTemplateCacheFor, '转换卡|b.png', '缓存键应含 avatar');
     assert.strictEqual(win.__mvu2shujukuTemplateCacheForName, '转换卡', '应记录缓存键的名称兜底');
@@ -5976,6 +6006,7 @@ test('扩展安全门控：非转换卡零接管零建表，转换卡才接管 M
     assert.strictEqual(win.getVariables, nativeVariableGet, '切回普通卡后应还原 getVariables');
     assert.strictEqual(win.updateVariablesWith, undefined, '切回普通卡后应撤销 updateVariablesWith');
     assert.strictEqual(win.replaceVariables, nativeVariableReplace, '切回普通卡后应还原 replaceVariables');
+    await assertOrdinaryRuntime();
 });
 
 test("旧布局：桥+扩展共用注册表：TH 非消息作用域保留，切到真 MVU 卡后还原全部原始函数", async () => {

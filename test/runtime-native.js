@@ -7,6 +7,85 @@ const { test } = require('./runner');
 const { core, assert, fs, applyingApi } = require('./helpers');
 const clone = value => JSON.parse(JSON.stringify(value));
 
+test('运行时模板读取：复用解码文本，模板修改与更新分别隔离', () => {
+    const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const start = source.indexOf('    let runtimeTemplateSource =');
+    const end = source.indexOf('    function cachedTemplateForCurrentCard(', start);
+    let decodes = 0;
+    const parse = vm.runInNewContext(source.slice(start, end) + '\nparseRuntimeTemplate;', {
+        mvu2shujukuDecodeB64: text => { decodes++; return Buffer.from(text, 'base64').toString('utf8'); },
+    });
+    const encode = value => Buffer.from(JSON.stringify({ sheet_one: { content: [[value]] } })).toString('base64');
+    const first = encode('原值'), second = encode('新值');
+    parse(first).sheet_one.content[0][0] = '临时更改';
+    assert.equal(parse(first).sheet_one.content[0][0], '原值');
+    assert.equal(decodes, 1);
+    assert.equal(parse(second).sheet_one.content[0][0], '新值');
+    assert.equal(decodes, 2);
+});
+
+test('同步持久化回放：只复制最后基底，稀疏楼层和等长更新仍读到正确状态', () => {
+    const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const begin = source.indexOf('    function readPersistedTableData(');
+    const end = source.indexOf('    // EJS 会在 CHAT_CHANGED', begin);
+    let copies = 0;
+    const snapshot = value => ({ sheet_one: { content: [['id', 'value'], [1, value]] } });
+    const inline = value => JSON.stringify({ test: {
+        storageFrame: { version: 2, checkpoint: { kind: 'full', data: snapshot(value) }, logEntries: [] },
+    } });
+    const chat = [
+        { TavernDB_ACU_IsolatedData: inline('甲') }, { is_user: true },
+        { TavernDB_ACU_IsolatedData: inline('乙') },
+    ];
+    const read = vm.runInNewContext('let persistedReadCache = null;\n' + source.slice(begin, end) + '\nreadPersistedTableData;', {
+        getContextSafe: () => ({ chat }),
+        JSON: { parse: JSON.parse, stringify(value) { if (value?.sheet_one) copies++; return JSON.stringify(value); } },
+    });
+    const first = read();
+    assert.equal(first.sheet_one.content[1][1], '乙');
+    assert.equal(copies, 1);
+    assert.equal(read(), first);
+    assert.equal(copies, 1);
+    assert.equal(inline('丙').length, chat[2].TavernDB_ACU_IsolatedData.length);
+    chat[2].TavernDB_ACU_IsolatedData = inline('丙');
+    assert.equal(read().sheet_one.content[1][1], '丙');
+    assert.equal(copies, 2);
+    chat.push({ TavernDB_ACU_IsolatedData: { test: { storageFrame: {
+        version: 2, logEntries: [{ operations: [{ kind: 'sql_sheet_batch', sheetKey: 'sheet_one' }] }],
+    } } } });
+    assert.equal(read(), null, '未知 SQL 操作交给原生引擎，不能返回此前的基底');
+});
+
+test('实时读表索引：普通状态不查模板，额外表与未就绪行仍按原规则核验', () => {
+    const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const section = (start, end) => {
+        const offset = source.indexOf(start);
+        return source.slice(offset, source.indexOf(end, offset));
+    };
+    const layout = [{ table: '状态表', kind: 'singleton' }];
+    let templateReads = 0, exports = 0;
+    const api = { exportTableAsJson() { exports++; return {}; } };
+    const context = vm.createContext({
+        cachedTemplateForCurrentCard: () => { templateReads++; return { sheet_note: { name: '纪要表' } }; },
+    });
+    vm.runInContext(section('    function runtimeForeignTableNames(', '    let runtimeTemplateSource')
+        + section('    function indexTableSnapshot(', '    function mvuDataFromCompleteTableSnapshot('), context);
+    const data = { sheet_state: { name: '状态表', content: [['id']] } };
+    const sheets = context.indexTableSnapshot(data);
+    assert.deepStrictEqual([...context.runtimeForeignTableNames(api, layout, sheets)], []);
+    assert.equal(context.tableIndexCoversLayout(sheets, layout), false);
+    assert.equal(context.tableIndexCoversLayout(sheets, layout, true), true);
+    data.sheet_state.content.push([1]);
+    assert.equal(context.tableIndexCoversLayout(sheets, layout), true);
+    assert.equal(templateReads, 0);
+    data.sheet_note = { name: '纪要表' };
+    data.sheet_other = { name: '异卡表' };
+    const updated = context.indexTableSnapshot(data);
+    assert.deepStrictEqual([...context.runtimeForeignTableNames(api, layout, updated)], ['异卡表']);
+    assert.equal(templateReads, 1);
+    assert.equal(exports, 0);
+});
+
 function openingTemplateBuilder(runtimeCore = core) {
     // 直接调用真实的候选构造函数（扩展运行时导出的同一份实现），不再按源码切片，
     // 也不用替身预检替代。
@@ -285,6 +364,71 @@ test("旧布局：消息持久化：缺少导入、提交失败或规划期间�
     assert.strictEqual(writes, 0);
 });
 
+test('消息更新块：普通正文也缓存，切换分支或编辑后重扫并保留消息身份', () => {
+    const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const start = source.indexOf('    const messageUpdateFpCache = new WeakMap();');
+    const end = source.indexOf('    function baselineMessageUpdateBlocks(', start);
+    let scans = 0;
+    const fingerprint = vm.runInNewContext(source.slice(start, end) + '\nmessageUpdateFingerprint;', {
+        window: {},
+        messageUpdateBlocks: text => { scans++; return text.startsWith('<UpdateVariable>') ? text : ''; },
+    });
+    const message = { mes: '普通正文', swipe_id: 0 };
+    assert.equal(fingerprint(message, 1), '');
+    assert.equal(fingerprint(message, 1), '');
+    assert.equal(scans, 1);
+    message.mes = '<UpdateVariable>更新';
+    const updated = fingerprint(message, 1);
+    assert.ok(updated);
+    message.swipe_id = 1;
+    message.mes = '另一候选正文';
+    assert.equal(fingerprint(message, 1), '');
+    assert.equal(fingerprint(message, 1), '');
+    message.swipe_id = 0;
+    message.mes = '<UpdateVariable>更新';
+    assert.equal(fingerprint(message, 1), updated);
+    assert.notEqual(fingerprint({ ...message }, 1), updated);
+    assert.equal(scans, 5);
+});
+
+test('运行时全局初始化：已发布窗口不重复读表，新增入口仍等数据就绪', () => {
+    const source = fs.readFileSync(require.resolve('../src/extension-runtime'), 'utf8');
+    const start = source.indexOf("        // waitGlobalInitialized('Mvu') 不只检查");
+    const end = source.indexOf('    // 撤销 Mvu 接管', start);
+    let reads = 0, ready = false, announcements = 0;
+    const initialized = [];
+    const first = {
+        initializeGlobal: name => initialized.push(['first', name]),
+        eventEmit: () => announcements++,
+    };
+    const targets = [first];
+    const publish = vm.runInNewContext(`let windowMvuGlobalAnnounced = false;
+        const windowMvuInitializedFunctions = new WeakSet(), windowMvuFake = {};
+        function publish() {
+        ${source.slice(start, end)}
+        publish;`, {
+        targets,
+        window: { getAllVariables: () => { reads++; return { __mvu2shujukuReadUnavailable: !ready }; } },
+    });
+    publish();
+    assert.equal(reads, 1);
+    assert.deepStrictEqual(initialized, []);
+    ready = true;
+    publish(); publish();
+    assert.equal(reads, 2, '稳定窗口的再次检查不反投影');
+    assert.equal(announcements, 1);
+    const second = { initializeGlobal: name => initialized.push(['second', name]) };
+    targets.push(second);
+    ready = false;
+    publish();
+    assert.deepStrictEqual(initialized, [['first', 'Mvu']]);
+    ready = true;
+    publish(); publish();
+    assert.deepStrictEqual(initialized, [['first', 'Mvu'], ['second', 'Mvu']]);
+    assert.equal(reads, 4);
+    assert.equal(announcements, 1);
+});
+
 test('聊天重新加载：同身份的新消息对象不重跑旧更新块，后续新回复仍更新', async () => {
     const h = await nativeRuntime(undefined, ({ context, tables }) => {
         context.event_types = { CHAT_LOADED: 'loaded', MESSAGE_RECEIVED: 'received', GENERATION_ENDED: 'ended' };
@@ -407,6 +551,51 @@ async function nativeRuntime(source = require('./synthetic-card')(), configure, 
     assert.strictEqual(typeof win.Mvu?.replaceMvuData, 'function');
     return { win, context, tables, api, advance, tableCallbacks, handlers };
 }
+
+test('运行时全局初始化：反复切入转换卡只保留一个监听，旧宿主可通过 eventOff 解绑', async () => {
+    for (const returnHandle of [true, false]) {
+        const listeners = new Map();
+        const h = await nativeRuntime(undefined, ({ win, context }) => {
+            win.eventOn = function (name, handler) {
+                let active = listeners.get(name);
+                if (!active) listeners.set(name, active = new Set());
+                active.add(handler);
+                if (returnHandle) return { stop: () => active.delete(handler) };
+            };
+            win.eventOff = function (name, handler) { listeners.get(name)?.delete(handler); };
+            context.characters.push({ name: '普通卡', avatar: 'native.png', first_mes: '你好' });
+            context.event_types = { CHAT_CHANGED: 'chat_changed' };
+        });
+        for (let i = 0; i < 3; i++) {
+            assert.equal(listeners.get('global_Mvu_initialized').size, 1);
+            h.context.characterId = 1;
+            await h.context.eventSource.emit('chat_changed');
+            assert.equal(listeners.get('global_Mvu_initialized').size, 0);
+            h.context.characterId = 0;
+            await h.context.eventSource.emit('chat_changed');
+        }
+        assert.equal(listeners.get('global_Mvu_initialized').size, 1);
+    }
+});
+
+test('运行时全局初始化：不阻止后续注册宿主支持的对外事件', async () => {
+    const events = new Set();
+    let supportsExportedEvents = false;
+    const h = await nativeRuntime(undefined, ({ win, context }) => {
+        win.eventOn = function (name) {
+            if (name.startsWith('mag_') && !supportsExportedEvents) return;
+            events.add(name);
+            return { stop: () => events.delete(name) };
+        };
+        context.event_types = { CHAT_CHANGED: 'chat_changed' };
+    });
+    assert(events.has('global_Mvu_initialized'));
+    assert(!events.has('mag_invoke_mvu'));
+    supportsExportedEvents = true;
+    await h.context.eventSource.emit('chat_changed');
+    assert(events.has('mag_invoke_mvu'));
+    assert(events.has('mag_update_variable'));
+});
 
 test("旧布局：开场恢复：内部Schema提交后丢失载体仍恢复已提交值，不回退模板占位值", async () => {
     const source = { name: '公开开场提交缓存', first_mes: '开场', character_book: { entries: [{ comment: '[InitVar]', enabled: false, content: JSON.stringify({组:{时间:'待初始化',备注:'保留'}}) }] },
