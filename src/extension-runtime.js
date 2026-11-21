@@ -1639,6 +1639,7 @@ function installExtensionRuntime(window) {
                 });
                 es.on(et.MESSAGE_RECEIVED, messageId => {
                     if (!hasConvertedRuntime()) return;
+                    captureVariableView();
                     scheduleReplyStatusCleanup(messageId);
                     scheduleConvertedWork(autoInitDatabase, 600);
                     scheduleConvertedWork(applyPendingMessageUpdateBlocks, 900);
@@ -1661,6 +1662,7 @@ function installExtensionRuntime(window) {
                     if (evName && typeof evName === 'string') {
                         es.on(evName, () => {
                             if (!hasConvertedRuntime()) return;
+                            if (evName === et.MESSAGE_SWIPED) captureVariableView();
                             scheduleConvertedWork(autoInitDatabase, 300);
                             scheduleConvertedWork(applyActiveGreetingInitvar, 1200);
                             scheduleConvertedWork(applyPendingMessageUpdateBlocks, 1500);
@@ -1672,6 +1674,7 @@ function installExtensionRuntime(window) {
                 if (et.MESSAGE_DELETED && typeof et.MESSAGE_DELETED === 'string') {
                     es.on(et.MESSAGE_DELETED, () => {
                         if (!hasConvertedRuntime()) return;
+                        captureVariableView();
                         // 删楼会改变写入基线与承载楼，旧合并窗口中的写入全部取消。
                         if (pendingStatWriteSession) discardPendingStatWrite();
                         scheduleOpeningContinuityRecovery(et.MESSAGE_DELETED);
@@ -3220,11 +3223,28 @@ function installExtensionRuntime(window) {
     // 状态栏在更新回调后立即重读时，必须看到与回调事件同一份 after；
     // 只保留很短的读窗口，超时后仍回归插件运行时/持久化重建。
     let frontendCommittedMvuRead = null;
+    let variableView = null;
+    function captureVariableView() {
+        const session = captureRuntimeSession(), chat = getContextSafe().chat;
+        const { index, swipe } = ejsEvalBridge.selectMessage();
+        const message = chat?.[index];
+        if (variableView && variableView.session.key === session.key && variableView.session.epoch === session.epoch
+            && variableView.session.cardKey === session.cardKey && variableView.chat === chat
+            && variableView.index === index && variableView.message === message
+            && variableView.swipe === swipe) return variableView;
+        // Keep a distinct token when an observed selection changes, including
+        // when the same message and swipe are selected again later.
+        variableView = { session, chat, index, message, swipe };
+        return variableView;
+    }
+    function readPendingMvuVariables() {
+        if (!pendingStatWrite || !isRuntimeSessionCurrent(pendingStatWriteSession)) return null;
+        return { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
+    }
     function stageFrontendCommittedMvuRead(after) {
         try {
             frontendCommittedMvuRead = {
-                chatKey: autoInitChatId(),
-                cardKey: cardCacheKey(currentCharacter()),
+                view: captureVariableView(),
                 expiresAt: Date.now() + 5000,
                 value: JSON.parse(JSON.stringify(after)),
             };
@@ -3234,7 +3254,7 @@ function installExtensionRuntime(window) {
         try {
             const item = frontendCommittedMvuRead;
             if (!item) return null;
-            if (item.chatKey !== autoInitChatId() || item.cardKey !== cardCacheKey(currentCharacter()) || Date.now() > item.expiresAt) {
+            if (Date.now() > item.expiresAt || item.view !== captureVariableView()) {
                 frontendCommittedMvuRead = null;
                 return null;
             }
@@ -3368,9 +3388,8 @@ function installExtensionRuntime(window) {
             // 待写快照 > SP 已提交回调 > 完整运行时表 > 持久化帧 > 结构骨架。
             // 旧逻辑无条件优先 checkpoint，当 checkpoint 仍是开局快照而当前表已更新时，
             // format_message_variable/getvar 会偶发读到默认初始值。
-            if (pendingStatWrite && typeof pendingStatWrite === 'object') {
-                return { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} };
-            }
+            const pending = readPendingMvuVariables();
+            if (pending) return pending;
             const committed = readFrontendCommittedMvuRead();
             if (committed && committed.stat_data) return committed;
             try {
@@ -3546,7 +3565,8 @@ function installExtensionRuntime(window) {
     function armLateFrontendUpdate(after, before) {
         try {
             pendingLateFrontendUpdate = {
-                chatKey: autoInitChatId(),
+                view: captureVariableView(),
+                sequence: variableUpdateDispatchSeq,
                 expiresAt: Date.now() + 10000,
                 // after is the dispatcher's private copy. Only clone it if a
                 // late iframe actually needs the author-facing event.
@@ -3849,13 +3869,13 @@ function installExtensionRuntime(window) {
         return true;
     }
 
-    function mvuDataFromCompleteTableSnapshot(data, messageIndex, allowEmptyRows = false, includeNative = true) {
+    function mvuDataFromCompleteTableSnapshot(data, messageIndex, allowEmptyRows = false, { forHistoryCache = false } = {}) {
         try {
             if (!activeLayout || !tableSnapshotCoversLayout(data, activeLayout, allowEmptyRows)) return null;
             const core = window.MVU2SHUJUKU_CORE;
             if (!core || typeof core.statDataFromTables !== 'function') return null;
-            const after = core.statDataFromTables(activeLayout, data);
-            return after && after.stat_data ? (includeNative ? nativeStatStorage.merge(after, messageIndex) : after) : null;
+            const after = core.statDataFromTables(activeLayout, data, { includeDisplay: !forHistoryCache });
+            return after?.stat_data ? (forHistoryCache ? after : nativeStatStorage.merge(after, messageIndex)) : null;
         } catch (e) { return null; }
     }
 
@@ -4061,9 +4081,11 @@ function installExtensionRuntime(window) {
             tableUpdateHookTimer = hostWindow.setTimeout(flushTableUpdateHook, 120);
             return;
         }
-        if (!isRuntimeSessionCurrent(tableUpdateHookSession)) {
+        const session = tableUpdateHookSession;
+        if (!isRuntimeSessionCurrent(session)) {
             tableUpdateHookPendingData = null;
             tableUpdateHookSession = null;
+            tableBusinessPending = null;
             return;
         }
         if (!activeLayout) return;
@@ -4109,7 +4131,6 @@ function installExtensionRuntime(window) {
         const task = tableBusinessPending;
         tableBusinessPending = null;
         if (task && task.entries.length) {
-            const session = tableUpdateHookSession;
             tableBusinessRunning = true;
             try {
                 if (await applySpBusinessCorrection(data, task, session)) return;
@@ -4122,10 +4143,15 @@ function installExtensionRuntime(window) {
                 return;
             } finally { tableBusinessRunning = false; }
         }
-        publishCommittedTableSnapshot(data, '表格更新回调', false, false, persistedEmpty);
+        if (isRuntimeSessionCurrent(session)) publishCommittedTableSnapshot(data, '表格更新回调', false, false, persistedEmpty);
     }
     const tableUpdateHookCallback = (latestTableData, meta) => {
         if (!activeLayout) return;
+        const view = captureVariableView();
+        if (tableUpdateHookSession && !isRuntimeSessionCurrent(tableUpdateHookSession)) {
+            tableUpdateHookPendingData = null;
+            tableBusinessPending = null;
+        }
         // The reader observes actual runtime/frame revisions. A notification
         // alone must not discard an unchanged, already prepared history prefix.
         scheduleDatabaseHistoryPreparation();
@@ -4141,7 +4167,7 @@ function installExtensionRuntime(window) {
         }
         if (currentSnapshot) tableBusinessSnapshot = JSON.parse(JSON.stringify(currentSnapshot));
         tableBusinessRevision++;
-        tableUpdateHookSession = captureRuntimeSession();
+        tableUpdateHookSession = { ...view.session, validate: () => view === captureVariableView() };
         // SP 每次事务提交都代表运行时数据已变化（含被抑制广播的批量 CRUD），
         // 投影缓存必须立即失效。
         invalidateStatProjectionCache();
@@ -4337,6 +4363,31 @@ function installExtensionRuntime(window) {
     function restoreGlobalOriginals() { runtimeGlobals.restoreAll(); }
     let currentCardApi = null;
     let currentVariableApi = null;
+    let helperVariableBindings = new WeakMap();
+    function installHelperVariableBindings(w, variableApi) {
+        const helper = w.TavernHelper;
+        if (helper?.__mvu2shujukuCardApi !== currentCardApi) return;
+        const nativeHelper = runtimeGlobals.original(w, 'TavernHelper');
+        if (!nativeHelper) return;
+        // TH can share a facade with multiple windows and can add methods to
+        // its native namespace in place. Check both sides before reusing it.
+        const previous = helperVariableBindings.get(helper);
+        if (previous?.variableApi === variableApi && previous.nativeHelper === nativeHelper
+            && previous.methods.every(([name, native, installed]) => nativeHelper[name] === native && helper[name] === installed)) return;
+        const namespace = variableApi.bind(nativeHelper, nativeHelper);
+        if (namespace.getChatMessages) Object.defineProperty(helper, 'getChatMessages', { value: namespace.getChatMessages, configurable: true, writable: true, enumerable: true });
+        if (namespace.setChatMessages) Object.defineProperty(helper, 'setChatMessages', { value: namespace.setChatMessages, configurable: true, writable: true, enumerable: true });
+        if (nativeHelper._bind && helper.__mvu2shujukuVariableApi !== variableApi) {
+            Object.defineProperty(helper, '_bind', { value: variableApi.bindIframe(nativeHelper._bind), configurable: true, enumerable: true });
+            Object.defineProperty(helper, '__mvu2shujukuVariableApi', { value: variableApi, configurable: true });
+        }
+        for (const name of variableApi.names) {
+            Object.defineProperty(helper, name, { value: namespace[name], configurable: true, writable: true, enumerable: true });
+        }
+        const names = [...variableApi.names, 'getChatMessages', 'setChatMessages', '_bind'];
+        helperVariableBindings.set(helper, { variableApi, nativeHelper,
+            methods: names.map(name => [name, nativeHelper[name], helper[name]]) });
+    }
     const frontendReadiness = window.__MVU2SHUJUKU_FRONTEND_READINESS_FACTORY__({
         capture: captureRuntimeSession,
         sameSession: (a, b) => a.key === b.key && a.epoch === b.epoch,
@@ -4553,23 +4604,11 @@ function installExtensionRuntime(window) {
                     const id = currentVariableApi.messageIdForWindow(receiver);
                     return readDatabaseVariables({ type: 'message', message_id: id });
                 },
-                prepareMessages: list => {
-                    const indices = Array.isArray(list) ? list.filter(item => Number.isInteger(item?.message_id)
-                        && Object.prototype.hasOwnProperty.call(item, 'data')).map(item => item.message_id) : [];
-                    return indices.length ? databaseMessageHistory.prepare(indices) : Promise.resolve();
-                },
-                projectMessages: list => {
+                prepareMessages: indices => indices.length ? databaseMessageHistory.prepare(indices) : Promise.resolve(),
+                readMessageVariables: (id, swipe) => {
                     assertRuntimeSession(shimSession);
-                    if (!Array.isArray(list)) return list;
-                    return list.map(item => {
-                        // include_swipes has a different shape. Do not invent state
-                        // for swipes which the host has not selected/replayed.
-                        if (!item || !Number.isInteger(item.message_id) || !Object.prototype.hasOwnProperty.call(item, 'data')) return item;
-                        const target = ejsEvalBridge.selectMessage({ withMsg: { id: item.message_id, swipe_id: item.swipe_id } });
-                        const wrap = target.missing ? {} : readDatabaseVariables({ type: 'message', message_id: target.index });
-                        return { ...item, data: { ...item.data, stat_data: wrap.stat_data || {},
-                            display_data: item.data?.display_data ?? wrap.display_data ?? wrap.stat_data ?? {} } };
-                    });
+                    const target = ejsEvalBridge.selectMessage({ withMsg: { id, swipe_id: swipe } });
+                    return target.missing ? {} : readDatabaseVariables({ type: 'message', message_id: target.index });
                 },
                 nativeState: opts => readCardApiMetadata().statStorage?.version >= 1
                     ? nativeStatStorage.read(databaseVariableTarget(opts, false).index) : undefined,
@@ -4722,20 +4761,7 @@ function installExtensionRuntime(window) {
                 }
                 // Namespace methods are separate functions, not aliases of the bare
                 // globals. Bind the original namespace receiver, never the facade.
-                const nativeHelper = runtimeGlobals.original(w, 'TavernHelper');
-                const helper = w.TavernHelper;
-                if (nativeHelper && helper?.__mvu2shujukuCardApi === currentCardApi) {
-                    const namespace = variableApi.bind(nativeHelper, nativeHelper);
-                    if (namespace.getChatMessages) Object.defineProperty(helper, 'getChatMessages', { value: namespace.getChatMessages, configurable: true, writable: true, enumerable: true });
-                    if (namespace.setChatMessages) Object.defineProperty(helper, 'setChatMessages', { value: namespace.setChatMessages, configurable: true, writable: true, enumerable: true });
-                    if (nativeHelper._bind && helper.__mvu2shujukuVariableApi !== variableApi) {
-                        Object.defineProperty(helper, '_bind', { value: variableApi.bindIframe(nativeHelper._bind), configurable: true, enumerable: true });
-                        Object.defineProperty(helper, '__mvu2shujukuVariableApi', { value: variableApi, configurable: true });
-                    }
-                    for (const name of variableApi.names) {
-                        Object.defineProperty(helper, name, { value: namespace[name], configurable: true, writable: true, enumerable: true });
-                    }
-                }
+                installHelperVariableBindings(w, variableApi);
                 // 前端状态栏在消息 iframe 里用 eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, ...) 监听刷新。
                 // 若 iframe 没有 TH 注入的 eventOn，就补一个绑定到 CustomEvent 的兜底，
                 // 这样 emitMvuEvent 的 dispatchEvent 一定能触发前端刷新（不会因事件源不一致而收不到）。
@@ -4786,6 +4812,7 @@ function installExtensionRuntime(window) {
     // 撤销 Mvu 接管：恢复各窗口原 window.Mvu，停止周期复查，切回转换卡时再接管。
     function restoreWindowMvuShim() {
         currentCardApi = null;
+        helperVariableBindings = new WeakMap();
         windowMvuFakeSession = null;
         if (runtimeWindows) runtimeWindows.invalidate();
         pendingLateFrontendUpdate = null;
@@ -4901,19 +4928,17 @@ function installExtensionRuntime(window) {
                             // 新 iframe 的 eventOn 注册。新 iframe 出现后只补发最近一次载荷；
                             // 先清除 pending 再广播，避免前端重渲染再新建 iframe 时形成循环。
                             const pendingUpdate = pendingLateFrontendUpdate;
-                            if (pendingUpdate && pendingUpdate.expiresAt >= Date.now() && pendingUpdate.chatKey === autoInitChatId()) {
-                                pendingLateFrontendUpdate = null;
-                                const session = captureRuntimeSession();
+                            if (pendingUpdate) pendingLateFrontendUpdate = null;
+                            if (pendingUpdate && pendingUpdate.expiresAt >= Date.now() && pendingUpdate.view === captureVariableView()) {
                                 hostWindow.setTimeout(() => {
                                     try {
-                                        if (!isRuntimeSessionCurrent(session)) return;
+                                        if (pendingUpdate.view !== captureVariableView()
+                                            || pendingUpdate.sequence !== variableUpdateDispatchSeq) return;
                                         applyWindowMvuShim();
                                         emitMvuEvent('mag_variable_update_ended', JSON.parse(JSON.stringify(pendingUpdate.after)), pendingUpdate.before);
                                         dbg('[前端迟到挂载] 新 iframe 已就绪，补发最近一次 VARIABLE_UPDATE_ENDED。');
                                     } catch (e) {}
                                 }, 120);
-                            } else if (pendingUpdate && pendingUpdate.expiresAt < Date.now()) {
-                                pendingLateFrontendUpdate = null;
                             }
                         }
                     });
@@ -4933,6 +4958,8 @@ function installExtensionRuntime(window) {
         activePlaceholderNeeded = false;
         runtimeTemplateSource = null;
         persistedReadCache = null;
+        variableView = null;
+        frontendCommittedMvuRead = null;
         if (placeholderRetryTimer) hostWindow.clearTimeout(placeholderRetryTimer);
         placeholderRetryTimer = null;
         placeholderRetryCount = 0;
@@ -6778,7 +6805,8 @@ function installExtensionRuntime(window) {
         readSessionKey: () => { const session = captureRuntimeSession(); return session.key + ':' + session.epoch; },
         readLayoutKey: () => activeLayout,
         yieldToHost: () => new Promise(resolve => hostWindow.setTimeout(resolve, 0)),
-        project: (tables, index) => mvuDataFromCompleteTableSnapshot(tables, index, true, false),
+        displayFromStat: true,
+        project: tables => mvuDataFromCompleteTableSnapshot(tables, undefined, true, { forHistoryCache: true }),
         readFallback: index => {
             const tables = readPersistedTableData(index);
             return tables ? mvuDataFromCompleteTableSnapshot(tables, index) : undefined;
@@ -6858,8 +6886,7 @@ function installExtensionRuntime(window) {
         const target = databaseVariableTarget(options, false);
         if (target.missing) return {};
         if (!target.current) return readDatabaseMessageHistory(target.index, { deferClone: true }) || {};
-        const all = pendingStatWrite ? { stat_data: pendingStatWrite, display_data: {}, delta_data: {}, initialized_lorebooks: {} }
-            : window.getAllVariables ? window.getAllVariables() : { stat_data: {} };
+        const all = readPendingMvuVariables() || (window.getAllVariables ? window.getAllVariables() : { stat_data: {} });
         if (all && all.__mvu2shujukuReadUnavailable === true) {
             try {
                 const prepared = readDatabaseMessageHistory(target.index, { deferClone: true });
@@ -6872,7 +6899,9 @@ function installExtensionRuntime(window) {
         return all;
     }
     function assertDatabaseMessageWrite(options) {
-        ejsEvalBridge.assertWritable(databaseVariableTarget(options, true));
+        const target = databaseVariableTarget(options, true);
+        ejsEvalBridge.assertWritable(target);
+        return { ...target, message: getContextSafe().chat?.[target.index] };
     }
     function templateDatabaseDefines(context, execution) {
         const safeDefine = function () { return variables.getvar(null); };

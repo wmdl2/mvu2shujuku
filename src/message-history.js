@@ -217,7 +217,9 @@ function createMessageHistory(deps) {
         // clones the complete public result. EJS/ordinary reads keep a private
         // copy here, including callers whose second argument is a swipe index.
         const value = owner.values.get(index);
-        return options?.copy === false ? value : clone(value);
+        const result = options?.copy === false ? value : clone(value);
+        // The table projection can omit its duplicate display tree until read.
+        return deps.displayFromStat ? { ...result, display_data: clone(value.stat_data) } : result;
     }
     function invalidate() { generation = null; }
     return { prepare, read, invalidate };

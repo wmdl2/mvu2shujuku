@@ -552,6 +552,51 @@ async function nativeRuntime(source = require('./synthetic-card')(), configure, 
     return { win, context, tables, api, advance, tableCallbacks, handlers };
 }
 
+test('运行时复查：复用稳定助手绑定并接管迟到接口和 iframe', async () => {
+    const frames = [];
+    const helper = {
+        getVariables() { assert.equal(this, helper); return { source: 'original' }; },
+        getChatMessages() { return []; },
+    };
+    const h = await nativeRuntime(undefined, ({ win }) => {
+        win.TavernHelper = helper;
+        win.document.querySelectorAll = selector => selector === 'iframe' ? frames : [];
+    });
+    const facade = h.win.TavernHelper;
+    const read = facade.getVariables, messages = facade.getChatMessages;
+    await h.advance(4000);
+    assert.strictEqual(facade.getVariables, read);
+    assert.strictEqual(facade.getChatMessages, messages);
+    assert.equal(facade.getVariables({ type: 'chat' }).source, 'original');
+
+    const frame = { document: { querySelectorAll: () => [] }, TavernHelper: facade };
+    frames.push({ contentWindow: frame });
+    await h.advance(2000);
+    assert.strictEqual(frame.Mvu, h.win.Mvu);
+    assert.strictEqual(frame.TavernHelper.getVariables, read, '共享助手对象的 iframe 不重复包装接口');
+
+    helper.getVariables = function () { assert.equal(this, helper); return { source: 'reloaded' }; };
+    helper._bind = function () { return { getChatMessages: () => [] }; };
+    await h.advance(2000);
+    assert.notStrictEqual(facade.getVariables, read);
+    assert.notStrictEqual(facade._bind, helper._bind);
+    assert.equal(frame.TavernHelper.getVariables({ type: 'chat' }).source, 'reloaded');
+    const overwrite = () => ({ source: 'overwritten' });
+    facade.getVariables = overwrite;
+    await h.advance(2000);
+    assert.notStrictEqual(facade.getVariables, overwrite);
+    assert.equal(facade.getVariables({ type: 'chat' }).source, 'reloaded');
+    const reloaded = facade.getVariables;
+    await h.advance(2000);
+    assert.strictEqual(facade.getVariables, reloaded);
+
+    h.win.TavernHelper = { getVariables: () => ({ source: 'replacement' }) };
+    await h.advance(2000);
+    assert.notStrictEqual(h.win.TavernHelper, facade);
+    assert.equal(h.win.TavernHelper.getVariables({ type: 'chat' }).source, 'replacement');
+    assert.strictEqual(frame.TavernHelper.getVariables, reloaded);
+});
+
 test('运行时全局初始化：反复切入转换卡只保留一个监听，旧宿主可通过 eventOff 解绑', async () => {
     for (const returnHandle of [true, false]) {
         const listeners = new Map();
@@ -821,6 +866,98 @@ test("旧布局：提交读缓存：脚本成功写入后立即读回新值，�
     const sheet = Object.values(h.tables).find(s => s.name === '状态表');
     assert.strictEqual(Number(sheet.content[1][sheet.content[0].indexOf('金币')]), 37);
     assert.strictEqual(h.win.Mvu.getMvuData().stat_data.状态.金币, 37, '成功 Promise 后读视图必须追上本次已提交快照');
+});
+
+test('运行时变量候选归属：同聊天切换后丢弃先前的提交读缓存和待写覆盖', async () => {
+    const h = await nativeRuntime(undefined, ({ context }) => {
+        context.event_types.MESSAGE_SWIPED = 'fixture_swiped';
+    });
+    await h.advance(2000);
+    const previousTables = clone(h.tables);
+    const previous = Object.values(previousTables).find(sheet => sheet.name === '状态表');
+    previous.content[1][previous.content[0].indexOf('金币')] = 65;
+    const read = () => h.win.Mvu.getMvuData().stat_data.状态.金币;
+    const hostGold = read();
+    const onUpdate = h.tableCallbacks.at(-1);
+    assert(onUpdate);
+    onUpdate(previousTables, { persisted: true });
+    await h.advance(120);
+    assert.equal(read(), 65, '提交回调后的即时读应看见同一候选的权威状态');
+
+    const message = h.context.chat[0];
+    message.swipe_id = 1;
+    await h.context.eventSource.emit('fixture_swiped', 0);
+    message.swipe_id = 0;
+    await h.context.eventSource.emit('fixture_swiped', 0);
+    assert.equal(read(), hostGold, '切走再切回后应从宿主读取，不复活旧读缓存');
+
+    const next = h.win.Mvu.getMvuData();
+    next.stat_data.状态.金币 = 91;
+    const settled = h.win.Mvu.replaceMvuData(next);
+    await h.advance(1);
+    assert.equal(read(), 91, '同一候选的连续读取仍可看见待写覆盖');
+    message.swipe_id = 1;
+    assert.equal(read(), hostGold, '切换后即使宿主通知还未到达，也不能读取上一候选的待写值');
+    await h.advance(1000);
+    assert.equal(await settled, false);
+    assert.equal(read(), hostGold);
+});
+
+test('运行时变量候选归属：表更新防抖和晚挂载通知只发送当前候选的最新状态', async () => {
+    const events = [], observe = [];
+    const h = await nativeRuntime(undefined, ({ win, context }) => {
+        context.event_types.MESSAGE_SWIPED = 'fixture_swiped';
+        win.MutationObserver = class {
+            constructor(callback) { observe.push(callback); }
+            observe() {}
+            disconnect() {}
+        };
+        win.CustomEvent = function (name, { detail }) { this.type = name; this.detail = detail; };
+        win.dispatchEvent = event => {
+            if (event.type === 'mag_variable_update_ended') events.push(event.detail.after.stat_data.状态.金币);
+        };
+    });
+    await h.advance(2000);
+    events.length = 0;
+    const onUpdate = h.tableCallbacks.at(-1);
+    assert(onUpdate);
+    const snapshot = gold => {
+        const data = clone(h.tables);
+        const sheet = Object.values(data).find(value => value.name === '状态表');
+        sheet.content[1][sheet.content[0].indexOf('金币')] = gold;
+        return data;
+    };
+    const mount = () => observe.slice().forEach(callback => callback([{ addedNodes: [{ tagName: 'IFRAME' }] }]));
+    const select = async swipe => {
+        h.context.chat[0].swipe_id = swipe;
+        await h.context.eventSource.emit('fixture_swiped', 0);
+    };
+
+    onUpdate(snapshot(70), { persisted: true });
+    await select(1);
+    await h.advance(120);
+    assert.deepStrictEqual(events, [], '上一候选的防抖通知应被取消');
+    onUpdate(snapshot(71), { persisted: true });
+    await h.advance(120);
+    assert.deepStrictEqual(events, [71]);
+    mount();
+    await h.advance(120);
+    assert.deepStrictEqual(events, [71, 71], '同一候选的晚挂载补发仍有效');
+
+    onUpdate(snapshot(72), { persisted: true });
+    await h.advance(120);
+    mount();
+    await select(0);
+    await select(1);
+    await h.advance(120);
+    assert.deepStrictEqual(events, [71, 71, 72], '已经排队的晚挂载载荷不能跨候选后再发送');
+
+    onUpdate(snapshot(73), { persisted: true });
+    await h.advance(120);
+    onUpdate(snapshot(74), { persisted: true });
+    mount();
+    await h.advance(120);
+    assert.deepStrictEqual(events, [71, 71, 72, 73, 74], '后到的提交应取代同一候选上一份待补发载荷');
 });
 
 test("旧布局：整组空值：真实运行时的完整替换保留删除意图，普通旧布局仍补齐遗漏组", async () => {

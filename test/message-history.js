@@ -25,6 +25,30 @@ test('历史接口适配：指定楼层批量读取、缓存复用和副本隔�
     await h.reader.prepare([0, 1]);
     assert.equal(h.reader.read(0).stat_data.value, 10); assert.equal(h.calls.length, 1);
 });
+test('历史缓存优化：从单份状态恢复独立显示，旧宿主返回原有快照', async () => {
+    const fallback = { stat_data: { value: 10 }, display_data: { value: '旧宿主显示' } };
+    const h = harness(factory, {
+        displayFromStat: true,
+        project: data => ({ stat_data: { values: [{ value: data.value }], empty: null } }),
+        readFallback: () => fallback,
+    });
+    await h.reader.prepare([0]);
+    const result = h.reader.read(0);
+    const expected = { values: [{ value: 10 }], empty: null };
+    assert.deepStrictEqual(result.stat_data, expected);
+    assert.deepStrictEqual(result.display_data, expected);
+    result.display_data.values[0].value = 99;
+    assert.deepStrictEqual(result.stat_data, expected);
+    result.stat_data.values[0].value = 98;
+    const borrowed = h.reader.read(0, { copy: false });
+    assert.deepStrictEqual(borrowed.stat_data, expected);
+    assert.deepStrictEqual(borrowed.display_data, expected);
+    borrowed.display_data.values.pop();
+    assert.deepStrictEqual(h.reader.read(0).display_data, expected);
+    assert.deepStrictEqual(h.calls, [[0]]);
+    delete h.api.exportTableSnapshotsAtMessages;
+    assert.deepStrictEqual(h.reader.read(0), fallback);
+});
 test('历史准备性能：启动回放前复用本次已经校验的来源', async () => {
     let inspections = 0;
     const h = harness();
@@ -232,8 +256,15 @@ test('历史接口接入：真实运行时在EJS执行前准备，TH与Mvu同步
     const count = calls;
     assert.equal(await h.win.EjsTemplate.evalTemplate(code, { message_id: 0 }), 19);
     assert.equal(calls, count);
-    assert.equal(h.win.getVariables({ type: 'message', message_id: 0 }).stat_data.状态.金币, 19);
-    assert.equal(h.win.Mvu.getMvuData({ type: 'message', message_id: 0 }).stat_data.状态.金币, 19);
+    const options = { type: 'message', message_id: 0 };
+    const helper = h.win.getVariables(options);
+    assert.equal(helper.stat_data.状态.金币, 19);
+    assert.equal(helper.display_data.状态.金币, 19);
+    helper.display_data.状态.金币 = 20;
+    assert.equal(helper.stat_data.状态.金币, 19);
+    const mvu = h.win.Mvu.getMvuData(options);
+    assert.equal(mvu.stat_data.状态.金币, 19);
+    assert.equal(mvu.display_data.状态.金币, 19);
     assert.equal(h.win.Mvu.getMvuData().stat_data.状态.金币, before.状态.金币);
     h.context.chat[0].swipe_id = 1;
     await h.win.EjsTemplate.evalTemplate(code, { message_id: 0 });

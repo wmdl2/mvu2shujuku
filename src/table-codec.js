@@ -170,7 +170,7 @@ function createTableCodec(repairJson, statStorage) {
         return target;
     };
 
-    function statDataFromTables(layoutEntries, tables) {
+    function statDataFromTables(layoutEntries, tables, options) {
         const data = { stat_data: {} };
         const sd = data.stat_data;
         const publicExtras = [];
@@ -413,7 +413,9 @@ function createTableCodec(repairJson, statStorage) {
             applyVwdDescriptions(item.entry, overrides, sd);
         }
         for (const extra of publicExtras) data.stat_data = statStorage.combine(data.stat_data, extra);
-        try { data.display_data = JSON.parse(JSON.stringify(data.stat_data)); } catch (e) {}
+        if (options?.includeDisplay !== false) {
+            try { data.display_data = JSON.parse(JSON.stringify(data.stat_data)); } catch (e) {}
+        }
         return data;
     }
 

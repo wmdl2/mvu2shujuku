@@ -4395,7 +4395,7 @@ test('扩展文件齐全且 index.js 语法正确', () => {
     assert.ok(files['index.js'].includes('下载数据桥源码（仅供调试）'), '数据桥下载按钮应明确标注为调试源码');
     assert.ok(files['index.js'].includes('不是酒馆助手 .json 导入包'), '应明确说明 .js 无需导入酒馆助手');
     assert.ok(files['index.js'].includes('const tableUpdateHookCallback = (latestTableData, meta) =>'), 'SP 表更新桥应使用稳定回调引用，并接收提交后快照及持久化标记');
-    assert.ok(files['index.js'].includes('core.statDataFromTables(activeLayout, data)'), 'SP 表更新应直接用回调快照生成 MVU 事件载荷，不依赖 replay 窗口内的同步导出');
+    assert.match(files['index.js'], /core\.statDataFromTables\(activeLayout, data(?:,|\))/, 'SP 表更新应直接用回调快照生成 MVU 事件载荷，不依赖 replay 窗口内的同步导出');
     assert.ok(files['index.js'].includes('function tableSnapshotCoversLayout(data, layout, allowEmptyRows = false)'), '读侧应按完整 layout 判定 replay 物化快照是否就绪');
     assert.ok(files['index.js'].includes('[前端迟到挂载]'), '重生成时新状态栏 iframe 晚于数据事件挂载时应补发最近载荷');
     assert.ok(files['index.js'].includes('try { installTableUpdateHook(); } catch (e) {}'), 'SP 晚加载/运行时重建后应周期重申表更新回调');

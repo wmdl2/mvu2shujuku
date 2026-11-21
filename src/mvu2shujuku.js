@@ -13,7 +13,7 @@
 (function (root) {
     'use strict';
 
-    const VERSION = '0.8.9';
+    const VERSION = '0.8.10';
 
     /* VWD 动态说明实验开关（内部）。
      * 默认关闭：普通转换与运行时都不产生 `$说明覆盖` 列、layout.vwd 槽位，也不启用新的
@@ -1610,8 +1610,8 @@
     function buildLayout(...args) { return getSchemaLayout().buildLayout(...args); }
     function buildLayoutJson(...args) { return getSchemaLayout().buildLayoutJson(...args); }
     function resolveLayoutMacros(...args) { return getSchemaLayout().resolveLayoutMacros(...args); }
-    function statDataFromTables(layoutEntries, tables) {
-        return getTableCodec().statDataFromTables(layoutEntries, tables);
+    function statDataFromTables(layoutEntries, tables, options) {
+        return getTableCodec().statDataFromTables(layoutEntries, tables, options);
     }
     function vwdFieldId(...args) { return getTableCodec().vwdFieldId(...args); }
     function vwdOverridesFromRow(...args) { return getTableCodec().vwdOverridesFromRow(...args); }

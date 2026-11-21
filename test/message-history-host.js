@@ -66,8 +66,14 @@ module.exports = async function messageHistoryHost(h) {
             th: window.TavernHelper.getVariables({ type: 'message', message_id }).stat_data.状态.金币,
             mvu: window.Mvu.getMvuData({ type: 'message', message_id }).stat_data.状态.金币,
         }));
-        const messageValues = window.getChatMessages('0-2').filter(item => [0, 2].includes(item.message_id))
-            .map(item => item.data.stat_data.状态.金币);
+        const regular = window.getChatMessages('0-2').filter(item => [0, 2].includes(item.message_id));
+        const messageValues = regular.map(item => item.data.stat_data.状态.金币);
+        const legacyCandidateValues = regular.map(item => item.swipes_data[item.swipe_id].stat_data.状态.金币);
+        const candidateValues = window.getChatMessages('0-2', { include_swipes: true })
+            .filter(item => [0, 2].includes(item.message_id))
+            .map(item => item.swipes_data[item.swipe_id].stat_data.状态.金币);
+        regular[0].data.stat_data.状态.金币 = -1;
+        const copyIsolated = window.getChatMessages(0)[0].data.stat_data.状态.金币 === 12.5;
         const variables = ctx.chat[0].variables ||= [];
         const carrier = variables[Number(ctx.chat[0].swipe_id || 0)] ||= {};
         carrier.stat_data ||= {};
@@ -75,7 +81,8 @@ module.exports = async function messageHistoryHost(h) {
         const scriptBefore = window.Mvu.getMvuData({ message_id: 0 }).stat_data['$历史脚本测试'];
         delete carrier.stat_data['$历史脚本测试'];
         const scriptRemoved = !Object.hasOwn(window.Mvu.getMvuData({ message_id: 0 }).stat_data, '$历史脚本测试');
-        return { values, ejsValues, messageValues, scriptBefore, scriptRemoved, current: window.Mvu.getMvuData().stat_data.状态.金币,
+        return { values, ejsValues, messageValues, legacyCandidateValues, candidateValues, copyIsolated,
+            scriptBefore, scriptRemoved, current: window.Mvu.getMvuData().stat_data.状态.金币,
             unchanged: JSON.stringify(api.exportTableAsJson()) === before,
             kinds: ctx.chat.flatMap(message => {
                 let isolated = message.TavernDB_ACU_IsolatedData;
@@ -88,10 +95,29 @@ module.exports = async function messageHistoryHost(h) {
         assert.deepStrictEqual(value.values, [{ th: 12.5, mvu: 12.5 }, { th: 22.75, mvu: 22.75 }]);
         assert.deepStrictEqual(value.ejsValues.map(Number), [12.5, 22.75]);
         assert.deepStrictEqual(value.messageValues, [12.5, 22.75]);
+        assert.deepStrictEqual(value.legacyCandidateValues, value.messageValues);
+        assert.deepStrictEqual(value.candidateValues, value.messageValues);
+        assert(value.copyIsolated);
         assert.equal(value.scriptBefore, '甲'); assert(value.scriptRemoved);
         assert.equal(value.current, 44.25); assert(value.unchanged); assert(value.kinds.includes('sql_sheet_batch'));
     };
     const first = await inspect(); check(first);
+    for (const gold of [44.5, 44.25]) {
+        const result = await page.evaluate(async gold => {
+            const ctx = window.SillyTavern.getContext();
+            const message_id = ctx.chat.length - 1;
+            const [item] = window.getChatMessages(message_id);
+            item.data.stat_data.状态.金币 = gold;
+            await window.TavernHelper.setChatMessages([item], { refresh: 'none' });
+            return {
+                visible: window.getChatMessages(message_id, { include_swipes: true })[0]
+                    .swipes_data[item.swipe_id].stat_data.状态.金币,
+                rawMapped: Object.hasOwn(ctx.chat[message_id].variables?.[item.swipe_id]?.stat_data || {}, '状态'),
+            };
+        }, gold);
+        assert.deepStrictEqual(result, { visible: gold, rawMapped: false });
+        await waitCommittedGold(page, gold);
+    }
     await page.reload({ waitUntil: 'domcontentloaded' }); await openState(page, state);
     await page.waitForFunction(() => {
         try { return window.Mvu?.getMvuData().stat_data.状态.金币 === 44.25; } catch (_) { return false; }

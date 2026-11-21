@@ -5,9 +5,11 @@ const { assert } = require('./helpers');
 const lodash = require('../src/vendor/schema-engine-libs').lodash;
 const createVariableApi = require('../src/variable-api');
 
-function harness() {
+function harness({ beforeChatMutation } = {}) {
     let state = { count: 3, nested: { left: 1, right: 2 }, list: [{ id: 'a', $cache: 7 }] };
     let auxiliary = { helper: 4 }, active = true, fail = false;
+    const writeMessage = {};
+    let swipe = 0;
     const writes = [], delegated = [], receiver = {};
     const native = {};
     for (const name of ['getVariables', 'replaceVariables', 'updateVariablesWith', 'insertOrAssignVariables', 'insertVariables', 'deleteVariable']) {
@@ -25,12 +27,16 @@ function harness() {
         readDatabase: opts => ({ stat_data: opts.message_id === 0 ? { count: 1 } : lodash.cloneDeep(state) }),
         replaceDatabase: async (next, opts) => { if (fail) return false; writes.push({ next, opts }); state = lodash.cloneDeep(next.stat_data); return true; },
         nativeState: () => ({ $root: { kept: true } }),
+        beforeChatMutation,
         assertCurrent: () => { if (!active) throw Error('session changed'); },
-        assertWritable: opts => { if (opts.message_id === 0) throw Error('history readonly'); },
+        assertWritable: opts => {
+            if (opts.message_id === 0) throw Error('history readonly');
+            return { message: writeMessage, index: 2, swipe };
+        },
     });
     return { api: adapter.bind(native, receiver), adapter, native, receiver, writes, delegated,
         state: () => state, auxiliary: () => auxiliary,
-        expire: () => { active = false; }, fail: () => { fail = true; } };
+        expire: () => { active = false; }, fail: () => { fail = true; }, switchSwipe: () => { swipe++; } };
 }
 const message = { type: 'message' };
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -143,30 +149,49 @@ test('TH变量接口：getAll合并原辅助变量与指定数据库视图，保
     assert.strictEqual(h.writes.length, 0);
 });
 
-test('TH变量接口：消息读取的同步与Promise形态走同一投影，保留原对象', async () => {
+test('TH变量接口：普通及候选消息读取的同步与Promise形态共用所选快照', async () => {
     const factory = vm.runInNewContext('(' + createVariableApi.toString() + ')');
-    let prepared = 0;
-    const adapter = factory({ lodash, assertCurrent() {}, prepareMessages: async () => { prepared++; },
-        projectMessages: list => list.map(item => ({ ...item, data: { ...item.data, stat_data: { count: item.message_id } } })) });
-    const list = [{ message_id: 0, data: { aux: 1 } }];
+    const prepared = [], snapshots = [{ stat_data: { count: 3 } }, { stat_data: { count: 7 }, display_data: { shown: 8 } }];
+    const adapter = factory({ lodash, assertCurrent() {}, prepareMessages: async indices => { prepared.push(plain(indices)); },
+        readMessageVariables: (id, swipe) => {
+            assert.strictEqual(swipe, 1);
+            return snapshots[id];
+        } });
+    const original = { stat_data: { count: 1 }, aux: 'unselected' };
+    const selected = { aux: 'selected' };
+    const list = [{ message_id: 0, swipe_id: 1, data: selected, swipes_data: [original, selected] },
+        { message_id: 1, swipe_id: 1, swipes_data: [original, selected] }];
     for (const asyncRead of [false, true]) {
         const api = adapter.bind({ getChatMessages: () => asyncRead ? Promise.resolve(list) : list }, {});
-        const result = api.getChatMessages('0');
+        const result = api.getChatMessages('0-1', { include_swipes: true });
         assert.strictEqual(!!result.then, asyncRead);
-        assert.deepStrictEqual(plain(await result), [{ message_id: 0, data: { aux: 1, stat_data: { count: 0 } } }]);
+        const [regular, swiped] = await result;
+        assert.deepStrictEqual(plain(regular.data), { aux: 'selected', stat_data: { count: 3 }, display_data: { count: 3 } });
+        assert.deepStrictEqual(regular.data, regular.swipes_data[1]);
+        assert.deepStrictEqual(swiped.swipes_data[0], original);
+        assert.strictEqual(Object.hasOwn(swiped, 'data'), false);
+        assert.deepStrictEqual(plain(swiped.swipes_data[1]), { aux: 'selected', stat_data: { count: 7 }, display_data: { shown: 8 } });
+        regular.data.stat_data.count = 44;
+        swiped.swipes_data[1].display_data.shown = 99;
+        assert.strictEqual(regular.swipes_data[1].stat_data.count, 3);
+        assert.strictEqual(snapshots[0].stat_data.count, 3);
+        assert.strictEqual(snapshots[1].display_data.shown, 8);
     }
-    assert.strictEqual(prepared, 1); assert.deepStrictEqual(list, [{ message_id: 0, data: { aux: 1 } }]);
+    assert.deepStrictEqual(prepared, [[0, 1]]);
+    assert.deepStrictEqual(list.map(item => item.swipes_data[1]), [{ aux: 'selected' }, { aux: 'selected' }]);
 });
 
 test('TH变量接口：setChatMessages复用变量提交，转交原消息字段并避免复制映射状态', async () => {
     const h = harness(); let received;
     h.native.setChatMessages = (messages, opts) => { received = { messages, opts }; };
     const api = h.adapter.bind(h.native, h.receiver);
-    const messages = [{ message_id: 2, message: 'text', data: { helper: 8, stat_data: { count: 10 } } }];
+    const messages = [{ message_id: 2, swipe_id: 0, message: 'text', data: { helper: 8, stat_data: { count: 10 } },
+        swipes_data: [{ stat_data: { count: 3 } }] }];
     await api.setChatMessages(messages, { refresh: 'none' });
     assert.strictEqual(h.state().count, 10);
     assert.deepStrictEqual(plain(received.messages[0].data.stat_data), { $root: { kept: true } });
     assert.strictEqual(received.messages[0].message, 'text');
+    assert.strictEqual(Object.hasOwn(received.messages[0], 'swipes_data'), false);
     assert.deepStrictEqual(received.opts, { refresh: 'none' });
     assert.strictEqual(messages[0].data.stat_data.count, 10);
     const before = h.writes.length;
@@ -174,6 +199,28 @@ test('TH变量接口：setChatMessages复用变量提交，转交原消息字段
     await assert.rejects(api.setChatMessages([{ data: { stat_data: {} } }]), /整数/);
     await assert.rejects(api.setChatMessages([{ message_id: 2, swipes_data: [{ stat_data: {} }] }]), /swipes_data/);
     assert.strictEqual(h.writes.length, before);
+});
+
+test('TH变量接口：异步更新及等待保存期间切换候选会拒绝写入', async () => {
+    let release;
+    const barrier = new Promise(resolve => { release = resolve; });
+    const h = harness({ beforeChatMutation: () => barrier });
+    let delegatedMessage = false;
+    h.native.setChatMessages = () => { delegatedMessage = true; };
+    const api = h.adapter.bind(h.native, h.receiver);
+    const stale = { code: 'MVU_VARIABLE_CONTEXT_STALE' };
+    await assert.rejects(api.updateVariablesWith(async data => {
+        h.switchSwipe();
+        data.stat_data.count = 10;
+        return data;
+    }, message), stale);
+    const pending = api.setChatMessages([{ message_id: 2, swipe_id: 1, data: { stat_data: { count: 12 } } }]);
+    h.switchSwipe();
+    release();
+    await assert.rejects(pending, stale);
+    await assert.rejects(api.setChatMessages([{ message_id: 2, swipe_id: 1, data: { stat_data: { count: 12 } } }]), stale);
+    assert.strictEqual(h.writes.length, 0);
+    assert.strictEqual(delegatedMessage, false);
 });
 
 test('TH变量接口：reloadInitVar沿原浅合并和书级去重，不重置已有组及展示数据', () => {
